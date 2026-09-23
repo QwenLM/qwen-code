@@ -205,7 +205,7 @@ function executeArenaCommand(
   // its worktree directory — keeping the parent's would duplicate it.
   let chatHistory;
   try {
-    const fullHistory = config.getGeminiClient().getChat().getHistoryShallow();
+    const fullHistory = config.getLlmClient().getChat().getHistoryShallow();
     chatHistory = stripStartupContext(fullHistory);
   } catch {
     debugLogger.debug('Could not retrieve chat history for arena agents');
@@ -433,6 +433,14 @@ export const arenaCommand: SlashCommand = {
         context: CommandContext,
         args: string,
       ): Promise<void | MessageActionReturn | OpenDialogActionReturn> => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {
@@ -492,6 +500,14 @@ export const arenaCommand: SlashCommand = {
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {
@@ -536,6 +552,14 @@ export const arenaCommand: SlashCommand = {
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {
@@ -587,6 +611,14 @@ export const arenaCommand: SlashCommand = {
         | OpenDialogActionReturn
         | ConfirmActionReturn
       > => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {

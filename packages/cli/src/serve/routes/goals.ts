@@ -8,12 +8,9 @@
  * Workspace-wide `/goal` listing — the daemon-side surface behind the Web Shell
  * "Goals" page.
  *
- * A goal is a session-scoped Stop hook whose state (condition, judge turn count,
- * last verdict) lives only in the `qwen --acp` child's in-memory store. The serve
- * process holds no copy, so this route fans out one `sessionGoalGet` ext-method
- * call per live session and collects the answers. There is no durable goal store
- * to read instead: a goal only advances while its session is resident, so "the
- * live sessions" IS the complete set of goals that are actually running.
+ * The canonical Goal runtime is session scoped and owned by each `qwen --acp`
+ * child. The serve process holds no mutable copy, so this route fans out one
+ * `sessionGoalGet` ext-method call per live session and collects the answers.
  *
  * A session whose child is wedged or dying rejects; those are dropped (and
  * logged) rather than failing the whole list, so one bad session can't hide the
@@ -21,9 +18,8 @@
  * (up to `PROBE_CONCURRENCY`), so a wedged child costs one timeout rather than
  * one per session.
  *
- * Read-only: clearing a goal stays on `POST /session/:id/goal/clear`, and
- * setting one stays a prompt (`/goal <condition>` registers the hook and kicks
- * off the first turn — it is not a pure write).
+ * Controls use the canonical `POST /session/:id/goal` route. This listing stays
+ * read-only and only projects each live runtime's current snapshot.
  */
 
 import type { Application } from 'express';
@@ -89,7 +85,7 @@ async function allSettledWithLimit<T, R>(
   return results;
 }
 
-/** One row of the Goals page. */
+/** One non-terminal Goal shown on the Goals page. */
 interface GoalView {
   sessionId: string;
   /** The session's label, when it has one — otherwise the client shows the id. */
@@ -105,6 +101,7 @@ interface GoalView {
    * that the goal specifically is running.
    */
   hasActivePrompt: boolean;
+  snapshot: BridgeSessionGoal['snapshot'];
 }
 
 export function registerGoalsRoutes(
@@ -148,17 +145,19 @@ export function registerGoalsRoutes(
           continue;
         }
         const { session, goal } = outcome.value;
-        if (!goal.active) continue;
+        const record = goal.snapshot.goal;
+        if (!record || record.status === 'complete') continue;
         goals.push({
           sessionId: session.sessionId,
           displayName: session.displayName ?? null,
-          condition: goal.active.condition,
-          iterations: goal.active.iterations,
-          setAt: goal.active.setAt,
-          ...(goal.active.lastReason !== undefined
-            ? { lastReason: goal.active.lastReason }
+          condition: record.objective,
+          iterations: record.turnCount,
+          setAt: record.createdAt,
+          ...(record.lastReason !== undefined
+            ? { lastReason: record.lastReason }
             : {}),
           hasActivePrompt: session.hasActivePrompt,
+          snapshot: goal.snapshot,
         });
       }
       if (dropped.length > 0) {

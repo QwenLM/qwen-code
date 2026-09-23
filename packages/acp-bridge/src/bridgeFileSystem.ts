@@ -76,8 +76,10 @@ export interface BridgeFileSystem {
    *     HTTP `POST /file` posture. Agents that previously
    *     relied on writing through symlinked dotfiles will need
    *     to address the resolved path directly.
-   *   - **Workspace boundary enforcement** — paths outside the
-   *     bound workspace surface `path_outside_workspace`.
+   *   - **Workspace boundary enforcement by default** — paths outside the
+   *     bound workspace surface `path_outside_workspace`. A daemon-owned,
+   *     same-host adapter may implement the narrow built-in-tool exception
+   *     described below; generic adapters must not infer it.
    *
    * Owner/group preservation is best-effort and platform-dependent
    * (POSIX `chown` requires root for cross-user changes; Windows
@@ -86,7 +88,11 @@ export interface BridgeFileSystem {
    * The serve-side adapter satisfies this via
    * `WorkspaceFileSystem.writeTextOverwrite`, which does atomic
    * tmp+rename with mode preservation + `0o600` default + symlink
-   * reject inside a per-path lock.
+   * reject inside a per-path lock. Only daemon-created same-host adapters may
+   * additionally accept strict, versioned provenance attached after a
+   * built-in tool enters `execute()` and use an equivalent host writer for an
+   * external absolute path. That provenance is an internal routing marker,
+   * not a portable authorization token or an extension to generic ACP.
    */
   writeText(params: WriteTextFileRequest): Promise<WriteTextFileResponse>;
 }

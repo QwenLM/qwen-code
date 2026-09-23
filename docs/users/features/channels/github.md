@@ -4,17 +4,31 @@ This guide covers setting up a Qwen Code channel that monitors GitHub notificati
 
 ## Prerequisites
 
-- A GitHub account for the channel. Use a dedicated bot account when the PAT
-  owner also needs to operate the channel.
-- A GitHub Personal Access Token (PAT) with `notifications` and `public_repo` (or `repo`) scopes
+- A GitHub account authenticated with the permissions needed to read notifications and post comments
+- The [GitHub CLI](https://cli.github.com/) installed on the host running Qwen Code when using local `gh` authentication
 
-## Creating a Token
+Use a dedicated bot account when the authenticated account also needs to operate the channel. GitHub does not generate a usable notification for the account's own activity, and the adapter ignores its own comments to prevent reply loops.
 
-1. Go to **Settings → Developer settings → Personal access tokens → Tokens (classic)**
-2. Generate a token with these scopes:
-   - **notifications** — read notification threads
-   - **public_repo** (or **repo** for private repos) — post comments
-3. Save the token securely as an environment variable
+## Authentication
+
+To reuse the GitHub CLI login on the Qwen Code host, authenticate `gh` and explicitly set `useLocalGh: true` in the channel configuration:
+
+```bash
+gh auth login
+```
+
+Local `gh` authentication is account-wide and may expose notifications from every repository visible to that GitHub account. Enable it only when the workspace operator is trusted to use that account. Otherwise, configure a dedicated PAT.
+
+For GitHub Enterprise Server, authenticate the same host used by `baseUrl`:
+
+```bash
+gh auth login --hostname github.example.com
+```
+
+You can instead configure a classic personal access token (PAT). An explicit `token` overrides local `gh` authentication. The PAT needs these scopes:
+
+- **notifications** — read notification threads
+- **public_repo** (or **repo** for private repos) — post comments
 
 ## Configuration
 
@@ -25,35 +39,32 @@ Add the channel to `~/.qwen/settings.json`:
   "channels": {
     "my-github": {
       "type": "github",
-      "token": "$GITHUB_TOKEN",
+      "useLocalGh": true,
       "pollInterval": 60000,
       "reasonFilter": ["mention", "review_requested", "assign"],
-      "senderPolicy": "allowlist",
-      "allowedUsers": ["operator-github-username"],
+      "operators": ["operator-github-username"],
       "sessionScope": "chat_thread",
       "cwd": "/path/to/your/project",
-      "blockStreaming": "off",
       "groupPolicy": "open",
       "groups": {
-        "*": { "requireMention": true }
+        "*": {
+          "requireMention": true,
+          "senders": "allowlist",
+          "allowedUsers": ["operator-github-username"]
+        }
       }
     }
   }
 }
 ```
 
-Set the token as an environment variable:
+To override local `gh` authentication with a PAT, add `"token": "$GITHUB_TOKEN"` to the channel and set the environment variable before starting Qwen Code:
 
 ```bash
 export GITHUB_TOKEN="ghp_your_token_here"
 ```
 
-The PAT owner cannot trigger its own channel: GitHub self-activity does not
-provide a usable notification, and the adapter intentionally ignores its own
-comments to prevent reply loops. If the PAT owner needs to operate the channel,
-use a separate bot-owned PAT and put only operator accounts in `allowedUsers`.
-Startup rejects an allowlist containing only the PAT owner and warns when the
-PAT owner appears alongside other operators.
+The authenticated account cannot trigger its own channel. If that account needs to operate the channel, authenticate a separate bot account and put their usernames in the group `allowedUsers` and explicit `operators` lists. Startup warns when a group allowlist contains the authenticated account, which cannot trigger tasks; use a different account in the group allowlist.
 
 ### GitHub Enterprise
 
@@ -65,18 +76,19 @@ For GitHub Enterprise Server, set `baseUrl`:
 }
 ```
 
+Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credential cannot be sent over plaintext HTTP.
+
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                   |
-| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `token`                   | (required)               | Classic PAT with `notifications` scope                                                        |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
-| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
-| `blockStreaming`          | `"off"`                  | Always forced to `"off"`; intermediate model chunks aren't published; `"on"` is not supported |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                  |
+| Option                    | Default                  | Description                                                                                                                                      |
+| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                             |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                        |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                              |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                           |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                 |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                     |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
@@ -86,11 +98,15 @@ Filtered notifications are marked read only after all accepted work in the poll 
 
 ## ⚠️ Security
 
-On a **public repository**, setting `senderPolicy: "open"` allows **any GitHub user** who triggers a supported notification reason to submit prompts that drive the agent in your `cwd`. This includes reading code, spending tokens, posting comments, and (subject to permission policy) running tools.
+On a **public repository**, setting `groups: { "*": { "senders": "open" } }` allows **any GitHub user** who triggers a supported notification reason to submit prompts that drive the agent in your `cwd`. This includes reading code, spending tokens, posting comments, and (subject to permission policy) running tools.
 
-Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
+Always use `groups["*"].senders: "allowlist"` with explicit group `allowedUsers` on public repos.
 
-Allowlist and pairing entries follow the **username**, not the immutable account ID. If an allowlisted user renames their GitHub account, remove the stale entry — GitHub releases the old username for anyone else to claim, and the new holder would inherit the allowlist/pairing authorization.
+All GitHub traffic is group traffic. Group members default to `open`; set `groups["*"].senders` to `allowlist` and populate its `allowedUsers` to restrict authors. Private policy and user pairing never restrict repository members. Set `operators` explicitly for shared-session management.
+
+Group member allowlists and operator lists follow the **username**, not the immutable account ID. If a listed user renames their GitHub account, remove the stale entry — GitHub releases the old username for anyone else to claim, and the new holder would inherit that authorization.
+
+Note that under `groupPolicy: "pairing"`, access is granted per repository: once a repository is approved, **any GitHub user** can by default drive the bot through that repository's issues and pull requests. All GitHub traffic is group traffic, so `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved repository; set `senders: "allowlist"` with `allowedUsers` on that repository's `groups` entry to narrow it. Approvals are keyed by the repository full name (`owner/repo`), which changes on rename or transfer — revoke stale group approvals after any repository rename, transfer, or deletion.
 
 ## Mention Detection
 
@@ -119,13 +135,7 @@ For an accepted issue or pull-request comment, the channel adds GitHub's `👀` 
 
 ### Final-only output
 
-The GitHub channel always forces final-only delivery. The adapter sets `blockStreaming` to `"off"`, so intermediate model chunks are never published as separate comments and `blockStreaming: "on"` is not supported.
-
-```json
-{
-  "blockStreaming": "off"
-}
-```
+The GitHub channel publishes only completed responses. Intermediate model chunks are never published as separate comments.
 
 If GitHub returns a definite no-write delivery failure, such as a rate-limit
 response, the channel stores the final reply in
@@ -141,7 +151,7 @@ not retried automatically because GitHub may have created the comment.
 - If a user marks a notification as read on github.com before the bot's poll cycle, the bot will not process it.
 - The bot does not read comments before the current polling window; `author` and `comment` notifications may aggregate up to 20 comments from that window.
 - Inline PR review comments and review summary bodies are not enumerated; only issue/PR comments are processed.
-- Requires a classic PAT with `notifications` scope. Fine-grained PATs do not support the notifications API.
+- The selected credential must support the Notifications API. Fine-grained PATs do not support it; use local `gh` authentication or a classic PAT with `notifications` scope.
 
 ## Starting the Channel
 

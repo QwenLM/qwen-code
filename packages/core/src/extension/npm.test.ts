@@ -18,6 +18,7 @@ import { promises as dns } from 'node:dns';
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
   existsSync: vi.fn(),
+  createReadStream: vi.fn(() => ({ destroy: vi.fn() }) as never),
   createWriteStream: vi.fn(),
   promises: {
     readdir: vi.fn(),
@@ -26,6 +27,10 @@ vi.mock('node:fs', () => ({
     unlink: vi.fn(),
     mkdir: vi.fn(),
   },
+}));
+
+vi.mock('node:stream/promises', () => ({
+  pipeline: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('parseNpmPackageSource', () => {
@@ -906,6 +911,17 @@ describe('downloadFromNpmRegistry', () => {
       ),
     ).rejects.toThrow('more than 100 unsupported link entries');
     expect(tar.x).not.toHaveBeenCalled();
+
+    // Tripping the link-count cap makes failValidation destroy the read
+    // stream; the mocked stream must support that cleanly. Before the
+    // createReadStream mock returned a destroyable object, this path raised
+    // a TypeError inside the tar.t mock instead of completing.
+    const createdStream = vi.mocked(fs.createReadStream).mock.results[0]
+      ?.value as { destroy: ReturnType<typeof vi.fn> } | undefined;
+    expect(createdStream?.destroy).toHaveBeenCalled();
+    await expect(
+      vi.mocked(tar.t).mock.results[0]?.value as Promise<unknown>,
+    ).resolves.toBeUndefined();
   });
 
   it('stops between tar inspection and extraction when cancelled', async () => {

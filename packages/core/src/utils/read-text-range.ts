@@ -278,8 +278,11 @@ export async function readTextCursorWindowFromHandle(
   let skipRestOfLine = false;
   // A CRLF line arrives here as text ending in '\r' with the '\n' consumed as
   // its terminator, so the returned text never contains the pair — testing
-  // `content` for '\r\n' would report 'lf' for every single-line page.
-  let sawCrlf = false;
+  // `content` for '\r\n' would report 'lf' for every single-line page. A
+  // window that resumes right after a CRLF terminator carries no evidence of
+  // the pair at all — the tail page of a file without a final newline is the
+  // case in practice — so seed the flag from the two bytes before the window.
+  let sawCrlf = await precededByCrlfTerminator(fileHandle, startOffset);
 
   const emit = (line: string, hadNewline: boolean): void => {
     const separator = lines.length > 0 ? 1 : 0;
@@ -388,6 +391,12 @@ export async function readTextCursorWindowFromHandle(
       true,
     );
     consumedBytes = resumeAt - startOffset;
+    // The skip walked over the cut line's terminator without decoding it —
+    // the same pair the next page's seed reads — so count it here too or the
+    // two pages of one file disagree.
+    if (!sawCrlf) {
+      sawCrlf = await precededByCrlfTerminator(fileHandle, resumeAt);
+    }
   }
 
   const content = lines.join('\n');
@@ -407,6 +416,25 @@ const UTF8_BOM_BYTES = 3;
 
 /** Byte 0x0A never appears inside a multi-byte UTF-8 sequence. */
 const LINE_FEED = 0x0a;
+const CARRIAGE_RETURN = 0x0d;
+
+/**
+ * Whether the two bytes just before `startOffset` form a CRLF terminator. A
+ * cursor this reader mints always resumes at the line start after a '\n', so
+ * this is one bounded two-byte read; it is the only line-ending evidence a
+ * window whose own lines carry no terminator can have.
+ */
+async function precededByCrlfTerminator(
+  fileHandle: FileHandle,
+  startOffset: number,
+): Promise<boolean> {
+  if (startOffset < 2) return false;
+  const probe = Buffer.alloc(2);
+  const { bytesRead } = await fileHandle.read(probe, 0, 2, startOffset - 2);
+  return (
+    bytesRead === 2 && probe[0] === CARRIAGE_RETURN && probe[1] === LINE_FEED
+  );
+}
 
 async function hasUtf8Bom(
   fileHandle: FileHandle,

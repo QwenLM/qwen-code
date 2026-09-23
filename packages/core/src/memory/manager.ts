@@ -41,6 +41,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
   logMemoryDream,
   logMemoryExtract,
@@ -62,6 +63,7 @@ import {
   type AutoMemoryForgetMatch,
   type AutoMemoryForgetResult,
   type AutoMemoryForgetSelectionResult,
+  type AutoMemoryStorageScope,
 } from './forget.js';
 import {
   resolveRelevantAutoMemoryPromptForQuery,
@@ -270,9 +272,44 @@ function updateRecord(
 }
 
 function partWritesToMemory(part: Part, projectRoot: string): boolean {
-  const name = part.functionCall?.name;
+  let name = part.functionCall?.name
+    ? canonicalToolName(part.functionCall.name)
+    : undefined;
+  let args = part.functionCall?.args as Record<string, unknown> | undefined;
+  if (name === ToolNames.TOOL_CALL) {
+    const targetName = args?.['name'];
+    const targetArgs = args?.['arguments'];
+    if (typeof targetName === 'string') {
+      name = canonicalToolName(targetName);
+      if (
+        typeof targetArgs === 'object' &&
+        targetArgs !== null &&
+        !Array.isArray(targetArgs)
+      ) {
+        args = targetArgs as Record<string, unknown>;
+      } else {
+        args = undefined;
+        if (typeof targetArgs === 'string') {
+          const trimmedArgs = targetArgs.trim();
+          if (trimmedArgs.startsWith('{') && trimmedArgs.endsWith('}')) {
+            try {
+              const parsedArgs: unknown = JSON.parse(trimmedArgs);
+              if (
+                typeof parsedArgs === 'object' &&
+                parsedArgs !== null &&
+                !Array.isArray(parsedArgs)
+              ) {
+                args = parsedArgs as Record<string, unknown>;
+              }
+            } catch {
+              // Invalid JSON cannot describe a memory-writing target.
+            }
+          }
+        }
+      }
+    }
+  }
   if (name && WRITE_TOOL_NAMES.has(name)) {
-    const args = part.functionCall?.args as Record<string, unknown> | undefined;
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
     if (
@@ -581,7 +618,10 @@ export class MemoryManager {
 
   private track<T>(taskId: string, promise: Promise<T>): Promise<T> {
     this.inFlight.set(taskId, promise);
-    void promise.finally(() => this.inFlight.delete(taskId));
+    void promise.then(
+      () => this.inFlight.delete(taskId),
+      () => this.inFlight.delete(taskId),
+    );
     return promise;
   }
 
@@ -762,17 +802,21 @@ export class MemoryManager {
 
       const result = await runAutoMemoryExtract(params);
       const durationMs = Date.now() - t0;
+      const skippedReason = result.skippedReason;
+      const status = skippedReason ? 'skipped' : 'completed';
       this.update(record, {
-        status: result.skippedReason ? 'skipped' : 'completed',
+        status,
         progressText:
           result.systemMessage ??
-          (result.touchedTopics.length > 0
-            ? `Managed auto-memory updated: ${result.touchedTopics.join(', ')}.`
-            : 'Managed auto-memory extraction completed without durable changes.'),
+          (skippedReason
+            ? `Skipped: ${skippedReason.replaceAll('_', ' ')}.`
+            : result.touchedTopics.length > 0
+              ? `Managed auto-memory updated: ${result.touchedTopics.join(', ')}.`
+              : 'Managed auto-memory extraction completed without durable changes.'),
         metadata: {
           touchedTopics: result.touchedTopics,
           processedOffset: result.cursor.processedOffset,
-          skippedReason: result.skippedReason,
+          skippedReason,
         },
       });
       if (params.config) {
@@ -780,7 +824,8 @@ export class MemoryManager {
           params.config,
           new MemoryExtractEvent({
             trigger: 'auto',
-            status: 'completed',
+            status,
+            ...(skippedReason ? { skipped_reason: skippedReason } : {}),
             patches_count: result.touchedTopics.length,
             touched_topics: result.touchedTopics,
             duration_ms: durationMs,
@@ -1401,6 +1446,7 @@ export class MemoryManager {
       config?: Config;
       limit?: number;
       abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
     } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
     return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
@@ -1420,7 +1466,11 @@ export class MemoryManager {
   forget(
     projectRoot: string,
     query: string,
-    options: { config?: Config; abortSignal?: AbortSignal } = {},
+    options: {
+      config?: Config;
+      abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
+    } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
     return forgetManagedAutoMemoryEntries(projectRoot, query, options, now);

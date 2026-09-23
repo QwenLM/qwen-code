@@ -99,10 +99,11 @@ the monotonic sequence the client resumes from.
    WebSocket is a stateful connection, no SSE replay (consistent with
    `AcpWsTransport.supportsReplay = false`).
 4. **`connection-registry.ts`** — `sendSession(sessionId, frame, id?)`
-   threads `id` to `stream.send`. The per-session pre-attach **buffer**
-   stores `{ frame, id? }` pairs so a buffered frame keeps its cursor when
-   flushed on attach. (The connection-scoped buffer is unchanged — those
-   frames are JSON-RPC responses with no bus id.)
+   threads `id` to the transport. The per-session pre-attach **buffer**
+   stores one serialized UTF-8 payload with its optional cursor and budget
+   lease, so a buffered frame keeps its cursor without retaining the source
+   object or serializing it again on attach. Connection-scoped replies use the
+   same representation.
 5. **`dispatch.ts`**
    - `translateEvent` passes `event.id` through every `sendSession` /
      `binding.stream.send` call for bus events.
@@ -182,6 +183,21 @@ by both the REST and `/acp` surfaces, so their strict accept/reject rules and
 operator logging can't drift.
 
 ## Backward compatibility
+
+Pre-attach queues are bounded by both count and serialized payload bytes. One
+stream owns at most 256 frames, one logical connection at most 1,024 frames and
+64 MiB, and all ACP HTTP mounts share a process-global 4,096-frame/256-MiB
+budget. A fresh attach transfers the lease to the transport writer and releases
+it only after local delivery or definitive failure. If SSE accepts a complete
+frame but closes before its final write callback, delivery is outcome-unknown;
+an ownership-granting response preserves the session rather than deleting it.
+If the logical connection is still live, ownership is conservatively
+committed; during connection teardown, the client is detached while persisted
+session data remains available for resume. Resume still discards
+id-bearing buffered events in favor of authoritative ring replay and preserves
+id-less reply ordering, but that discard now releases the retained byte lease.
+Overflow closes the exact session; connection-scoped or shared-WebSocket
+overflow closes the logical connection instead of evicting an older frame.
 
 - **Old clients that don't send `Last-Event-ID`** → `lastEventId` is
   `undefined` → `subscribeEvents` starts live, exactly as today.

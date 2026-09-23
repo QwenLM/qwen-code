@@ -7,8 +7,20 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
-import { getPlugin } from '../commands/channel/channel-registry.js';
-import { loadSettings, saveSettings } from '../config/settings.js';
+import {
+  CHANNEL_OUTPUT_MODE_FIELD,
+  parseChannelOutputMode,
+} from '@qwen-code/channel-base';
+import {
+  getPlugin,
+  UNSAFE_OBJECT_KEYS,
+} from '../commands/channel/channel-registry.js';
+import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
+import {
+  loadSettings,
+  saveSettings,
+  type SettingsFile,
+} from '../config/settings.js';
 
 export type ChannelSecretUpdate =
   | { operation: 'preserve' }
@@ -71,8 +83,6 @@ function invalidConfig(message: string): ChannelSettingsError {
   return new ChannelSettingsError('channel_settings_invalid_config', message);
 }
 
-const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-
 function assertSafeChannelName(name: string): void {
   if (UNSAFE_OBJECT_KEYS.has(name)) {
     throw new ChannelSettingsError(
@@ -119,33 +129,29 @@ function assertStringRecord(
   }
 }
 
-function assertNumberRecord(
+function assertSharedField(
   key: string,
   value: unknown,
-  allowedKeys: ReadonlySet<string>,
-): void {
-  if (!isRecord(value)) {
-    throw invalidConfig(`Channel field "${key}" must be an object.`);
-  }
-  for (const [nestedKey, nestedValue] of Object.entries(value)) {
-    if (
-      !allowedKeys.has(nestedKey) ||
-      typeof nestedValue !== 'number' ||
-      !Number.isFinite(nestedValue)
-    ) {
-      throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
+  previous?: unknown,
+): boolean {
+  if (key === 'multiSession') {
+    if (typeof value !== 'boolean') {
+      throw invalidConfig(`Channel field "${key}" must be a boolean.`);
     }
+    return true;
   }
-}
-
-function assertSharedField(key: string, value: unknown): boolean {
+  if (key === 'groupSenderPolicy' || key === 'allowedGroupUsers') {
+    throw invalidConfig(
+      `Channel field "${key}" moved to groups["*"].${key === 'groupSenderPolicy' ? 'senders' : 'allowedUsers'}.`,
+    );
+  }
   const enumValues: Record<string, ReadonlySet<string>> = {
+    privatePolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
-    groupPolicy: new Set(['disabled', 'allowlist', 'open']),
-    sessionScope: new Set(['user', 'thread', 'single']),
+    groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
+    sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
-    blockStreaming: new Set(['on', 'off']),
   };
   if (Object.hasOwn(enumValues, key)) {
     if (typeof value !== 'string' || !enumValues[key]!.has(value)) {
@@ -159,12 +165,79 @@ function assertSharedField(key: string, value: unknown): boolean {
     }
     return true;
   }
-  if (key === 'allowedUsers') {
+  if (key === 'allowedUsers' || key === 'operators') {
     if (
       !Array.isArray(value) ||
       value.some((item) => typeof item !== 'string')
     ) {
       throw invalidConfig(`Channel field "${key}" must be a string array.`);
+    }
+    return true;
+  }
+  if (key === 'groups') {
+    if (!isRecord(value)) {
+      if (
+        containsUnsafeObjectKey(value) ||
+        !isDeepStrictEqual(previous, value)
+      ) {
+        throw invalidConfig(`Channel field "${key}" must be an object.`);
+      }
+      return true;
+    }
+    const previousGroups = isRecord(previous) ? previous : {};
+    for (const [groupId, groupConfig] of Object.entries(value)) {
+      if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
+        throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
+      }
+      const previousGroup = isRecord(previousGroups[groupId])
+        ? previousGroups[groupId]
+        : {};
+      for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
+        const known = [
+          'requireMention',
+          'dispatchMode',
+          'groupHistoryLimit',
+          'senders',
+          'allowedUsers',
+        ].includes(nestedKey);
+        const valid =
+          (nestedKey === 'requireMention' &&
+            typeof nestedValue === 'boolean') ||
+          (nestedKey === 'dispatchMode' &&
+            typeof nestedValue === 'string' &&
+            ['collect', 'steer', 'followup'].includes(nestedValue)) ||
+          (nestedKey === 'groupHistoryLimit' &&
+            typeof nestedValue === 'number' &&
+            Number.isFinite(nestedValue)) ||
+          (nestedKey === 'senders' &&
+            typeof nestedValue === 'string' &&
+            ['open', 'allowlist'].includes(nestedValue)) ||
+          (nestedKey === 'allowedUsers' &&
+            Array.isArray(nestedValue) &&
+            nestedValue.every((item) => typeof item === 'string'));
+        if (
+          known &&
+          !valid &&
+          !(
+            nestedKey !== 'senders' &&
+            Object.hasOwn(previousGroup, nestedKey) &&
+            isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
+            !containsUnsafeObjectKey(nestedValue)
+          )
+        ) {
+          throw invalidConfig(
+            `Channel field "${key}.${groupId}.${nestedKey}" is invalid.`,
+          );
+        }
+        if (!known) {
+          assertPreservedUnknownField(
+            `${key}.${groupId}`,
+            nestedKey,
+            nestedValue,
+            previousGroup,
+          );
+        }
+      }
     }
     return true;
   }
@@ -180,14 +253,6 @@ function assertSharedField(key: string, value: unknown): boolean {
       value,
       new Set(['id', 'displayName', 'description']),
     );
-    return true;
-  }
-  if (key === 'blockStreamingChunk') {
-    assertNumberRecord(key, value, new Set(['minChars', 'maxChars']));
-    return true;
-  }
-  if (key === 'blockStreamingCoalesce') {
-    assertNumberRecord(key, value, new Set(['idleMs']));
     return true;
   }
   if (key === 'memoryScope') {
@@ -207,17 +272,60 @@ function assertSharedField(key: string, value: unknown): boolean {
   return false;
 }
 
+function containsUnsafeObjectKey(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => containsUnsafeObjectKey(item));
+  }
+  if (!isRecord(value)) return false;
+  return Object.entries(value).some(
+    ([key, nested]) =>
+      UNSAFE_OBJECT_KEYS.has(key) || containsUnsafeObjectKey(nested),
+  );
+}
+
 function assertDescriptorValue(
   field: ChannelConfigFieldDescriptor,
   value: unknown,
+  path = field.key,
+  previous?: unknown,
 ): void {
+  if (field.kind === 'object') {
+    // The web editor cannot edit object fields and re-sends the stored value
+    // verbatim on every save; an unchanged stored object keeps its values even
+    // if a newer rule would reject them. Reserved keys stay rejected.
+    if (isDeepStrictEqual(previous, value) && !containsUnsafeObjectKey(value)) {
+      return;
+    }
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${path}" has an invalid value.`);
+    }
+    const previousRecord = isRecord(previous) ? previous : {};
+    const properties = new Map(
+      field.properties.map((property) => [property.key, property]),
+    );
+    for (const [key, nestedValue] of Object.entries(value)) {
+      const property = properties.get(key);
+      if (!property) {
+        assertPreservedUnknownField(path, key, nestedValue, previousRecord);
+        continue;
+      }
+      assertDescriptorValue(
+        property,
+        nestedValue,
+        `${path}.${key}`,
+        Object.hasOwn(previousRecord, key) ? previousRecord[key] : undefined,
+      );
+    }
+    assertRequiredFields(field.properties, value, path);
+    return;
+  }
   const invalidEnvironment =
     typeof value === 'string' &&
     isEnvironmentReference(value) &&
-    field.envResolvable !== true;
+    !field.envResolvable;
   if (invalidEnvironment) {
     throw invalidConfig(
-      `Channel field "${field.key}" does not support environment references.`,
+      `Channel field "${path}" does not support environment references.`,
     );
   }
   const valid =
@@ -227,7 +335,9 @@ function assertDescriptorValue(
     (field.kind === 'boolean' && typeof value === 'boolean') ||
     (field.kind === 'number' &&
       typeof value === 'number' &&
-      Number.isFinite(value)) ||
+      Number.isFinite(value) &&
+      (field.exclusiveMinimum === undefined ||
+        value > field.exclusiveMinimum)) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
       field.options?.some((option) => option.value === value) === true) ||
@@ -236,10 +346,49 @@ function assertDescriptorValue(
       value.every((item) => typeof item === 'string')) ||
     (field.kind === 'record' &&
       isRecord(value) &&
-      Object.values(value).every((v) => typeof v === 'string'));
+      Object.values(value).every((v) => typeof v === 'string') &&
+      !containsUnsafeObjectKey(value));
   if (!valid) {
-    throw invalidConfig(`Channel field "${field.key}" has an invalid value.`);
+    throw invalidConfig(`Channel field "${path}" has an invalid value.`);
   }
+}
+
+function assertRequiredFields(
+  fields: ReadonlyArray<Pick<ChannelConfigFieldDescriptor, 'key' | 'required'>>,
+  values: Record<string, unknown>,
+  path?: string,
+): void {
+  for (const field of fields) {
+    if (!field.required) continue;
+    const value = Object.hasOwn(values, field.key)
+      ? values[field.key]
+      : undefined;
+    if (value === undefined || value === null || value === '') {
+      const fieldPath = path ? `${path}.${field.key}` : field.key;
+      throw invalidConfig(`Channel field "${fieldPath}" is required.`);
+    }
+  }
+}
+
+function assertPreservedUnknownField(
+  path: string | undefined,
+  key: string,
+  value: unknown,
+  previous: Record<string, unknown>,
+): void {
+  const fieldPath = path ? `${path}.${key}` : key;
+  if (UNSAFE_OBJECT_KEYS.has(key)) {
+    throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
+  }
+  if (containsUnsafeObjectKey(value)) {
+    throw invalidConfig(
+      `Channel field "${fieldPath}" cannot use a reserved key.`,
+    );
+  }
+  if (Object.hasOwn(previous, key) && isDeepStrictEqual(previous[key], value)) {
+    return;
+  }
+  throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
 }
 
 function assertManagedConfig(
@@ -252,24 +401,26 @@ function assertManagedConfig(
     if (key === 'type') continue;
     const field = descriptorFields.get(key);
     if (field) {
-      assertDescriptorValue(field, value);
+      assertDescriptorValue(
+        field,
+        value,
+        field.key,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      );
       continue;
     }
-    if (assertSharedField(key, value)) continue;
     if (
-      !Object.hasOwn(previous, key) ||
-      !isDeepStrictEqual(previous[key], value)
+      assertSharedField(
+        key,
+        value,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      )
     ) {
-      throw invalidConfig(`Channel field "${key}" is not manageable.`);
+      continue;
     }
+    assertPreservedUnknownField(undefined, key, value, previous);
   }
-  for (const field of fields) {
-    if (!field.required) continue;
-    const value = config[field.key];
-    if (value === undefined || value === null || value === '') {
-      throw invalidConfig(`Channel field "${field.key}" is required.`);
-    }
-  }
+  assertRequiredFields(fields, config);
 }
 
 function validateSecretUpdate(
@@ -309,35 +460,76 @@ export function assertValidChannelSecretUpdates(
   }
 }
 
-function workspaceValues(workspaceCwd: string): {
-  channels: Record<string, Record<string, unknown>>;
-  startupNames: string[];
-} {
-  const settings = loadSettings(workspaceCwd, { skipLoadEnvironment: true })
-    .workspace.settings;
-  const rawChannels = isRecord(settings.channels) ? settings.channels : {};
+/**
+ * Resolve the settings scope that owns channel configs for a workspace.
+ *
+ * When the workspace directory is the user's home directory, the settings
+ * loader disables the workspace scope and attributes the shared settings file
+ * to the user scope. Reads and writes must resolve the same scope: otherwise a
+ * redirected `QWEN_HOME` makes reads come from the user file while writes land
+ * in `<workspace>/.qwen/settings.json`, a file no scope reads.
+ */
+function channelSettingsScope(workspaceCwd: string): SettingsFile {
+  const loaded = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
+  return loaded.workspaceSettingsActive ? loaded.workspace : loaded.user;
+}
+
+function channelRecordMap(
+  value: unknown,
+): Record<string, Record<string, unknown>> {
+  const rawChannels = isRecord(value) ? value : {};
   const channels: Record<string, Record<string, unknown>> = {};
   for (const [name, config] of Object.entries(rawChannels)) {
+    // A settings file keeps these keys as own keys through JSON.parse, and
+    // assigning them here would set this map's prototype (`__proto__`) or list
+    // a planted channel the read view never validated and hash it into the
+    // revision (`constructor`/`prototype`). The write path already rejects
+    // these names, so the read side skips the same set.
+    if (UNSAFE_OBJECT_KEYS.has(name)) continue;
     if (isRecord(config)) channels[name] = config;
   }
+  return channels;
+}
+
+function snapshotFrom(values: {
+  channels: Record<string, Record<string, unknown>>;
+  startupNames: string[];
+}): ChannelSettingsSnapshot {
+  return {
+    revision: revisionOf(values.channels, values.startupNames),
+    channels: { ...values.channels },
+    startupNames: [...values.startupNames],
+  };
+}
+
+function workspaceValues(workspaceCwd: string): {
+  channels: Record<string, Record<string, unknown>>;
+  storedChannels: Record<string, Record<string, unknown>>;
+  startupNames: string[];
+} {
+  const scope = channelSettingsScope(workspaceCwd);
+  const settings = scope.settings;
   const startupNames = Array.isArray(settings.serve?.channels)
     ? settings.serve.channels.filter(
         (name): name is string => typeof name === 'string',
       )
     : [];
-  return { channels, startupNames };
+  return {
+    channels: channelRecordMap(settings.channels),
+    // A save replaces the whole `channels` subtree, so the write set has to be
+    // built from the stored form. `settings` is env-resolved: deriving the
+    // write set from it rewrites every untouched channel's `$VAR` reference as
+    // the resolved literal, materializing secrets in plaintext on disk.
+    storedChannels: channelRecordMap(scope.originalSettings.channels),
+    startupNames,
+  };
 }
 
 export class WorkspaceChannelSettingsStore {
   constructor(private readonly workspaceCwd: string) {}
 
   snapshot(): ChannelSettingsSnapshot {
-    const { channels, startupNames } = workspaceValues(this.workspaceCwd);
-    return {
-      revision: revisionOf(channels, startupNames),
-      channels: { ...channels },
-      startupNames: [...startupNames],
-    };
+    return snapshotFrom(workspaceValues(this.workspaceCwd));
   }
 
   async upsert(
@@ -360,6 +552,15 @@ export class WorkspaceChannelSettingsStore {
         .filter((field) => field.kind === 'secret')
         .map((field) => field.key),
     );
+    // Restoring a stored `$VAR` reference is only legal on a descriptor that
+    // declares `envResolvable`: `assertDescriptorValue` rejects a bare reference
+    // on any other field, and the restore below runs after that check, so
+    // restoring one would persist a value the daemon refuses to read back.
+    const envResolvableKeys = new Set(
+      plugin.management.fields
+        .filter((field) => field.envResolvable)
+        .map((field) => field.key),
+    );
     for (const key of Object.keys(secretUpdates)) {
       if (!secretKeys.has(key)) {
         throw invalidSecret(
@@ -375,25 +576,124 @@ export class WorkspaceChannelSettingsStore {
       }
     }
 
-    const current = this.assertRevision(options.expectedRevision);
+    const { current, storedChannels } = this.assertRevision(
+      options.expectedRevision,
+    );
     const storedPrevious = current.channels[name] ?? {};
-    const previous =
-      storedPrevious['type'] === options.config.type ? storedPrevious : {};
+    // Decide the type match once, from the env-resolved stored config: a stored
+    // `type` that is itself an environment reference never equals the resolved
+    // type the request carries, so gating the stored-form lookup below on the
+    // raw value would disagree with this gate, skip the restore, and persist
+    // the resolved secret in plaintext. The gate itself has to stay — on a
+    // genuine type change the previous type's stored secret must not carry over.
+    const hasPreviousOfType = storedPrevious['type'] === options.config.type;
+    const previous = hasPreviousOfType ? storedPrevious : {};
+    // The same config as it is stored on disk, without env resolution.
+    const storedOnDisk = storedChannels[name] ?? {};
+    const previousOnDisk = hasPreviousOfType ? storedOnDisk : {};
     const nextConfig: Record<string, unknown> = { ...options.config };
+    const storedReferences: Record<string, unknown> = {};
     for (const key of secretKeys) {
       const update = secretUpdates[key] ?? { operation: 'preserve' };
       const value = applySecretUpdate(previous[key], update);
       if (value !== undefined) nextConfig[key] = value;
+      // Validation below runs against the resolved value; what gets persisted
+      // keeps the stored reference, so preserving a secret does not bake the
+      // resolved literal into the settings file. A field that does not declare
+      // `envResolvable` is left out: a hand-written reference there is a value
+      // this store's own validator rejects, and writing it back would make
+      // every later upsert of the channel fail on a field the caller never sent.
+      if (
+        update.operation === 'preserve' &&
+        previousOnDisk[key] !== undefined &&
+        envResolvableKeys.has(key)
+      ) {
+        storedReferences[key] = previousOnDisk[key];
+      }
     }
-    assertManagedConfig(nextConfig, previous, plugin.management.fields);
-
-    const channels = { ...current.channels, [name]: nextConfig };
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
-    saveSettings(workspaceFile, { channels }, ['channels'], {
-      throwOnWriteFailure: true,
+    // The same restore for the edited channel's non-secret environment
+    // references. `GET channels` hands the editor the env-resolved snapshot, so
+    // a client can only echo the resolved literal back; without this pass,
+    // saving any unrelated field would replace the user's `$VAR` with that
+    // literal for this channel while sibling channels keep theirs. Only a value
+    // the client returned unchanged is restored, so a deliberate edit still
+    // persists what was submitted.
+    for (const field of plugin.management.fields) {
+      const key = field.key;
+      if (!field.envResolvable || secretKeys.has(key)) continue;
+      const onDisk = previousOnDisk[key];
+      if (typeof onDisk !== 'string' || !isEnvironmentReference(onDisk)) {
+        continue;
+      }
+      if (nextConfig[key] !== previous[key]) continue;
+      storedReferences[key] = onDisk;
+    }
+    try {
+      parseChannelOutputMode(
+        name,
+        nextConfig['outputMode'],
+        plugin.supportsOutputMode === true,
+      );
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    assertManagedConfig(
+      nextConfig,
+      previous,
+      plugin.supportsOutputMode === true
+        ? [...plugin.management.fields, CHANNEL_OUTPUT_MODE_FIELD]
+        : plugin.management.fields,
+    );
+    const multiSessionError = multiSessionCompatibilityError(name, {
+      multiSession: nextConfig['multiSession'] === true,
+      sessionScope:
+        (nextConfig['sessionScope'] as
+          | 'user'
+          | 'thread'
+          | 'chat_thread'
+          | 'single'
+          | undefined) ??
+        plugin.defaultSessionScope ??
+        'user',
+      groupHistoryLimit: nextConfig['groupHistoryLimit'],
+      groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
+      webhooks: nextConfig['webhooks'],
     });
+    if (multiSessionError) throw invalidConfig(multiSessionError);
+    let crossFieldError: unknown;
+    try {
+      crossFieldError = plugin.management.validateConfig?.(nextConfig);
+      if (crossFieldError instanceof Promise) {
+        // A non-async validateConfig can still return a rejected Promise; the
+        // backstop below throws without awaiting it, so attach a handler to
+        // keep the rejection from terminating the daemon.
+        void crossFieldError.catch(() => {});
+      }
+    } catch (error) {
+      throw invalidConfig(
+        `Channel validateConfig failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (crossFieldError !== undefined) {
+      throw invalidConfig(
+        typeof crossFieldError === 'string'
+          ? crossFieldError
+          : 'Channel validateConfig must return a string error message.',
+      );
+    }
+
+    const channels = {
+      ...storedChannels,
+      [name]: { ...nextConfig, ...storedReferences },
+    };
+    saveSettings(
+      channelSettingsScope(this.workspaceCwd),
+      { channels },
+      ['channels'],
+      { throwOnWriteFailure: true },
+    );
     return this.snapshot();
   }
 
@@ -402,8 +702,10 @@ export class WorkspaceChannelSettingsStore {
     options: ChannelSettingsMutationOptions,
   ): Promise<ChannelSettingsSnapshot> {
     assertSafeChannelName(name);
-    const current = this.assertRevision(options.expectedRevision);
-    const channels = { ...current.channels };
+    const { current, storedChannels } = this.assertRevision(
+      options.expectedRevision,
+    );
+    const channels = { ...storedChannels };
     delete channels[name];
     const hasAllSentinel = current.startupNames.some(isAllStartupName);
     const startupNames = hasAllSentinel
@@ -413,11 +715,8 @@ export class WorkspaceChannelSettingsStore {
         ? ['all']
         : []
       : current.startupNames.filter((startupName) => startupName !== name);
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
     saveSettings(
-      workspaceFile,
+      channelSettingsScope(this.workspaceCwd),
       { channels, serve: { channels: startupNames } },
       ['channels'],
       { throwOnWriteFailure: true },
@@ -433,11 +732,8 @@ export class WorkspaceChannelSettingsStore {
       assertSafeChannelName(name);
     }
     this.assertRevision(options.expectedRevision);
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
     saveSettings(
-      workspaceFile,
+      channelSettingsScope(this.workspaceCwd),
       { serve: { channels: [...names] } },
       ['serve', 'channels'],
       { throwOnWriteFailure: true },
@@ -445,14 +741,18 @@ export class WorkspaceChannelSettingsStore {
     return this.snapshot();
   }
 
-  private assertRevision(expectedRevision: string): ChannelSettingsSnapshot {
-    const current = this.snapshot();
+  private assertRevision(expectedRevision: string): {
+    current: ChannelSettingsSnapshot;
+    storedChannels: Record<string, Record<string, unknown>>;
+  } {
+    const values = workspaceValues(this.workspaceCwd);
+    const current = snapshotFrom(values);
     if (current.revision !== expectedRevision) {
       throw new ChannelSettingsError(
         'channel_settings_conflict',
         'Channel settings changed; reload before trying again.',
       );
     }
-    return current;
+    return { current, storedChannels: values.storedChannels };
   }
 }

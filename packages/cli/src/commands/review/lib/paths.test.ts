@@ -4,14 +4,168 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { basename, dirname, join, resolve } from 'node:path';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import {
+  assertWritableOutPath,
+  repoRelativeOf,
+  inertPath,
+  lastReviewEffortPath,
   tmpFile,
   probeWorktreePath,
+  scratchLabel,
+  scratchWorktreePath,
+  scratchWorktreePrefix,
   worktreePath,
   PARSE_ARGS_REPORT,
+  REVIEW_TRUST_STATE_DIR,
+  reviewRepositoryRootForWorktree,
+  reviewTrustStateDir,
 } from './paths.js';
+
+describe('trusted review state paths', () => {
+  let home: string;
+  let repo: string;
+
+  beforeEach(() => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'review-state-home-')));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-state-repo-')));
+    vi.stubEnv('QWEN_HOME', home);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('keeps repository authority under the global protected root', () => {
+    const state = reviewTrustStateDir(repo);
+    expect(state.startsWith(join(home, REVIEW_TRUST_STATE_DIR) + sep)).toBe(
+      true,
+    );
+    expect(state.startsWith(repo + sep)).toBe(false);
+  });
+
+  it('shares one lock scope across nested review worktrees', () => {
+    const outer = join(repo, '.qwen', 'tmp', 'review-pr-9');
+    const inner = join(outer, '.qwen', 'tmp', 'review-pr-1');
+    expect(reviewTrustStateDir(outer)).toBe(reviewTrustStateDir(repo));
+    expect(reviewRepositoryRootForWorktree(inner)).toBe(repo);
+  });
+
+  it('separates different repositories', () => {
+    const other = realpathSync(
+      mkdtempSync(join(tmpdir(), 'review-state-other-')),
+    );
+    try {
+      expect(reviewTrustStateDir(other)).not.toBe(reviewTrustStateDir(repo));
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps case-distinct repositories separate when the filesystem does', () => {
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'review-state-case-')),
+    );
+    const upper = join(parent, 'Repository');
+    const lower = join(parent, 'repository');
+    try {
+      mkdirSync(upper);
+      try {
+        mkdirSync(lower);
+      } catch {
+        return;
+      }
+      if (realpathSync(upper) === realpathSync(lower)) return;
+      expect(reviewTrustStateDir(upper)).not.toBe(reviewTrustStateDir(lower));
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one namespace for case variants of the same repository', () => {
+    const variant = join(dirname(repo), basename(repo).toUpperCase());
+    let sameRepository = false;
+    try {
+      const actual = statSync(repo);
+      const alternate = statSync(variant);
+      sameRepository =
+        actual.dev === alternate.dev && actual.ino === alternate.ino;
+    } catch {
+      return;
+    }
+    if (sameRepository) {
+      expect(reviewTrustStateDir(variant)).toBe(reviewTrustStateDir(repo));
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'uses one namespace for symlink and canonical repository spellings',
+    () => {
+      const links = realpathSync(
+        mkdtempSync(join(tmpdir(), 'review-state-links-')),
+      );
+      const alias = join(links, 'repository');
+      try {
+        symlinkSync(repo, alias, 'dir');
+        expect(reviewTrustStateDir(alias)).toBe(reviewTrustStateDir(repo));
+      } finally {
+        rmSync(links, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'recognizes a nested review worktree reached through a symlink',
+    () => {
+      const nested = join(repo, '.qwen', 'tmp', 'review-pr-9');
+      const links = realpathSync(
+        mkdtempSync(join(tmpdir(), 'review-state-nested-links-')),
+      );
+      const alias = join(links, 'repository');
+      try {
+        mkdirSync(nested, { recursive: true });
+        symlinkSync(nested, alias, 'dir');
+        expect(reviewTrustStateDir(alias)).toBe(reviewTrustStateDir(repo));
+      } finally {
+        rmSync(links, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a worktree outside the review geometry', () => {
+    expect(() =>
+      reviewRepositoryRootForWorktree(join(repo, 'arbitrary-worktree')),
+    ).toThrow(/not shaped like <root>\/\.qwen\/tmp\/<name>/);
+  });
+});
+
+describe('lastReviewEffortPath', () => {
+  it('uses the project storage owner exported by the parent session', () => {
+    expect(
+      lastReviewEffortPath('/workspace/repo', '/runtime/projects/repo'),
+    ).toBe(resolve('/runtime/projects/repo/review-last-effort'));
+  });
+
+  it('keeps fallback storage private and project-scoped', () => {
+    const first = lastReviewEffortPath('/workspace/one');
+    const second = lastReviewEffortPath('/workspace/two');
+    expect(first).not.toBe(second);
+    expect(first).not.toContain('/workspace/one/.qwen');
+    expect(second).not.toContain('/workspace/two/.qwen');
+  });
+});
 
 describe('PARSE_ARGS_REPORT', () => {
   it('is the literal path the skill tees to in Step 0', () => {
@@ -75,5 +229,186 @@ describe('probeWorktreePath', () => {
     expect(probeWorktreePath(worktreePath(7))).toBe(
       `${resolve(worktreePath(7))}-probe`,
     );
+  });
+});
+
+describe('scratchWorktreePath', () => {
+  const worktree = resolve('/a/b/review-pr-1');
+
+  it('names the tree after the agent that owns it', () => {
+    // The label is what keeps concurrent verifier shards apart; a scratch tree
+    // they share is the race the whole mechanism exists to remove.
+    expect(scratchWorktreePath(worktree, 'verify--round-2--abc')).toBe(
+      `${worktree}-scratch-verify--round-2--abc`,
+    );
+    expect(scratchWorktreePath(worktree, 'verify--round-2--abc')).not.toBe(
+      scratchWorktreePath(worktree, 'verify--round-2--def'),
+    );
+  });
+
+  it('resolves a relative worktree so the tree is a SIBLING, not a child', () => {
+    // `git worktree add` runs with the review worktree as cwd. A relative path
+    // would land the scratch tree inside the one tree it must never touch.
+    expect(scratchWorktreePath('.qwen/tmp/review-pr-1', 'verify')).toBe(
+      `${resolve('.qwen/tmp/review-pr-1')}-scratch-verify`,
+    );
+  });
+
+  it('flattens a crafted label instead of following it out of the temp dir', () => {
+    // The label reaches this over a CLI flag, and the path it builds is both
+    // created by `git worktree add` and later DELETED by cleanup's sweep.
+    const p = scratchWorktreePath(worktree, '../../../etc/passwd');
+    expect(p).not.toContain('..');
+    expect(dirname(p)).toBe(dirname(worktree));
+    expect(p.startsWith(`${worktree}-scratch-`)).toBe(true);
+  });
+
+  it('caps a long label — the suffix rides on an already-deep path', () => {
+    const p = scratchWorktreePath(worktree, 'v'.repeat(400));
+    expect(basename(p).length).toBeLessThanOrEqual(
+      'review-pr-1-scratch-'.length + 64,
+    );
+  });
+
+  it('refuses a label that keeps no path-safe character', () => {
+    // `???` and `!!!` are two different labels that flatten to nothing. A
+    // fallback would name both trees after the prefix itself — one tree for
+    // every shard whose label was unusable, and a path cleanup's prefix sweep
+    // matches as a whole family.
+    expect(() => scratchWorktreePath(worktree, '???')).toThrow(TypeError);
+    expect(scratchLabel('???')).toBe('');
+  });
+});
+
+describe('scratchWorktreePrefix', () => {
+  it('is the exact infix cleanup sweeps on, not merely a prefix of the path', () => {
+    // Asserting only `path.startsWith(prefix)` is a tautology — the path is
+    // BUILT from the prefix — and it holds just as well for a broader prefix,
+    // which is the dangerous direction: `cleanup` feeds this to a
+    // `startsWith` filter over the temp dir and deletes every match, so a
+    // prefix of `…/review-pr-7` alone would delete PR 70's live worktrees.
+    expect(scratchWorktreePrefix(worktreePath(7))).toBe(
+      `${resolve(worktreePath(7))}-scratch-`,
+    );
+    expect(
+      scratchWorktreePath(worktreePath(70), 'x').startsWith(
+        scratchWorktreePrefix(worktreePath(7)),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('inertPath', () => {
+  // The only sanitizer between a git-reported (PR- or agent-controlled) path
+  // and three sinks that render it: a brief the agent treats as its whole
+  // instructions, the roster's separator lines, and the orchestrator's
+  // terminal. The character class IS the safety property.
+  it('flattens everything that could act rather than name', () => {
+    expect(inertPath('a\nb.ts')).toBe('a b.ts');
+    expect(inertPath('a\u001b[31mb.ts')).toBe('a [31mb.ts');
+    expect(inertPath('a`b.ts')).toBe('a b.ts');
+    // The roster separator glyph — a filename must not be able to forge a
+    // block boundary in the text an orchestrator pastes to an agent.
+    expect(inertPath('a\u2500b.ts')).toBe('a b.ts');
+    // Invisible formatting: a bidi override reverses the rendering of
+    // everything after it, and a zero-width joiner hides characters inside a
+    // path a reader is being asked to judge.
+    expect(inertPath('a\u202eb.ts')).toBe('a b.ts');
+    expect(inertPath('a\u200bb.ts')).toBe('a b.ts');
+    expect(inertPath('a\ufeffb.ts')).toBe('a b.ts');
+    // Line and paragraph separators open a new Markdown line like a newline.
+    expect(inertPath('a\u2028b.ts')).toBe('a b.ts');
+  });
+
+  it('leaves an ordinary path exactly as it is', () => {
+    // A sanitizer that mangles the common case makes every rendered path
+    // unusable as the command argument the reader is told to run.
+    expect(inertPath('packages/cli/src/a-b_c.test.ts')).toBe(
+      'packages/cli/src/a-b_c.test.ts',
+    );
+    expect(inertPath('caf\u00e9.ts')).toBe('caf\u00e9.ts');
+    expect(inertPath('my probe.ts')).toBe('my probe.ts');
+  });
+});
+describe('repoRelativeOf — the repository root is inside the repository', () => {
+  it('does not classify the root itself as an escape', () => {
+    // `classifyRunTarget` accepts a directory target, so the root is a
+    // reachable one — and calling it an escape split the two sides that must
+    // agree: the parent pinned the typed spelling while the child derived
+    // `safeTarget('') === 'target'`, so the poll never matched and a review
+    // that HAD run reported no verdict. `--file <root>` also threw
+    // "resolves to <root>, which is outside the repository at <root>".
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-rel-')));
+    try {
+      const out = repoRelativeOf(root, root, root);
+      expect(out.escapes).toBe(false);
+      expect(out.rel).toBe('');
+      // …and a genuine escape still is one.
+      expect(repoRelativeOf(root, '..', root).escapes).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('canonicalise walk-up — backslash is a POSIX filename byte', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps a leading backslash through the ancestor walk',
+    () => {
+      // R23: the walk-up strip treated `\` as a separator on POSIX, so a
+      // dangling symlink literally named `\link` (realpath THROWS on a
+      // dangling link, which is what reaches the walk at all) came back as
+      // `link` — the capture then diffed a different name and the real
+      // entry dropped mutely; this PR's own `notes\` fixtures insist the
+      // byte is ordinary. Only the platform's separators are stripped now.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-rel-')));
+      try {
+        symlinkSync('no-such-target', join(root, '\\link'));
+        const out = repoRelativeOf(root, '\\link', root);
+        expect(out.escapes).toBe(false);
+        expect(out.rel).toBe('\\link');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe('assertWritableOutPath — the up-front --out ruling', () => {
+  it('refuses a repeated --out, which yargs hands over as an array, with a message that says so', () => {
+    // Not `out.trim is not a function`: that reads as a crash in the
+    // command, and the operator cannot tell it is their argument.
+    expect(() => assertWritableOutPath(['a.json', 'b.json'])).toThrow(
+      TypeError,
+    );
+    expect(() => assertWritableOutPath(['a.json', 'b.json'])).toThrow(
+      '--out must be given once, as a file path',
+    );
+    // `--no-out` arrives as `false`; nothing was given twice, so the message
+    // is the blank value's.
+    for (const shape of [false, true, undefined]) {
+      expect(() => assertWritableOutPath(shape)).toThrow(TypeError);
+      expect(() => assertWritableOutPath(shape)).toThrow(
+        '--out must name a file path',
+      );
+    }
+  });
+
+  it('refuses a blank value, a trailing separator and an existing directory, and admits a file path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'out-path-'));
+    try {
+      expect(() => assertWritableOutPath('  ')).toThrow(
+        '--out must name a file path',
+      );
+      expect(() => assertWritableOutPath(join(dir, 'later') + '/')).toThrow(
+        '--out names a directory, not a file',
+      );
+      expect(() => assertWritableOutPath(dir)).toThrow(
+        '--out names a directory, not a file',
+      );
+      expect(() => assertWritableOutPath(join(dir, 'plan.json'))).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -4,7 +4,7 @@
 //! lets clients trained on 0–1000 normalized coordinates (e.g. Qwen-VL
 //! `computer_use`) drive the pixel-based tool surface. It runs entirely in
 //! `cua-driver-core` so the per-platform tools stay untouched (fork-rebase
-//! friendly). See `libs/cua-driver/docs/relative-coordinates-design.md`.
+//! friendly). See `packages/cua-driver/docs/relative-coordinates-design.md`.
 //!
 //! Three hooks, wired into `ToolRegistry::invoke` / `tools_list`:
 //!   - input  : `denormalize_args`  — 0–1000 → pixels, before the real tool
@@ -62,6 +62,12 @@ fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
         ],
         // move_cursor positions the overlay in SCREEN space (no window_id).
         "move_cursor" => &[("x", true, true), ("y", false, true)],
+        "set_window_frame" => &[
+            ("x", true, true),
+            ("y", false, true),
+            ("width", true, true),
+            ("height", false, true),
+        ],
         // scroll x/y specify WHERE to deliver the wheel event (not scroll amount).
         // macOS: window-local screenshot pixels. Windows: screen-absolute (desktop
         // scope only, no pid → screenshot_w=0 → falls back to desktop/screen cache).
@@ -94,14 +100,33 @@ fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
 /// so the caller can surface the error to the model instead of silently passing
 /// through unconverted normalized coordinates (which would land clicks at wrong
 /// positions).
-pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screenshot_h: u32) -> Result<(), String> {
+pub fn denormalize_args(
+    tool: &str,
+    args: &mut Value,
+    screenshot_w: u32,
+    screenshot_h: u32,
+) -> Result<(), String> {
+    if matches!(tool, "browser_click" | "browser_pointer")
+        && ["x", "y", "to_x", "to_y"]
+            .iter()
+            .any(|field| args.get(*field).is_some_and(Value::is_number))
+    {
+        return Err(
+            "Normalized coordinate mode does not translate browser CSS pixels; use a fresh browser ref instead."
+                .to_owned(),
+        );
+    }
+
     // from_zoom coords live in the zoom-image space, not window-local.
     // Denormalize against the cached zoom image dimensions instead of the
     // window screenshot size. If no zoom cache exists, return an error.
     // parallel_mouse_drag does not support from_zoom — skip this block
     // so its nested handler below is always reached.
     if tool != "parallel_mouse_drag"
-        && args.get("from_zoom").and_then(|v| v.as_bool()).unwrap_or(false)
+        && args
+            .get("from_zoom")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     {
         let pid = args.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
         if let Some((zw, zh)) = get_zoom_size(pid) {
@@ -114,15 +139,13 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
             }
         } else {
             // Only error when the tool actually carries coordinate fields.
-            let has_coords = input_coord_fields(tool).iter().any(|&(f, _, _)| {
-                args.get(f).and_then(|v| v.as_f64()).is_some()
-            });
+            let has_coords = input_coord_fields(tool)
+                .iter()
+                .any(|&(f, _, _)| args.get(f).and_then(|v| v.as_f64()).is_some());
             if has_coords {
-                return Err(
-                    "from_zoom=true but no zoom context cached. \
+                return Err("from_zoom=true but no zoom context cached. \
                      Call zoom first so the driver knows the zoom image dimensions."
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
         return Ok(());
@@ -137,32 +160,32 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
         let (dw, dh) = if screen_basis {
             match screen {
                 Some(s) => s,
-                None => return Err(
-                    "Coordinate normalization requires screen size. \
+                None => {
+                    return Err("Coordinate normalization requires screen size. \
                      Call get_screen_size first so the driver can convert \
                      0–1000 coordinates to pixels."
-                        .to_string(),
-                ),
+                        .to_string())
+                }
             }
         } else if screenshot_w == 0 {
             let has_window_target = args.get("pid").is_some_and(|v| !v.is_null())
                 || args.get("window_id").is_some_and(|v| !v.is_null());
             if has_window_target {
-                return Err(
-                    "Coordinate normalization requires window screenshot size. \
+                return Err("Coordinate normalization requires window screenshot size. \
                      Call get_window_state for this window first so the driver \
                      can convert 0–1000 coordinates to pixels."
-                        .to_string(),
-                );
+                    .to_string());
             }
             match desktop_screenshot_size() {
                 Some(s) => s,
-                None => return Err(
-                    "Coordinate normalization requires desktop screenshot size. \
+                None => {
+                    return Err(
+                        "Coordinate normalization requires desktop screenshot size. \
                      Call get_desktop_state first so the driver can convert \
                      0–1000 coordinates to pixels."
-                        .to_string(),
-                ),
+                            .to_string(),
+                    )
+                }
             }
         } else {
             (screenshot_w, screenshot_h)
@@ -171,6 +194,9 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
         if let Some(v) = args.get(field).and_then(|v| v.as_f64()) {
             args[field] = json!(norm_to_px(v, dim, scale));
         }
+    }
+    if tool == "verify_state" {
+        denormalize_verify_state_bounds(args, screen, scale)?;
     }
     // parallel_mouse_drag: coordinates are nested inside drags[].{path, from_x,
     // from_y, to_x, to_y, x_from, x_to}. Each drag item has its own window_id,
@@ -183,18 +209,21 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
                 let item_wid = item.get("window_id").and_then(|v| v.as_u64()).unwrap_or(0);
                 let (dw, dh) = match get_size(item_pid, item_wid) {
                     Some(s) => s,
-                    None => return Err(
-                        "Coordinate normalization requires window screenshot size. \
+                    None => {
+                        return Err("Coordinate normalization requires window screenshot size. \
                          Call get_window_state for this window first so the driver \
                          can convert 0–1000 coordinates to pixels."
-                            .to_string(),
-                    ),
+                            .to_string())
+                    }
                 };
                 // from_x/from_y/to_x/to_y + fn domain bounds x_from/x_to
                 for (field, is_x) in &[
-                    ("from_x", true), ("from_y", false),
-                    ("to_x", true), ("to_y", false),
-                    ("x_from", true), ("x_to", true),
+                    ("from_x", true),
+                    ("from_y", false),
+                    ("to_x", true),
+                    ("to_y", false),
+                    ("x_from", true),
+                    ("x_to", true),
                 ] {
                     let dim = if *is_x { dw } else { dh };
                     if let Some(v) = item.get(*field).and_then(|v| v.as_f64()) {
@@ -216,6 +245,49 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
                         }
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn denormalize_verify_state_bounds(
+    args: &mut Value,
+    screen: Option<(u32, u32)>,
+    scale: f64,
+) -> Result<(), String> {
+    let Some(expectations) = args.get_mut("expect").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let has_bounds = expectations.iter().any(|expectation| {
+        expectation
+            .get("window")
+            .and_then(|window| window.get("bounds"))
+            .is_some_and(Value::is_object)
+    });
+    if !has_bounds {
+        return Ok(());
+    }
+    let (width, height) = screen.ok_or_else(|| {
+        "Coordinate normalization requires screen size. Call get_screen_size before verify_state bounds."
+            .to_owned()
+    })?;
+    for expectation in expectations {
+        let Some(bounds) = expectation
+            .get_mut("window")
+            .and_then(|window| window.get_mut("bounds"))
+        else {
+            continue;
+        };
+        for (field, dimension) in [
+            ("x", width),
+            ("width", width),
+            ("y", height),
+            ("height", height),
+            ("tolerance_px", width.max(height)),
+        ] {
+            if let Some(value) = bounds.get(field).and_then(Value::as_f64) {
+                bounds[field] = json!(norm_to_px(value, dimension, scale));
             }
         }
     }
@@ -267,40 +339,46 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
                 "input_schema"
             };
             if let Some(props) = tool
-            .get_mut(schema_key)
-            .and_then(|s| s.get_mut("properties"))
-            .and_then(|p| p.as_object_mut())
-        {
-            for &(field, is_x, screen_basis) in fields {
-                if let Some(fobj) = props.get_mut(field).and_then(|f| f.as_object_mut()) {
-                    // Insert unconditionally: in normalized mode the model MUST be
-                    // told these are 0–`scale`, even for fields the upstream schema
-                    // left undescribed (e.g. move_cursor's bare x/y). This runs
-                    // only when `normalized` is set, so pixel mode is untouched.
-                    // move_cursor is screen-space; the rest are window-local.
-                    let basis = if screen_basis { "screen" } else { "window" };
-                    let desc = if is_x {
-                        format!("X coordinate, 0–{scale} normalized to {basis} width (top-left origin).")
-                    } else {
-                        format!("Y coordinate, 0–{scale} normalized to {basis} height (top-left origin).")
-                    };
-                    fobj.insert("description".to_string(), json!(desc));
+                .get_mut(schema_key)
+                .and_then(|s| s.get_mut("properties"))
+                .and_then(|p| p.as_object_mut())
+            {
+                for &(field, is_x, screen_basis) in fields {
+                    if let Some(fobj) = props.get_mut(field).and_then(|f| f.as_object_mut()) {
+                        // Insert unconditionally: in normalized mode the model MUST be
+                        // told these are 0–`scale`, even for fields the upstream schema
+                        // left undescribed (e.g. move_cursor's bare x/y). This runs
+                        // only when `normalized` is set, so pixel mode is untouched.
+                        // move_cursor is screen-space; the rest are window-local.
+                        let basis = if screen_basis { "screen" } else { "window" };
+                        let desc = if is_x {
+                            format!("X coordinate, 0–{scale} normalized to {basis} width (top-left origin).")
+                        } else {
+                            format!("Y coordinate, 0–{scale} normalized to {basis} height (top-left origin).")
+                        };
+                        fobj.insert("description".to_string(), json!(desc));
+                    }
                 }
-            }
-            // from_zoom: rewrite to say "normalized" instead of "pixel"
-            // so the model sends 0–scale coords for zoom-image clicks too.
-            if let Some(fobj) = props.get_mut("from_zoom").and_then(|f| f.as_object_mut()) {
-                fobj.insert(
-                    "description".to_string(),
-                    json!(format!(
-                        "When true, x and y are 0–{scale} normalized coordinates \
+                // from_zoom: rewrite to say "normalized" instead of "pixel"
+                // so the model sends 0–scale coords for zoom-image clicks too.
+                if let Some(fobj) = props.get_mut("from_zoom").and_then(|f| f.as_object_mut()) {
+                    fobj.insert(
+                        "description".to_string(),
+                        json!(format!(
+                            "When true, x and y are 0–{scale} normalized coordinates \
                          in the last zoom image for this pid. The driver maps them \
                          back to window coords."
-                    )),
-                );
+                        )),
+                    );
+                }
             }
-        }
         } // end if !fields.is_empty()
+        if name == "verify_state" {
+            rewrite_verify_state_bounds(tool, scale);
+        }
+        if matches!(name.as_str(), "browser_click" | "browser_pointer") {
+            rewrite_browser_coordinate_guidance(tool);
+        }
         // Top-level description: replace pixel-coordinate phrasing with
         // normalized wording. Multiple variants exist across platforms.
         if let Some(desc) = tool.get("description").and_then(|d| d.as_str()) {
@@ -370,15 +448,61 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
             }
             // "screen-absolute pixel" (get_desktop_state)
             if d.contains("screen-absolute pixel") {
-                d = d.replace(
-                    "screen-absolute pixel",
-                    &format!("0–{scale} normalized"),
-                );
+                d = d.replace("screen-absolute pixel", &format!("0–{scale} normalized"));
                 changed = true;
             }
             if changed {
                 tool["description"] = json!(d);
             }
+        }
+    }
+}
+
+fn rewrite_verify_state_bounds(tool: &mut Value, scale: u64) {
+    let Some(properties) = tool
+        .get_mut("inputSchema")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("expect"))
+        .and_then(|expect| expect.get_mut("items"))
+        .and_then(|items| items.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("window"))
+        .and_then(|window| window.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("bounds"))
+        .and_then(|bounds| bounds.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for (field, axis) in [
+        ("x", "screen width"),
+        ("width", "screen width"),
+        ("y", "screen height"),
+        ("height", "screen height"),
+        ("tolerance_px", "larger screen dimension"),
+    ] {
+        if let Some(definition) = properties.get_mut(field).and_then(Value::as_object_mut) {
+            definition.insert(
+                "description".to_owned(),
+                json!(format!("0-{scale} normalized against the {axis}.")),
+            );
+        }
+    }
+}
+
+fn rewrite_browser_coordinate_guidance(tool: &mut Value) {
+    let Some(properties) = tool
+        .get_mut("inputSchema")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for field in ["x", "y", "to_x", "to_y"] {
+        if let Some(definition) = properties.get_mut(field).and_then(Value::as_object_mut) {
+            definition.insert(
+                "description".to_owned(),
+                json!("Unavailable in normalized mode; use a fresh browser ref."),
+            );
         }
     }
 }
@@ -392,15 +516,20 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
 // It is never the value `invoke` consults.
 
 static DEFAULT_NORMALIZED: AtomicBool = AtomicBool::new(false);
+static DEFAULT_NORMALIZED_SET: AtomicBool = AtomicBool::new(false);
 
 /// Seed the process-wide default coordinate mode (called once at startup).
 pub fn set_default_normalized(on: bool) {
     DEFAULT_NORMALIZED.store(on, Ordering::Relaxed);
+    DEFAULT_NORMALIZED_SET.store(true, Ordering::Relaxed);
 }
 
 /// The default coordinate mode new registries inherit.
 pub fn default_normalized() -> bool {
-    DEFAULT_NORMALIZED.load(Ordering::Relaxed)
+    if DEFAULT_NORMALIZED_SET.load(Ordering::Relaxed) {
+        return DEFAULT_NORMALIZED.load(Ordering::Relaxed);
+    }
+    std::env::var_os("CUA_DRIVER_RS_COORDINATE_SPACE").is_some_and(|value| value == "1")
 }
 
 /// Normalization full-scale — the "1000" in 1000×1000. Configurable to absorb
@@ -409,30 +538,43 @@ pub fn default_normalized() -> bool {
 /// `CUA_DRIVER_RS_COORDINATE_SCALE`; default 1000. Stored as an integer because
 /// normalization scales are whole numbers in practice.
 static COORDINATE_SCALE: AtomicU64 = AtomicU64::new(1000);
+static COORDINATE_SCALE_SET: AtomicBool = AtomicBool::new(false);
 
 /// Seed the normalization full-scale (called once at startup). 0 is rejected
 /// (it would divide by zero) and falls back to 1000.
 pub fn set_coordinate_scale(scale: u32) {
     let s = if scale == 0 { 1000 } else { scale };
     COORDINATE_SCALE.store(s as u64, Ordering::Relaxed);
+    COORDINATE_SCALE_SET.store(true, Ordering::Relaxed);
 }
 
 /// The active normalization full-scale, as f64 for the conversion math.
 pub fn coordinate_scale() -> f64 {
-    COORDINATE_SCALE.load(Ordering::Relaxed) as f64
+    if COORDINATE_SCALE_SET.load(Ordering::Relaxed) {
+        return COORDINATE_SCALE.load(Ordering::Relaxed) as f64;
+    }
+    std::env::var("CUA_DRIVER_RS_COORDINATE_SCALE")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1000) as f64
 }
 
 // ── Per-window size cache ────────────────────────────────────────────────────
 //
-// Cross-call window state (written by get_window_state, read by the next
-// click), naturally process-scoped — stays global.
+// Cross-call window state is isolated by the runtime scope installed at the
+// canonical registry boundary. The fallback scope covers direct unit helpers.
+
+fn runtime_scope() -> String {
+    crate::tool::current_dispatch_runtime_scope().unwrap_or_else(|| "legacy".to_owned())
+}
 
 /// Per-(pid, window_id) screenshot-size cache. Keyed on window_id (not pid
 /// alone like the platform `resize_registry`) so multiple windows of the same
 /// process don't clobber each other's basis.
-static SIZE_CACHE: OnceLock<Mutex<HashMap<(i64, u64), (u32, u32)>>> = OnceLock::new();
+static SIZE_CACHE: OnceLock<Mutex<HashMap<(String, i64, u64), (u32, u32)>>> = OnceLock::new();
 
-fn size_cache() -> &'static Mutex<HashMap<(i64, u64), (u32, u32)>> {
+fn size_cache() -> &'static Mutex<HashMap<(String, i64, u64), (u32, u32)>> {
     SIZE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -440,13 +582,17 @@ fn size_cache() -> &'static Mutex<HashMap<(i64, u64), (u32, u32)>> {
 /// resolve the normalization basis without re-capturing.
 pub fn put_size(pid: i64, window_id: u64, w: u32, h: u32) {
     if let Ok(mut cache) = size_cache().lock() {
-        cache.insert((pid, window_id), (w, h));
+        cache.insert((runtime_scope(), pid, window_id), (w, h));
     }
 }
 
 /// Look up the cached screenshot size for a (pid, window_id).
 pub fn get_size(pid: i64, window_id: u64) -> Option<(u32, u32)> {
-    size_cache().lock().ok()?.get(&(pid, window_id)).copied()
+    size_cache()
+        .lock()
+        .ok()?
+        .get(&(runtime_scope(), pid, window_id))
+        .copied()
 }
 
 /// Ingest the screenshot size from a `get_window_state` result into the cache,
@@ -468,22 +614,22 @@ pub fn ingest_window_size(tool: &str, args: &Value, result: &ToolResult) {
 /// Logical screen size (from `get_screen_size`) — the basis for move_cursor's
 /// screen-space coordinates. The agent cursor overlay operates in CGEvent screen
 /// points (logical), not physical pixels.
-static SCREEN_SIZE: OnceLock<Mutex<Option<(u32, u32)>>> = OnceLock::new();
+static SCREEN_SIZE: OnceLock<Mutex<HashMap<String, (u32, u32)>>> = OnceLock::new();
 
-fn screen_cache() -> &'static Mutex<Option<(u32, u32)>> {
-    SCREEN_SIZE.get_or_init(|| Mutex::new(None))
+fn screen_cache() -> &'static Mutex<HashMap<String, (u32, u32)>> {
+    SCREEN_SIZE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Cache the logical screen size for normalizing move_cursor coordinates.
 pub fn put_screen_size(w: u32, h: u32) {
     if let Ok(mut c) = screen_cache().lock() {
-        *c = Some((w, h));
+        c.insert(runtime_scope(), (w, h));
     }
 }
 
 /// The cached logical screen size, if a `get_screen_size` has been seen.
 pub fn screen_size() -> Option<(u32, u32)> {
-    screen_cache().lock().ok().and_then(|c| *c)
+    screen_cache().lock().ok()?.get(&runtime_scope()).copied()
 }
 
 // ── Desktop screenshot-size cache (for desktop-scope clicks) ────────────────
@@ -494,22 +640,26 @@ pub fn screen_size() -> Option<(u32, u32)> {
 /// physical pixels. Separate from `SCREEN_SIZE` (logical points) because
 /// move_cursor operates in screen points while desktop-scope clicks operate
 /// in screenshot pixels.
-static DESKTOP_SCREENSHOT_SIZE: OnceLock<Mutex<Option<(u32, u32)>>> = OnceLock::new();
+static DESKTOP_SCREENSHOT_SIZE: OnceLock<Mutex<HashMap<String, (u32, u32)>>> = OnceLock::new();
 
-fn desktop_screenshot_cache() -> &'static Mutex<Option<(u32, u32)>> {
-    DESKTOP_SCREENSHOT_SIZE.get_or_init(|| Mutex::new(None))
+fn desktop_screenshot_cache() -> &'static Mutex<HashMap<String, (u32, u32)>> {
+    DESKTOP_SCREENSHOT_SIZE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Cache the desktop screenshot size (physical pixels) for desktop-scope coords.
 pub fn put_desktop_screenshot_size(w: u32, h: u32) {
     if let Ok(mut c) = desktop_screenshot_cache().lock() {
-        *c = Some((w, h));
+        c.insert(runtime_scope(), (w, h));
     }
 }
 
 /// The cached desktop screenshot size, if a `get_desktop_state` has been seen.
 pub fn desktop_screenshot_size() -> Option<(u32, u32)> {
-    desktop_screenshot_cache().lock().ok().and_then(|c| *c)
+    desktop_screenshot_cache()
+        .lock()
+        .ok()?
+        .get(&runtime_scope())
+        .copied()
 }
 
 /// Ingest screen/desktop sizes from tool results into the appropriate caches.
@@ -541,20 +691,24 @@ pub fn ingest_screen_size(tool: &str, result: &ToolResult) {
 /// Per-pid zoom-image size cache. Keyed on pid alone (matching the platform
 /// `ZoomRegistry`). Written by `ingest_zoom_size` after a `zoom` call,
 /// read by `denormalize_args` when `from_zoom=true`.
-static ZOOM_SIZE_CACHE: OnceLock<Mutex<HashMap<i64, (u32, u32)>>> = OnceLock::new();
+static ZOOM_SIZE_CACHE: OnceLock<Mutex<HashMap<(String, i64), (u32, u32)>>> = OnceLock::new();
 
-fn zoom_size_cache() -> &'static Mutex<HashMap<i64, (u32, u32)>> {
+fn zoom_size_cache() -> &'static Mutex<HashMap<(String, i64), (u32, u32)>> {
     ZOOM_SIZE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn put_zoom_size(pid: i64, w: u32, h: u32) {
     if let Ok(mut cache) = zoom_size_cache().lock() {
-        cache.insert(pid, (w, h));
+        cache.insert((runtime_scope(), pid), (w, h));
     }
 }
 
 pub fn get_zoom_size(pid: i64) -> Option<(u32, u32)> {
-    zoom_size_cache().lock().ok()?.get(&pid).copied()
+    zoom_size_cache()
+        .lock()
+        .ok()?
+        .get(&(runtime_scope(), pid))
+        .copied()
 }
 
 /// Ingest the zoom image size from a `zoom` result into the cache so that
@@ -687,7 +841,8 @@ mod tests {
     #[test]
     fn denormalize_scroll_converts_xy_when_present() {
         // scroll with x/y (pixel-wheel path) — coords are window-local.
-        let mut args = json!({ "pid": 1, "window_id": 2, "direction": "down", "x": 500.0, "y": 500.0 });
+        let mut args =
+            json!({ "pid": 1, "window_id": 2, "direction": "down", "x": 500.0, "y": 500.0 });
         denormalize_args("scroll", &mut args, 800, 600).unwrap();
         assert_eq!(args["x"], json!(400.0)); // 500/1000 * 800
         assert_eq!(args["y"], json!(300.0)); // 500/1000 * 600
@@ -753,7 +908,10 @@ mod tests {
         // screenshot_w=0 + has pid → window-scope without cache → error
         let mut args = json!({ "pid": 42, "x": 500.0, "y": 500.0 });
         let err = denormalize_args("click", &mut args, 0, 0).unwrap_err();
-        assert!(err.contains("get_window_state"), "error should guide to get_window_state: {err}");
+        assert!(
+            err.contains("get_window_state"),
+            "error should guide to get_window_state: {err}"
+        );
     }
 
     #[test]
@@ -826,14 +984,20 @@ mod tests {
         let xd = props["x"]["description"].as_str().unwrap();
         let yd = props["y"]["description"].as_str().unwrap();
         assert!(xd.contains("0–1000"), "x desc should mention 0–1000: {xd}");
-        assert!(xd.to_lowercase().contains("width"), "x desc should mention width: {xd}");
+        assert!(
+            xd.to_lowercase().contains("width"),
+            "x desc should mention width: {xd}"
+        );
         assert!(yd.contains("0–1000"));
         assert!(yd.to_lowercase().contains("height"));
         // non-coord field untouched
         assert_eq!(props["pid"]["description"], json!("Target pid."));
         // top-level description's pixel wording rewritten too
         let td = tl["tools"][0]["description"].as_str().unwrap();
-        assert!(!td.contains("window-local screenshot pixels"), "top-level still says pixels: {td}");
+        assert!(
+            !td.contains("window-local screenshot pixels"),
+            "top-level still says pixels: {td}"
+        );
     }
 
     #[test]
@@ -881,7 +1045,10 @@ mod tests {
         let xd = tl["tools"][0]["input_schema"]["properties"]["x"]["description"]
             .as_str()
             .unwrap();
-        assert!(xd.contains("0–1000"), "daemon input_schema x not rewritten: {xd}");
+        assert!(
+            xd.contains("0–1000"),
+            "daemon input_schema x not rewritten: {xd}"
+        );
     }
 
     // ---- global state: size cache + ingest + switch ----
@@ -931,8 +1098,7 @@ mod tests {
     #[test]
     fn ingest_zoom_size_ignores_non_zoom() {
         let args = json!({ "pid": 990021 });
-        let r = ToolResult::text("ok")
-            .with_structured(json!({ "width": 400, "height": 300 }));
+        let r = ToolResult::text("ok").with_structured(json!({ "width": 400, "height": 300 }));
         ingest_zoom_size("click", &args, &r);
         assert_eq!(get_zoom_size(990021), None);
     }
@@ -966,13 +1132,12 @@ mod tests {
 
     #[test]
     fn normalize_result_desktop_state_is_noop() {
-        let mut r = ToolResult::text("ok")
-            .with_structured(json!({
-                "screenshot_width": 3840,
-                "screenshot_height": 2160,
-                "screen_width": 1920,
-                "screen_height": 1080,
-            }));
+        let mut r = ToolResult::text("ok").with_structured(json!({
+            "screenshot_width": 3840,
+            "screenshot_height": 2160,
+            "screen_width": 1920,
+            "screen_height": 1080,
+        }));
         normalize_result("get_desktop_state", &mut r);
         let sc = r.structured_content.as_ref().unwrap();
         assert_eq!(sc["screenshot_width"], json!(3840));
@@ -985,14 +1150,13 @@ mod tests {
     fn ingest_screen_size_from_get_desktop_state() {
         // Retina: get_desktop_state writes to desktop_screenshot cache (physical),
         // NOT to screen cache (logical).
-        let r = ToolResult::text("ok")
-            .with_structured(json!({
-                "screen_width": 1920,
-                "screen_height": 1080,
-                "screenshot_width": 3840,
-                "screenshot_height": 2160,
-                "scale_factor": 2.0,
-            }));
+        let r = ToolResult::text("ok").with_structured(json!({
+            "screen_width": 1920,
+            "screen_height": 1080,
+            "screenshot_width": 3840,
+            "screenshot_height": 2160,
+            "scale_factor": 2.0,
+        }));
         ingest_screen_size("get_desktop_state", &r);
         assert_eq!(desktop_screenshot_size(), Some((3840, 2160)));
     }

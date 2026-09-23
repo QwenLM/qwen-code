@@ -9,12 +9,19 @@ export {
   normalizeDaemonEvent,
   getSessionUpdatePayload,
 } from './normalizer.js';
-export { createDaemonToolPreview } from './toolPreview.js';
+export {
+  createDaemonToolPreview,
+  createDaemonToolResultPreview,
+} from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
+  estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
   isSubagentChildBlock,
+  isTaskExecutionMode,
+  isTrimmedPermissionBlockId,
+  isTrimmedToolBlockId,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
   selectApprovalMode,
@@ -25,6 +32,8 @@ export {
   selectToolProgress,
   selectTranscriptBlocks,
   selectTranscriptBlocksOrderedByEventId,
+  selectUnrecognizedDiagnostics,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from './transcript.js';
 export { createDaemonTranscriptStore } from './store.js';
 export { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from './sentinels.js';
@@ -52,6 +61,7 @@ export type {
 } from './conformance.js';
 export {
   extractContentPart,
+  extractTranscriptTiming,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,
   redactSensitiveFields as redactDaemonUiSensitiveFields,
@@ -59,21 +69,32 @@ export {
   stringifyJson,
   stripOscSequences,
 } from './utils.js';
-export { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+export {
+  DAEMON_PLAN_TOOL_CALL_ID,
+  DAEMON_UI_DEBUG_REASONS,
+  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isUnrecognizedDiagnosticReason,
+} from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonTranscriptTimingMeta,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
+  DaemonToolResultPreview,
+  DaemonTodoListPreview,
+  DaemonTranscriptTodoItem,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlockKind,
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,
@@ -81,8 +102,13 @@ export type {
   DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  DaemonTranscriptTruncationDetail,
+  DaemonTurnUsage,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events
   DaemonUiAssistantDoneEvent,
+  DaemonUiDebugReason,
   DaemonUiErrorEvent,
   DaemonUiEvent,
   DaemonUiEventBase,
@@ -95,10 +121,12 @@ export type {
   DaemonUiShellOutputEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUiUserResourceLinkEvent,
   DaemonUiToolUpdateEvent,
   DaemonUiToolProvenance,
   // Session-meta events
   DaemonUiSessionMetadataChangedEvent,
+  DaemonUiSessionSourceChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,

@@ -16,7 +16,8 @@
  * Auto-stops after max_events or idle_timeout_ms of silence.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -51,10 +52,10 @@ import {
 import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
-  isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
-import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
@@ -171,9 +172,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const command = normalizeMonitorShellCommand(
-      this.params.command,
-    ).safetyCommand;
+    if (this.config.getShellExecutionSandbox?.()) return 'ask';
+    const normalized = normalizeMonitorShellCommand(this.params.command);
+    const command = normalized.safetyCommand;
+    const cwd =
+      this.params.directory || this.config.getTargetDir?.() || process.cwd();
 
     // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
     // it falls through to 'ask' along with every other non-read-only
@@ -188,7 +191,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Bash(...) — see comment in getConfirmationDetails); only the
     // substitution-deny half is removed.
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
+        command,
+        cwd,
+      );
       if (isReadOnly) {
         return 'allow';
       }
@@ -203,6 +209,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const normalized = normalizeMonitorShellCommand(this.params.command);
+    const cwd =
+      this.params.directory || this.config.getTargetDir?.() || process.cwd();
     const subCommands = splitCommands(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
 
@@ -216,7 +224,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // permission boundary.
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub);
+        if (!this.config.getShellExecutionSandbox?.())
+          isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
@@ -359,23 +368,25 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     // Spawn the process
     const { executable, argsPrefix } = getShellConfiguration();
-    let child;
+    const sandboxed = Boolean(this.config.getShellExecutionSandbox?.());
+    let child: ChildProcess | undefined;
     try {
-      child = spawn(executable, [...argsPrefix, command], {
-        cwd: this.params.directory || this.config.getTargetDir(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true,
-        env: {
-          ...sanitizeChildEnv(process.env),
-          QWEN_CODE: '1',
-          TERM: 'dumb', // no color codes for streaming
-          ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
-            includeGitPager: false,
-            platform: os.platform(),
-          }),
-          ...getShellContextEnvVars(),
-        },
-      });
+      if (!sandboxed)
+        child = spawn(executable, [...argsPrefix, command], {
+          cwd: this.params.directory || this.config.getTargetDir(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: true,
+          env: {
+            ...sanitizeChildEnv(process.env),
+            QWEN_CODE: '1',
+            TERM: 'dumb', // no color codes for streaming
+            ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
+              includeGitPager: false,
+              platform: os.platform(),
+            }),
+            ...getShellContextEnvVars(),
+          },
+        });
     } catch (err) {
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
@@ -383,7 +394,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    registration.pid = child.pid;
+    registration.pid = child?.pid;
     let exited = false;
 
     // Capture async spawn errors (ENOENT, EACCES, etc.) during the window
@@ -392,7 +403,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const captureEarlySpawnError = (err: Error): void => {
       earlySpawnError ??= err;
     };
-    child.on('error', captureEarlySpawnError);
+    child?.on('error', captureEarlySpawnError);
 
     // ----- Line buffering & throttling state ---------------------------------
     // Declared up-front (before `abortHandler`) so that the synchronous abort
@@ -457,34 +468,33 @@ class MonitorToolInvocation extends BaseToolInvocation<
     };
 
     const killChildProcessGroup = (): void => {
-      if (exited || !child.pid) return;
+      const pid = child?.pid;
+      if (exited || !pid) return;
 
       if (process.platform === 'win32') {
-        const tk = spawn(
-          'taskkill',
-          ['/pid', child.pid.toString(), '/f', '/t'],
-          { stdio: 'ignore' },
-        );
+        const tk = spawn('taskkill', ['/pid', pid.toString(), '/f', '/t'], {
+          stdio: 'ignore',
+        });
         tk.on('error', (err) =>
           debugLogger.warn(
-            `Monitor taskkill failed for pid ${child.pid}: ${getErrorMessage(err)}`,
+            `Monitor taskkill failed for pid ${pid}: ${getErrorMessage(err)}`,
           ),
         );
       } else {
         try {
-          process.kill(-child.pid, 'SIGTERM');
+          process.kill(-pid, 'SIGTERM');
         } catch (err) {
           debugLogger.warn(
-            `Monitor ${monitorId} SIGTERM failed (pid=${child.pid}): ${getErrorMessage(err)}`,
+            `Monitor ${monitorId} SIGTERM failed (pid=${pid}): ${getErrorMessage(err)}`,
           );
         }
         setTimeout(() => {
-          if (!exited && child.pid) {
+          if (!exited) {
             try {
-              process.kill(-child.pid, 'SIGKILL');
+              process.kill(-pid, 'SIGKILL');
             } catch (err) {
               debugLogger.warn(
-                `Monitor ${monitorId} SIGKILL escalation failed (pid=${child.pid}): ${getErrorMessage(err)}`,
+                `Monitor ${monitorId} SIGKILL escalation failed (pid=${pid}): ${getErrorMessage(err)}`,
               );
             }
           }
@@ -513,23 +523,28 @@ class MonitorToolInvocation extends BaseToolInvocation<
       abortHandler();
       entryAc.signal.removeEventListener('abort', abortHandler);
       (
-        child.stdout as { destroy?: () => void } | null | undefined
+        child?.stdout as { destroy?: () => void } | null | undefined
       )?.destroy?.();
       (
-        child.stderr as { destroy?: () => void } | null | undefined
+        child?.stderr as { destroy?: () => void } | null | undefined
       )?.destroy?.();
-      child.removeListener('error', captureEarlySpawnError);
-      child.on('error', () => {});
+      child?.removeListener('error', captureEarlySpawnError);
+      child?.on('error', () => {});
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
       };
     }
 
-    const processLines = (buffer: { value: string }, data: Buffer): void => {
+    const processLines = (
+      buffer: { value: string },
+      data: Buffer | string,
+    ): void => {
       if (registration.status !== 'running') return;
 
-      const text = stripAnsi(data.toString('utf-8'));
+      const text = stripAnsi(
+        typeof data === 'string' ? data : data.toString('utf-8'),
+      );
       buffer.value += text;
 
       // Guard against unbounded partial-line accumulation. If a command emits
@@ -564,8 +579,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
-    child.stdout?.on('data', (data: Buffer) => processLines(stdoutBuf, data));
-    child.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
+    child?.stdout?.on('data', (data: Buffer) => processLines(stdoutBuf, data));
+    child?.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
 
     // Shared cleanup: flush buffers, remove abort listener, log dropped lines.
     // Called from `close` after stdio streams drain, and from `error` when no
@@ -598,7 +613,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     const settleFromExit = (
       code: number | null,
-      sig: NodeJS.Signals | null,
+      sig: NodeJS.Signals | number | null,
     ): void => {
       if (registration.status !== 'running') return; // already settled
 
@@ -634,10 +649,70 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
-    child.on('exit', onExit);
-    child.on('close', onClose);
-    child.on('error', onError);
-    child.removeListener('error', captureEarlySpawnError);
+    child?.on('exit', onExit);
+    child?.on('close', onClose);
+    child?.on('error', onError);
+    child?.removeListener('error', captureEarlySpawnError);
+
+    if (sandboxed) {
+      try {
+        const shellExecutionConfig = this.config.getShellExecutionConfig();
+        const handle = await executeRuntimeShell(
+          this.config,
+          command,
+          this.params.directory || this.config.getTargetDir(),
+          (event) => {
+            if (event.type === 'binary_detected') {
+              if (registration.status === 'running') {
+                registry.fail(monitorId, 'Binary output detected');
+                entryAc.abort();
+              }
+            } else if (
+              event.type === 'data' &&
+              typeof event.chunk === 'string'
+            ) {
+              processLines(
+                event.stream === 'stderr' ? stderrBuf : stdoutBuf,
+                event.chunk,
+              );
+            }
+          },
+          entryAc.signal,
+          false,
+          {
+            ...shellExecutionConfig,
+            maxBufferedOutputBytes: Math.min(
+              shellExecutionConfig.maxBufferedOutputBytes ??
+                PARTIAL_LINE_BUFFER_CAP,
+              PARTIAL_LINE_BUFFER_CAP,
+            ),
+          },
+          { streamStdout: true },
+        );
+        registration.pid = handle.pid;
+        void handle.result.then(
+          (result) => {
+            exited = true;
+            cleanup();
+            if (result.error) {
+              if (registration.status === 'running')
+                registry.fail(monitorId, result.error.message);
+            } else {
+              settleFromExit(result.exitCode, result.signal);
+            }
+          },
+          (error: unknown) =>
+            onError(error instanceof Error ? error : new Error(String(error))),
+        );
+      } catch (error) {
+        onError(error instanceof Error ? error : new Error(String(error)));
+        return {
+          llmContent: `Monitor failed to start: ${getErrorMessage(error)}`,
+          returnDisplay: `Monitor failed: ${getErrorMessage(error)}`,
+          error: { message: getErrorMessage(error) },
+        };
+      }
+    }
 
     if (earlySpawnError) {
       onError(earlySpawnError);

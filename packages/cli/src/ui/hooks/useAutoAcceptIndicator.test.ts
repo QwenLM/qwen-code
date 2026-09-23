@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import {
   describe,
@@ -54,7 +55,7 @@ interface MockConfigInstanceShape {
   getFullContext: Mock<() => boolean>;
   getUserAgent: Mock<() => string>;
   getUserMemory: Mock<() => string>;
-  getGeminiMdFileCount: Mock<() => number>;
+  getMemoryFileCount: Mock<() => number>;
   getToolRegistry: Mock<() => { discoverTools: Mock<() => void> }>;
 }
 
@@ -110,7 +111,7 @@ describe('useAutoAcceptIndicator', () => {
           () => string
         >,
         getUserMemory: vi.fn().mockReturnValue('') as Mock<() => string>,
-        getGeminiMdFileCount: vi.fn().mockReturnValue(0) as Mock<() => number>,
+        getMemoryFileCount: vi.fn().mockReturnValue(0) as Mock<() => number>,
         getToolRegistry: vi
           .fn()
           .mockReturnValue({ discoverTools: vi.fn() }) as Mock<

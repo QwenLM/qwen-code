@@ -44,7 +44,7 @@ describe('restoreCommand', () => {
         getProjectTempCheckpointsDir: vi.fn().mockReturnValue(checkpointsDir),
         getProjectTempDir: vi.fn().mockReturnValue(geminiTempDir),
       },
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         setHistory: mockSetHistory,
       }),
     } as unknown as Config;
@@ -54,6 +54,7 @@ describe('restoreCommand', () => {
         config: mockConfig,
       },
     });
+    mockContext.ui.clearPendingState = vi.fn();
   });
 
   afterEach(async () => {
@@ -76,6 +77,27 @@ describe('restoreCommand', () => {
         completion: expect.any(Function),
       }),
     );
+  });
+
+  it('rejects direct restore before creating directories or restoring files in tool sandbox', async () => {
+    const command = restoreCommand(mockConfig);
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ backend: 'bwrap' });
+    await fs.rm(checkpointsDir, { recursive: true, force: true });
+
+    expect(await command?.action?.(mockContext, 'checkpoint')).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'File restore is unavailable in tool sandbox.',
+    });
+    expect(
+      mockConfig.storage.getProjectTempCheckpointsDir,
+    ).not.toHaveBeenCalled();
+    expect(mockRewind).not.toHaveBeenCalled();
+    await expect(fs.stat(checkpointsDir)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   describe('action', () => {
@@ -170,6 +192,7 @@ describe('restoreCommand', () => {
       expect(mockContext.ui.loadHistory).toHaveBeenCalledWith(
         toolCallData.history,
       );
+      expect(mockContext.ui.clearPendingState).toHaveBeenCalledTimes(1);
       expect(mockSetHistory).toHaveBeenCalledWith(toolCallData.clientHistory);
       expect(mockRewind).toHaveBeenCalledWith(toolCallData.promptId, true);
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(

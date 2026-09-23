@@ -26,6 +26,17 @@ export const ROOT_RESERVE_FRACTION = 0.1;
 export const MIN_ROOT_RESERVE_MB = 256;
 export const MAX_ROOT_RESERVE_MB = 1_024;
 
+/**
+ * Adaptive live-journal growth: the pool (carved from the effective
+ * budget) that per-session journal caps may grow into beyond their
+ * baseline when an in-flight turn outgrows them. Derived once here and
+ * shared by every bridge the daemon constructs, which together account
+ * every live session against the ONE aggregate pool. A ceiling, not a
+ * preallocation — nothing is reserved until a session actually grows.
+ */
+export const JOURNAL_GROWTH_POOL_FRACTION = 0.05;
+export const MAX_JOURNAL_GROWTH_POOL_MB = 1_024;
+
 export type MemoryBudgetSource = 'flag' | 'derived';
 export type AvailableMemorySource = 'constrained' | 'host';
 
@@ -84,8 +95,8 @@ function clamp(value: number, low: number, high: number): number {
  * Memory available to the daemon process tree, in MB.
  *
  * `process.constrainedMemory()` already reads cgroup v1 and v2 through libuv.
- * It is clamped to the host total because cgroup v1 reports "unlimited" as a
- * huge sentinel value rather than as an absent limit.
+ * It is clamped to the host total because cgroup v1/v2 may report "unlimited"
+ * as a huge sentinel value rather than as an absent limit.
  *
  * `packages/core/src/services/memoryPressureMonitor.ts` has a fuller cgroup
  * walk with its own sentinel handling; it is a private method on a class the
@@ -109,25 +120,7 @@ export function detectAvailableMemoryMb(): {
   return { memoryMb: Math.floor(totalBytes / (1024 * 1024)), source: 'host' };
 }
 
-/**
- * Approximately the ceiling `getAcpMemoryArgs()` applies today with no budget:
- * half of available memory, capped at 16 GB. Reported so the gap between
- * current behavior and a future policy is visible.
- *
- * Two known divergences from the spawn path, both in the direction of this
- * figure being the more conservative one:
- *
- * - the spawn path drops the flag entirely when the target is below the
- *   spawning daemon's own heap limit, in which case the child inherits V8's
- *   default and can end up higher;
- * - the spawn path treats any `constrainedMemory() > 0` as the total, so under
- *   cgroup v1 with an "unlimited" sentinel it computes from that sentinel and
- *   lands on the 16 GB cap, while `detectAvailableMemoryMb` rejects the
- *   sentinel and computes from the host total instead.
- *
- * Aligning them belongs with the change that actually applies a ceiling; doing
- * it here would mean adopting the sentinel bug to match.
- */
+// The raise-only spawn guard can leave a child above this modeled ceiling.
 export function legacyChildCeilingMb(availableMemoryMb?: number): number {
   const memoryMb = availableMemoryMb ?? detectAvailableMemoryMb().memoryMb;
   return Math.min(
@@ -188,6 +181,44 @@ export function recommendedChildShareMb(
     MAX_CHILD_HEAP_MB,
   );
   return Math.min(share, budget.legacyChildCeilingMb);
+}
+
+/**
+ * Daemon-wide pool, in MB, that adaptive live-journal growth may draw on.
+ * Divides the same capacity denominator as the child policy; the journal
+ * lives in the daemon heap rather than in a child, but the budget is the
+ * single figure this module offers and 5% of it keeps the pool a rounding
+ * error next to child heaps while still covering several fully-grown
+ * sessions (per-session growth hard-caps at 256 MiB). A session retains
+ * TWO journals (full plus summary projection) under the granted cap, so a
+ * fully-grown session's retained heap can reach ~2x the growth charged
+ * here; sizing from this pool must double the journal term, as the
+ * memory-ceiling note on JOURNAL_GROWTH_HARD_CAP_BYTES documents. Returns
+ * 0 — growth disabled — on a host too small for the minimum budget, and
+ * never exceeds the headroom left after the root reserve.
+ */
+export function journalGrowthPoolMb(budget: DaemonMemoryBudget): number {
+  if (budget.insufficientMemory) return 0;
+  return Math.min(
+    Math.floor(budget.effectiveBudgetMb * JOURNAL_GROWTH_POOL_FRACTION),
+    MAX_JOURNAL_GROWTH_POOL_MB,
+    budget.childPoolMb,
+  );
+}
+
+/**
+ * The serve layer's growth-pool decision in MB: 0 disables adaptive
+ * journal growth. Growth is off when the operator pinned either journal
+ * cap (explicit config wins) or `journalGrowthPoolMb` reports no pool.
+ */
+export function serveJournalGrowthPoolMb(input: {
+  budget: DaemonMemoryBudget;
+  maxJournalEvents?: number;
+  maxJournalBytes?: number;
+}): number {
+  if (input.maxJournalEvents !== undefined) return 0;
+  if (input.maxJournalBytes !== undefined) return 0;
+  return journalGrowthPoolMb(input.budget);
 }
 
 export function resolveDaemonMemoryBudget(

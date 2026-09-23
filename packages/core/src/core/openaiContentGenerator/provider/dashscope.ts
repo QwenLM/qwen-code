@@ -15,12 +15,154 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
-import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
+import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from '../../modalityDefaults.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { getEffectiveReasoning } from '../../reasoning-overrides.js';
+import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
+
+/**
+ * Legacy input ladder for routes without an explicit reasoning capability.
+ * DashScope accepts high/max as xhigh aliases; configured presets expose only
+ * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * existing unconfigured routes.
+ */
+const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+] as const;
+
+export type DashScopeThinkingKnobSelection = {
+  source: 'extra_body' | 'samplingParams' | 'reasoning';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+  value: unknown;
+};
+
+/**
+ * Select the effective tiered-Qwen thinking knob using the same layer and
+ * same-layer precedence as the request builder. Keeping this decision shared
+ * lets UI reporters describe the value that will actually reach the wire.
+ */
+export function selectDashScopeThinkingKnob(
+  model: string | undefined,
+  extraBody: Record<string, unknown> | undefined,
+  samplingParams: Record<string, unknown> | undefined,
+  reasoningEffort: unknown,
+  tieredModel = isTieredEffortWireModel(model),
+): DashScopeThinkingKnobSelection | undefined {
+  if (!tieredModel) {
+    return undefined;
+  }
+
+  const selectFromLayer = (
+    source: 'extra_body' | 'samplingParams',
+    layer: Record<string, unknown> | undefined,
+  ): DashScopeThinkingKnobSelection | undefined => {
+    if (layer?.['enable_thinking'] === false) {
+      return { source, field: 'enable_thinking', value: false };
+    }
+    return selectValueFromLayer(source, layer) ?? selectOnSwitch(source, layer);
+  };
+
+  const selectValueFromLayer = (
+    source: 'extra_body' | 'samplingParams',
+    layer: Record<string, unknown> | undefined,
+  ): DashScopeThinkingKnobSelection | undefined => {
+    if (layer?.['reasoning_effort'] != null) {
+      return {
+        source,
+        field: 'reasoning_effort',
+        value: layer['reasoning_effort'],
+      };
+    }
+    if (layer?.['thinking_budget'] != null) {
+      return {
+        source,
+        field: 'thinking_budget',
+        value: layer['thinking_budget'],
+      };
+    }
+    return undefined;
+  };
+
+  const selectOnSwitch = (
+    source: 'extra_body' | 'samplingParams',
+    layer: Record<string, unknown> | undefined,
+  ): DashScopeThinkingKnobSelection | undefined => {
+    if (layer?.['enable_thinking'] === true) {
+      return { source, field: 'enable_thinking', value: true };
+    }
+    return undefined;
+  };
+
+  const reasoningSelection: DashScopeThinkingKnobSelection | undefined =
+    reasoningEffort !== undefined
+      ? {
+          source: 'reasoning',
+          field: 'reasoning_effort',
+          value: reasoningEffort,
+        }
+      : undefined;
+  const extraBodySelection = selectFromLayer('extra_body', extraBody);
+  if (
+    extraBodySelection?.field === 'enable_thinking' &&
+    extraBodySelection.value === true
+  ) {
+    // An on-switch blocks lower-priority off-switches but does not choose the
+    // effort tier or budget. Let the next value-bearing layer decide.
+    return (
+      selectValueFromLayer('samplingParams', samplingParams) ??
+      reasoningSelection ??
+      extraBodySelection
+    );
+  }
+  if (extraBodySelection) {
+    return extraBodySelection;
+  }
+  const samplingSelection = selectFromLayer('samplingParams', samplingParams);
+  return samplingSelection?.field === 'enable_thinking' &&
+    samplingSelection.value === true
+    ? (reasoningSelection ?? samplingSelection)
+    : (samplingSelection ?? reasoningSelection);
+}
+
+function withoutNullishThinkingKnobs(
+  layer: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!layer) {
+    return undefined;
+  }
+  const hasNullishEnableThinking =
+    'enable_thinking' in layer && layer['enable_thinking'] == null;
+  const hasNullishEffort =
+    'reasoning_effort' in layer && layer['reasoning_effort'] == null;
+  const hasNullishBudget =
+    'thinking_budget' in layer && layer['thinking_budget'] == null;
+  if (!hasNullishEnableThinking && !hasNullishEffort && !hasNullishBudget) {
+    return layer;
+  }
+  const sanitized = { ...layer };
+  if (hasNullishEnableThinking) {
+    delete sanitized['enable_thinking'];
+  }
+  if (hasNullishEffort) {
+    delete sanitized['reasoning_effort'];
+  }
+  if (hasNullishBudget) {
+    delete sanitized['thinking_budget'];
+  }
+  return sanitized;
+}
 
 /**
  * Official DashScope regional API hosts (matched exactly or as a parent
@@ -41,16 +183,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     super(contentGeneratorConfig, cliConfig);
   }
 
-  getResponseParsingOptions(): OpenAIResponseParsingOptions {
-    // ponytail: DashScope-only fallback; remove after provider output stabilizes.
-    return { contentOnlyThinkingTagLeaks: true };
-  }
-
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
    * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
+   * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.
    *
    * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
@@ -98,6 +236,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       (hostname.endsWith('.alibaba-inc.com') ||
         hostname.endsWith('.aliyun-inc.com'));
 
+    // Alibaba Cloud API Gateway domains proxying to DashScope-compatible
+    // APIs. Covers *.alicloudapi.com.
+    const isAliCloudApiOrigin =
+      hostname !== null && hostname.endsWith('.alicloudapi.com');
+
     // Check if proxy is configured and matches
     const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
       ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
@@ -113,6 +256,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       !isDashscopeOrigin &&
       !isTokenPlanOrigin &&
       !isInternalOrigin &&
+      !isAliCloudApiOrigin &&
       !isProxyMatch
     ) {
       debugLogger.debug(
@@ -126,8 +270,18 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       );
     }
 
+    if (isAliCloudApiOrigin) {
+      debugLogger.debug(
+        `DashScope provider activated via alicloudapi origin: ${hostname}`,
+      );
+    }
+
     return (
-      isDashscopeOrigin || isTokenPlanOrigin || isInternalOrigin || isProxyMatch
+      isDashscopeOrigin ||
+      isTokenPlanOrigin ||
+      isInternalOrigin ||
+      isAliCloudApiOrigin ||
+      isProxyMatch
     );
   }
 
@@ -135,12 +289,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
-    const defaultHeaders = {
+    const defaultHeaders: Record<string, string | undefined> = {
       'User-Agent': userAgent,
       'X-DashScope-CacheControl': 'enable',
       'X-DashScope-UserAgent': userAgent,
       'X-DashScope-AuthType': authType,
     };
+    // Omni experiment: oss:// media URLs from the temporary-upload channel
+    // are only resolved server-side when this header is present. Static
+    // injection (vs per-request threading) is deliberate — the header is
+    // harmless on requests without oss:// parts.
+    if (this.cliConfig.isOmniEnabled?.()) {
+      defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
+    }
 
     return customHeaders
       ? { ...defaultHeaders, ...customHeaders }
@@ -169,6 +330,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ),
     });
   }
 
@@ -177,18 +343,23 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    *
    * This method applies DashScope-specific configurations including:
    * - Cache control for the system message, last tool message (when tools are configured),
-   *   and the latest history message
+   *   and the latest history message — or, when a reattach region trails the
+   *   conversation, the last stable block before it
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
    *
    * @param request - The original chat completion request parameters
    * @param userPromptId - Unique identifier for the user prompt for session tracking
+   * @param reattachBlockCount - Number of trailing blocks in the last message that
+   *   belong to the regenerated reattach region; the conversation cache breakpoint
+   *   is placed before them. Defaults to 0 (last block of the last message).
    * @returns Configured request with DashScope-specific parameters applied
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
+    reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
     let tools = request.tools;
@@ -215,6 +386,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         this.addDashScopeCacheControl(
           request,
           request.stream ? 'all' : 'system_only',
+          reattachBlockCount,
         );
       messages = updatedMessages;
       tools = updatedTools;
@@ -223,17 +395,26 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
-    const extraBody = this.contentGeneratorConfig.extra_body;
+    const isTieredQwenModel = this.isTieredEffortModel(request.model);
+    const extraBody = isTieredQwenModel
+      ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
+      : this.contentGeneratorConfig.extra_body;
 
     // qwen3.8-max accepts the unified effort tiers directly. Older qwen hybrid
     // models still expose only the on/off `enable_thinking` switch. User
     // extra_body wins (merged last); the disable path (reasoning: false) is
     // handled upstream in the pipeline.
     const qwenEffortConfig = this.buildQwenEffortConfig(request.model);
-    const requestParams = requestWithTokenLimits as unknown as Record<
+    const rawRequestParams = requestWithTokenLimits as unknown as Record<
       string,
       unknown
     >;
+    const requestParams = isTieredQwenModel
+      ? withoutNullishThinkingKnobs(rawRequestParams)!
+      : rawRequestParams;
+    // A request-level reasoning_effort (samplingParams) beats the config
+    // tier: dashscopeExtras is spread after requestWithTokenLimits below, so
+    // without this copy the tier would clobber the request-level override.
     if (
       'reasoning_effort' in requestParams &&
       'reasoning_effort' in qwenEffortConfig
@@ -241,6 +422,18 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       qwenEffortConfig['reasoning_effort'] = requestParams['reasoning_effort'];
     }
     const hasQwenEffortConfig = Object.keys(qwenEffortConfig).length > 0;
+    // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve the
+    // highest-priority layer once; when both fields are explicit in that
+    // layer, reasoning_effort keeps the pre-existing provider behavior.
+    const selectedThinkingKnob = isTieredQwenModel
+      ? selectDashScopeThinkingKnob(
+          this.resolveWireModel(request.model),
+          extraBody,
+          requestParams,
+          qwenEffortConfig['reasoning_effort'],
+          isTieredQwenModel,
+        )
+      : undefined;
 
     if (this.isVisionModel(request.model)) {
       // DashScope-exclusive fields not present in the OpenAI SDK types; spread
@@ -253,10 +446,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...qwenEffortConfig,
       };
       const visionResult: Record<string, unknown> = {
-        ...requestWithTokenLimits,
+        ...requestParams,
         messages,
         ...(tools ? { tools } : {}),
-        ...(this.buildMetadata(userPromptId) || {}),
+        ...this.buildRequestMetadata(request.model, userPromptId),
         ...dashscopeExtras,
       };
       // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -265,10 +458,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       if (hasQwenEffortConfig && 'reasoning' in visionResult) {
         delete visionResult['reasoning'];
       }
-      return {
-        ...visionResult,
-        ...(extraBody ? extraBody : {}),
-      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+      return this.mergeExtraBodyAndResolveKnobs(
+        hasQwenEffortConfig
+          ? visionResult
+          : this.clampConfiguredReasoningEffort(visionResult),
+        extraBody,
+        request.model,
+        selectedThinkingKnob,
+      );
     }
 
     // DashScope-exclusive fields not present in the OpenAI SDK types; user
@@ -278,10 +475,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...qwenEffortConfig,
     };
     const result: Record<string, unknown> = {
-      ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
+      ...requestParams, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
-      ...(this.buildMetadata(userPromptId) || {}),
+      ...this.buildRequestMetadata(request.model, userPromptId),
       ...dashscopeExtras,
     };
     // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -290,31 +487,283 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (hasQwenEffortConfig && 'reasoning' in result) {
       delete result['reasoning'];
     }
-    return {
-      ...result,
-      ...(extraBody ? extraBody : {}),
-    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    // No qwen effort field means the nested `reasoning` object is what ships,
+    // so it needs the same ceiling any other OpenAI-compatible request gets.
+    return this.mergeExtraBodyAndResolveKnobs(
+      hasQwenEffortConfig
+        ? result
+        : this.clampConfiguredReasoningEffort(result),
+      extraBody,
+      request.model,
+      selectedThinkingKnob,
+    );
   }
 
+  /**
+   * Shared tail for the vision and text branches: merge user extra_body
+   * last, then resolve thinking-knob conflicts against the wire model.
+   */
+  private mergeExtraBodyAndResolveKnobs(
+    result: Record<string, unknown>,
+    extraBody: Record<string, unknown> | undefined,
+    model: string | undefined,
+    selectedThinkingKnob: DashScopeThinkingKnobSelection | undefined,
+  ): OpenAI.Chat.ChatCompletionCreateParams {
+    const merged: Record<string, unknown> = {
+      ...result,
+      ...(extraBody ? extraBody : {}),
+    };
+    const reasoningEffort = merged['reasoning_effort'];
+    const dropped = new Set<string>();
+    if (selectedThinkingKnob?.field === 'thinking_budget') {
+      if (reasoningEffort !== undefined) {
+        dropped.add('reasoning_effort');
+      }
+      if (merged['enable_thinking'] === false) {
+        dropped.add('enable_thinking');
+      }
+    }
+    if (
+      selectedThinkingKnob?.field === 'reasoning_effort' &&
+      merged['thinking_budget'] !== undefined
+    ) {
+      dropped.add('thinking_budget');
+    }
+    for (const key of dropped) {
+      delete merged[key];
+    }
+    for (const key of this.dropConflictingThinkingKnobs(
+      model,
+      merged,
+      selectedThinkingKnob,
+    )) {
+      dropped.add(key);
+    }
+    this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
+    this.flattenGptReasoningEffort(merged);
+    return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  private getConfiguredReasoning(model: string | undefined) {
+    return this.getReasoningCapabilities(model);
+  }
+
+  private isTieredEffortModel(model: string | undefined): boolean {
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return configured.profile === 'dashscope-effort';
+    return isTieredEffortWireModel(
+      model ?? this.contentGeneratorConfig.model,
+      configured,
+    );
+  }
+
+  private resolveWireModel(model: string | undefined): string {
+    return (model ?? this.contentGeneratorConfig.model ?? '').toLowerCase();
+  }
+
+  /**
+   * Translate the unified reasoning effort into the wire shape the model
+   * accepts. The qwen3.8-max family takes the tiered `reasoning_effort`
+   * directly; older qwen hybrid models expose only the on/off
+   * `enable_thinking` switch, so the effort ladder collapses to on/off
+   * there. Gated to qwen-family wire models (mirroring the pipeline's
+   * disable gate) so the qwen-specific fields never leak to a non-qwen
+   * model sharing the DashScope endpoint.
+   */
   private buildQwenEffortConfig(
     model: string | undefined,
   ): Record<string, unknown> {
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return {};
+    const reasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      configured,
+    );
     if (!reasoning || reasoning.effort === undefined) {
       return {};
     }
-    const wireModel = (
-      model ??
-      this.contentGeneratorConfig.model ??
-      ''
-    ).toLowerCase();
-    if (wireModel === 'qwen3.8-max' || wireModel === 'qwen3.8-max-preview') {
-      return { reasoning_effort: reasoning.effort };
+    const wireModel = this.resolveWireModel(model);
+    if (this.isTieredEffortModel(model)) {
+      const configured = this.getConfiguredReasoning(model);
+      if (configured && !configured.toggleOnly) {
+        return configured.efforts.includes(reasoning.effort)
+          ? { reasoning_effort: reasoning.effort }
+          : {};
+      }
+      return { reasoning_effort: this.clampTieredEffort(reasoning.effort) };
     }
-    if (wireModel.startsWith('qwen') || wireModel === 'coder-model') {
+    if (isQwenFamilyWireModel(wireModel)) {
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Preserve the legacy clamp for a route without an explicit capability.
+   * Only the unified reasoning.effort preference reaches this fallback;
+   * extra_body and samplingParams remain verbatim provider overrides.
+   */
+  private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
+    const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);
+    if (clamped !== effort && !this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not accepted by the DashScope ` +
+          `tiered-effort family; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return clamped;
+  }
+
+  /**
+   * Resolve thinking knobs that conflict with a shipping `reasoning_effort`.
+   * Preset extra_body injects `enable_thinking` for models declared with
+   * enableThinking (provider-config.ts), and user extra_body merges last.
+   * Only the qwen3.8-max family reads `reasoning_effort` itself — there an
+   * effort tier ships alone: an `enable_thinking: true` alongside an effort
+   * tier is a second competing knob (the shape the nested-`reasoning` strip
+   * in buildRequest exists to prevent), and DashScope rejects
+   * `reasoning_effort` combined with `thinking_budget`. The `'none'`
+   * disable and a winning `thinking_budget` intentionally keep a co-present
+   * `enable_thinking: true`. Explicit same-layer effort/budget pairs retain
+   * reasoning_effort, matching the provider's behavior before cross-layer
+   * resolution. An explicit `enable_thinking: false` is the documented
+   * extra_body escape hatch winning over the config tier, so it is honoured
+   * as the family's canonical disable (`reasoning_effort: 'none'`, preserved
+   * by the pipeline's disable strip) rather than silently deleted; a
+   * higher-priority `enable_thinking: true` conversely keeps the shipping
+   * tier. Older qwen
+   * hybrids read `enable_thinking` / `thinking_budget`, not
+   * `reasoning_effort`, so when an opaque reasoning_effort override
+   * conflicts with a meaningful thinking_budget the inert field goes and
+   * the knobs the model reads survive. Non-qwen models treat
+   * `reasoning_effort` as an opaque sampling override and keep every knob.
+   */
+  private dropConflictingThinkingKnobs(
+    model: string | undefined,
+    merged: Record<string, unknown>,
+    selectedThinkingKnob?: DashScopeThinkingKnobSelection,
+  ): string[] {
+    const wireModel = this.resolveWireModel(model);
+    if (!isQwenFamilyWireModel(wireModel)) {
+      return [];
+    }
+    const isTieredEffortModel = this.isTieredEffortModel(model);
+    if (
+      isTieredEffortModel &&
+      selectedThinkingKnob?.field === 'enable_thinking' &&
+      selectedThinkingKnob.value === false
+    ) {
+      merged['reasoning_effort'] = 'none';
+      const dropped = ['enable_thinking'];
+      if (merged['thinking_budget'] !== undefined) {
+        dropped.push('thinking_budget');
+      }
+      for (const key of dropped) {
+        delete merged[key];
+      }
+      return dropped;
+    }
+
+    const effort = merged['reasoning_effort'];
+    if (typeof effort !== 'string') {
+      return [];
+    }
+    // `none` is a real disable only for the tiered family. On legacy Qwen
+    // models reasoning_effort is opaque, so preserve the meaningful budget
+    // and drop the inert field just like any other effort value.
+    if (isTieredEffortModel && effort === 'none') {
+      if (merged['thinking_budget'] === undefined) {
+        return [];
+      }
+      delete merged['thinking_budget'];
+      return ['thinking_budget'];
+    }
+
+    if (isTieredEffortModel) {
+      if (
+        selectedThinkingKnob?.field === 'reasoning_effort' &&
+        'enable_thinking' in merged
+      ) {
+        delete merged['enable_thinking'];
+        return ['enable_thinking'];
+      }
+      return [];
+    }
+
+    if (merged['thinking_budget'] === undefined) {
+      return [];
+    }
+    delete merged['reasoning_effort'];
+    return ['reasoning_effort'];
+  }
+
+  private warnConflictingKnobDrop(
+    model: string | undefined,
+    reasoningEffort: unknown,
+    dropped: string[],
+  ): void {
+    if (dropped.length === 0) {
+      return;
+    }
+    if (!this.conflictingKnobDropWarned) {
+      this.conflictingKnobDropWarned = true;
+      debugLogger.warn('DashScope: dropped conflicting thinking knobs', {
+        model: this.resolveWireModel(model),
+        reasoningEffort,
+        dropped,
+      });
+    }
+  }
+
+  private conflictingKnobDropWarned = false;
+
+  /**
+   * DashScope is an aggregating gateway: a non-qwen model (e.g. `ZHIPU/GLM-...`)
+   * reached through the same endpoint has its request forwarded to that vendor's
+   * own backend, `metadata` object included. Those backends type `metadata` as a
+   * string, so the object fails to deserialize and the request is rejected with a
+   * flat 400, making the model unusable through Qwen Code. `metadata` is a
+   * platform-private tracing field (sessionId / promptId / channel) that only
+   * means anything to DashScope's own inference path, so gate it on the wire model
+   * the same way `buildQwenEffortConfig` gates the qwen-only thinking knobs, for
+   * the same stated reason: qwen-specific fields must not leak to a non-qwen model
+   * sharing the endpoint.
+   *
+   * This is orthogonal to which *origins* count as DashScope-compatible, so the
+   * `*.alicloudapi.com` recognition added in #9103 is untouched: a qwen model
+   * behind such a gateway still ships metadata.
+   */
+  private buildRequestMetadata(
+    model: string | undefined,
+    userPromptId: string,
+  ): Record<string, unknown> {
+    if (!this.shouldSendRequestMetadata(model)) {
+      return {};
+    }
+    return this.buildMetadata(userPromptId) || {};
+  }
+
+  /**
+   * Auto by default: qwen-family wire models only, per the gateway reasoning on
+   * {@link buildRequestMetadata}. The client cannot tell a forwarded request from
+   * one DashScope serves itself, so an explicit `enableRequestMetadata` wins in
+   * both directions: `true` restores the field for a non-qwen model served
+   * first-party whose tracing still matters, `false` suppresses it everywhere.
+   * Read only from the provider's own config, never the session's. A
+   * side-model generator is built with its own per-model config but shares
+   * the session `Config`, and a cross-provider agent config deliberately
+   * clears this field, so any session fallback would let the main model's
+   * value decide a different model's request. On the main route the provider
+   * config is the same object the qwen-oauth hot switch mutates in place, so
+   * nothing is latched here.
+   */
+  private shouldSendRequestMetadata(model: string | undefined): boolean {
+    const configured = this.contentGeneratorConfig.enableRequestMetadata;
+    if (typeof configured === 'boolean') {
+      return configured;
+    }
+    return isQwenFamilyWireModel(this.resolveWireModel(model));
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
@@ -339,6 +788,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private addDashScopeCacheControl(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     cacheControl: 'system_only' | 'all',
+    reattachBlockCount = 0,
   ): {
     messages: OpenAI.Chat.ChatCompletionMessageParam[];
     tools?: ChatCompletionToolWithCache[];
@@ -348,13 +798,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
     const lastIndex = messages.length - 1;
 
+    // With a volatile reattach region trailing the conversation, the breakpoint
+    // must sit on the last STABLE block — before the reattached images — or the
+    // cached prefix shifts every turn (issue #11627). Otherwise keep the
+    // historical "last block of the last message" anchor.
+    const stableBlock =
+      reattachBlockCount > 0 && lastIndex >= 0
+        ? this.lastStableBlock(messages, reattachBlockCount)
+        : { messageIndex: lastIndex, excludeTail: 0 };
+
     const updatedMessages =
       messages.length === 0
         ? messages
         : messages.map((message, index) => {
+            const isConversationAnchor =
+              stableBlock?.messageIndex === index && cacheControl === 'all';
             const shouldAddCacheControl = Boolean(
               (index === systemIndex && systemIndex !== -1) ||
-                (index === lastIndex && cacheControl === 'all'),
+                isConversationAnchor,
             );
 
             if (
@@ -368,7 +829,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
             return {
               ...message,
-              content: this.addCacheControlToContent(message.content),
+              content: this.addCacheControlToContent(
+                message.content,
+                isConversationAnchor && stableBlock
+                  ? stableBlock.excludeTail
+                  : 0,
+              ),
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
 
@@ -381,6 +847,40 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages: updatedMessages,
       tools: updatedTools,
     };
+  }
+
+  /**
+   * Locate the last block that is not part of the trailing reattach region,
+   * walking back through messages as needed. Returns the owning message index
+   * plus how many trailing blocks of that message to skip when stamping the
+   * conversation `cache_control` breakpoint.
+   */
+  private lastStableBlock(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+    reattachBlockCount: number,
+  ): { messageIndex: number; excludeTail: number } | undefined {
+    let remaining = reattachBlockCount;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const content = (messages[index] as { content?: unknown }).content;
+      // An empty string (an empty tool result, or a reasoning-only assistant
+      // turn) carries no stable block; score it zero so the walk continues to
+      // a message with real content instead of anchoring on a fabricated
+      // zero-length text block.
+      const blockCount =
+        typeof content === 'string'
+          ? content.length > 0
+            ? 1
+            : 0
+          : Array.isArray(content)
+            ? content.length
+            : 0;
+      if (blockCount === 0) continue;
+      if (blockCount > remaining) {
+        return { messageIndex: index, excludeTail: remaining };
+      }
+      remaining -= blockCount;
+    }
+    return undefined;
   }
 
   private addCacheControlToTools(
@@ -405,12 +905,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    */
   private addCacheControlToContent(
     content: NonNullable<OpenAI.Chat.ChatCompletionMessageParam['content']>,
+    excludeTail = 0,
   ): ChatCompletionContentPartWithCache[] {
     // Convert content to array format if it's a string
     const contentArray = this.normalizeContentToArray(content);
 
     // Add cache control to the last text item or create one if needed
-    return this.addCacheControlToContentArray(contentArray);
+    return this.addCacheControlToContentArray(contentArray, excludeTail);
   }
 
   /**
@@ -431,18 +932,35 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Add cache control to the content array
+   * Add cache control to the content array, skipping `excludeTail` trailing
+   * blocks (the reattach region) so the breakpoint lands on the last stable
+   * block instead of a regenerated trailing image.
    */
   private addCacheControlToContentArray(
     contentArray: ChatCompletionContentPartWithCache[],
+    excludeTail = 0,
   ): ChatCompletionContentPartWithCache[] {
     if (contentArray.length === 0) {
       return contentArray;
     }
 
-    // Add cache_control to the last text item
-    const lastItem = contentArray[contentArray.length - 1];
-    contentArray[contentArray.length - 1] = {
+    let targetIndex = contentArray.length - 1 - excludeTail;
+    if (targetIndex < 0) {
+      return contentArray;
+    }
+
+    // When a reattach region is being skipped, keep walking the anchor back
+    // past non-text blocks (e.g. a current-turn inline image the next turn
+    // textualizes) so the breakpoint lands on stable text instead of an image.
+    if (excludeTail > 0) {
+      while (targetIndex > 0 && contentArray[targetIndex].type !== 'text') {
+        targetIndex -= 1;
+      }
+    }
+
+    // Add cache_control to the last stable content item.
+    const lastItem = contentArray[targetIndex];
+    contentArray[targetIndex] = {
       ...lastItem,
       cache_control: { type: 'ephemeral' },
     } as ChatCompletionContentPartTextWithCache;

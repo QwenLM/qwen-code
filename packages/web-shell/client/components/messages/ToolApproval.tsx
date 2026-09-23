@@ -1,23 +1,35 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useRef,
   useMemo,
   useId,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
+import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { GoalApprovalContent } from './GoalApprovalContent';
 import { PlanExecutionView } from './PlanExecutionView';
+import { isExitPlanApprovalRequest } from '../../utils/todos';
+import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
+import {
+  ThinkingTranslateButton,
+  type SessionContentGenerator,
+} from './AssistantMessage';
 import styles from './ToolApproval.module.css';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { DiffView } from './tools/DiffView';
+import { useWebShellCustomization } from '../../customization';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
-  onConfirm: (id: string, selectedOption: string) => void;
+  onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
+  disabled?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -30,6 +42,8 @@ interface ToolApprovalProps {
    */
   keyboardActive?: boolean;
   planTodos?: readonly TodoItem[];
+  planExecutionMode?: string;
+  generateContent?: SessionContentGenerator;
 }
 
 export function parseTitle(title?: string): {
@@ -91,7 +105,23 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   return request.title;
 }
 
-function getSafeDefaultIndex(options: PermissionRequest['options']): number {
+function getSafeDefaultIndex(
+  options: PermissionRequest['options'],
+  isAgent = false,
+): number {
+  if (isAgent) {
+    // Launching the agent is the model's proposed next action: default the
+    // selection to the one-shot allow instead of the reject button, and never
+    // to a permanent allow rule.
+    const allowOnceIdx = options.findIndex((o) => o.kind === 'allow_once');
+    if (allowOnceIdx >= 0) return allowOnceIdx;
+    // No one-shot option: fall back to the reject (safe) rather than landing
+    // on a permanent allow rule.
+    const rejectIdx = options.findIndex(
+      (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
+    );
+    return rejectIdx >= 0 ? rejectIdx : 0;
+  }
   if (
     options.length > 1 &&
     (options[0].kind === 'allow_always' || options[0].kind === 'reject_always')
@@ -201,17 +231,36 @@ export function ToolApproval({
   request,
   onConfirm,
   variant = 'inline',
+  disabled = false,
   keyboardActive = true,
   planTodos = [],
+  planExecutionMode,
+  generateContent,
 }: ToolApprovalProps) {
   const { t } = useI18n();
+  const isAgent = isAgentTool(request.toolName);
+  const isGoal = request.toolName === 'propose_goal';
+  const isExitPlanApproval = isExitPlanApprovalRequest(request);
+  const hasPlanExecutionMode =
+    isExitPlanApproval && planExecutionMode !== undefined;
   const displayOptions = useMemo(
-    () => prepareDisplayOptions(request.options),
-    [request.options],
+    () =>
+      prepareDisplayOptions(
+        hasPlanExecutionMode
+          ? request.options.filter(
+              (option) =>
+                option.id === 'restore_previous' ||
+                option.kind === 'reject_once' ||
+                option.kind === 'reject_always',
+            )
+          : request.options,
+      ),
+    [request.options, hasPlanExecutionMode],
   );
+  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const safeDefaultIndex = useMemo(
-    () => getSafeDefaultIndex(displayOptions),
-    [displayOptions],
+    () => getSafeDefaultIndex(displayOptions, isAgent),
+    [displayOptions, isAgent],
   );
   // Prefer the localized label. Known producers give every option a distinct
   // i18n key (plan mode's restore_previous has its own), so this normally
@@ -227,12 +276,55 @@ export function ToolApproval({
       if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
     }
     return (option: PermissionRequest['options'][number]) => {
+      if (isGoal && keyCount.get(getOptionI18nKey(option) ?? '') === 1) {
+        if (option.kind === 'allow_once') return t('approval.goal.confirm');
+        if (option.kind === 'reject_once') return t('approval.goal.reject');
+      }
+      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+        return t('approval.option.executePlan', {
+          mode: t(`mode.label.${planExecutionMode}`),
+        });
+      }
+      if (showsPlanWorkflow || hasPlanExecutionMode) {
+        // An exit_plan_mode approval emits two `allow_once` options, so this
+        // cannot relabel by kind alone: `restore_previous` restores the
+        // pre-plan approval mode (YOLO if the user entered plan from YOLO)
+        // while the plain confirm keeps manual approval. Sharing one label
+        // would hide that difference behind two identical buttons.
+        if (
+          option.kind === 'allow_once' &&
+          option.id !== 'restore_previous' &&
+          option.id !== 'proceed_once_and_switch_to_default'
+        ) {
+          return t('workflow.planReview.confirm');
+        }
+        if (option.kind === 'reject_once' || option.kind === 'reject_always') {
+          return t('workflow.planReview.continuePlanning');
+        }
+      }
       const key = getOptionI18nKey(option);
       if (key && keyCount.get(key) === 1) return t(key);
       return option.label || (key ? t(key) : '');
     };
-  }, [displayOptions, t]);
+  }, [
+    displayOptions,
+    isGoal,
+    showsPlanWorkflow,
+    hasPlanExecutionMode,
+    planExecutionMode,
+    t,
+  ]);
   const [selected, setSelected] = useState(safeDefaultIndex);
+  const [submissionState, setSubmissionState] = useState<{
+    requestId: string;
+    status: 'pending' | 'failed';
+  } | null>(null);
+  const submitting =
+    submissionState?.requestId === request.id &&
+    submissionState.status === 'pending';
+  const submissionFailed =
+    submissionState?.requestId === request.id &&
+    submissionState.status === 'failed';
   const requestRef = useRef(request);
   requestRef.current = request;
   const selectedRef = useRef(selected);
@@ -241,6 +333,7 @@ export function ToolApproval({
   const safeDefaultIndexRef = useRef(safeDefaultIndex);
   safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const headingId = useId();
   const questionId = useId();
   const descId = useId();
@@ -253,6 +346,7 @@ export function ToolApproval({
   // request the user already answered.
   useEffect(() => {
     submittedRef.current = false;
+    setSubmissionState(null);
     selectedRef.current = safeDefaultIndexRef.current;
     setSelected(safeDefaultIndexRef.current);
   }, [request.id]);
@@ -260,17 +354,47 @@ export function ToolApproval({
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
-  const toolName = localizeToolDisplayName(rawToolName, t);
-  const descriptionText = getDescriptionText(request);
+  const toolName = isGoal
+    ? t('approval.goal.title')
+    : showsPlanWorkflow
+      ? t('workflow.planReview.title')
+      : localizeToolDisplayName(rawToolName, t);
+  const descriptionText =
+    showsPlanWorkflow || isGoal ? undefined : getDescriptionText(request);
   const contentText = extractContentText(request);
+  const goalObjective =
+    typeof request.rawInput?.objective === 'string'
+      ? request.rawInput.objective
+      : '';
+  const showsContent = Boolean(
+    contentText && (request.contentIsInput || contentText !== request.title),
+  );
 
   const confirm = useCallback(
     (optionId: string) => {
-      if (submittedRef.current) return;
+      if (disabled || submittedRef.current) return;
       submittedRef.current = true;
-      onConfirm(requestRef.current.id, optionId);
+      const requestId = requestRef.current.id;
+      if (isGoal) {
+        setSubmissionState({ requestId, status: 'pending' });
+      }
+      const onFailure = () => {
+        // A late rejection must not re-arm a newer request's submission.
+        if (requestRef.current.id === requestId) {
+          submittedRef.current = false;
+          if (isGoal) {
+            setSubmissionState({ requestId, status: 'failed' });
+          }
+        }
+      };
+      try {
+        const submission = onConfirm(requestId, optionId);
+        if (submission) void submission.catch(onFailure);
+      } catch {
+        onFailure();
+      }
     },
-    [onConfirm],
+    [onConfirm, disabled, isGoal],
   );
 
   const focusOption = useCallback((index: number) => {
@@ -290,7 +414,14 @@ export function ToolApproval({
   // already topmost on mount still focuses its default.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  useEffect(() => {
+  // Must be a layout effect, not a passive one: the commit that mounts this
+  // overlay also hides the composer, and sibling layout effects can force a
+  // synchronous style recalculation (by reading layout) before any passive
+  // effect runs — Chromium drops focus from the just-hidden composer during
+  // that recalculation, so a passive guard would read `body` and miss.
+  // Layout effects run right after DOM mutation, before any recalculation,
+  // while the hidden composer still holds focus.
+  useLayoutEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
@@ -298,6 +429,15 @@ export function ToolApproval({
     if (!keyboardActive) return;
     const requestChanged = request.id !== prevRequestId;
     if (wasActive && !requestChanged) return;
+    // The approval can appear while the user is mid-typing in the composer:
+    // the same commit hides the composer and mounts this overlay. Grabbing
+    // focus would redirect the in-progress keystrokes — Enter-to-send, Space,
+    // digits — to the safe-default option and can confirm the request
+    // unintentionally. Yield to the editable target; the dialog stays
+    // reachable by Tab/click.
+    if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
+      return;
+    }
     // Fresh request → safe default; same request re-activated (e.g. a covering
     // panel closed) → restore the option the user had selected rather than
     // snapping focus back to the default and silently changing their choice.
@@ -325,9 +465,9 @@ export function ToolApproval({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (
-        e.key !== 'Escape' &&
         e.target instanceof Element &&
-        e.target.closest('[data-plan-interactive]')
+        ((e.key !== 'Escape' && e.target.closest('[data-plan-interactive]')) ||
+          e.target.closest('[data-approval-shortcuts-ignore]'))
       ) {
         return;
       }
@@ -367,31 +507,65 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
-  const isAgent = isAgentTool(request.toolName);
-  const command = getCommandFromRawInput(request);
-  const showsCommandBlock = Boolean(
-    (isExec && command) || (contentText && contentText !== request.title),
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
+  const diffs = useMemo(
+    () =>
+      hostOwnsEditDiffPreview
+        ? []
+        : request.content
+            .filter((block) => block.type === 'diff')
+            .map((block) => {
+              const oldText = block.oldText ?? '';
+              const newText = block.newText ?? '';
+              // Approval cards render into an [role=alertdialog] and stay
+              // synchronous — a giant edit here freezes the panel and makes
+              // the deletion/addition rows unreadable at a glance. Gate on
+              // the raw payload before running the LCS; the transcript
+              // completed-edit view calls buildUnifiedDiff directly and
+              // keeps its previous coarse rendering.
+              const OMITTED =
+                ' Diff omitted because it is too large to display safely.';
+              const tooManyChars = oldText.length + newText.length > 100_000;
+              const oldLines = oldText ? oldText.split('\n').length : 0;
+              const newLines = newText ? newText.split('\n').length : 0;
+              const tooManyLines = oldLines + newLines > 1_000;
+              return {
+                path: block.path,
+                diff:
+                  tooManyChars || tooManyLines
+                    ? OMITTED
+                    : buildUnifiedDiff(oldText, newText),
+              };
+            }),
+    [request.content, hostOwnsEditDiffPreview],
   );
-  const isExitPlanApproval =
-    request.toolKind === 'switch_mode' &&
-    request.toolName?.toLowerCase() === 'exit_plan_mode';
-  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
-  const questionText = isAgent
-    ? t('approval.launchAgentQuestion')
-    : isExec
-      ? t('approval.execQuestion', { tool: toolName })
-      : t('approval.changeQuestion');
+  const command = getCommandFromRawInput(request);
+  const showsCommandBlock =
+    !isGoal && Boolean((isExec && command) || showsContent);
+  const questionText = isGoal
+    ? t('approval.goal.hint')
+    : showsPlanWorkflow
+      ? t('workflow.planReview.question')
+      : isAgent
+        ? t('approval.launchAgentQuestion')
+        : isExec
+          ? t('approval.execQuestion', { tool: toolName })
+          : t('approval.changeQuestion');
 
   return (
     <div
-      className={
-        variant === 'floating'
-          ? `${styles.approval} ${styles.floating}${
-              showsPlanWorkflow ? ` ${styles.floatingWorkflow}` : ''
-            }`
-          : styles.approval
-      }
+      ref={panelRef}
+      className={[
+        styles.approval,
+        variant === 'floating' && styles.floating,
+        variant === 'floating' && isExitPlanApproval && styles.floatingWorkflow,
+        isGoal && styles.goalApproval,
+      ]
+        .filter(Boolean)
+        .join(' ')}
       data-web-shell-permission-panel
+      data-web-shell-goal-approval={isGoal || undefined}
+      aria-busy={isGoal ? submitting : undefined}
       role="alertdialog"
       aria-labelledby={headingId}
       // Expose the question, the tool description, and the command/content to
@@ -402,7 +576,7 @@ export function ToolApproval({
       aria-describedby={[
         questionId,
         descriptionText ? descId : null,
-        showsCommandBlock ? commandId : null,
+        showsCommandBlock || isGoal ? commandId : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -423,13 +597,20 @@ export function ToolApproval({
         </div>
       )}
 
-      {isExec && command ? (
+      {isGoal ? (
+        <GoalApprovalContent
+          key={request.id}
+          id={commandId}
+          objective={goalObjective}
+          content={contentText || (goalObjective ? '' : request.title || '')}
+        />
+      ) : isExec && command ? (
         <div className={styles.code}>
           <pre className={styles.codeBlock} id={commandId} title={command}>
             {command}
           </pre>
         </div>
-      ) : contentText && contentText !== request.title ? (
+      ) : showsContent ? (
         <pre
           className={`${styles.content}${
             isExitPlanApproval ? ` ${styles.planContent}` : ''
@@ -441,15 +622,57 @@ export function ToolApproval({
         </pre>
       ) : null}
 
+      {diffs.length > 0 && (
+        // `data-plan-interactive` is the existing Escape-exempt opt-out the
+        // panel's handleKeyDown already recognises: it lets Arrow/j/k/Home/End
+        // reach the focused diff row for native scroll instead of moving the
+        // approval selection, while Escape still bubbles up and rejects.
+        <div className={styles.content} data-plan-interactive>
+          {diffs.map((block, index) => (
+            <div key={index}>
+              <div>{block.path}</div>
+              <DiffView diff={block.diff} />
+            </div>
+          ))}
+        </div>
+      )}
+
       {showsPlanWorkflow && (
         <div className={styles.workflow}>
           <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
         </div>
       )}
 
-      <div className={styles.question} id={questionId}>
+      {isExec && command && generateContent && (
+        <div className={styles.explainRow}>
+          <ThinkingTranslateButton
+            key={request.id}
+            content={command}
+            generateContent={generateContent}
+            className={styles.explainButton}
+            mode="explain-shell"
+          />
+        </div>
+      )}
+
+      <div
+        className={isGoal ? styles.goalHint : styles.question}
+        id={questionId}
+      >
         {questionText}
       </div>
+
+      {isGoal && (
+        <div className={styles.goalFeedback}>
+          {submissionFailed ? (
+            <span role="alert">{t('approval.goal.failed')}</span>
+          ) : (
+            <span role="status">
+              {submitting ? t('approval.goal.pending') : ''}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* radiogroup semantics — the approval choice is single-select. No label
           on the group: the alertdialog already exposes the question via
@@ -470,6 +693,7 @@ export function ToolApproval({
                 isSelected ? styles.optionActive : ''
               }`}
               data-web-shell-permission-option
+              disabled={disabled || (isGoal && submitting)}
               data-option-id={option.id}
               tabIndex={isSelected ? 0 : -1}
               role="radio"

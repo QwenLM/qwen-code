@@ -5,7 +5,11 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { writeStderrLine, writeStderrLineSafe } from './stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+  writeStdoutLineSafe,
+} from './stdioHelpers.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -48,5 +52,23 @@ describe('writeStderrLineSafe', () => {
     });
 
     expect(() => writeStderrLineSafe('boom')).not.toThrow();
+  });
+});
+
+describe('writeStdoutLineSafe', () => {
+  it('writes with a trailing newline when stdout is healthy', () => {
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    writeStdoutLineSafe('hello');
+
+    expect(write).toHaveBeenCalledWith('hello\n');
+  });
+
+  it('swallows EPIPE instead of taking the caller down with it', () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+
+    expect(() => writeStdoutLineSafe('boom')).not.toThrow();
   });
 });

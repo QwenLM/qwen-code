@@ -9,11 +9,15 @@ export const SERVICE_NAME = 'qwen-code';
 export const EVENT_USER_PROMPT = 'qwen-code.user_prompt';
 export const EVENT_USER_RETRY = 'qwen-code.user_retry';
 export const EVENT_TOOL_CALL = 'qwen-code.tool_call';
+export const EVENT_REPEATED_TOOL_FAILURE_GUARD =
+  'qwen-code.repeated_tool_failure_guard';
 export const EVENT_API_REQUEST = 'qwen-code.api_request';
 export const EVENT_API_ERROR = 'qwen-code.api_error';
 export const EVENT_API_CANCEL = 'qwen-code.api_cancel';
 export const EVENT_API_RESPONSE = 'qwen-code.api_response';
 export const EVENT_CLI_CONFIG = 'qwen-code.config';
+export const EVENT_SESSION_START = 'session.start';
+export const EVENT_SESSION_END = 'session.end';
 export const EVENT_EXTENSION_DISABLE = 'qwen-code.extension_disable';
 export const EVENT_EXTENSION_ENABLE = 'qwen-code.extension_enable';
 export const EVENT_EXTENSION_INSTALL = 'qwen-code.extension_install';
@@ -35,7 +39,7 @@ export const EVENT_PROTOCOL_TAG_SANITIZED =
   'qwen-code.chat.protocol_tag_sanitized';
 // Phase 4b — HTTP-status retry telemetry emitted by `retryWithBackoff` for
 // 429 / 5xx errors at LLM call sites. Distinct from EVENT_CONTENT_RETRY,
-// which is fired by geminiChat for InvalidStreamError retries on a separate
+// which is fired by llmChat for InvalidStreamError retries on a separate
 // retry budget. See docs/design/telemetry-llm-request-timing-design.md.
 export const EVENT_API_RETRY = 'qwen-code.api_retry';
 export const EVENT_CONVERSATION_FINISHED = 'qwen-code.conversation_finished';
@@ -44,6 +48,7 @@ export const EVENT_MALFORMED_JSON_RESPONSE =
 export const EVENT_FILE_OPERATION = 'qwen-code.file_operation';
 export const EVENT_MODEL_SLASH_COMMAND = 'qwen-code.slash_command.model';
 export const EVENT_SUBAGENT_EXECUTION = 'qwen-code.subagent_execution';
+export const EVENT_GOAL_STATE = 'qwen-code.goal_state';
 export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
@@ -67,6 +72,7 @@ export const EVENT_SPECULATION = 'qwen-code.speculation';
 // Workflow Events (#4721)
 export const EVENT_WORKFLOW_KEYWORD = 'qwen-code.workflow_keyword';
 export const EVENT_WORKFLOW_RUN = 'qwen-code.workflow_run';
+export const EVENT_WORKFLOW_SIZE_WARNING = 'qwen-code.workflow_size_warning';
 
 // Arena Events
 export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';

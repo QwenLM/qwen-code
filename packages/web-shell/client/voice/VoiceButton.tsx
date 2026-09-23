@@ -11,7 +11,7 @@ import {
   useConnection,
   useWorkspace,
   useWorkspaceEventSignals,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useVoiceCapture } from './useVoiceCapture';
 import {
@@ -25,6 +25,7 @@ import styles from './VoiceButton.module.css';
 /** Live waveform bar count in the recording pill. */
 const BAR_COUNT = 16;
 const NOTICE_TIMEOUT_MS = 2_000;
+const HOLD_THRESHOLD_MS = 250;
 
 export interface VoiceButtonProps {
   /** Insert the final transcript into the composer (user reviews, then sends). */
@@ -118,6 +119,8 @@ export function VoiceButton({
     mode: 'hold',
   }));
   const holdPointerIdRef = useRef<number | null>(null);
+  const holdStartedAtRef = useRef(0);
+  const ignoreNextClickRef = useRef(false);
   const targetRef = useRef(target);
   targetRef.current = target;
   const requestGenerationRef = useRef(0);
@@ -310,7 +313,13 @@ export function VoiceButton({
   const canCancel = isRecording || isConnecting;
 
   const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (voiceGate.mode === 'hold' && event.detail !== 0) return;
+    if (voiceGate.mode === 'hold') {
+      const ignore = event.detail !== 0 && ignoreNextClickRef.current;
+      ignoreNextClickRef.current = false;
+      if (ignore || (event.detail !== 0 && !isRecording && !isConnecting)) {
+        return;
+      }
+    }
     if (isRecording) {
       stop();
     } else if (isConnecting) {
@@ -322,6 +331,9 @@ export function VoiceButton({
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (voiceGate.mode === 'hold' && holdPointerIdRef.current === null) {
+      ignoreNextClickRef.current = false;
+    }
     if (
       voiceGate.mode !== 'hold' ||
       event.button !== 0 ||
@@ -333,6 +345,8 @@ export function VoiceButton({
     }
     event.preventDefault();
     holdPointerIdRef.current = event.pointerId;
+    holdStartedAtRef.current = event.timeStamp;
+    ignoreNextClickRef.current = true;
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -350,7 +364,12 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    if (isConnecting || isRecording) stop();
+    if (
+      event.timeStamp - holdStartedAtRef.current >= HOLD_THRESHOLD_MS &&
+      (isConnecting || isRecording)
+    ) {
+      stop();
+    }
   };
 
   const handlePointerCancel = (
@@ -363,7 +382,8 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    if (isConnecting || isRecording) abort();
+    ignoreNextClickRef.current = false;
+    abort();
   };
 
   const label = isRecording

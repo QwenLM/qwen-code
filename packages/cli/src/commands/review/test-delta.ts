@@ -39,84 +39,48 @@
 // rescued summary lines. A file this cannot parse is disclosed, never guessed.
 
 import type { CommandModule } from 'yargs';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
-  buildRunEnv,
-  spawnTimedOut,
-  trimOutput,
+  run as runCommand,
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
-
-// eslint-disable-next-line no-control-regex -- ESC is the character under test
-const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+import { refuseUnsandboxedPhase } from './lib/sandboxed-exec.js';
+import { failingFilesOf } from './lib/failing-files.js';
+import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 
 /**
  * The exact shapes `build-test` emits for a test command — and the only ones
  * this command will hand to a shell.
  *
  * The report is a FILE this reads and then executes from, with `shell: true`,
- * in the base worktree. Nothing else in the pipeline re-executes a string it
- * read back off disk, so nothing else has to care where that string came from;
- * this does. The workspace token is a directory, and a directory is a name a
- * pull request can choose: `packages/x";curl …|sh;"` is a legal path in git
- * and on Linux, and it round-trips through the report into a shell.
+ * in the base worktree. Nothing else re-executes a string it read back off
+ * disk except `build-test --resume`, and both gates are the SAME imported
+ * predicate, defined beside the emitter (`testCommand` in npm-toolchain):
+ * two byte-identical copies once guarded the two re-execution sites, and a
+ * grammar change applied to one would have silently diverged them — this
+ * file skipping a valid stored command (the under-measurement direction this
+ * command exists to avoid) while the other kept accepting it. The workspace
+ * token is a directory, and a directory is a name a pull request can choose:
+ * `packages/x";curl …|sh;"` is a legal path in git and on Linux, and it
+ * round-trips through the report into a shell.
  *
  * Restricting to the emitter's own grammar costs nothing real — `build-test`
- * produces `npm test` and `npm test --workspace="<dir>"`, both matched here —
- * and anything outside it is skipped and disclosed rather than run, which is
+ * produces `npm test` and `npm test --workspace="<dir>"`, both matched — and
+ * anything outside it is skipped and disclosed rather than run, which is
  * the same treatment every other thing this command cannot do gets.
  */
-const RERUNNABLE_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
+const RERUNNABLE_COMMAND_RE = TEST_COMMAND_RE;
 
 /** `trimOutput`'s own marker — the one signal that a stored output is partial. */
 const TRIM_MARKER_RE = /\.\.\. \[\d+ characters omitted/;
 
-/**
- * Test files a runner named as failing, out of one command's output.
- *
- * Two shapes cover vitest and jest, the runners build-test drives:
- * `FAIL  src/x.test.ts > name` (both, in the failure section) and vitest's
- * per-file `❯ src/x.test.ts (12 tests | 3 failed)` progress line. Matching is
- * on the path token, so a `FAIL` line whose path was truncated mid-token by
- * output trimming simply does not match — an unparsed failure surfaces as a
- * count mismatch in the caller's disclosure, never as an invented path.
- */
-export function failingFilesOf(output: string, root = ''): string[] {
-  const text = output.replace(ANSI_SGR_RE, '');
-  const files = new Set<string>();
-  const re =
-    // `\\` and `:` in the path class: a Windows runner prints
-    // `FAIL  C:\\repo\\src\\x.test.ts`, which the POSIX-only class missed —
-    // and a missed parse is an unattributed failure, not a loud error.
-    /(?:^|\s)(?:FAIL\s+|❯\s+)(?:\|([^|]+)\|\s+)?([\w@.:\\/-]+\.(?:test|spec)\.[cm]?[jt]sx?)\b([^\n]*)/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    // The `❯` progress line lists every file; only a failing one counts.
-    if (m[0].trimStart().startsWith('❯') && !/failed/.test(m[3] ?? ''))
-      continue;
-    // ROOT-RELATIVE, and keyed by project. The two sides run in DIFFERENT
-    // roots (the PR worktree and the base tree), so comparing absolute paths
-    // verbatim made every pre-existing failure a fabricated netNew. The vitest
-    // project token is part of the identity too: dropping it collapsed
-    // same-named files across workspaces, suppressing a real Critical as a
-    // "measurement" — the worse of the two failure directions.
-    files.add(`${m[1] ? `${m[1].trim()}::` : ''}${relativeToRoot(m[2], root)}`);
-  }
-  return [...files].sort();
-}
-
-/** Strip the run's own root (and any leading `./`) so the two sides compare. */
-export function relativeToRoot(file: string, root: string): string {
-  const norm = (v: string) => v.replace(/\\/g, '/').replace(/\/+$/, '');
-  const f = norm(file);
-  const r = root ? norm(root) : '';
-  const rel = r && f.startsWith(`${r}/`) ? f.slice(r.length + 1) : f;
-  return rel.replace(/^\.\//, '');
-}
+// The failing-file parser lives in lib/ because build-test needs it too: the
+// PR side has to be measured off its UNTRIMMED output, at capture time.
+// Re-exported here for the callers (and tests) that have always found it here.
+export { failingFilesOf, relativeToRoot } from './lib/failing-files.js';
 
 /** One rerun: the same command, in the base tree. */
 export interface DeltaEntry {
@@ -137,8 +101,13 @@ export interface DeltaEntry {
    */
   unparsed: boolean;
   /**
-   * True when the PR-side output this read was already trimmed by `build-test`.
-   * The failing-file list may be short, which can only understate `shared`.
+   * True when the PR side had to be re-parsed out of the TRIMMED stored
+   * output — the report carried no capture-time `failingFiles` (or a
+   * malformed one) AND the trim marker is present. A report whose set was
+   * measured before the trim never sets this. When it is set, the loss cuts
+   * BOTH ways: a missing file understates `shared` when base fails it too,
+   * and understates `netNew` — the direction that loses a failure the PR
+   * caused — when only the PR side does.
    */
   prTruncated: boolean;
 }
@@ -173,6 +142,15 @@ export interface TestDeltaArgs {
   timeout: number;
   /** Test seam — production spawns the real command. */
   exec?: (command: string, cwd: string, timeoutMs: number) => BaseRunResult;
+  /**
+   * Containment gate, injectable for the same reason `exec` is: it resolves
+   * the operator's OWN policy from settings and environment, so without a seam
+   * every test in this file changes its answer on a machine where the operator
+   * opted into `required` — 21 of 31 of them, measured. Tests that are about
+   * delta arithmetic pass a gate that never refuses; the one test that is
+   * about the gate drives the real chain.
+   */
+  refuse?: (root: string) => string | null;
   /** Injectable clock, for tests only — the budget math cannot be driven to
    *  its cutoff in real time. Matches `test-efficacy`'s seam; without it a
    *  test has to reassign the global `Date.now`. */
@@ -191,50 +169,13 @@ export interface TestDeltaArgs {
  * attributed to this PR by "measurement". Parse the raw text, report the
  * bounded one.
  */
-export interface BaseRunResult extends CommandResult {
-  /** Parsed from the untrimmed output. Absent from a seam that predates this. */
-  failingFiles?: string[];
-}
-
-// Mirrors build-test's run() on the three properties its comments call out as
-// deliberate — reviewed live when this reimplementation diverged on all three:
-// stdin ignored (a rerun that asks a question hangs to the deadline), timeout
-// read from error.code with the SIGTERM/null-status fallback (the substring
-// form misses a maxBuffer kill, which would flow into the base-green Critical
-// path), and trimmed output (a failing monorepo suite is hundreds of KB that
-// would otherwise land verbatim in the report Agent 7 reads).
-function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
-  const started = Date.now();
-  const r = spawnSync(command, {
-    shell: true,
-    cwd,
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    env: buildRunEnv(process.env),
-    maxBuffer: 64 * 1024 * 1024,
-    // build-test's, deliberately: "a build that asks a question is a build that
-    // hangs until the deadline" — and this reruns those same commands.
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  // The sibling's predicate, not a weaker re-derivation: an external SIGTERM
-  // (container stop, cancelled CI job) sets neither an ETIMEDOUT message nor
-  // an exit code, so the substring form reported timedOut:false with empty
-  // output and fed straight into the base-green path.
-  const timedOut = spawnTimedOut(r);
-  const raw = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  return {
-    command,
-    exitCode: timedOut ? null : (r.status ?? null),
-    seconds: Math.round((Date.now() - started) / 1000),
-    timedOut,
-    failingFiles: timedOut ? [] : failingFilesOf(raw, cwd),
-    // Bounded like build-test's: this lands in `entries[].base.output`, which
-    // is JSON.stringify'd to --out, and the verdict fields sit AFTER it — an
-    // untrimmed megabyte pushes exactly what the command produces past any
-    // reader's truncation.
-    output: trimOutput(raw),
-  };
-}
+/**
+ * Nothing of its own any more: `failingFiles` moved onto `CommandResult` when
+ * build-test grew the untrimmed capture, and this re-declared it. Kept as the
+ * name the injectable `exec` seam has always been spelled with rather than
+ * churning every caller for an alias.
+ */
+export type BaseRunResult = CommandResult;
 
 /**
  * Whole-command budget, mirroring test-efficacy's. `--timeout` is PER COMMAND,
@@ -249,7 +190,23 @@ const TOTAL_BUDGET_MS = 540_000;
 const DEFAULT_TIMEOUT_S = 300;
 
 export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
-  const exec = args.exec ?? run;
+  // The base-side rerun crosses the SAME containment boundary as the PR side.
+  //
+  // It used to have its own `run()`, a careful copy of build-test's — and the
+  // copy was correct right up until build-test's grew a container. Then the two
+  // sides stopped being comparable: the PR side ran in the image with an env
+  // allowlist and no network, the base side on the host with the full
+  // environment and the full network. A test that reads an env var or opens a
+  // socket then fails on one side and passes on the other for a reason that has
+  // nothing to do with the diff, and this file's whole job is to say which side
+  // a failure belongs to. It would have said "the PR's" — a manufactured
+  // Critical — or, on the other flip, waved a real regression through as
+  // pre-existing.
+  //
+  // So the duplicate is gone rather than re-synchronised: one `run`, one place
+  // where the boundary is decided, and no way for the two sides to drift again.
+  // `kind` defaults to 'test', which is the restrictive shape (no network).
+  const exec = args.exec ?? runCommand;
   const baseline = resolve(args.baseline);
   const empty = (note: string): TestDeltaReport => ({
     entries: [],
@@ -270,6 +227,19 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (!existsSync(baseline)) {
     return empty(
       `the base tree ${baseline} does not exist — run \`qwen review base-tree\` first`,
+    );
+  }
+  // `required` means no reviewed-repository command runs outside a container,
+  // and that has to include this one. The base tree holds base-commit content,
+  // so this is not the PR reaching the host — it is the operator's setting
+  // meaning what it says at every phase rather than at most of them. Refusing
+  // is also the honest answer for the measurement itself: with containment
+  // unavailable the PR side either refused too or ran somewhere else, and a
+  // delta between two differently-shaped runs is worse than no delta.
+  const refusal = (args.refuse ?? refuseUnsandboxedPhase)(baseline);
+  if (refusal) {
+    return empty(
+      `the base-side rerun did not happen, so NOTHING was attributed — ${refusal}`,
     );
   }
 
@@ -316,10 +286,27 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       skippedForBudget.push(t.command);
       continue;
     }
-    const prFailingFiles = failingFilesOf(
-      t.output ?? '',
-      args.prWorktree ?? '',
-    );
+    // Prefer the set build-test measured off its untrimmed output; fall back to
+    // re-parsing the bounded report only for a report written before that field
+    // existed. Same precedence the base side uses below, and for the same
+    // reason: the trim is lossy and the capture site is not.
+    //
+    // Shape-checked here because this is the one consumer and the report is a
+    // file anything may have edited: a `failingFiles` that is not a string
+    // array reached `.filter` as-is and threw where the honest reading is
+    // "this seam supplied no measurement" — the same fallback an absent field
+    // has always taken.
+    // Non-empty too: the producer OMITS the field when nothing failed to
+    // parse, so an empty array can only be hand-made — and taking it as
+    // authoritative would skip the reparse and understate both sets.
+    const measured =
+      Array.isArray(t.failingFiles) &&
+      t.failingFiles.length > 0 &&
+      t.failingFiles.every((f) => typeof f === 'string')
+        ? t.failingFiles
+        : undefined;
+    const prFailingFiles =
+      measured ?? failingFilesOf(t.output ?? '', args.prWorktree ?? '');
     // A clamped deadline is not the same fact as a slow command: if the
     // budget cut this rerun short, "timed out — infrastructure" would send the
     // reader hunting a hang that is really an exhausted budget. Record which.
@@ -336,12 +323,18 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // managed to parse. Requiring both sides to be empty silently dropped a
     // failed command whose FAIL lines the trim had scattered.
     const unparsed = prFailingFiles.length === 0;
-    // The PR side is read out of build-test's STORED output, which that command
-    // trimmed on the same rules. The base side is parsed raw (see BaseRunResult)
-    // so it can never be the short one, but nothing here can un-trim the report:
-    // a PR-side set missing files makes `shared` — not `netNew` — too small, so
-    // the loss is silence, and silence still gets said out loud.
-    const prTruncated = TRIM_MARKER_RE.test(t.output ?? '');
+    // Only when the PR side had to be re-parsed out of build-test's STORED
+    // output, which that command trimmed. A report that carries `failingFiles`
+    // was measured before the trim, so its set is complete and the disclosure
+    // would be a false alarm.
+    //
+    // When the fallback IS in use the loss cuts both ways, and the earlier
+    // wording ("`shared`, not `netNew`") understated it: a file the trim
+    // dropped is missing from `shared` when base fails it too, and missing from
+    // `netNew` when only the PR side does — the direction that loses a failure
+    // the PR caused. Hence the capture-time field; this is the legacy seam.
+    const prTruncated =
+      measured === undefined && TRIM_MARKER_RE.test(t.output ?? '');
     // A base run that never finished attributes NOTHING: with its failing set
     // unknowable, promoting the PR side's failures to net-new would
     // manufacture the strongest evidence this command produces out of an
@@ -401,7 +394,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
   if (truncated) {
     parts.push(
-      `${truncated} command(s) had their PR-side output trimmed before this ran, so their failing-file list may be partial — a file missing there is one this delta could not call pre-existing, never one it invented`,
+      `${truncated} command(s) reached this from a report that trimmed their PR-side output and recorded no failing-file set, so their failing-file list may be partial — a file the trim dropped is missing from BOTH lists: unattributed, never invented`,
     );
   }
   const unusable = entries.filter(

@@ -14,16 +14,14 @@ import {
   type GitCommitDetail,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
-} from '../workspace-registry.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  requireTrustedWorkspaceRuntime,
   resolveContainedCwd,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
+
+const MAX_SEARCH_CHARS = 200;
 
 function buildLogList(
   workspaceCwd: string,
@@ -118,7 +116,18 @@ async function handleLogList(
       typeof rawRange === 'string' && rawRange.trim()
         ? rawRange.trim()
         : undefined;
-    const result = await fetchGitLog(workspaceCwd, { limit, skip, range });
+    const rawSearch = req.query['search'];
+    const search =
+      typeof rawSearch === 'string' && rawSearch.trim()
+        ? rawSearch.trim().slice(0, MAX_SEARCH_CHARS)
+        : undefined;
+    const result = await fetchGitLog(workspaceCwd, {
+      limit,
+      skip,
+      range,
+      all: req.query['all'] === '1',
+      search,
+    });
     res.status(200).json(buildLogList(workspaceCwd, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
@@ -177,16 +186,6 @@ export function registerWorkspaceGitLogRoutes(
       'GET /workspace/git/log/commit',
     );
   });
-}
-
-function resolveTrustedRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
 }
 
 export function registerWorkspaceQualifiedGitLogRoutes(

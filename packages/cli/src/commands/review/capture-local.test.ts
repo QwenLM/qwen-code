@@ -11,15 +11,58 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seedParseArgs } from './lib/test-utils.js';
+import {
+  COMPOSE_FLOOR_ENV,
+  DEADLINE_ENV,
+  DEFAULT_DEADLINE_SECONDS,
+  RESERVE_ENV,
+} from './lib/deadline.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
+// The flag ruling, overridable so a test can make it fail the way a bug would
+// (a non-TypeError) — the handler must not mistake that for a usage error.
+// Null means the real `validateDeadlineFlag`.
+const validateOverride = vi.hoisted(() => ({
+  impl: null as null | (() => void),
+}));
+vi.mock('./lib/deadline.js', async (orig) => {
+  const actual = await orig<Record<string, unknown>>();
+  const real = actual['validateDeadlineFlag'] as (...args: unknown[]) => void;
+  return {
+    ...actual,
+    validateDeadlineFlag: (...args: unknown[]) =>
+      validateOverride.impl !== null ? validateOverride.impl() : real(...args),
+  };
+});
+const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
+const visibilityMock = vi.hoisted(() => vi.fn((): string[] | null => []));
+vi.mock('../../config/settings.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  loadSettings: settingsMock,
+}));
 vi.mock('./lib/local-diff.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   captureLocalDiff: captureMock,
+}));
+// The git layer is tested elsewhere (the integration suites run a real
+// repository); the scratch directory here is not one. The visibility-bit
+// oracle answers "no tracked path carries a bit" — the shape a clean tree
+// has — because without an answer the stops must fail closed, and the
+// tests below pin the clean claim.
+vi.mock('./lib/local-anchor.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  invisibleTrackedPaths: visibilityMock,
 }));
 
 const { captureLocalCommand } = await import('./capture-local.js');
@@ -63,6 +106,8 @@ beforeEach(() => {
   cwd = process.cwd();
   process.chdir(dir);
   errs = [];
+  visibilityMock.mockReset();
+  visibilityMock.mockReturnValue([] as string[]);
   vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
     errs.push(String(chunk));
     return true;
@@ -75,6 +120,58 @@ afterEach(() => {
   vi.restoreAllMocks();
   process.chdir(cwd);
   rmSync(dir, { recursive: true, force: true });
+  process.exitCode = undefined;
+});
+
+/**
+ * Drive the handler expecting a usage refusal: one `capture-local:` line
+ * on stderr matching `re` and exit code 2 — never a thrown TypeError, which
+ * would surface as the CLI's crash banner with a stack.
+ */
+function refused(out: string, over: Record<string, unknown>, re: RegExp): void {
+  process.exitCode = undefined;
+  errs = [];
+  expect(() => run(out, over)).not.toThrow();
+  expect(process.exitCode).toBe(2);
+  const line = errs.join('');
+  expect(line).toMatch(/^capture-local: --deadline/);
+  expect(line).toMatch(re);
+  expect(line).not.toContain('    at ');
+  process.exitCode = undefined;
+}
+
+describe('capture-local — the re-captures\u2019 skipped lists ride the guard', () => {
+  it('withholds the stop when only a RE-capture skipped content', () => {
+    // R21-2: the sampling loop kept only `.diff` from re-captures 1 and 2 —
+    // an unreviewable file entering the window lands in `skipped`, never in
+    // the diff BYTES, so the byte comparison read "held still" and the
+    // decided stops fired over content two of the three captures skipped.
+    // Skip-set movement is tree movement.
+    let call = 0;
+    captureMock.mockImplementation(() => {
+      call += 1;
+      return {
+        diff: Buffer.from('', 'utf8'),
+        untracked: [],
+        skipped:
+          call === 1
+            ? []
+            : [{ path: 'huge.bin', bytes: 1, reason: 'over the cap' }],
+        unbornHead: false,
+        repoRoot: dir,
+      };
+    });
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.nothingToReview).toBeUndefined();
+    expect(existsSync(join(dir, '.qwen/tmp/qwen-review-local-stop.json'))).toBe(
+      false,
+    );
+    expect(errs.join('')).toContain(
+      'the working tree changed while the capture was being hashed',
+    );
+  });
 });
 
 describe('capture-local (command boundary)', () => {
@@ -86,7 +183,14 @@ describe('capture-local (command boundary)', () => {
     expect(plan.chunks.length).toBeGreaterThan(0);
     expect(plan.untrackedFiles).toEqual(['src/pay.ts']);
     expect(existsSync(plan.diffPathAbsolute)).toBe(true);
-    expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
+    const writtenDiff = readFileSync(plan.diffPathAbsolute, 'utf8');
+    expect(writtenDiff).toBe(DIFF);
+    // The identity must digest the SAME bytes the plan was built from: this
+    // command carries its diff as `diffBytes`, and any other string passed at
+    // the call site would stay type-correct while naming nothing.
+    expect(plan.selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(writtenDiff, 'utf8').digest('hex'),
+    );
   });
 
   it('creates the output directory the caller chose', () => {
@@ -203,6 +307,32 @@ describe('capture-local (command boundary)', () => {
     expect(plan.effort).toBeUndefined();
   });
 
+  it('withholds the cache candidate when the visibility bits cannot be enumerated', () => {
+    // The candidate records the identity of the tree this round reviewed;
+    // an oracle the capture cannot run leaves that identity uncertified, so
+    // the write fails closed exactly like the decided stops do.
+    capture();
+    visibilityMock.mockReturnValue(null);
+    run('plan.json');
+    expect(
+      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
+    ).toBe(false);
+    expect(errs.join('')).toContain('could not be enumerated');
+  });
+
+  it('withholds the cache candidate while tracked paths carry a visibility bit', () => {
+    // `hash-object` reads through a set --assume-unchanged/--skip-worktree
+    // bit while `git diff` cannot see the edit it hides — the candidate
+    // would record the identity of bytes this round never reviewed.
+    capture();
+    visibilityMock.mockReturnValue(['src/pay.ts']);
+    run('plan.json');
+    expect(
+      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
+    ).toBe(false);
+    expect(errs.join('')).toContain('the cache candidate is withheld');
+  });
+
   it('escapes a filename carrying terminal control characters', () => {
     // A filename is workspace-controlled, and git permits an ESC or a newline in
     // one. Printed raw it can forge a second warning line or drive the user's
@@ -213,5 +343,286 @@ describe('capture-local (command boundary)', () => {
     const out = errs.join('');
     expect(out).not.toContain('[2K');
     expect(out).toContain('\\u001b');
+  });
+});
+
+describe('capture-local — the budget context the handler actually passes', () => {
+  // `BudgetContext`'s fields are optional, so dropping either from this call
+  // site compiles clean and every unit test beneath it stays green. Only a
+  // handler-level assertion on the written plan can see it — and this command
+  // had none.
+  it('carries the operator ceiling and the clock into the written plan', () => {
+    const before = process.env[DEADLINE_ENV];
+    try {
+      const huge = Array.from(
+        { length: 9000 },
+        (_, i) => `+const x${i} = ${i};`,
+      ).join('\n');
+      capture({
+        diff: Buffer.from(
+          [
+            'diff --git a/src/huge.ts b/src/huge.ts',
+            '--- /dev/null',
+            '+++ b/src/huge.ts',
+            '@@ -0,0 +1,9000 @@',
+            huge,
+            '',
+          ].join('\n'),
+          'utf8',
+        ),
+        untracked: ['src/huge.ts'],
+      });
+
+      delete process.env[DEADLINE_ENV];
+      settingsMock.mockReturnValue({ merged: {} });
+      const noClock = join(dir, 'no-clock.json');
+      run(noClock);
+      const a = JSON.parse(readFileSync(noClock, 'utf8'));
+      expect(a.srcDiffLines).toBeGreaterThanOrEqual(3000);
+      expect(a.budget.reverseAuditRounds).toBe(5); // huge, no clock → 3B tier
+      // The default wall rides along — and it is the reason the tier above
+      // still reads 5: a default is not an explicit clock.
+      expect(a.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.huge);
+      expect(a.deadlineSource).toBe('default');
+
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      const withClock = join(dir, 'with-clock.json');
+      run(withClock);
+      expect(
+        JSON.parse(readFileSync(withClock, 'utf8')).budget.reverseAuditRounds,
+      ).toBe(3);
+
+      // …and the operator ceiling lowers whichever tier applies.
+      settingsMock.mockReturnValue({
+        merged: { review: { reverseAuditRounds: 3 } },
+      });
+      delete process.env[DEADLINE_ENV];
+      const capped = join(dir, 'capped.json');
+      run(capped);
+      expect(
+        JSON.parse(readFileSync(capped, 'utf8')).budget.reverseAuditRounds,
+      ).toBe(3);
+    } finally {
+      settingsMock.mockReturnValue({ merged: {} });
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
+  });
+});
+
+describe('capture-local — the --deadline flag the handler records', () => {
+  const hugeTree = () =>
+    capture({
+      diff: Buffer.from(
+        [
+          'diff --git a/src/huge.ts b/src/huge.ts',
+          '--- /dev/null',
+          '+++ b/src/huge.ts',
+          '@@ -0,0 +1,9000 @@',
+          Array.from({ length: 9000 }, (_, i) => `+const x${i} = ${i};`).join(
+            '\n',
+          ),
+          '',
+        ].join('\n'),
+        'utf8',
+      ),
+      untracked: ['src/huge.ts'],
+    });
+
+  it('an explicit --deadline is recorded as a flag wall and, like an env clock, flips the huge tier', () => {
+    // Isolate the reserve / compose-floor overrides too: the shell-priced
+    // leg reads them from the ambient environment, and this repository's
+    // own review job exports a reserve.
+    const before = process.env[DEADLINE_ENV];
+    const beforeReserve = process.env[RESERVE_ENV];
+    const beforeFloor = process.env[COMPOSE_FLOOR_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      delete process.env[RESERVE_ENV];
+      delete process.env[COMPOSE_FLOOR_ENV];
+      hugeTree();
+      const out = join(dir, 'flag.json');
+      run(out, { deadline: '120' });
+      const a = JSON.parse(readFileSync(out, 'utf8'));
+      expect(a.deadlineSeconds).toBe(7200);
+      expect(a.deadlineSource).toBe('flag');
+      expect(a.budget.reverseAuditRounds).toBe(3);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+      if (beforeReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = beforeReserve;
+      if (beforeFloor === undefined) delete process.env[COMPOSE_FLOOR_ENV];
+      else process.env[COMPOSE_FLOOR_ENV] = beforeFloor;
+    }
+  });
+
+  it('`--deadline none` records no wall, and a small diff records the small default', () => {
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      hugeTree();
+      const none = join(dir, 'none.json');
+      run(none, { deadline: 'none' });
+      const a = JSON.parse(readFileSync(none, 'utf8'));
+      expect(a).not.toHaveProperty('deadlineSeconds');
+      expect(a).not.toHaveProperty('deadlineSource');
+      expect(a.budget.reverseAuditRounds).toBe(5);
+
+      capture();
+      const small = join(dir, 'small.json');
+      run(small);
+      const b = JSON.parse(readFileSync(small, 'utf8'));
+      expect(b.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.small);
+      expect(b.deadlineSource).toBe('default');
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
+  });
+
+  it('prices the flag with this shell’s reserve override too, before the tree is captured', () => {
+    // The sibling of fetch-pr's case: with a 4800s reserve exported, a wall
+    // the env-free rule admits (100 > 90) cannot hold a convergence here,
+    // so the capture refuses it naming the wall this shell accepts — and
+    // records that one. No epoch, or the leg is skipped by design.
+    const before = process.env[DEADLINE_ENV];
+    const beforeReserve = process.env[RESERVE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      process.env[RESERVE_ENV] = '4800';
+      captureMock.mockClear();
+      hugeTree();
+      const refusedOut = join(dir, 'refused.json');
+      refused(
+        refusedOut,
+        { deadline: '100' },
+        /shortest wall that can hold one here is 141 minutes/,
+      );
+      expect(captureMock).not.toHaveBeenCalled();
+      expect(existsSync(refusedOut)).toBe(false);
+      const out = join(dir, 'admitted.json');
+      run(out, { deadline: '141' });
+      const a = JSON.parse(readFileSync(out, 'utf8'));
+      expect(a.deadlineSeconds).toBe(141 * 60);
+      expect(a.deadlineSource).toBe('flag');
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+      if (beforeReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = beforeReserve;
+    }
+  });
+
+  it('a malformed --deadline is a usage error — exit 2, one line, ruled before the tree is captured', () => {
+    captureMock.mockClear();
+    const out = join(dir, 'bad.json');
+    refused(out, { deadline: 'soon' }, /got "soon"/);
+    refused(
+      out,
+      { deadline: '0' },
+      /--deadline must be a whole number of minutes or `none`/,
+    );
+    expect(captureMock).not.toHaveBeenCalled();
+    expect(existsSync(out)).toBe(false);
+  });
+});
+
+describe('capture-local — the handler’s error contract', () => {
+  it('an --out that names a directory is a usage error — exit 2, one line, ruled before the tree is captured', () => {
+    // The check its siblings make before any work. Without it the capture
+    // and hashing ran to completion before the plan write failed with
+    // EISDIR (one line, exit 1).
+    captureMock.mockClear();
+    const existing = join(dir, 'plans');
+    mkdirSync(existing);
+    for (const out of [existing, join(dir, 'not-yet') + '/']) {
+      process.exitCode = undefined;
+      errs = [];
+      expect(() => run(out)).not.toThrow();
+      expect(process.exitCode).toBe(2);
+      const line = errs.join('');
+      expect(line).toMatch(
+        /^capture-local: --out names a directory, not a file: /,
+      );
+      expect(line).not.toContain('    at ');
+    }
+    // A repeated --out arrives as an array: the same one-line shape, with a
+    // message that names the mistake instead of a `.trim` crash.
+    process.exitCode = undefined;
+    errs = [];
+    expect(() => run(['a.json', 'b.json'] as unknown as string)).not.toThrow();
+    expect(process.exitCode).toBe(2);
+    expect(errs.join('')).toMatch(
+      /^capture-local: --out must be given once, as a file path\n?$/,
+    );
+    expect(captureMock).not.toHaveBeenCalled();
+    process.exitCode = undefined;
+  });
+
+  it('an internal fault prints one line and exits 1 — and its stack after it under --debug', () => {
+    // plan-diff's contract for the default output: one line for the
+    // operator. The stack says where the fault happened, for whoever has to
+    // find it, and follows the line only when debug output is asked for.
+    const out = join(dir, 'boom.json');
+    captureMock.mockImplementation(() => {
+      throw new Error('git is not installed');
+    });
+    process.exitCode = undefined;
+    errs = [];
+    expect(() => run(out)).not.toThrow();
+    expect(process.exitCode).toBe(1);
+    expect(errs.join('')).toContain('capture-local: git is not installed\n');
+    expect(errs.join('')).not.toContain('    at ');
+
+    process.exitCode = undefined;
+    errs = [];
+    expect(() => run(out, { debug: true })).not.toThrow();
+    expect(process.exitCode).toBe(1);
+    expect(errs.join('')).toMatch(
+      /capture-local: git is not installed\nError: git is not installed\n\s+at /,
+    );
+
+    // Only the flag: debug variables in the environment (set for other
+    // tools, or by the dev launcher) leave the operator's one line alone.
+    vi.stubEnv('DEBUG', '1');
+    vi.stubEnv('QWEN_DEBUG', '1');
+    vi.stubEnv('NODE_ENV', 'development');
+    try {
+      process.exitCode = undefined;
+      errs = [];
+      run(out);
+      expect(process.exitCode).toBe(1);
+      expect(errs.join('')).toContain('capture-local: git is not installed\n');
+      expect(errs.join('')).not.toContain('    at ');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(existsSync(out)).toBe(false);
+    process.exitCode = undefined;
+  });
+
+  it('a ruling that fails with anything but a usage error exits 1, still before the capture', () => {
+    // The ruling's TypeErrors are usage errors (exit 2, above). Anything
+    // else out of it is a fault in the ruling: exit 1, and the tree is still
+    // never captured on the way out.
+    const out = join(dir, 'ruling.json');
+    captureMock.mockClear();
+    validateOverride.impl = () => {
+      throw new Error('environment unreadable');
+    };
+    try {
+      process.exitCode = undefined;
+      errs = [];
+      expect(() => run(out, { deadline: '120' })).not.toThrow();
+      expect(process.exitCode).toBe(1);
+      expect(errs.join('')).toContain(
+        'capture-local: environment unreadable\n',
+      );
+      expect(captureMock).not.toHaveBeenCalled();
+    } finally {
+      validateOverride.impl = null;
+    }
+    process.exitCode = undefined;
   });
 });

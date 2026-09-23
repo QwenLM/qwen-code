@@ -6,24 +6,41 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+  GOAL_DEFAULT_TOKEN_BUDGET,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
+  GOAL_TOKEN_BUDGET_CAP,
   ToolNames,
   DEFAULT_QWEN_MODEL,
   OutputFormat,
   NativeLspService,
+  AuthType,
   Storage,
+  SessionIdCaseConflictError,
+  FatalConfigError,
 } from '@qwen-code/qwen-code-core';
+import { normalizeModelProposedGoals } from './config.js';
 import {
+  buildSkillSettingsListsProvider,
+  isValidSessionId,
   loadCliConfig,
   parseArguments,
   SessionIdConflictError,
   type CliArgs,
+  resetOutputStyleWarningsForTesting,
 } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+
+const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('../serve/ssh-workspace-store.js', () => ({
+  readSshWorkspace: sshWorkspaceProbe,
+}));
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -34,6 +51,7 @@ const mockSessionServiceInstance = vi.hoisted(() => ({
   forkSession: vi.fn(),
   sessionExists: vi.fn(),
   sessionExistsInAnyState: vi.fn(),
+  findSessionIdIgnoringCase: vi.fn(),
 }));
 const mockSessionServiceCtor = vi.hoisted(() =>
   vi.fn(() => mockSessionServiceInstance),
@@ -89,9 +107,7 @@ const createNativeLspServiceInstance = () => ({
 });
 
 vi.mock('./trustedFolders.js', () => ({
-  isWorkspaceTrusted: vi
-    .fn()
-    .mockReturnValue({ isTrusted: true, source: 'file' }), // Default to trusted
+  isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -166,6 +182,40 @@ vi.mock('command-exists', () => ({
   },
 }));
 
+// #7734 added a sandbox runtime probe that spawns a real `docker version`
+// subprocess during sandbox selection. These tests enable the sandbox to assert
+// image precedence, not which runtime is chosen, so left unmocked the probe runs
+// for real and the suite fails on any non-macOS host without a running daemon
+// (macOS is masked because the sandbox-exec branch returns before probing).
+// Report the runtime probe healthy; leave every other spawnSync call real.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const spawnSync = vi.fn(
+    (command: string, args?: readonly string[], options?: unknown) => {
+      if (
+        (command === 'docker' || command === 'podman') &&
+        args?.[0] === 'version'
+      ) {
+        return {
+          status: 0,
+          stdout: '',
+          stderr: '',
+          signal: null,
+          pid: 0,
+          output: [],
+          error: undefined,
+        };
+      }
+      return (actual.spawnSync as unknown as (...a: unknown[]) => unknown)(
+        command,
+        args,
+        options,
+      );
+    },
+  );
+  return { ...actual, default: { ...actual, spawnSync }, spawnSync };
+});
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualServer = await importOriginal<typeof ServerConfig>();
   const SkillManagerMock = vi.fn();
@@ -190,6 +240,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       .mockImplementation(() => createNativeLspServiceInstance()),
     SessionService: mockSessionServiceCtor,
     SkillManager: SkillManagerMock,
+    // Reset to `undefined` per test, which resolveOutputStyle treats as
+    // "built-ins only"; the output-style tests below install a catalog.
+    loadOutputStyleCatalog: vi.fn(),
     IdeClient: {
       getInstance: vi.fn().mockResolvedValue({
         getConnectionStatus: vi.fn(),
@@ -199,10 +252,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     },
     loadEnvironment: vi.fn(),
     loadServerHierarchicalMemory: vi.fn(
-      (cwd, dirs, debug, fileService, extensionPaths, _maxDirs) =>
+      // Match the real signature: (cwd, includeDirs, fileService,
+      // extensionContextFilePaths, folderTrust, importFormat,
+      // contextRuleExcludes, options)
+      (cwd, _dirs, _fileService, extensionContextFilePaths) =>
         Promise.resolve({
-          memoryContent: extensionPaths?.join(',') || '',
-          fileCount: extensionPaths?.length || 0,
+          memoryContent: extensionContextFilePaths?.join(',') || '',
+          fileCount: extensionContextFilePaths?.length || 0,
+          contextFilePaths: extensionContextFilePaths || [],
           ruleCount: 0,
           conditionalRules: [],
           projectRoot: cwd || '/tmp',
@@ -219,11 +276,94 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+describe('isValidSessionId', () => {
+  it.each([
+    ['a canonical UUID', 'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'],
+    [
+      'an agent-suffixed UUID',
+      'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d-agent-qwen',
+    ],
+  ])('accepts %s', (_, value) => {
+    expect(isValidSessionId(value)).toBe(true);
+  });
+
+  // These shapes are paste-into-shell payloads for the exit-time resume
+  // echo, so the production gate must reject them.
+  it.each([
+    ['newline', 'evil\nrm -rf ~'],
+    ['escape sequence', 'evil\u001B]52;c;pwned\u0007session'],
+    ['leading dash', '-cafebabe0123456789abcdef01234567'],
+    ['non-UUID token', 'abc123'],
+  ])('rejects a payload with a %s', (_, value) => {
+    expect(isValidSessionId(value)).toBe(false);
+  });
+});
+
 describe('parseArguments', () => {
   const originalArgv = process.argv;
 
   afterEach(() => {
     process.argv = originalArgv;
+  });
+
+  it.each([
+    ['--sandbox', 'bwrap'],
+    ['--sandbox=bwrap'],
+    ['-s', 'bwrap'],
+    ['-s=bwrap'],
+  ])(
+    'reports bwrap migration before prompt conflicts: %j',
+    async (...flags) => {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+      mockWriteStderrLine.mockClear();
+      try {
+        await expect(parseArguments()).rejects.toThrow('process.exit called');
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('Whole-CLI bwrap has been removed'),
+        );
+      } finally {
+        exit.mockRestore();
+      }
+    },
+  );
+
+  it('preserves boolean sandbox flags and literal prompt text', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', '-p', 'bwrap'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      prompt: 'bwrap',
+    });
+    process.argv = ['node', 'script.js', '--no-sandbox', 'query'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'query',
+    });
+    process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
+    expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
+  });
+
+  it('includes every approval mode description in --help', async () => {
+    process.argv = ['node', 'script.js', '--help'];
+    const output: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args) => {
+      output.push(args.join(' '));
+    });
+    try {
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      const help = output.join('');
+      for (const mode of ServerConfig.APPROVAL_MODES) {
+        expect(help).toContain(
+          `${mode} (${ServerConfig.APPROVAL_MODE_INFO[mode].description})`,
+        );
+      }
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('should throw an error when both --prompt and --prompt-interactive are used together', async () => {
@@ -283,6 +423,19 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.prompt).toBe('test prompt');
     expect(argv.promptInteractive).toBeUndefined();
+  });
+
+  it('accepts OpenAI Responses as an auth type', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      AuthType.USE_OPENAI_RESPONSES,
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
   });
 
   it('registers update as an exiting subcommand', async () => {
@@ -436,7 +589,7 @@ describe('parseArguments', () => {
   it('rejects --json-schema combined with --input-format stream-json', async () => {
     // The "first valid structured_output call ends the session"
     // contract is incompatible with the long-lived stream-json input
-    // protocol. Also load-bearing: gemini.tsx's
+    // protocol. Also load-bearing: llm.tsx's
     // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
     // branch explicitly relies on this rejection holding. Pair with
     // --output-format stream-json because input/output formats must
@@ -488,6 +641,12 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.appendSystemPrompt).toBe('Be extra concise.');
     expect(argv.systemPrompt).toBeUndefined();
+  });
+
+  it('should parse --output-style', async () => {
+    process.argv = ['node', 'script.js', '--output-style', 'Concise'];
+    const argv = await parseArguments();
+    expect(argv.outputStyle).toBe('Concise');
   });
 
   it('should allow -r flag as alias for --resume', async () => {
@@ -867,10 +1026,22 @@ describe('parseArguments', () => {
     expect(argv.channel).toBe('desktop');
   });
 
-  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
-    process.argv = ['node', 'script.js', '--acp'];
+  it('should accept daemon as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'daemon'];
     const argv = await parseArguments();
-    expect(argv.channel).toBe('ACP');
+    expect(argv.channel).toBe('daemon');
+  });
+
+  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('ACP');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
@@ -880,6 +1051,41 @@ describe('parseArguments', () => {
     // channel with the ACP default.
     expect(argv.channel).toBe('desktop');
     expect(argv.acp).toBe(true);
+  });
+
+  it('reports the daemon channel for daemon-spawned ACP children', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('daemon');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('reports the desktop channel for the Tauri desktop shell', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('desktop');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an explicit --channel over the daemon markers', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp', '--channel', 'VSCode'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('VSCode');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('should reject invalid --approval-mode values', async () => {
@@ -1018,6 +1224,9 @@ describe('loadCliConfig', () => {
     });
     mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
     mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(false);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      undefined,
+    );
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
@@ -1030,22 +1239,250 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([undefined, '1'])(
+    'propagates the operator requirement independently of daemon factory availability: %s',
+    async (serve) => {
+      vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
+      vi.stubEnv('QWEN_CODE_SERVE', serve);
+      vi.stubEnv('SANDBOX', undefined);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentExecutionBackend: 'container',
+          executionEnvironmentFactory:
+            serve || process.platform === 'win32'
+              ? undefined
+              : expect.any(Function),
+        }),
+      );
+    },
+  );
+
   it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith([
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith([
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
+  });
+
+  it('isolates SSH configuration from local project services and code-mode-only settings', async () => {
+    sshWorkspaceProbe.mockReturnValueOnce({
+      host: 'host',
+      port: 2222,
+      directory: '/srv/project',
+    });
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    await loadCliConfig(
+      {
+        tools: {
+          codeModeOnly: true,
+          truncateToolOutputThreshold: 2500,
+          shell: { defaultTimeoutMs: 45000 },
+        },
+        mcpServers: { local: { command: 'must-not-run' } },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        codeModeOnly: false,
+        disableAllHooks: true,
+        mcpServers: {},
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
+        enableAutoSkill: false,
+        fileCheckpointingEnabled: false,
+        artifactEnabled: false,
+        executionEnvironment: expect.objectContaining({
+          toolNames: expect.any(Set),
+        }),
+        appendSystemPrompt: expect.stringContaining('/srv/project'),
+      }),
+    );
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('passes the effective model API to Config at startup', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('RESPONSES_KEY', 'responses-key');
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        model: { name: 'gpt-model' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'gpt-model',
+              wireApi: 'responses',
+              envKey: 'RESPONSES_KEY',
+              baseUrl: 'https://example.test/v1',
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        generationConfig: expect.objectContaining({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          apiKey: 'responses-key',
+        }),
+      }),
+    );
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+  });
+
+  it.each<[Settings, AuthType | undefined]>([
+    [
+      { modelProviders: { 'openai-responses': [{ id: 'old' }] } },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ modelProviders: { 'openai-responses': [] } }, undefined],
+    [
+      {
+        modelProviders: { gateway: [{ id: 'old' }] },
+        providerProtocol: { gateway: 'openai-responses' },
+      },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ providerProtocol: { unused: 'openai-responses' } }, undefined],
+    [
+      {
+        modelProviders: { 'openai-responses': [{ id: 'old' }] },
+        providerProtocol: { 'openai-responses': 'openai' },
+      },
+      AuthType.USE_OPENAI,
+    ],
+  ])(
+    'loads released provider configuration without changing its declared route: %j',
+    async (settings, expectedProtocol) => {
+      process.argv = ['node', 'script.js'];
+      const before = structuredClone(settings);
+      const argv = await parseArguments();
+      const config = await loadCliConfig(settings, argv);
+      for (const authType of [
+        AuthType.USE_OPENAI,
+        AuthType.USE_OPENAI_RESPONSES,
+      ]) {
+        const oldModels = config
+          .getModelsConfig()
+          .getAvailableModelsForAuthType(authType)
+          .filter((model) => model.id === 'old');
+        expect(oldModels).toHaveLength(authType === expectedProtocol ? 1 : 0);
+      }
+      expect(settings).toEqual(before);
+    },
+  );
+
+  it('reports an invalid model api as a config error, not an unexpected crash', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'gpt-model' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            // A hand-editable typo. This resolves before the TUI starts, so an
+            // unwrapped throw leaves the user a stack trace and no way back.
+            wireApi: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid wireApi "resposnes" for provider "openai"/,
+    );
+  });
+
+  it('reports an invalid model api as a config error even with no model selected', async () => {
+    process.argv = ['node', 'script.js'];
+    // Clear every auth env var getAuthTypeFromEnv can read so no selectedType
+    // is inferred from the runner environment.
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    const argv = await parseArguments();
+    const settings: Settings = {
+      // No security.auth.selectedType and no model.name: generation-config
+      // resolution never touches the model, so the invalid `wireApi` is caught by
+      // the up-front validation loop in loadCliConfig — still a config error,
+      // not an unexpected crash with a stack trace.
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            wireApi: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+    vi.unstubAllEnvs();
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid wireApi "resposnes" for provider "openai"/,
+    );
+  });
+
+  it('registers the external agent executor factory so executor definitions dispatch (R1-7)', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    // This single host-side registration is what the whole external-subagent
+    // feature dispatches through. Every dispatch test mocks
+    // getExternalAgentExecutor, so without this assertion deleting the
+    // injection would regress every valid executor definition to "registered no
+    // external agent executor" with the whole suite still green.
+    const factory = config.getExternalAgentExecutor();
+    expect(factory).toBeDefined();
+    expect(typeof factory?.create).toBe('function');
   });
 
   it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
@@ -1056,6 +1493,66 @@ describe('loadCliConfig', () => {
     await loadCliConfig({}, argv);
 
     expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
+  });
+
+  it('maps --restore-ask-user-question only in ACP mode', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--restore-ask-user-question',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(true);
+  });
+
+  it('ignores --restore-ask-user-question outside ACP mode', async () => {
+    process.argv = ['node', 'script.js', '--restore-ask-user-question'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
+  it('defaults restoreAskUserQuestion to false', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
+  it('wires the skill settings lists provider outside bare and safe mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({ skills: { enabled: ['pdf'] } }, argv);
+
+    expect(config.hasSkillSettingsListsProvider()).toBe(true);
+  });
+
+  it.each(['--bare', '--safe-mode'])(
+    'omits the skill settings lists provider in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { skills: { enabled: ['pdf'] } },
+        argv,
+      );
+
+      expect(config.hasSkillSettingsListsProvider()).toBe(false);
+    },
+  );
+
+  it('maps the settings lists into normalized provider sets', () => {
+    const lists = buildSkillSettingsListsProvider({
+      skills: { enabled: [' A '], defaultDisabled: ['B'], disabled: ['C'] },
+    })();
+
+    expect([...lists.enabled]).toEqual(['a']);
+    expect([...lists.defaultDisabled]).toEqual(['b']);
+    expect([...lists.hardDisabled]).toEqual(['c']);
   });
 
   it('preserves explicit opt-out when --debug is used', async () => {
@@ -1101,6 +1598,147 @@ describe('loadCliConfig', () => {
     });
   });
 
+  describe('model.goalTokenBudget', () => {
+    it('carries the setting into the Goal budget grant', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalTokenBudget: 1_234 } },
+        argv,
+      );
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(1_234);
+    });
+
+    it('uses -1 as the unlimited sentinel', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalTokenBudget: -1 } },
+        argv,
+      );
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it.each([
+      0,
+      -2,
+      1.5,
+      GOAL_TOKEN_BUDGET_CAP + 1,
+      '5000' as unknown as number,
+    ])('rejects invalid settings value %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig({ model: { goalTokenBudget: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalTokenBudget/);
+    });
+
+    it('arms the built-in default when the setting is unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(GOAL_DEFAULT_TOKEN_BUDGET);
+    });
+  });
+
+  describe('model.goalMaxTurns and model.goalMaxActiveMinutes', () => {
+    it('carries the settings into the Goal cadence grants', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalMaxTurns: 20, goalMaxActiveMinutes: 30 } },
+        argv,
+      );
+
+      expect(config.getGoalTurnBudgetGrant()).toBe(20);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(1_800_000);
+    });
+
+    it('runs Goals with no cadence ceiling when the settings are unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+    });
+
+    it.each([-1, 20])(
+      'accepts %s as an explicit turn ceiling or opt-out',
+      async (value) => {
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        const config = await loadCliConfig(
+          { model: { goalMaxTurns: value } },
+          argv,
+        );
+
+        expect(config.getGoalTurnBudgetGrant()).toBe(
+          value === -1 ? Number.POSITIVE_INFINITY : value,
+        );
+      },
+    );
+
+    it.each([0, -2, 1.5, GOAL_MAX_TURNS_CAP + 1, '20' as unknown as number])(
+      'rejects invalid goalMaxTurns %s at startup',
+      async (value) => {
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await expect(
+          loadCliConfig({ model: { goalMaxTurns: value } }, argv),
+        ).rejects.toThrow(/settings\.json: model\.goalMaxTurns/);
+      },
+    );
+
+    it.each([
+      0,
+      -2,
+      0.5,
+      GOAL_MAX_ACTIVE_MINUTES_CAP + 1,
+      '30' as unknown as number,
+    ])('rejects invalid goalMaxActiveMinutes %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig({ model: { goalMaxActiveMinutes: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalMaxActiveMinutes/);
+    });
+  });
+
+  describe('model.goalCheckpointTimeoutSeconds', () => {
+    it.each([45, 0, -1, 1.5, 901, '30' as unknown as number])(
+      'loads with the deprecated setting at %s and ignores it',
+      async (value) => {
+        // Goals no longer run evidence checkpoints, so nothing reads the
+        // value. A settings file that still carries it, valid or not, must
+        // not stop the CLI from starting.
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await expect(
+          loadCliConfig(
+            { model: { goalCheckpointTimeoutSeconds: value } },
+            argv,
+          ),
+        ).resolves.toBeDefined();
+      },
+    );
+  });
+
   it('should use configured context file name when settings.context.fileName is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1109,15 +1747,12 @@ describe('loadCliConfig', () => {
         fileName: 'CUSTOM_AGENTS.md',
       },
     };
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
   });
 
   it('should propagate stream-json formats to config', async () => {
@@ -1298,6 +1933,413 @@ describe('loadCliConfig', () => {
     });
   });
 
+  describe('output style', () => {
+    beforeEach(() => {
+      resetOutputStyleWarningsForTesting();
+    });
+
+    // A `mockReturnValue` verdict is the same for every folder, so it cannot
+    // show which workspace the call site asks about. This one answers from the
+    // path argument the way the real `isWorkspaceTrusted` does — a call about
+    // some other folder comes back trusted, and the assertion that depends on
+    // the revocation goes red.
+    const distrustWorkspace = (untrusted: string) => {
+      vi.mocked(isWorkspaceTrusted).mockImplementation(
+        (_settings, _trustConfig, workspacePath) => ({
+          isTrusted: (workspacePath ?? process.cwd()) !== untrusted,
+          source: 'file',
+        }),
+      );
+    };
+
+    it('leaves the style unset by default', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getOutputStyle()).toBeUndefined();
+    });
+
+    it('selects a built-in style from general.outputStyle, case-insensitively', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Concise');
+    });
+
+    it('lets --output-style override the setting', async () => {
+      process.argv = ['node', 'script.js', '--output-style', 'Explanatory'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Explanatory');
+    });
+
+    it('selects a custom style from the loaded catalog', async () => {
+      const custom: ServerConfig.OutputStyleDefinition = {
+        name: 'Reviewer',
+        source: 'user',
+        description: 'Reviews without editing',
+        keepCodingInstructions: false,
+        prompt: 'Review only.',
+      };
+      vi.mocked(ServerConfig.loadOutputStyleCatalog).mockResolvedValue([
+        ...ServerConfig.BUILT_IN_OUTPUT_STYLES,
+        custom,
+      ]);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'reviewer' } },
+        argv,
+        '/repo',
+      );
+      expect(config.getOutputStyle()).toBe(custom);
+      expect(ServerConfig.loadOutputStyleCatalog).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+      });
+    });
+
+    it('does not read project styles from an untrusted workspace', async () => {
+      const workspace = process.cwd();
+      distrustWorkspace(workspace);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, workspace);
+      expect(ServerConfig.loadOutputStyleCatalog).toHaveBeenCalledWith({
+        projectRoot: undefined,
+      });
+    });
+
+    // The positive control for the mock above: revoking trust for a folder
+    // that is not this workspace must leave this workspace's styles alone.
+    it('reads project styles when another folder is the untrusted one', async () => {
+      const workspace = process.cwd();
+      distrustWorkspace('/some/other/repo');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, workspace);
+      expect(ServerConfig.loadOutputStyleCatalog).toHaveBeenCalledWith({
+        projectRoot: workspace,
+      });
+    });
+
+    it.each(['--safe-mode', '--bare'])(
+      'keeps built-ins only under %s',
+      async (flag) => {
+        process.argv = ['node', 'script.js', flag, '--output-style', 'Concise'];
+        const argv = await parseArguments();
+        const config = await loadCliConfig({}, argv);
+        expect(ServerConfig.loadOutputStyleCatalog).not.toHaveBeenCalled();
+        expect(config.getOutputStyle()?.name).toBe('Concise');
+      },
+    );
+
+    it('treats "default" as no style, even when the setting names one', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js', '--output-style', 'default'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      // The sentinel must stay silent: falling through to the unknown-name
+      // path would warn on every startup for a documented value.
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('treats a "default" setting as no style, without warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'DEFAULT' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('treats a whitespace-only value as no style, without warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: '   ' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('warns about an unknown style and falls back to the default', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Verbose' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Unknown output style "Verbose" (from general.outputStyle)',
+        ),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Concise, Proactive, Explanatory, Learning'),
+      );
+    });
+
+    // The list has to name what this session can actually select. Built-ins
+    // alone read as a complete catalog and send the user looking for a style
+    // the warning never mentions.
+    it('names the loaded custom styles in the unknown-style warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const custom: ServerConfig.OutputStyleDefinition = {
+        name: 'Reviewer',
+        source: 'user',
+        description: 'Reviews without editing',
+        keepCodingInstructions: false,
+        prompt: 'Review only.',
+      };
+      vi.mocked(ServerConfig.loadOutputStyleCatalog).mockResolvedValue([
+        ...ServerConfig.BUILT_IN_OUTPUT_STYLES,
+        custom,
+      ]);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Verbose' } },
+        argv,
+        '/repo',
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Available styles: Concise, Proactive, Explanatory, Learning, Reviewer.',
+        ),
+      );
+    });
+
+    it('strips control sequences before echoing an unknown style name', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: '\u001b[31mEVIL\u001b[0m' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      const emitted = errorSpy.mock.calls.map((call) => call.join(' '));
+      expect(
+        emitted.some((message) =>
+          message.includes('Unknown output style "EVIL"'),
+        ),
+      ).toBe(true);
+      // A repo-committed .qwen/settings.json is untrusted input; the raw
+      // value must never reach the terminal through the warning.
+      for (const message of emitted) {
+        // eslint-disable-next-line no-control-regex
+        expect(message).not.toMatch(/[\u0000-\u001f\u007f]/);
+      }
+    });
+
+    it('names the flag when the unknown style came from --output-style', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js', '--output-style', 'Verbose'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('(from --output-style)'),
+      );
+    });
+
+    // `loadSettings` casts parsed settings.json to `Settings` without checking
+    // value types, so a hand-edited non-string value reaches this code as-is.
+    // Starting up beats a TypeError that locks everyone out of the project.
+    it.each([
+      ['a number', 1],
+      ['a boolean', true],
+      ['an object', {}],
+      ['an array', ['Concise']],
+    ])(
+      'warns and starts with the default style when the setting is %s',
+      async (_label, value) => {
+        const errorSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+        const config = await loadCliConfig(
+          { general: { outputStyle: value as unknown as string } },
+          argv,
+        );
+        expect(config.getOutputStyle()).toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Invalid output style value (from general.outputStyle)',
+          ),
+        );
+      },
+    );
+
+    it('warns and starts with the default style when --output-style is repeated', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // yargs delivers an array for a repeated flag despite `type: 'string'`.
+      process.argv = [
+        'node',
+        'script.js',
+        '--output-style',
+        'Concise',
+        '--output-style',
+        'Proactive',
+      ];
+      const argv = await parseArguments();
+      expect(Array.isArray(argv.outputStyle)).toBe(true);
+      const config = await loadCliConfig({}, argv);
+      expect(config.getOutputStyle()?.name).toBe('Proactive');
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '--output-style was given 2 times; using the last value.',
+        ),
+      );
+    });
+
+    it('names the received shape when the setting is not a string', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 42 as unknown as string } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Invalid output style value (from general.outputStyle): expected a string, got number',
+        ),
+      );
+    });
+
+    it('treats a null setting as no style, without warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: null as unknown as string } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('lets an empty --output-style fall through to the setting', async () => {
+      process.argv = ['node', 'script.js', '--output-style', ''];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Concise');
+    });
+
+    it('lets a zero-width-only --output-style fall through to the setting', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // `trim()` leaves U+200B in place, so a guard written on it alone would
+      // count this as given and drop the setting with no warning — the same
+      // input the user cannot tell apart from `--output-style ''`.
+      process.argv = ['node', 'script.js', '--output-style', '\u200b'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Concise');
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not fall back to the setting when the flag names an unknown style', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js', '--output-style', 'Verbose'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+    });
+
+    it('drops bidi and zero-width characters before matching or echoing', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const looksLikeConcise = await loadCliConfig(
+        { general: { outputStyle: 'Con\u200bcise\ufeff' } },
+        argv,
+      );
+      expect(looksLikeConcise.getOutputStyle()?.name).toBe('Concise');
+
+      resetOutputStyleWarningsForTesting();
+      await loadCliConfig(
+        { general: { outputStyle: '\u202eesobreV\u202c' } },
+        argv,
+      );
+      const warning = errorSpy.mock.calls.at(-1)?.[0] as string;
+      expect(warning).toContain('Unknown output style "esobreV"');
+      expect(warning).not.toMatch(
+        /[\u202a-\u202e\u2066-\u2069\u200b-\u200f\ufeff]/,
+      );
+    });
+
+    it('bounds how much of an unknown style name is echoed', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ general: { outputStyle: 'x'.repeat(500) } }, argv);
+      const warning = errorSpy.mock.calls.at(-1)?.[0] as string;
+      expect(warning).toContain(`"${'x'.repeat(64)}…"`);
+      expect(warning).not.toContain('x'.repeat(65));
+    });
+
+    it('prints a given warning once even when loadCliConfig runs again', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ general: { outputStyle: 'Verbose' } }, argv);
+      await loadCliConfig({ general: { outputStyle: 'Verbose' } }, argv);
+      expect(
+        errorSpy.mock.calls.filter(([msg]) =>
+          String(msg).includes('Unknown output style "Verbose"'),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it.each(['--bare', '--safe-mode'])(
+      'ignores the setting under %s but still honors the flag',
+      async (flag) => {
+        process.argv = ['node', 'script.js', flag];
+        let argv = await parseArguments();
+        const fromSetting = await loadCliConfig(
+          { general: { outputStyle: 'Concise' } },
+          argv,
+        );
+        expect(fromSetting.getOutputStyle()).toBeUndefined();
+
+        process.argv = ['node', 'script.js', flag, '--output-style', 'Concise'];
+        argv = await parseArguments();
+        const fromFlag = await loadCliConfig({}, argv);
+        expect(fromFlag.getOutputStyle()?.name).toBe('Concise');
+      },
+    );
+  });
+
   it('should propagate runtime sleep prevention setting', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1376,6 +2418,32 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionWriterLeaseEnabled: true,
+      }),
+    );
+  });
+
+  it('keeps Session Workflow disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionWorkflowEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the Session Workflow opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { sessionWorkflow: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionWorkflowEnabled: true,
       }),
     );
   });
@@ -1637,6 +2705,107 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('rebinds a selective restore projection to the forked session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn(async (sessionId: string) => ({
+      sessionId,
+      filePath: `/mock/${sessionId}.jsonl`,
+      startTime: '2026-08-13T00:00:00.000Z',
+      lastUpdated: '2026-08-13T00:00:00.000Z',
+      runtime: {
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        recording: { lastCompletedUuid: 'leaf', turnParentUuids: [] },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      },
+    }));
+
+    const config = await loadCliConfig(
+      {},
+      { resume: sourceSessionId, forkSession: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { sessionRestore: { projectionSource } },
+    );
+
+    const forkedSessionId = config.getSessionId();
+    expect(mockSessionServiceInstance.forkSession).toHaveBeenCalledWith(
+      sourceSessionId,
+      forkedSessionId,
+    );
+    expect(projectionSource).toHaveBeenCalledOnce();
+    expect(projectionSource).toHaveBeenCalledWith(forkedSessionId);
+    expect(mockSessionServiceInstance.loadSession).not.toHaveBeenCalled();
+    const configParams = mockConfigConstructorParams.mock.calls.at(-1)?.[0];
+    expect(configParams).toEqual(
+      expect.objectContaining({
+        sessionId: forkedSessionId,
+        sessionData: undefined,
+        sessionRestoreProjection: expect.objectContaining({
+          sessionId: forkedSessionId,
+        }),
+        sessionRestoreProjectionSource: expect.any(Function),
+      }),
+    );
+
+    const deferredProjection =
+      await configParams.sessionRestoreProjectionSource();
+    expect(deferredProjection).toEqual(
+      expect.objectContaining({ sessionId: forkedSessionId }),
+    );
+    expect(projectionSource).toHaveBeenNthCalledWith(2, forkedSessionId);
+  });
+
+  it('preloads a selective projection when a non-ACP host cannot acquire a writer lease', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn(async (sessionId: string) => ({
+      sessionId,
+      filePath: `/mock/${sessionId}.jsonl`,
+      startTime: '2026-08-13T00:00:00.000Z',
+      lastUpdated: '2026-08-13T00:00:00.000Z',
+      runtime: {
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        recording: { lastCompletedUuid: 'leaf', turnParentUuids: [] },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      },
+    }));
+
+    await loadCliConfig(
+      { experimental: { sessionWriterLease: true } },
+      { resume: sourceSessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { sessionRestore: { projectionSource } },
+    );
+
+    expect(projectionSource).toHaveBeenCalledOnce();
+    expect(projectionSource).toHaveBeenCalledWith(sourceSessionId);
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        experimentalZedIntegration: false,
+        sessionWriterLeaseEnabled: true,
+        sessionRestoreProjection: expect.objectContaining({
+          sessionId: sourceSessionId,
+        }),
+      }),
+    );
+  });
+
   it('should explain when --fork-session fails to copy the source session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
@@ -1684,7 +2853,43 @@ describe('loadCliConfig', () => {
 
   it('should exit when a caller-supplied sessionId already exists (default CLI behavior)', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
-    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(true);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      sessionId,
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(loadCliConfig({}, { sessionId } as CliArgs)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should exit when a caller-supplied sessionId matches a legacy case-variant transcript', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    // The id is free in its exact spelling, but a legacy uppercase twin
+    // occupies it — creating would mint a permanently unrestorable pair.
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      sessionId.toUpperCase(),
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(loadCliConfig({}, { sessionId } as CliArgs)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should exit when the case-insensitive occupancy check reports a conflict', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockRejectedValue(
+      new SessionIdCaseConflictError(sessionId),
+    );
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
@@ -1698,7 +2903,9 @@ describe('loadCliConfig', () => {
 
   it('should throw SessionIdConflictError instead of exiting when throwOnSessionIdConflict is set', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
-    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(true);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      sessionId,
+    );
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
@@ -1722,7 +2929,9 @@ describe('loadCliConfig', () => {
 
   it('should not throw for a fresh caller-supplied sessionId when throwOnSessionIdConflict is set', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
-    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(false);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      undefined,
+    );
 
     const config = await loadCliConfig(
       {},
@@ -1737,6 +2946,54 @@ describe('loadCliConfig', () => {
     );
 
     expect(config.getSessionId()).toBe(sessionId);
+  });
+
+  it('canonicalizes a mixed-case caller-supplied sessionId before storing it', async () => {
+    const sessionId = '123E4567-E89B-12D3-A456-426614174000';
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      undefined,
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId.toLowerCase());
+  });
+
+  it('skips the occupancy check for a daemon-generated sessionId', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    // A failing occupancy scan (EACCES/EMFILE/EIO fail closed) must not
+    // reject an internally generated fresh UUID on the id-less creation hot
+    // path — the check exists for caller-chosen ids only.
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockRejectedValue(
+      new Error('EACCES: chats/archive unreadable'),
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId, sessionIdGenerated: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(
+      mockSessionServiceInstance.findSessionIdIgnoringCase,
+    ).not.toHaveBeenCalled();
   });
 
   it('should use internal sandbox session ID without treating it as a new session', async () => {
@@ -1777,9 +3034,9 @@ describe('loadCliConfig', () => {
     const settings: Settings = {};
     const defaultContextFiles = ['QWEN.md', 'AGENTS.md'];
     const getAllSpy = vi
-      .spyOn(ServerConfig, 'getAllGeminiMdFilenames')
+      .spyOn(ServerConfig, 'getAllMemoryFilenames')
       .mockReturnValue(defaultContextFiles);
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -1791,8 +3048,8 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { context: { fileName: 'CUSTOM_CONTEXT.md' } };
-    const getAllSpy = vi.spyOn(ServerConfig, 'getAllGeminiMdFilenames');
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const getAllSpy = vi.spyOn(ServerConfig, 'getAllMemoryFilenames');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -1973,6 +3230,8 @@ describe('loadCliConfig', () => {
     };
 
     it('returns undefined when neither settings nor env configure web search', async () => {
+      // `undefined` means "derive the backend from the active provider" —
+      // it must not be confused with an explicit opt-out.
       const config = await loadWithSettings({});
       expect(config.getWebSearchSettings()).toBeUndefined();
     });
@@ -2054,6 +3313,60 @@ describe('loadCliConfig', () => {
       );
     });
 
+    it('lets WEB_SEARCH_TIMEOUT_MS override tools.webSearch.timeoutMs', async () => {
+      vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', '90000');
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 30000 } },
+      });
+      expect(config.getWebSearchSettings()?.timeoutMs).toBe(90000);
+    });
+
+    it('ignores an empty, non-numeric or non-positive WEB_SEARCH_TIMEOUT_MS', async () => {
+      for (const raw of ['', 'abc', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { timeoutMs: 30000 } },
+        });
+        expect(config.getWebSearchSettings()?.timeoutMs).toBe(30000);
+      }
+    });
+
+    it('passes a budget-only setting through without other web search keys', async () => {
+      // Core still treats this as the automatic path: only model or an
+      // env-declared backend make the configuration explicit.
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 45000 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ timeoutMs: 45000 });
+    });
+
+    it('lets WEB_SEARCH_MAX_PER_SESSION override tools.webSearch.maxPerSession', async () => {
+      vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', '50');
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()?.maxPerSession).toBe(50);
+    });
+
+    it('ignores an empty, non-numeric, fractional or non-positive WEB_SEARCH_MAX_PER_SESSION', async () => {
+      for (const raw of ['', 'abc', '1.5', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { maxPerSession: 10 } },
+        });
+        expect(config.getWebSearchSettings()?.maxPerSession).toBe(10);
+      }
+    });
+
+    it('passes a cap-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    // Both modes must turn the tool off explicitly: leaving the settings
+    // undefined would let the registry derive a backend from the provider.
     it('disables web search in safe mode', async () => {
       process.argv = ['node', 'script.js', '--safe-mode'];
       const argv = await parseArguments();
@@ -2061,7 +3374,14 @@ describe('loadCliConfig', () => {
         { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
         argv,
       );
-      expect(config.getWebSearchSettings()).toBeUndefined();
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
+    });
+
+    it('disables web search in safe mode even when nothing is configured', async () => {
+      process.argv = ['node', 'script.js', '--safe-mode'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
     });
 
     it('disables web search in bare mode', async () => {
@@ -2071,7 +3391,14 @@ describe('loadCliConfig', () => {
         { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
         argv,
       );
-      expect(config.getWebSearchSettings()).toBeUndefined();
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
+    });
+
+    it('disables web search in bare mode even when nothing is configured', async () => {
+      process.argv = ['node', 'script.js', '--bare'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
     });
   });
 });
@@ -2431,7 +3758,7 @@ describe('mergeExcludeTools', () => {
     expect(config.getPermissionsDeny()).toHaveLength(2);
   });
 
-  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+  it('should disable both deferred-tool bridges when tools.toolSearch.enabled is false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2439,25 +3766,28 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v4 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v3 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+  it('should keep the stable bridge enabled for prefixed deepseek-chat models', async () => {
     process.argv = [
       'node',
       'script.js',
@@ -2467,18 +3797,20 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should not auto-disable tool_search for non-deepseek models', async () => {
+  it('should keep the stable bridge enabled for non-deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'qwen-max'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should respect explicit enabled:true override for deepseek models', async () => {
+  it('should accept explicit enabled:true for deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2486,6 +3818,7 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
   it('should pass tools.toolSearch.threshold through to the config', async () => {
@@ -2498,11 +3831,79 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolSearchThreshold()).toBe(25);
   });
 
-  it('should default tools.toolSearch.threshold to 10', async () => {
+  it('should default tools.toolSearch.threshold to 0', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getToolSearchThreshold()).toBe(10);
+    expect(config.getToolSearchThreshold()).toBe(0);
+  });
+
+  it('should enable CodeModeOnly only when explicitly configured', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig({}, argv, undefined, []);
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(codeMode.getCodeModeOnly()).toBe(true);
+    expect(direct.getToolMode()).toBe('direct');
+    expect(codeMode.getToolMode()).toBe('code_mode_only');
+  });
+
+  it.each(['--safe-mode', '--bare'])(
+    'should disable CodeModeOnly in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { codeModeOnly: true } },
+        argv,
+        undefined,
+        [],
+      );
+
+      expect(config.getCodeModeOnly()).toBe(false);
+    },
+  );
+
+  it('should default tools.listDirectory.enabled to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(false);
+  });
+
+  it('should enable list_directory when tools.listDirectory.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { listDirectory: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(true);
+  });
+
+  it('should default tools.todoWrite.enabled to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.isTodoWriteEnabled()).toBe(false);
+  });
+
+  it('should enable todo_write when tools.todoWrite.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { todoWrite: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isTodoWriteEnabled()).toBe(true);
   });
 
   it('should force tools.toolSearch.threshold to 0 in safe mode', async () => {
@@ -3355,6 +4756,48 @@ describe('loadCliConfig with includeDirectories', () => {
     );
   });
 
+  it('ignores ambient roots and LSP for a host-managed provisional workspace', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+        loadFromIncludeDirectories: true,
+      },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { provisionalWorkspace: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        provisionalWorkspace: true,
+        includeDirectories: [],
+        loadMemoryFromIncludeDirectories: false,
+        lsp: { enabled: false },
+      }),
+    );
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
   it('should ignore implicit startup context inputs in bare mode', async () => {
     const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
     const cliPath = path.resolve(path.sep, 'cli', 'path1');
@@ -3458,6 +4901,114 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});
     expect(config.isLspEnabled()).toBe(false);
+  });
+
+  it('transports the trusted host policy and ignores an undeclared top-level setting', async () => {
+    vi.mocked(fs.statSync).mockReturnValue({
+      isDirectory: () => true,
+    } as import('node:fs').Stats);
+    vi.mocked(fs.realpathSync).mockImplementation((value) => value.toString());
+    process.argv = ['node', 'script.js', '--bare', '-p', 'fixture'];
+    const argv = await parseArguments();
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+    const config = await loadCliConfig(
+      {},
+      argv,
+      policy.workspace,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { shellExecutionSandbox: policy },
+    );
+    expect(config.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
+    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual(
+      policy.maskedPaths,
+    );
+    expect(config.getCoreTools()).toEqual(
+      expect.arrayContaining([
+        ToolNames.SHELL,
+        ToolNames.TASK_STOP,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+      ]),
+    );
+    const ordinary = await loadCliConfig(
+      { shellExecutionSandbox: policy } as Settings,
+      argv,
+      policy.workspace,
+      [],
+    );
+    expect(ordinary.getShellExecutionSandbox()).toBeUndefined();
+    const rejectedModes: Array<[string, Partial<CliArgs>]> = [
+      ['prompt-interactive frontend', { promptInteractive: 'fixture' }],
+      ['stream-json frontend', { inputFormat: 'stream-json' }],
+      ['worktree startup', { worktree: 'review' }],
+      ['additional context directories', { includeDirectories: ['/outside'] }],
+    ];
+    for (const [, overrides] of rejectedModes) {
+      await expect(
+        loadCliConfig(
+          {},
+          { ...argv, ...overrides },
+          policy.workspace,
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { shellExecutionSandbox: policy },
+        ),
+      ).rejects.toThrow('does not yet support');
+    }
+    const normal = await loadCliConfig(
+      {},
+      { ...argv, bare: false },
+      policy.workspace,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { shellExecutionSandbox: policy },
+    );
+    expect(normal.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
+    expect(normal.getBareMode()).toBe(false);
+    vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
+    await expect(
+      loadCliConfig(
+        {},
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow('agent execution environments');
   });
 
   it('should ignore coreTools overrides in bare mode', async () => {
@@ -3698,6 +5249,129 @@ describe('loadCliConfig safe mode', () => {
   });
 });
 
+describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    vi.spyOn(process, 'cwd').mockReturnValue(
+      path.resolve(path.sep, 'home', 'user', 'project'),
+    );
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('passes settings.tools.eager as the eager tool allowlist', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: ['ReadFile', 'Shell'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getEagerTools()).toEqual(['ReadFile', 'Shell']);
+  });
+
+  it('keeps an explicitly empty tools.eager list active', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: [],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    // `[]` is an active allowlist naming nothing (defer everything), unlike
+    // `tools.core`, where an empty list is treated as unset.
+    expect(config.getEagerTools()).toEqual([]);
+  });
+
+  it('warns when normalization drops tools.eager entries (#10075)', async () => {
+    // Normalization strips empty/non-string entries before
+    // PermissionManager.initialize() sees them, and the collapsed list is
+    // still the ACTIVE defer-everything allowlist — the drop must leave a
+    // signal instead of silently demoting the whole toolset.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: [''],
+      },
+    };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('tools.eager: ignoring 1 unusable entry'),
+    );
+    // The collapse to the active-but-empty allowlist is deliberate
+    // (fail-closed); only the silence was the bug.
+    expect(config.getEagerTools()).toEqual([]);
+    warnSpy.mockRestore();
+  });
+
+  it('does not treat permissions.allow as the eager allowlist', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['ReadFile', 'Shell'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    // Pure auto-approval grant (#10075) — the eager surface is driven
+    // solely by tools.eager and stays unrestricted here.
+    expect(config.getPermissionsAllow()).toContain('ReadFile');
+    expect(config.getEagerTools()).toBeUndefined();
+  });
+
+  it('does not treat --allowed-tools as the eager allowlist', async () => {
+    process.argv = ['node', 'script.js', '--allowed-tools', 'ReadFile'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    // Auto-approval grant only — the eager surface stays unrestricted.
+    expect(config.getPermissionsAllow()).toContain('ReadFile');
+    expect(config.getEagerTools()).toBeUndefined();
+  });
+
+  it('strips tools.eager in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: ['ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getEagerTools()).toBeUndefined();
+  });
+
+  it('strips tools.eager in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: ['ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getEagerTools()).toBeUndefined();
+  });
+});
+
 describe('loadCliConfig chatCompression', () => {
   const originalArgv = process.argv;
 
@@ -3817,6 +5491,62 @@ describe('loadCliConfig useBuiltinRipgrep', () => {
     const settings: Settings = { tools: { useBuiltinRipgrep: true } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getUseBuiltinRipgrep()).toBe(true);
+  });
+});
+
+describe('loadCliConfig workflowsEnabled', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
+    vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', undefined);
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should be disabled by default when workflowsEnabled is not set in settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(false);
+  });
+
+  // The regression this whole setting exists to prevent: `workflowsEnabled`
+  // was declared on ConfigParameters and read by isWorkflowsEnabled(), but
+  // loadCliConfig never wrote it — so the setting was a dead switch and the
+  // env var was the only way in.
+  it('should be enabled when workflowsEnabled is set to true in settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { workflowsEnabled: true } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(true);
+  });
+
+  it('should let the QWEN_CODE_DISABLE_WORKFLOWS kill switch override a true setting', async () => {
+    vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { workflowsEnabled: true } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(false);
+  });
+
+  it('should let QWEN_CODE_ENABLE_WORKFLOWS enable workflows when the setting is false', async () => {
+    vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { workflowsEnabled: false } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(true);
   });
 });
 
@@ -3961,6 +5691,7 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
   });
 
   it('should be interactive if prompt-interactive is set', async () => {
@@ -3977,6 +5708,31 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should honor an explicit interactive shell setting in headless mode', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { enableInteractiveShell: true } } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should honor an explicit non-interactive shell setting in interactive mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { enableInteractiveShell: false } } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
   });
 
   it('should not be interactive if prompt is set', async () => {
@@ -3985,6 +5741,42 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
+  });
+
+  it('should keep the interactive shell default for ACP with a prompt', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should keep the interactive shell default for configured file input', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { dualOutput: { inputFile: '/tmp/input.jsonl' } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should keep the interactive shell default for stream-json input', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--prompt',
+      'test',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
   });
 
   it('should not be interactive if positional prompt words are provided with other flags', async () => {
@@ -3993,6 +5785,7 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
   });
 
   it('should not be interactive if positional prompt words are provided with multiple flags', async () => {
@@ -4103,9 +5896,19 @@ describe('loadCliConfig approval mode', () => {
   it('should normalize approval mode values from settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const settings: Settings = {
-      tools: { approvalMode: ServerConfig.ApprovalMode.AUTO_EDIT },
-    };
+    const settings = {
+      tools: { approvalMode: 'auto_edit' },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+  });
+
+  it('should normalize legacy autoedit approval mode from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: { approvalMode: 'autoedit' },
+    } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
   });
@@ -4189,6 +5992,55 @@ describe('loadCliConfig approval mode', () => {
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
     });
+
+    it('should not claim an override when no privileged mode was requested', async () => {
+      mockWriteStderrLine.mockClear();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, undefined, []);
+      // AUTO is the built-in fall-through, not a caller request, so the
+      // downgrade still happens but must not be reported as an override.
+      expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+      expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Approval mode overridden'),
+      );
+    });
+
+    it('should still warn when a privileged mode was requested', async () => {
+      mockWriteStderrLine.mockClear();
+      process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, undefined, []);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Approval mode overridden'),
+      );
+    });
+  });
+
+  it('should treat an undecided folder as untrusted', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+  });
+
+  it('should stay quiet for an undecided folder that requested nothing', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    mockWriteStderrLine.mockClear();
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Approval mode overridden'),
+    );
   });
 });
 
@@ -4309,6 +6161,18 @@ describe('Output format', () => {
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
   });
 
+  it('should use stream-json format from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.STREAM_JSON);
+  });
+
   it('should prioritize the format from argv', async () => {
     process.argv = ['node', 'script.js', '--output-format', 'json'];
     const argv = await parseArguments();
@@ -4319,6 +6183,18 @@ describe('Output format', () => {
       [],
     );
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
+  });
+
+  it('should prioritize argv over a differing settings format', async () => {
+    process.argv = ['node', 'script.js', '--output-format', 'text'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.TEXT);
   });
 
   it('should error on invalid --output-format argument', async () => {
@@ -4573,6 +6449,11 @@ describe('sandbox image resolution precedence', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     delete process.env['QWEN_SANDBOX_IMAGE'];
+    // These cases measure image precedence, not platform-dependent backend
+    // selection: on macOS the un-stubbed resolution picks sandbox-exec, an
+    // in-place backend that carries no image. Pin a container backend — the
+    // probe is answered by the spawnSync mock above (`docker version` → 0).
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
   });
 
   afterEach(() => {
@@ -4834,6 +6715,63 @@ describe('loadCliConfig skills.directories', () => {
   });
 });
 
+describe('loadCliConfig omni settings key validation', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    process.argv = ['node', 'script.js'];
+  });
+
+  it('accepts known nested omni keys (storage, memory, processing maps)', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      omni: {
+        delivery: {
+          upload: {
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKeyEnv: 'DASHSCOPE_API_KEY',
+            model: 'qwen3.5-omni-plus',
+          },
+        },
+        storage: { retentionDays: 7, maxTotalBytes: 1024 * 1024 * 1024 },
+        memory: { recall: { mode: 'active' } },
+        processing: {
+          // Free-form map: policy names are user-defined — the walk must
+          // stop at map nodes instead of rejecting every name.
+          fixedPolicies: {
+            'my-policy': { priority: 10, toolName: 'omni_extract_audio' },
+          },
+        },
+      },
+    } as Settings;
+
+    await expect(loadCliConfig(settings, argv)).resolves.toBeDefined();
+  });
+
+  it('rejects an unknown key directly under omni', async () => {
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storag: { retentionDays: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni".*"storag"/s,
+    );
+  });
+
+  it('rejects an unknown NESTED key with its full path', async () => {
+    // The deletion-controlling knobs live at omni.storage.* — a typo
+    // there must fail loud instead of leaving the GC on defaults.
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storage: { retentionDay: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni\.storage".*"retentionDay"/s,
+    );
+  });
+});
+
 describe('loadCliConfig skills.disabledLevels', () => {
   beforeEach(() => {
     process.argv = ['node', 'script.js'];
@@ -4886,5 +6824,61 @@ describe('loadCliConfig skills.disabledLevels', () => {
     const config = await loadCliConfig(settings, argv);
 
     expect(config.getDisabledSkillLevels()).toEqual(new Set());
+  });
+});
+
+describe('loadCliConfig goals.modelProposed', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to alwaysAsk when goals.modelProposed is not set', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+  });
+
+  // The wiring line in loadCliConfig is the only way the setting reaches
+  // core; without it "disabled" would be a dead switch and the model would
+  // keep the propose_goal tool.
+  it('passes goals.modelProposed = disabled through to core', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { goals: { modelProposed: 'disabled' } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getModelProposedGoals()).toBe('disabled');
+  });
+
+  it('falls back to the core default for an unknown value', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings = {
+      goals: { modelProposed: 'auto' },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+  });
+});
+
+describe('normalizeModelProposedGoals', () => {
+  it('passes the two known modes through and drops anything else', () => {
+    expect(normalizeModelProposedGoals('alwaysAsk')).toBe('alwaysAsk');
+    expect(normalizeModelProposedGoals('disabled')).toBe('disabled');
+    // An unknown value must not reach core as a third mode; the core
+    // default (alwaysAsk) applies instead.
+    expect(normalizeModelProposedGoals('auto')).toBeUndefined();
+    expect(normalizeModelProposedGoals(undefined)).toBeUndefined();
+    expect(normalizeModelProposedGoals(true)).toBeUndefined();
   });
 });

@@ -56,13 +56,19 @@ function extensionSkill(name: string): SkillConfig {
 }
 
 describe('extension skill activity helpers', () => {
-  it('matches skills from inactive extensions by name and displayName', () => {
+  it('matches skills from inactive extensions only by canonical name', () => {
     const refs = inactiveExtensionSkillRefs(
       configWithExtensions([
         extension({
           name: 'canonical-ext',
-          displayName: 'Display Ext',
+          displayName: 'Shared Display',
           isActive: false,
+          skills: [extensionSkill('audit')],
+        }),
+        extension({
+          name: 'active-ext',
+          displayName: 'Shared Display',
+          isActive: true,
           skills: [extensionSkill('audit')],
         }),
       ]),
@@ -71,9 +77,40 @@ describe('extension skill activity helpers', () => {
     expect(
       isInactiveExtensionSkill(skill('audit', 'canonical-ext'), refs),
     ).toBe(true);
-    expect(isInactiveExtensionSkill(skill('audit', 'Display Ext'), refs)).toBe(
-      true,
+    expect(
+      isInactiveExtensionSkill(skill('audit', 'Shared Display'), refs),
+    ).toBe(false);
+    expect(isInactiveExtensionSkill(skill('audit', 'active-ext'), refs)).toBe(
+      false,
     );
+  });
+
+  it('matches a registry-qualified skill through its authored name', () => {
+    // The registry names an extension skill `ext:audit` while the manifest —
+    // what `inactiveExtensionSkillRefs` reads — keeps `audit`. Without the
+    // authored-name fallback the lookup misses, which reads as "not inactive"
+    // and would expose an inactive extension's skill.
+    const refs = inactiveExtensionSkillRefs(
+      configWithExtensions([
+        extension({
+          name: 'ext',
+          isActive: false,
+          skills: [extensionSkill('audit')],
+        }),
+      ]),
+    );
+
+    expect(
+      isInactiveExtensionSkill(
+        {
+          name: 'ext:audit',
+          authoredName: 'audit',
+          level: 'extension',
+          extensionName: 'ext',
+        },
+        refs,
+      ),
+    ).toBe(true);
   });
 
   it('ignores skills from active extensions', () => {
@@ -92,7 +129,7 @@ describe('extension skill activity helpers', () => {
     );
   });
 
-  it('collects inactive extension skill names for commands without extensionName', () => {
+  it('collects inactive extension skill registry names', () => {
     const names = inactiveExtensionSkillNames(
       configWithExtensions([
         extension({
@@ -108,7 +145,7 @@ describe('extension skill activity helpers', () => {
       ]),
     );
 
-    expect(names).toEqual(new Set(['audit']));
+    expect(names).toEqual(new Set(['inactive-ext:audit']));
   });
 
   it('ignores non-extension skills', () => {

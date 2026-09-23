@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -171,6 +172,12 @@ public final class DaemonClient implements AutoCloseable {
                         "The daemon does not advertise session_scope_override; "
                                 + "the SDK cannot guarantee the requested session scope");
             }
+            if (request.getSessionId() != null
+                    && !capabilities.supports("session_id_override")) {
+                throw new DaemonProtocolException(
+                        "The daemon does not advertise session_id_override; "
+                                + "the SDK cannot guarantee the requested session ID");
+            }
             synchronized (lifecycleLock) {
                 ensureOpen();
             }
@@ -196,8 +203,21 @@ public final class DaemonClient implements AutoCloseable {
                 String clientId = JsonSupport.requiredString(json, "clientId",
                         "session");
                 validateClientId(clientId);
+                String sessionId = JsonSupport.requiredString(json, "sessionId",
+                        "session");
+                String requestedSessionId = request.getSessionId() == null
+                        ? null
+                        : request.getSessionId().toLowerCase(Locale.ROOT);
+                if (requestedSessionId != null
+                        && !requestedSessionId.equals(sessionId)) {
+                    throw new SessionCreationOutcomeUnknownException(
+                            new DaemonProtocolException(
+                                    "Daemon returned session \"" + sessionId
+                                            + "\" instead of requested session \""
+                                            + requestedSessionId + "\""));
+                }
                 DaemonSession session = new DaemonSession(
-                        JsonSupport.requiredString(json, "sessionId", "session"),
+                        sessionId,
                         JsonSupport.requiredString(json, "workspaceCwd", "session"),
                         JsonSupport.requiredBoolean(json, "attached", "session"),
                         clientId,

@@ -2,7 +2,7 @@
 
 ## Overview
 
-`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts`) is the F2 (#4175 commit 5) workspace-scoped pool: multiple ACP sessions inside one runtime share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. When pool mode is enabled, every started ACP child owns an independent pool (`QwenAgent.mcpPool`). Production attempts to preheat the primary child and retries on first use after failure; a trusted secondary starts its child on demand, while an untrusted secondary starts neither. The pool is constructed once at agent startup with the runtime's bootstrap `Config` and survives session lifecycles. Entries reference-count session attaches and close after a configurable grace period when the reference count reaches zero.
+`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts`) is the F2 (#4175 commit 5) workspace-scoped pool: multiple ACP sessions inside one runtime share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. When pool mode is enabled, every started ACP child owns an independent pool (`QwenAgent.mcpPool`). Production attempts to preheat the trusted primary child for compatibility; trusted secondaries start on demand, and an untrusted secondary starts neither the child nor its pool. Legacy primary routes retain their existing compatibility behavior. The pool is constructed once at agent startup with the runtime's bootstrap `Config` and survives session lifecycles. Entries reference-count session attaches and close after a configurable grace period when the reference count reaches zero.
 
 It is the main mechanism that prevents a multi-session daemon from forking one copy of every MCP server per session.
 
@@ -315,11 +315,12 @@ ordering.
 The pool key comes from `fingerprint(cfg)` in `mcp-pool-key.ts`. The hash covers
 all transport-defining fields:
 
-> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, oauth`
+> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, versionNegotiation, oauth`
 
 Per-session filtering and metadata fields (`includeTools`, `excludeTools`,
 `trust`, `description`, `extensionName`, `discoveryTimeoutMs`) are excluded, so
-sessions with different filters can share one entry.
+sessions with different filters can share one entry. The automatic negotiation
+opt-in is included because it changes how the underlying process connects.
 
 For the OAuth cell, `canonicalOAuth(o)` hashes every `MCPOAuthConfig` field:
 `clientId`, `clientSecret`, sorted `scopes`, sorted `audiences`,

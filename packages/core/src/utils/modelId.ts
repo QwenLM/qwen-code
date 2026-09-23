@@ -5,7 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from './auth-type.js';
 
 export interface ResolvedModelId {
   authType?: AuthType;
@@ -43,6 +43,7 @@ const AUTH_TYPES = new Set<AuthType>(Object.values(AuthType));
 
 export {
   RUNTIME_SNAPSHOT_PREFIX,
+  buildRuntimeSnapshotId,
   stripRuntimeSnapshotPrefix,
 } from './runtimeModelPrefix.js';
 

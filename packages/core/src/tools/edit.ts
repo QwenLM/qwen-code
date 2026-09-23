@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type {
+  FileDiff,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
@@ -20,6 +21,11 @@ import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import {
+  captureRuntimeFileVersion,
+  writeRuntimeFile,
+} from '../sandbox/runtime-file.js';
+import type { SandboxFileVersion } from '../sandbox/file-version.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import {
@@ -114,6 +120,7 @@ export interface EditToolParams {
 }
 
 interface CalculatedEdit {
+  sandboxFileVersion?: SandboxFileVersion | null;
   currentContent: string | null;
   newContent: string;
   occurrences: number;
@@ -144,6 +151,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @throws File system errors if reading the file fails unexpectedly (e.g., permissions)
    */
   private async calculateEdit(params: EditToolParams): Promise<CalculatedEdit> {
+    const sandboxFileVersion = captureRuntimeFileVersion(
+      this.config,
+      params.file_path,
+    );
     const replaceAll = params.replace_all ?? false;
     let currentContent: string | null = null;
     let fileExists = await isFilefileExists(params.file_path);
@@ -373,6 +384,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     return {
       currentContent,
       newContent,
+      sandboxFileVersion,
       occurrences,
       error,
       isNewFile,
@@ -415,7 +427,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       if (abortSignal.aborted) {
         throw error;
       }
-      const errorMsg = getErrorMessage(error);
+      const errorMsg =
+        isNodeError(error) && error.code === 'EISDIR'
+          ? `Target is a directory, not a file: ${this.params.file_path} (${error.code})`
+          : getErrorMessage(error);
       throw new Error(`Error preparing edit: ${errorMsg}`);
     }
 
@@ -545,14 +560,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       //
       // It does NOT eliminate the race. A concurrent writer that
       // lands between this stat and the writeTextFile call below
-      // can still be clobbered — that residual is an OS-level
-      // limitation of the stat-then-write pattern, and the only
-      // way to close it is an atomic write (write to a temp file,
-      // then rename) or a content-hash post-check that re-reads
-      // the bytes after the write. Both are deferred to a follow-up
-      // PR; operators who care about strict overwrite-protection
-      // should set `fileReadCacheDisabled: true` and rely on
-      // application-level locking.
+      // can still be clobbered. Atomic replacement is not compare-and-swap;
+      // the sandbox worker rechecks the prepared version before commit,
+      // but strict protection against concurrent writers requires locking.
       //
       // Run unconditionally (not gated on `editData.isNewFile`):
       // `isNewFile` was decided back in calculateEdit, but a file
@@ -597,7 +607,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // directories on the failure path — a real (if minor) FS
       // litter that the previous order created on every rejected
       // edit.
-      this.ensureParentDirectoriesExist(this.params.file_path);
+      if (!this.config.getShellExecutionSandbox?.()) {
+        this.ensureParentDirectoriesExist(this.params.file_path);
+      }
 
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
@@ -610,23 +622,35 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           // No explicit setting: auto-detect (e.g. .ps1 on non-UTF-8 Windows)
           useBOM = needsUtf8Bom(this.params.file_path);
         }
-        await this.config.getFileSystemService().writeTextFile({
-          path: this.params.file_path,
-          content: editData.newContent,
-          _meta: {
-            bom: useBOM,
+        await writeRuntimeFile(
+          this.config,
+          {
+            path: this.params.file_path,
+            content: editData.newContent,
+            toolWriteOrigin: 'edit',
+            _meta: {
+              bom: useBOM,
+            },
           },
-        });
+          editData.sandboxFileVersion,
+          signal,
+        );
       } else {
-        await this.config.getFileSystemService().writeTextFile({
-          path: this.params.file_path,
-          content: editData.newContent,
-          _meta: {
-            bom: editData.bom,
-            encoding: editData.encoding,
-            lineEnding: editData.lineEnding,
+        await writeRuntimeFile(
+          this.config,
+          {
+            path: this.params.file_path,
+            content: editData.newContent,
+            toolWriteOrigin: 'edit',
+            _meta: {
+              bom: editData.bom,
+              encoding: editData.encoding,
+              lineEnding: editData.lineEnding,
+            },
           },
-        });
+          editData.sandboxFileVersion,
+          signal,
+        );
       }
 
       // Track AI contribution for commit attribution
@@ -674,9 +698,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         'Current',
         'Proposed',
       );
-      const displayResult = {
+      const displayResult: FileDiff = {
         fileDiff,
         fileName,
+        filePath: this.params.file_path,
         originalContent: editData.currentContent,
         newContent: editData.newContent,
         diffStat,
@@ -733,7 +758,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         returnDisplay: `Error writing file: ${errorMsg}`,
         error: {
           message: errorMsg,
-          type: ToolErrorType.FILE_WRITE_FAILURE,
+          type:
+            isNodeError(error) &&
+            error.code === 'ESTALE' &&
+            this.config.getShellExecutionSandbox?.()
+              ? ToolErrorType.FILE_CHANGED_SINCE_READ
+              : isNodeError(error) && error.code === 'EISDIR'
+                ? ToolErrorType.TARGET_IS_DIRECTORY
+                : ToolErrorType.FILE_WRITE_FAILURE,
         },
       };
     }

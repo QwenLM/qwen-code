@@ -23,6 +23,14 @@ async function restoreAction(
   const { config } = services;
   const { addItem, loadHistory } = ui;
 
+  if (config?.getShellExecutionSandbox?.()) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: 'File restore is unavailable in tool sandbox.',
+    };
+  }
+
   const checkpointDir = config?.storage.getProjectTempCheckpointsDir();
 
   if (!checkpointDir) {
@@ -144,11 +152,12 @@ async function restoreAction(
           content: 'loadHistory function is not available.',
         };
       }
+      context.ui.clearPendingState?.();
       loadHistory(toolCallData.history);
     }
 
     if (toolCallData.clientHistory) {
-      await config?.getGeminiClient()?.setHistory(toolCallData.clientHistory);
+      await config?.getLlmClient()?.setHistory(toolCallData.clientHistory);
     }
 
     return {

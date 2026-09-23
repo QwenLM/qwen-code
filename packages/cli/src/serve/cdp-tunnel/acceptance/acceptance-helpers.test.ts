@@ -90,7 +90,11 @@ describe('CDP acceptance helpers', () => {
 
     try {
       await stopChild(child, { graceMs: 20 });
-      expect(child.signalCode).toBe('SIGKILL');
+      // Windows has no catchable POSIX signals: kill('SIGTERM') terminates
+      // the child directly, so stopChild never escalates to SIGKILL there.
+      expect(child.signalCode).toBe(
+        process.platform === 'win32' ? 'SIGTERM' : 'SIGKILL',
+      );
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill('SIGKILL');

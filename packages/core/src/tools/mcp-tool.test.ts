@@ -5,6 +5,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import sharp from 'sharp';
 import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
@@ -16,7 +17,9 @@ import {
 } from './mcp-tool.js';
 import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import type { Config } from '../config/config.js';
 import type { CallableTool, Part } from '@google/genai';
+import { SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
 import { ToolErrorType } from './tool-error.js';
 import {
   MCPServerStatus,
@@ -28,8 +31,22 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../utils/invocation-context.js';
+import * as imageView from '../utils/image-view.js';
+import * as inlineMediaLimit from '../core/inlineMediaLimit.js';
 
 vi.mock('node:fs/promises');
+
+const { mockDebugWarn } = vi.hoisted(() => ({ mockDebugWarn: vi.fn() }));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => ({
+    isEnabled: () => false,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: mockDebugWarn,
+    error: vi.fn(),
+  }),
+}));
 
 // Mock @google/genai mcpToTool and CallableTool
 // We only need to mock the parts of CallableTool that DiscoveredMCPTool uses.
@@ -147,6 +164,36 @@ describe('DiscoveredMCPTool', () => {
         })),
       }) satisfies McpDirectClient;
 
+    it.each(['summary', 'json', 'empty'] as const)(
+      'preserves CUA action handles with %s content',
+      async (kind) => {
+        const structuredContent = {
+          snapshot_id: 's00000001',
+          elements: [{ element_token: 's00000001:8', label: 'View' }],
+        };
+        const serialized = JSON.stringify(structuredContent);
+        const content =
+          kind === 'empty'
+            ? []
+            : [
+                {
+                  type: 'text' as const,
+                  text: kind === 'json' ? serialized : 'View menu',
+                },
+              ];
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({ content, structuredContent })),
+        };
+        const result = await createDirectTool(mcpClient, false)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expect(result.llmContent).toEqual([
+          { text: serialized },
+          ...(kind === 'summary' ? [{ text: 'View menu' }] : []),
+        ]);
+      },
+    );
+
     it('injects trusted request metadata for an allowed stdio tool', async () => {
       const mcpClient = successfulClient();
       const modelArguments = {
@@ -170,7 +217,6 @@ describe('DiscoveredMCPTool', () => {
             [INVOCATION_CONTEXT_META_KEY]: invocationContext,
           },
         },
-        undefined,
         expect.objectContaining({ onprogress: expect.any(Function) }),
       );
     });
@@ -235,6 +281,7 @@ describe('DiscoveredMCPTool', () => {
   afterEach(() => {
     removeMCPServerStatus(serverName);
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('constructor', () => {
@@ -681,6 +728,570 @@ describe('DiscoveredMCPTool', () => {
       );
     });
 
+    it('bounds an oversized image returned by an MCP tool', async () => {
+      const oversized = await sharp({
+        create: {
+          width: 3840,
+          height: 2160,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .png()
+        .toBuffer();
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'image',
+                  data: oversized.toString('base64'),
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const invocation = tool.build({ param: 'screenshot' });
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      const parts = toolResult.llmContent as Part[];
+      const inline = parts[1]!.inlineData!;
+      expect(inline.mimeType).toBe('image/jpeg');
+      const bounded = await sharp(
+        Buffer.from(inline.data!, 'base64'),
+      ).metadata();
+      expect(Math.max(bounded.width, bounded.height)).toBeLessThanOrEqual(1568);
+      expect(
+        Math.ceil(bounded.width / 28) * Math.ceil(bounded.height / 28),
+      ).toBeLessThanOrEqual(1568);
+    });
+
+    it('bounds images sequentially', async () => {
+      const mockBoundImageBuffer = vi.spyOn(imageView, 'boundImageBuffer');
+      let releaseFirst!: () => void;
+      const first = new Promise<null>((resolve) => {
+        releaseFirst = () => resolve(null);
+      });
+      mockBoundImageBuffer
+        .mockImplementationOnce(() => first)
+        .mockResolvedValueOnce(null);
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                { type: 'image', data: 'first', mimeType: 'image/png' },
+                { type: 'image', data: 'second', mimeType: 'image/png' },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const execution = tool
+        .build({ param: 'screenshots' })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(mockBoundImageBuffer).toHaveBeenCalled());
+      const callsBeforeRelease = mockBoundImageBuffer.mock.calls.length;
+      releaseFirst();
+      await execution;
+      expect(callsBeforeRelease).toBe(1);
+      expect(mockBoundImageBuffer).toHaveBeenCalledTimes(2);
+      // The renderer's error messages label bytes by their source; a bare mime
+      // type identifies no server, and several can be configured at once.
+      const firstLabel = mockBoundImageBuffer.mock.calls[0]?.[1];
+      expect(firstLabel).toContain(`${serverName}/${serverToolName}`);
+      expect(firstLabel).toContain('image/png');
+    });
+
+    describe('omni delivery exemption', () => {
+      // Under omni delivery the funnel uploads these parts by reference, so
+      // the inline clamp here would withhold an image it could deliver.
+      const omniStub = (deliveryActive: boolean, omniEnabled = true) => {
+        const isOmniDeliveryActive = vi.fn(() => deliveryActive);
+        const loadOmniMediaReader = vi.fn(async () => ({
+          isOmniDeliveryActive,
+        }));
+        const config = {
+          isOmniEnabled: vi.fn(() => omniEnabled),
+          loadOmniMediaReader,
+          getTruncateToolOutputThreshold: () => 1000,
+          getTruncateToolOutputLines: () => 50,
+          getUsageStatisticsEnabled: () => false,
+          isTrustedFolder: () => true,
+          storage: { getProjectTempDir: () => '/tmp/test-project' },
+        } as any;
+        return { config, loadOmniMediaReader, isOmniDeliveryActive };
+      };
+
+      const toolWith = (config: any) =>
+        new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined, // trust
+          undefined, // nameOverride
+          config,
+        );
+
+      // Shrink the clamp ceiling to 1 byte so any inline part would be
+      // withheld if the clamp ran, standing in for a real oversized payload.
+      const shrinkClamp = () => {
+        const realClamp = inlineMediaLimit.clampInlineMediaPart;
+        return vi
+          .spyOn(inlineMediaLimit, 'clampInlineMediaPart')
+          .mockImplementation((part, _limitBytes, remedy) =>
+            realClamp(part, 1, remedy),
+          );
+      };
+
+      const oversizedImageResponse = () => {
+        mockCallTool.mockResolvedValue([
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                content: [
+                  { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+                ],
+              },
+            },
+          },
+        ] as Part[]);
+      };
+
+      it('delivers an over-limit image to omni instead of withholding it', async () => {
+        const clamp = shrinkClamp();
+        // The decoder rejects a >100 MiB source and forwards the part as-is.
+        vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValue(
+          new imageView.ImageViewError(
+            'source_too_large',
+            `Image exceeds the 100 MB source limit: ${serverName}/${serverToolName} image/png`,
+          ),
+        );
+        oversizedImageResponse();
+        const { config, isOmniDeliveryActive } = omniStub(true);
+
+        const result = await toolWith(config)
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        expect(isOmniDeliveryActive).toHaveBeenCalledWith(config);
+        expect(clamp).not.toHaveBeenCalled();
+        expect(result.llmContent).toEqual([
+          {
+            text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
+          },
+          { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+        ]);
+      });
+
+      it('still withholds an over-limit image when omni delivery is inactive', async () => {
+        const clamp = shrinkClamp();
+        oversizedImageResponse();
+        const { config } = omniStub(false);
+
+        const result = await toolWith(config)
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        expect(clamp).toHaveBeenCalled();
+        const placeholder = (result.llmContent as Part[])[1]!;
+        expect(placeholder.text).toContain('[Media omitted: image/png');
+      });
+
+      it('does not load the omni module when omni is disabled', async () => {
+        // The cheap gate must run BEFORE the dynamic import: that import
+        // touches the filesystem, which breaks mock-fs suites and costs a
+        // module load for every non-omni user.
+        shrinkClamp();
+        oversizedImageResponse();
+        const { config, loadOmniMediaReader } = omniStub(true, false);
+
+        await toolWith(config)
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        expect(loadOmniMediaReader).not.toHaveBeenCalled();
+      });
+    });
+
+    it('never sends a non-image inline part to the renderer', async () => {
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'audio', mimeType: 'audio/wav', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      await tool
+        .build({ param: 'recording' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+    });
+
+    it('forwards oversized non-image inline media instead of a placeholder', async () => {
+      // Bounding is image-only by design: replacing an oversized audio block
+      // with text drops bytes nothing else can supply, so both skip paths leave
+      // non-image media exactly as the server sent it. Pin that boundary — a
+      // clamp re-added on either path keeps every other case green.
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'audio', mimeType: 'audio/wav', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'recording' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+      expect(result.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following audio data with mime-type: audio/wav]`,
+        },
+        { inlineData: { mimeType: 'audio/wav', data: 'AAAA' } },
+      ]);
+    });
+
+    it('forwards an oversized untyped resource blob untouched', async () => {
+      // Bounding keys on the declared image mime; an unlabelled blob is not
+      // decoded or clamped.
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'resource',
+                  resource: { uri: 'file:///backup.zip', blob: 'AAAA' },
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'archive' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+      expect(result.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: application/octet-stream]`,
+        },
+        {
+          inlineData: { mimeType: 'application/octet-stream', data: 'AAAA' },
+        },
+      ]);
+    });
+
+    it('warns with the server and tool when the renderer is unavailable', async () => {
+      mockDebugWarn.mockClear();
+      vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValueOnce(
+        new imageView.ImageViewError(
+          'renderer_unavailable',
+          'Image rendering is unavailable because the "sharp" image module could not be loaded.',
+        ),
+      );
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      await tool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining(`${serverName}/${serverToolName}`),
+      );
+    });
+
+    it.each(['already fits', 'renderer rejects'] as const)(
+      'applies the inline media limit when an image %s',
+      async (outcome) => {
+        vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+        const bound = vi.spyOn(imageView, 'boundImageBuffer');
+        if (outcome === 'already fits') {
+          bound.mockResolvedValueOnce(null);
+        } else {
+          bound.mockRejectedValueOnce(
+            new imageView.ImageViewError('decode_failed', 'failed to decode'),
+          );
+        }
+        mockCallTool.mockResolvedValue([
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                content: [
+                  { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+                ],
+              },
+            },
+          },
+        ] as Part[]);
+
+        const result = await tool
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        const parts = result.llmContent as Part[];
+        expect(parts[0]).toEqual({
+          text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
+        });
+        const placeholder = parts[1]!.text!;
+        expect(placeholder).toContain('[Media omitted: image/png');
+        expect(placeholder).toContain('inline limit');
+        // These bytes exist only inside the tool result, so the default advice
+        // to reference an `@file` path cannot be followed.
+        expect(placeholder).not.toContain('@file path');
+        expect(placeholder).toContain('smaller or lower-resolution');
+      },
+    );
+
+    it('leaves an in-budget image from an MCP tool untouched', async () => {
+      const small = await sharp({
+        create: { width: 200, height: 100, channels: 4, background: '#204080' },
+      })
+        .png()
+        .toBuffer();
+      const data = small.toString('base64');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', data, mimeType: 'image/png' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const invocation = tool.build({ param: 'icon' });
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      const parts = toolResult.llmContent as Part[];
+      expect(parts[1]!.inlineData).toEqual({ mimeType: 'image/png', data });
+    });
+
+    it('re-encodes an in-budget image that outweighs the inline ceiling', async () => {
+      // 1200x800 fits the visual budget (long edge 1200, 43x29 = 1247 patches)
+      // but stored uncompressed it outweighs a 1 MiB ceiling, while the same
+      // frame re-encodes to ~11 KB of JPEG. Deciding "already fits" on geometry
+      // alone returns null here, and the trailing clamp then drops the part to
+      // a placeholder instead of keeping the resized image.
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', String(1024 * 1024));
+      const heavy = await sharp({
+        create: {
+          width: 1200,
+          height: 800,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .png({ compressionLevel: 0 })
+        .toBuffer();
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'image',
+                  data: heavy.toString('base64'),
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Part[];
+      expect(parts[1]!.text).toBeUndefined();
+      const inline = parts[1]!.inlineData!;
+      expect(inline.mimeType).toBe('image/jpeg');
+      expect(Buffer.from(inline.data!, 'base64').length).toBeLessThan(
+        1024 * 1024,
+      );
+    });
+
+    it('forwards an image the renderer cannot bound unchanged', async () => {
+      const animated = await sharp({
+        create: {
+          width: 3840,
+          height: 2160,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .gif()
+        .toBuffer();
+      const data = animated.toString('base64');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', data, mimeType: 'image/gif' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const invocation = tool.build({ param: 'gif' });
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      const parts = toolResult.llmContent as Part[];
+      expect(parts[1]!.inlineData).toEqual({
+        mimeType: 'image/gif',
+        data,
+      });
+    });
+
+    const oversizedPngBase64 = async () =>
+      (
+        await sharp({
+          create: {
+            width: 3840,
+            height: 2160,
+            channels: 3,
+            background: '#204080',
+          },
+        })
+          .png()
+          .toBuffer()
+      ).toString('base64');
+
+    it('bounds an oversized image returned with an MCP tool error', async () => {
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              error: { isError: true },
+              content: [
+                { type: 'text', text: 'failure context' },
+                {
+                  type: 'image',
+                  data: await oversizedPngBase64(),
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'error-image' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      const parts = result.llmContent as Part[];
+      expect(parts[2]!.inlineData!.mimeType).toBe('image/jpeg');
+      const bounded = await sharp(
+        Buffer.from(parts[2]!.inlineData!.data!, 'base64'),
+      ).metadata();
+      expect(Math.max(bounded.width, bounded.height)).toBeLessThanOrEqual(1568);
+    });
+
+    it('bounds an oversized image returned through the direct client', async () => {
+      const directClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [
+            {
+              type: 'image',
+              data: await oversizedPngBase64(),
+              mimeType: 'image/png',
+            },
+          ],
+        })),
+      };
+      const directTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        directClient,
+      );
+
+      const result = await directTool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Part[];
+      expect(parts[1]!.inlineData!.mimeType).toBe('image/jpeg');
+      const bounded = await sharp(
+        Buffer.from(parts[1]!.inlineData!.data!, 'base64'),
+      ).metadata();
+      expect(Math.max(bounded.width, bounded.height)).toBeLessThanOrEqual(1568);
+    });
+
+    it('fails the call when bounding is aborted', async () => {
+      const abort = new Error('Tool call aborted');
+      abort.name = 'AbortError';
+      vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValue(abort);
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      await expect(
+        tool
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal),
+      ).rejects.toThrow('Tool call aborted');
+    });
+
     it('should ignore unknown content block types', async () => {
       const params = { param: 'test' };
       const sdkResponse: Part[] = [
@@ -921,7 +1532,7 @@ describe('DiscoveredMCPTool', () => {
       it('forwards parent abort into the combined signal passed to the direct SDK client', async () => {
         let capturedSignal: AbortSignal | undefined;
         const mockDirectCallTool = vi.fn<McpDirectClient['callTool']>(
-          async (_params, _schema, options) => {
+          async (_params, options) => {
             capturedSignal = options?.signal;
             return new Promise(() => {});
           },
@@ -1148,6 +1759,367 @@ describe('DiscoveredMCPTool', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe('{"param":"testValue","param2":"anotherOne"}');
+    });
+  });
+
+  describe('MCP Apps display', () => {
+    const createAppTool = (
+      mcpClient: McpDirectClient,
+      appResourceUi?: Record<string, unknown>,
+      mcpTimeout?: number,
+    ) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        mcpTimeout,
+        undefined,
+        undefined,
+        false,
+        false,
+        'ui://demo/dashboard',
+        appResourceUi,
+      );
+
+    const expectAppLoadWarning = (result: ToolResult, reason: string) => {
+      expect(result.returnDisplay).toEqual({
+        type: 'mcp_app',
+        serverName,
+        resourceUri: 'ui://demo/dashboard',
+        html: '',
+        toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+        toolArguments: { param: 'test' },
+        fallbackText: `Warning: MCP App 'ui://demo/dashboard' from '${serverName}' could not be displayed: ${reason}\n\nDashboard ready`,
+      });
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.error).toBeUndefined();
+    };
+
+    it('loads an MCP App resource while preserving structured tool output', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+          structuredContent: { revenue: 42 },
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://api.example.com'] },
+                  permissions: { clipboardWrite: {} },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([
+        { text: '{"revenue":42}' },
+        { text: 'Dashboard ready' },
+      ]);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        resourceUri: 'ui://demo/dashboard',
+        html: '<main>Revenue</main>',
+        toolArguments: { param: 'test' },
+        fallbackText: '{"revenue":42}\nDashboard ready',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('uses listing-level app metadata when resources/read omits content _meta', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        html: '<main>Revenue</main>',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('lets content-level app metadata win over listing-level defaults', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://content.example.com'] },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://listing.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        csp: { connectDomains: ['https://content.example.com'] },
+      });
+      expect(
+        (result.returnDisplay as { permissions?: unknown }).permissions,
+      ).toBeUndefined();
+    });
+
+    it.each([
+      {
+        uri: 'ui://demo/dashboard',
+        mimeType: 'text/html',
+        text: '<main>Wrong MIME</main>',
+        reason:
+          'resource must return text/html;profile=mcp-app for ui://demo/dashboard',
+      },
+      {
+        uri: 'ui://demo/other',
+        mimeType: 'text/html;profile=mcp-app',
+        text: '<main>Wrong URI</main>',
+        reason: 'resource ui://demo/dashboard was not returned by the server',
+      },
+      {
+        uri: 'ui://demo/dashboard',
+        mimeType: 'text/html;profile=mcp-app',
+        text: '',
+        reason: 'resource did not return HTML content',
+      },
+    ])(
+      'explains an invalid app resource: $text',
+      async ({ reason, ...content }) => {
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(async () => ({
+            contents: [content],
+          })),
+        };
+
+        const result = await createAppTool(mcpClient)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+
+        expectAppLoadWarning(result, reason);
+      },
+    );
+
+    it.each([
+      { bytes: 1_048_576, encoding: 'text' },
+      { bytes: 1_048_577, encoding: 'text' },
+      { bytes: 1_048_577, encoding: 'blob' },
+    ] as const)(
+      'checks the UTF-8 size of a $bytes byte $encoding resource',
+      async ({ bytes, encoding }) => {
+        const html = `<main>é</main>${' '.repeat(bytes - 15)}`;
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(async () => ({
+            contents: [
+              {
+                uri: 'ui://demo/dashboard',
+                mimeType: 'text/html;profile=mcp-app',
+                ...(encoding === 'text'
+                  ? { text: html }
+                  : { blob: Buffer.from(html).toString('base64') }),
+              },
+            ],
+          })),
+        };
+
+        const result = await createAppTool(mcpClient)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+
+        if (bytes === 1_048_576) {
+          expect(result.returnDisplay).toMatchObject({ type: 'mcp_app', html });
+        } else {
+          expectAppLoadWarning(
+            result,
+            'resource HTML is 1048577 bytes, exceeding the 1048576 byte (1 MiB) host limit',
+          );
+        }
+        expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+        expect(result.error).toBeUndefined();
+      },
+    );
+
+    it.each([
+      { mcpTimeout: undefined, deadline: true, expectedTimeout: 10_000 },
+      { mcpTimeout: 60_000, deadline: true, expectedTimeout: 10_000 },
+      { mcpTimeout: 500, deadline: false, expectedTimeout: 500 },
+    ])(
+      'reports the resource timeout with MCP timeout $mcpTimeout',
+      async ({ mcpTimeout, deadline, expectedTimeout }) => {
+        const timeoutController = new AbortController();
+        const timeoutSpy = vi
+          .spyOn(AbortSignal, 'timeout')
+          .mockReturnValue(timeoutController.signal);
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(async (_params, options) => {
+            if (!deadline) {
+              // The shape `@modelcontextprotocol/client` 2.x throws for its
+              // own request timeouts — a string code, never JSON-RPC -32001.
+              throw new SdkError(
+                SdkErrorCode.RequestTimeout,
+                'Request timed out',
+                { timeout: mcpTimeout },
+              );
+            }
+            return new Promise<never>((_resolve, reject) => {
+              options?.signal?.addEventListener('abort', () => {
+                reject(options.signal?.reason);
+              });
+              timeoutController.abort(
+                new DOMException('The operation timed out', 'TimeoutError'),
+              );
+            });
+          }),
+        };
+
+        try {
+          const result = await createAppTool(mcpClient, undefined, mcpTimeout)
+            .build({ param: 'test' })
+            .execute(new AbortController().signal);
+
+          expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+          expect(mcpClient.readResource).toHaveBeenCalledWith(
+            { uri: 'ui://demo/dashboard' },
+            { timeout: expectedTimeout, signal: expect.any(AbortSignal) },
+          );
+          expectAppLoadWarning(
+            result,
+            `resource read timed out (limit: ${expectedTimeout} ms)`,
+          );
+          expect(mockDebugWarn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `(cause: ${deadline ? 'The operation timed out' : 'Request timed out'})`,
+            ),
+          );
+        } finally {
+          timeoutSpy.mockRestore();
+        }
+      },
+    );
+
+    it('attributes a server-sent -32001 to the server, not the host limit', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => {
+          // A server-sent `-32001` arrives as a ProtocolError carrying the
+          // numeric code; the v2 client never emits -32001 for its own
+          // timeouts, so this must not be labelled with the host's limit.
+          throw Object.assign(new Error('MCP error -32001: Unknown session'), {
+            code: -32001,
+          });
+        }),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expectAppLoadWarning(result, 'MCP error -32001: Unknown session');
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        `Warning: MCP App 'ui://demo/dashboard' from '${serverName}' could not be displayed: MCP error -32001: Unknown session`,
+      );
+    });
+
+    it('reports an unreadable app resource without changing the tool result', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi
+          .fn()
+          .mockRejectedValue(new Error('Resource unavailable')),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expectAppLoadWarning(result, 'Resource unavailable');
+    });
+
+    it('keeps the tool result when aborting the optional app resource fetch', async () => {
+      const controller = new AbortController();
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(
+          async (_params, options) =>
+            new Promise<never>((_resolve, reject) => {
+              options?.signal?.addEventListener('abort', () => {
+                reject(options.signal?.reason);
+              });
+              controller.abort();
+            }),
+        ),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(controller.signal);
+
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.returnDisplay).toBe('Dashboard ready');
+      expect(result.error).toBeUndefined();
     });
   });
 
@@ -1391,7 +2363,7 @@ describe('DiscoveredMCPTool', () => {
       // When callTool is called with an onprogress callback, it invokes
       // the callback to simulate the MCP server sending progress updates.
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn(async (_params, _schema, options) => {
+        callTool: vi.fn(async (_params, options) => {
           // Simulate 3 progress notifications from the MCP server
           for (let i = 1; i <= 3; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1472,7 +2444,7 @@ describe('DiscoveredMCPTool', () => {
       ];
 
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn(async (_params, _schema, options) => {
+        callTool: vi.fn(async (_params, options) => {
           for (let i = 0; i < steps.length; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
             options?.onprogress?.({
@@ -1605,6 +2577,44 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
       expect(ensureTool).toHaveBeenCalledWith(reconnectTool.name);
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
+    });
+
+    it('does not reconnect a guarded invocation after an ambiguous connection error', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolInvocationGuard: () => vi.fn(),
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const guardedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      await expect(
+        guardedTool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow('Connection closed');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
     });
 
     it.each<{
@@ -1768,12 +2778,13 @@ describe('DiscoveredMCPTool', () => {
         tool: vi.fn(),
         callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
       } as unknown as Mocked<CallableTool>;
-      const discoverToolsForServer = vi.fn();
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
       const mockConfig = {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
-          ensureTool: vi.fn(),
+          ensureTool,
         }),
       };
       const unsafeTool = new DiscoveredMCPTool(
@@ -1798,8 +2809,12 @@ describe('DiscoveredMCPTool', () => {
           .execute(new AbortController().signal),
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
+      // The call itself is never replayed (its outcome is ambiguous)...
       expect(initialCallable.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      // ...but the dead connection is still repaired so the next call can
+      // succeed (issue #9944).
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
     it.each<{
@@ -1852,7 +2867,7 @@ describe('DiscoveredMCPTool', () => {
             new Error('Connection closed after side effect completed'),
           ),
       };
-      const discoverToolsForServer = vi.fn();
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const ensureTool = vi.fn();
       const mockConfig = {
         isTrustedFolder: () => testCase.trustedFolder,
@@ -1880,9 +2895,154 @@ describe('DiscoveredMCPTool', () => {
           .execute(new AbortController().signal),
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
+      // No replay of the ambiguous call...
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
-      expect(ensureTool).not.toHaveBeenCalled();
+      // ...but the connection is still repaired best-effort so the next
+      // call does not inherit the dead session (issue #9944).
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('repairs the session of an unannotated tool after the server restarted (issue #9944)', async () => {
+      // An HTTP MCP server that restarted comes back with a fresh
+      // `mcp-session-id` space and answers our stale session with
+      // `-32001 "Session not found"`. The tool carries no
+      // readOnlyHint/idempotentHint annotations, so pre-fix the reconnect
+      // path never ran and the tool stayed unusable until a full session
+      // restart. The ambiguous call must still not be replayed — but the
+      // session repair (fresh initialize + tool reload) has to happen.
+      const sessionNotFoundError = Object.assign(
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"},"id":null}',
+        ),
+        { code: -32001 },
+      );
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(sessionNotFoundError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        undefined, // no annotations
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['Session not found', 'Session terminated', 'Session expired'])(
+      'routes "%s" to the reconnect path even while the status is still CONNECTED (issue #9944)',
+      async (sessionMessage) => {
+        // Servers that keep no GET SSE stream never flip the client status
+        // to DISCONNECTED when the session dies; the stale `-32001` code
+        // would then be misread as an execution timeout and the reconnect
+        // path would never run. The session-error carve-out must win for
+        // every dead-session phrasing a server may use — not just
+        // "Session not found" — so all three variants exercise it.
+        const sessionError = Object.assign(
+          new Error(
+            `Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32001,"message":"${sessionMessage}"},"id":null}`,
+          ),
+          { code: -32001 },
+        );
+        const initialClient: McpDirectClient = {
+          callTool: vi.fn().mockRejectedValueOnce(sessionError),
+        };
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const ensureTool = vi.fn();
+        const mockConfig = {
+          isTrustedFolder: () => true,
+          getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+        };
+        const tool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          true,
+          undefined,
+          mockConfig as any,
+          initialClient,
+          undefined,
+          undefined,
+          undefined, // no annotations → no replay, but repair must still run
+        );
+
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        await expect(
+          tool.build({ param: 'test' }).execute(new AbortController().signal),
+        ).rejects.toThrow(unsafeReplayErrorMessage);
+
+        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      },
+    );
+
+    it('routes an HTTP 404 dead-session response to the reconnect path even with unenumerated prose (issue #9944)', async () => {
+      // Per spec, a restarted HTTP server MUST answer a POST carrying a
+      // stale `mcp-session-id` with 404 (the SDK surfaces it as a
+      // StreamableHTTPError whose `code` is the HTTP status); the prose it
+      // wraps the 404 in is server-defined. "Unknown session" matches none
+      // of the enumerated `MCP_DEAD_SESSION_ERROR_PATTERN` phrasings, so
+      // only the structural `code: 404` signal can trigger recovery here —
+      // without it every subsequent call re-POSTs the stale session id and
+      // fails.
+      const unknownSessionError = Object.assign(new Error('Unknown session'), {
+        code: 404,
+      });
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(unknownSessionError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        undefined, // no annotations → no replay, but repair must still run
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
     it('should not retry on non-connection errors', async () => {
@@ -2426,7 +3586,7 @@ describe('DiscoveredMCPTool', () => {
       const discoverToolsForServer = vi.fn();
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockImplementation(
-          (_params, _schema, options) =>
+          (_params, options) =>
             new Promise((_resolve, reject) => {
               options?.signal?.addEventListener(
                 'abort',
@@ -2550,7 +3710,7 @@ describe('DiscoveredMCPTool', () => {
       const idleTimeoutMs = 1000; // 1 second for testing
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockImplementation(
-          (_params, _schema, options) =>
+          (_params, options) =>
             new Promise((_resolve, reject) => {
               // Simulate SDK behavior: reject when signal is aborted
               options?.signal?.addEventListener('abort', () => {
@@ -2604,7 +3764,7 @@ describe('DiscoveredMCPTool', () => {
         const idleTimeoutMs = 1000;
         const mockMcpClient: McpDirectClient = {
           callTool: vi.fn().mockImplementation(
-            (_params, _schema, options) =>
+            (_params, options) =>
               new Promise((_resolve, reject) => {
                 options?.signal?.addEventListener('abort', () => {
                   queueMicrotask(() => reject(options.signal?.reason));
@@ -2648,7 +3808,7 @@ describe('DiscoveredMCPTool', () => {
       let onProgressCallback: ((progress: any) => void) | undefined;
 
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn().mockImplementation((_params, _schema, options) => {
+        callTool: vi.fn().mockImplementation((_params, options) => {
           onProgressCallback = options?.onprogress;
           return new Promise((resolve, reject) => {
             // Listen for abort signal to properly reject when timeout fires
@@ -2733,5 +3893,72 @@ describe('DiscoveredMCPTool', () => {
 
       vi.useRealTimers();
     });
+  });
+});
+
+describe('DiscoveredMCPTool AUTO-mode classifier projection', () => {
+  const makeTool = (
+    annotations?: McpToolAnnotations,
+    config?: { getAutoModeSettings?: () => Record<string, unknown> },
+  ) =>
+    new DiscoveredMCPTool(
+      mockCallableToolInstance,
+      'slack',
+      'post_message',
+      'Post a message',
+      { type: 'object', properties: {} },
+      undefined,
+      undefined,
+      config as unknown as Config,
+      undefined,
+      undefined,
+      undefined,
+      annotations,
+    );
+
+  it('forwards server, tool, annotations and arguments to the classifier', () => {
+    const tool = makeTool({ readOnlyHint: false, openWorldHint: true });
+    expect(
+      tool.toAutoClassifierInput({
+        channel: '#ops',
+        text: 'AWS_SECRET_ACCESS_KEY=abcd',
+      }),
+    ).toEqual({
+      server: 'slack',
+      tool: 'post_message',
+      annotations: { readOnlyHint: false, openWorldHint: true },
+      // The argument content is the evidence the classifier needs — a
+      // secret in a chat payload is exactly the case it must catch.
+      arguments: { channel: '#ops', text: 'AWS_SECRET_ACCESS_KEY=abcd' },
+    });
+  });
+
+  it('forwards arguments when the config carries no autoMode.mcp settings', () => {
+    const tool = makeTool(undefined, { getAutoModeSettings: () => ({}) });
+    const projected = tool.toAutoClassifierInput({ text: 'hi' });
+    expect(projected).toMatchObject({ arguments: { text: 'hi' } });
+  });
+
+  it('still forwards arguments when the config lacks getAutoModeSettings', () => {
+    const tool = makeTool(undefined, {});
+    expect(tool.toAutoClassifierInput({ text: 'hi' })).toMatchObject({
+      arguments: { text: 'hi' },
+    });
+  });
+
+  it('returns the name-only sentinel when forwardArguments is false', () => {
+    const tool = makeTool(undefined, {
+      getAutoModeSettings: () => ({ mcp: { forwardArguments: false } }),
+    });
+    expect(tool.toAutoClassifierInput({ text: 'hi' })).toBe('');
+  });
+
+  it('marks truncated arguments instead of dropping them silently', () => {
+    const tool = makeTool();
+    const projected = tool.toAutoClassifierInput({
+      body: 'q'.repeat(50_000),
+    }) as Record<string, unknown>;
+    expect(projected['arguments_truncated']).toBe(true);
+    expect(JSON.stringify(projected)).toContain('…[truncated');
   });
 });

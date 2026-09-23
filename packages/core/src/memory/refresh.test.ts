@@ -19,7 +19,13 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import {
+  AGENT_CONTEXT_FILENAME,
+  DEFAULT_CONTEXT_FILENAME,
+  setMemoryFilename,
+} from '../utils/memory-constants.js';
+import {
   didWriteManagedMemory,
+  didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
 } from './refresh.js';
@@ -34,7 +40,7 @@ function createConfig(projectRoot: string, managed = true): Config {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
-    getGeminiClient: vi.fn().mockReturnValue({
+    getLlmClient: vi.fn().mockReturnValue({
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
     }),
   } as unknown as Config;
@@ -55,6 +61,7 @@ describe('managed memory refresh helper', () => {
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
+    setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
   });
 
   afterEach(async () => {
@@ -144,6 +151,144 @@ describe('managed memory refresh helper', () => {
     ).toBe(true);
   });
 
+  it('detects successful project context file writes only', () => {
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+            },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'edit',
+            args: { file_path: DEFAULT_CONTEXT_FILENAME },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'replace',
+            args: { target_file: DEFAULT_CONTEXT_FILENAME },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: path.join(projectRoot, AGENT_CONTEXT_FILENAME) },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+            },
+            status: 'error',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: path.join(projectRoot, 'notes.md') },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join('docs', DEFAULT_CONTEXT_FILENAME),
+            },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(projectRoot, '..', DEFAULT_CONTEXT_FILENAME),
+            },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+  });
+
+  it('detects configured project context file writes', () => {
+    setMemoryFilename('PROJECT_CONTEXT.md');
+
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: path.join(projectRoot, 'PROJECT_CONTEXT.md') },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+            },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+  });
+
   it('rebuilds touched indexes before refreshing the live instruction', async () => {
     const config = createConfig(projectRoot);
     const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
@@ -164,7 +309,7 @@ describe('managed memory refresh helper', () => {
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[0],
@@ -193,7 +338,7 @@ describe('managed memory refresh helper', () => {
 
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
   });
 
@@ -207,7 +352,7 @@ describe('managed memory refresh helper', () => {
 
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
   });
 

@@ -5,9 +5,21 @@ export {
 } from './paths.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
+export {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+} from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
+  BackgroundResponseContext,
   BridgeSessionInfo,
+  ChannelBtwResult,
   ChannelAgentBridge,
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
@@ -17,6 +29,7 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -30,9 +43,7 @@ export type {
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedEvent,
 } from './DaemonChannelBridge.js';
-export { BlockStreamer } from './BlockStreamer.js';
-export type { BlockStreamerOptions } from './BlockStreamer.js';
-export { ChannelBase } from './ChannelBase.js';
+export { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 export {
   CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
   ChannelProactiveDeliveryError,
@@ -71,9 +82,14 @@ export type {
   ChannelLoopStatus,
   ChannelLoopStoreOptions,
 } from './ChannelLoopStore.js';
+export { resolvePrivatePolicy } from './private-policy.js';
 export { PairingStore } from './PairingStore.js';
-export type { PairingRequest } from './PairingStore.js';
-export { GroupGate } from './GroupGate.js';
+export type {
+  CreatePairingRequestResult,
+  PairingRequest,
+  PairingSubject,
+} from './PairingStore.js';
+export { GroupGate, lowercaseGroupAllowedUsers } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
 export { DmGate } from './DmGate.js';
 export type { DmCheckResult } from './DmGate.js';
@@ -83,25 +99,48 @@ export { SessionRouter } from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,
+  sanitizeDisplayText,
   sanitizeLogText,
   truncateCodePoints,
+  truncateUtf16Units,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
+export {
+  CHANNEL_OUTPUT_MODE_FIELD,
+  DEFAULT_CHANNEL_OUTPUT_MODE,
+  parseChannelOutputMode,
+} from './output-mode.js';
+export { ChannelOutputTurn } from './output-turn.js';
+export type { ChannelOutputDecision } from './output-turn.js';
+export { BackgroundOutputCoordinator } from './background-output-coordinator.js';
+export type {
+  BackgroundOutputDelivery,
+  BackgroundOutputPacket,
+  BackgroundOutputTarget,
+  BackgroundOutputCoordinatorOptions,
+} from './background-output-coordinator.js';
 export type {
   Attachment,
-  BlockStreamingChunkConfig,
-  BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigNestedFieldDescriptor,
+  ChannelConfigNumberFieldDescriptor,
+  ChannelConfigObjectFieldDescriptor,
+  ChannelConfigPlainValueFieldDescriptor,
+  ChannelConfigValueFieldDescriptor,
   ChannelIdentityConfig,
   ChannelManagementDescriptor,
   ChannelMemoryIntentClassifier,
   ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
+  ChannelOutputMode,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
+  ChannelPermissionRequestContext,
   ChannelPlugin,
   ChannelPromptOwner,
   ChannelProactiveTarget,
@@ -119,6 +158,8 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrivatePolicy,
+  GroupSenderPolicy,
   ObservedChannelIdentity,
   ObservedChannelContactObservation,
   ObservedChannelContact,

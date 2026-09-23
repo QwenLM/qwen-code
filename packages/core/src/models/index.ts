@@ -5,6 +5,7 @@
  */
 
 export {
+  type ModelWireApi,
   type ModelCapabilities,
   type ModelGenerationConfig,
   type ModelConfig,
@@ -20,13 +21,21 @@ export {
   ModelRegistry,
   modelRegistryKey,
   resolveProviderProtocol,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  validateModelProvidersConfig,
+  resolveModelSelectionAuthType,
 } from './modelRegistry.js';
+
+export { isImageGenerationCapable } from './image-generation-capability.js';
 
 export {
   ModelsConfig,
   type ModelsConfigOptions,
   type OnModelChangeCallback,
 } from './modelsConfig.js';
+
+export { VERTEX_ADC_HINT } from './modelConfigErrors.js';
 
 export {
   AUTH_ENV_MAPPINGS,

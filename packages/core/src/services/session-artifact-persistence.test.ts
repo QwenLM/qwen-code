@@ -7,11 +7,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  getWebPreviewSnapshotId,
   normalizeEventPayload,
   normalizeSnapshotPayload,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
   stableSessionArtifactId,
+  selectActiveSideArtifactRecordUuids,
   type PersistedSessionArtifact,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
@@ -52,7 +54,147 @@ function event(payload: SessionArtifactEventRecordPayload): {
   };
 }
 
+describe('source snapshots beside artifact history', () => {
+  it.each(['session_sources_snapshot', 'custom_title'])(
+    'does not let %s hide a restored artifact snapshot',
+    (subtype) => {
+      expect(
+        selectActiveSideArtifactRecordUuids(
+          [
+            { uuid: 'turn', parentUuid: null, type: 'user' },
+            {
+              uuid: 'artifact',
+              parentUuid: 'turn',
+              type: 'system',
+              subtype: 'session_artifact_snapshot',
+            },
+            { uuid: 'metadata', parentUuid: 'turn', type: 'system', subtype },
+          ],
+          ['turn'],
+        ),
+      ).toEqual(['artifact']);
+    },
+  );
+});
+
 describe('session artifact persistence records', () => {
+  it('keeps saved webpage versions when forking events and snapshots', () => {
+    const uuid = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+    const saved = artifact(
+      'source-session',
+      `file:///tmp/runtime/artifacts/snapshots/${uuid}/index.html`,
+      {
+        id: stableSessionArtifactId(
+          'source-session',
+          `managed:preview-${uuid}`,
+        ),
+        kind: 'html',
+        storage: 'published',
+        source: 'tool',
+        toolName: 'artifact',
+        toolCallId: 'publish-v1',
+        managedId: `preview-${uuid}`,
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.published.sha256': 'a'.repeat(64),
+        },
+      },
+    );
+    const expected = {
+      ...saved,
+      id: stableSessionArtifactId('forked-session', `managed:preview-${uuid}`),
+    };
+    const base = {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId: 'source-session',
+      sequence: 1,
+      recordedAt: saved.createdAt,
+    };
+    const forkEvent = remapSessionArtifactPayloadForFork(
+      {
+        ...base,
+        changes: [{ action: 'created', artifactId: saved.id, artifact: saved }],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+    expect(forkEvent.changes[0]?.artifact).toMatchObject(expected);
+    const forkSnapshot = remapSessionArtifactPayloadForFork(
+      {
+        ...base,
+        artifacts: [saved],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactSnapshotRecordPayload;
+    expect(forkSnapshot.artifacts).toEqual([expect.objectContaining(expected)]);
+    expect(getWebPreviewSnapshotId(saved)).toBe(uuid);
+
+    const invalidOverrides: Array<Partial<PersistedSessionArtifact>> = [
+      { source: 'client' },
+      { source: 'hook' },
+      { toolName: 'record_artifact' },
+      { metadata: { artifactType: 'web_preview_snapshot' } },
+      { metadata: { ...saved.metadata, 'qwen.published.sha256': 'bad' } },
+      { managedId: `preview-${uuid.replace('-4a52-', '-5a52-')}` },
+      { url: saved.url?.replace(uuid, '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad') },
+      { url: saved.url?.replace('file:///', 'file://remote/') },
+      { url: `${saved.url}?q=1` },
+      { url: `${saved.url}#fragment` },
+      { url: 'file:///tmp/secret.html' },
+    ];
+    for (const override of invalidOverrides) {
+      const invalid = { ...saved, ...override };
+      expect(getWebPreviewSnapshotId(invalid)).toBeUndefined();
+      const rejected = remapSessionArtifactPayloadForFork(
+        {
+          ...base,
+          artifacts: [invalid],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        },
+        'source-session',
+        'forked-session',
+      ) as SessionArtifactSnapshotRecordPayload;
+      expect(rejected.artifacts).toEqual([]);
+    }
+  });
+
+  it('roundtrips persisted document artifacts', () => {
+    const document = artifact('s1', 'https://example.com/unused', {
+      kind: 'document',
+      storage: 'workspace',
+      workspacePath: 'reports/q3.xlsx',
+      url: undefined,
+    });
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      {
+        type: 'system',
+        subtype: 'session_artifact_snapshot',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 's1',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          artifacts: [document],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        },
+      },
+    ]);
+
+    expect(snapshot?.artifacts).toEqual([
+      expect.objectContaining({
+        kind: 'document',
+        storage: 'workspace',
+        workspacePath: 'reports/q3.xlsx',
+      }),
+    ]);
+  });
+
   it('rebuilds durable artifacts and explicit tombstones from event records', () => {
     const first = artifact('s1', 'https://example.com/first');
     const second = artifact('s1', 'https://example.com/second');
@@ -1060,6 +1202,8 @@ describe('session artifact persistence records', () => {
             metadata: {
               'qwen.workspace.sha256': 'not-a-sha',
               'qwen.workspace.mtimeMs': '123',
+              'qwen.workspace.sizeBytes': -1,
+              'qwen.published.sha256': 'not-a-sha',
               keep: true,
             },
           },

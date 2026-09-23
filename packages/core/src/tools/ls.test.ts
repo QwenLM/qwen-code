@@ -14,6 +14,7 @@ import type { Config } from '../config/config.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { ToolErrorType } from './tool-error.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { shortenPath } from '../utils/paths.js';
 
 describe('LSTool', () => {
   let lsTool: LSTool;
@@ -410,7 +411,7 @@ describe('LSTool', () => {
       };
       const invocation = lsTool.build(params);
       const description = invocation.getDescription();
-      const expected = path.resolve(params.path);
+      const expected = shortenPath(path.resolve(params.path));
       expect(description).toBe(expected);
     });
   });

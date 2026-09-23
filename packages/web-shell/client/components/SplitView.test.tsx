@@ -22,23 +22,29 @@ let otherWorkspaceSessions: Record<string, any[]>;
 // Stable client object (assigned once per test) so the other-workspace hook's
 // load callback keeps a stable identity and its effect doesn't loop.
 let workspaceClient: {
-  listWorkspaceSessions: ReturnType<typeof vi.fn>;
+  listWorkspaceSessionsPage: ReturnType<typeof vi.fn>;
   workspaceByCwd: ReturnType<typeof vi.fn>;
 };
 // Stable across renders (assigned once per test) so SplitView's reload effects,
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
+let waitingSessions: Set<string>;
+const scrollPaneIntoView = vi.fn();
+const confirmApproval = vi.fn();
+const PaneSessionContext = React.createContext<string | undefined>(undefined);
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
-    <div
-      data-session={props.sessionId}
-      data-clientid={props.clientId}
-      data-workspace={props.workspaceCwd}
-      data-restart-sse={props.restartEventStreamOnPrompt ? 'true' : 'false'}
-    >
-      {props.children}
-    </div>
+    <PaneSessionContext.Provider value={props.sessionId}>
+      <div
+        data-session={props.sessionId}
+        data-clientid={props.clientId}
+        data-workspace={props.workspaceCwd}
+        data-restart-sse={props.restartEventStreamOnPrompt ? 'true' : 'false'}
+      >
+        {props.children}
+      </div>
+    </PaneSessionContext.Provider>
   ),
   useConnection: () => connectionState,
   // `client` is a stable object; `capabilities` mirrors the connection so a test
@@ -62,22 +68,73 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
 }));
 
+vi.mock('../hooks/useScopedSessions', () => ({
+  useScopedSessions: (workspaceCwd: string | undefined) => {
+    const [sessions, setSessions] = React.useState<any[]>(() =>
+      workspaceCwd ? [] : sessionsState,
+    );
+    React.useEffect(() => {
+      if (!workspaceCwd) return;
+      void Promise.resolve().then(() => {
+        setSessions([...(otherWorkspaceSessions[workspaceCwd] ?? [])]);
+      });
+    }, [workspaceCwd]);
+    const reload = React.useCallback(async () => {
+      reloadMock();
+      const next = workspaceCwd
+        ? (otherWorkspaceSessions[workspaceCwd] ?? [])
+        : sessionsState;
+      setSessions([...next]);
+      return next;
+    }, [workspaceCwd]);
+    return { sessions, reload };
+  },
+}));
+
 vi.mock('./ChatPane', () => ({
   ChatPane: (props: any) => {
+    const sessionId = React.useContext(PaneSessionContext);
+    const pending = !!sessionId && waitingSessions.has(sessionId);
+    const { onApprovalChange } = props;
+    React.useEffect(() => {
+      if (!sessionId) return;
+      onApprovalChange?.(sessionId, pending);
+      return () => onApprovalChange?.(sessionId, false);
+    }, [sessionId, pending, onApprovalChange]);
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
       <div
         data-testid="chat-pane"
+        data-plan-visible={String(props.planControlVisible)}
         data-pane-workspace={props.workspaceCwd}
+        data-session-details={props.sessionSummary?.sessionId}
         data-maximized={props.isMaximized ? 'true' : 'false'}
-        data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
+        data-pane-active={props.isActive ? '' : undefined}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
+        data-context-controls={
+          props.registerContextUsageControls ? 'true' : 'false'
+        }
+        data-open-context-usage={props.onOpenContextUsage ? 'true' : 'false'}
+        data-before-context-compress={
+          props.onBeforeContextCompress ? 'true' : 'false'
+        }
         data-hidden={props.hidden ? 'true' : 'false'}
+        data-report-catalog-turn-completion={
+          props.reportCatalogTurnCompletion ? 'true' : 'false'
+        }
         data-voice-user-revision={String(props.voiceUserRevision ?? 0)}
         data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
         <span data-testid="pane-title">{props.title}</span>
+        <input aria-label={`Draft ${props.title}`} />
+        {pending && (
+          <div data-testid="pane-approval">
+            <button tabIndex={0} onClick={confirmApproval}>
+              Approve
+            </button>
+          </div>
+        )}
         {props.renderHeaderActions && (
           <span data-testid="pane-header-slot">
             {props.renderHeaderActions({
@@ -107,6 +164,10 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
 beforeEach(() => {
+  waitingSessions = new Set();
+  confirmApproval.mockClear();
+  scrollPaneIntoView.mockClear();
+  Element.prototype.scrollIntoView = scrollPaneIntoView;
   connectionState = {
     sessionId: 's3',
     capabilities: { features: [] },
@@ -120,13 +181,13 @@ beforeEach(() => {
   ];
   otherWorkspaceSessions = {};
   workspaceClient = {
-    listWorkspaceSessions: vi.fn(
-      async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
-    ),
+    listWorkspaceSessionsPage: vi.fn(async (cwd: string) => ({
+      sessions: otherWorkspaceSessions[cwd] ?? [],
+    })),
     workspaceByCwd: vi.fn((cwd: string) => ({
-      listWorkspaceSessions: vi.fn(
-        async () => otherWorkspaceSessions[cwd] ?? [],
-      ),
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
     })),
   };
   reloadMock = vi.fn();
@@ -185,9 +246,287 @@ function openPicker(): void {
 }
 
 describe('SplitView', () => {
-  it('renders one pane per initial session, each under its own provider', () => {
+  it('keeps a newly added controlled pane active without relying on composer autofocus', () => {
+    function ControlledSplit() {
+      const [ids, setIds] = React.useState(['s1', 's2']);
+      return (
+        <SplitView sessionIds={ids} onPanesChange={setIds} onExit={() => {}} />
+      );
+    }
+    render();
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <ControlledSplit />
+        </I18nProvider>,
+      ),
+    );
+    openPicker();
+    const third = Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('[role="option"] button'),
+    ).find((button) => button.textContent === 'Three')!;
+    act(() => third.click());
+    expect(titles()).toEqual(['One', 'Two', 'Three']);
+    expect(panes()[2].hasAttribute('data-pane-active')).toBe(true);
+  });
+
+  it('tracks pointer and keyboard activity without activating a hovered pane', () => {
     render({ sessionIds: ['s1', 's2'] });
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
+    act(() =>
+      panes()[1].dispatchEvent(new Event('pointerover', { bubbles: true })),
+    );
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
+    act(() =>
+      panes()[1].dispatchEvent(new Event('pointerdown', { bubbles: true })),
+    );
+    expect(panes()[1].hasAttribute('data-pane-active')).toBe(true);
+    act(() => panes()[0].querySelector('input')!.focus());
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
+    expect(panes()[1].hasAttribute('data-pane-active')).toBe(false);
+  });
+
+  it('cycles hidden pending panes, focuses outside approvals and preserves drafts without confirming', () => {
+    waitingSessions = new Set(['s2', 's3']);
+    render({ sessionIds: ['s1', 's2', 's3'] });
+    const draft = panes()[0].querySelector('input')!;
+    draft.value = 'keep this draft';
+    act(() =>
+      panes()[0]
+        .querySelector<HTMLButtonElement>('[data-testid="pane-maximize"]')!
+        .click(),
+    );
+    const pendingButton = container!.querySelector<HTMLButtonElement>(
+      '[title="Go to the next session awaiting input"]',
+    )!;
+    expect(pendingButton.textContent).toBe('2 awaiting input');
+    expect(pendingButton.getAttribute('aria-label')).toBe(
+      '2 awaiting input — Go to the next session awaiting input',
+    );
+    expect(pendingButton.getAttribute('aria-label')).toContain(
+      pendingButton.textContent,
+    );
+    expect(container!.querySelector('[role="status"]')?.textContent).toBe(
+      '2 awaiting input',
+    );
+    act(() => pendingButton.click());
+    expect(panes()[1].getAttribute('data-maximized')).toBe('true');
+    expect(document.activeElement).toBe(
+      panes()[1].closest('[data-pane-session-id]'),
+    );
+    act(() => pendingButton.click());
+    expect(panes()[2].getAttribute('data-maximized')).toBe('true');
+    expect(document.activeElement).toBe(
+      panes()[2].closest('[data-pane-session-id]'),
+    );
+    expect(confirmApproval).not.toHaveBeenCalled();
+    expect(scrollPaneIntoView).toHaveBeenCalledTimes(2);
+    expect(panes()[0].querySelector('input')).toBe(draft);
+    expect(draft.value).toBe('keep this draft');
+  });
+
+  it.each([false, true])(
+    'continues forward from an idle middle pane (maximized: %s)',
+    (maximized) => {
+      waitingSessions = new Set(['s1', 's3']);
+      render({ sessionIds: ['s1', 's2', 's3'] });
+      act(() => panes()[1].querySelector('input')!.focus());
+      if (maximized) {
+        act(() =>
+          panes()[1]
+            .querySelector<HTMLButtonElement>('[data-testid="pane-maximize"]')!
+            .click(),
+        );
+      }
+      const pending = container!.querySelector<HTMLButtonElement>(
+        '[title="Go to the next session awaiting input"]',
+      )!;
+      for (const index of [2, 0]) {
+        act(() => pending.click());
+        expect(panes()[index].hasAttribute('data-pane-active')).toBe(true);
+        expect(document.activeElement).toBe(
+          panes()[index].closest('[data-pane-session-id]'),
+        );
+        expect(panes()[index].getAttribute('data-maximized')).toBe(
+          String(maximized),
+        );
+      }
+      expect(confirmApproval).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports pending panes while hidden and clears the report on unmount', () => {
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onPendingPanesChange });
+    act(() =>
+      panes()[1]
+        .querySelector<HTMLButtonElement>('[data-testid="pane-maximize"]')!
+        .click(),
+    );
+    expect(panes()[0].getAttribute('data-hidden')).toBe('true');
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
+    act(() => root!.unmount());
+    root = null;
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('reports changed pending panes without clearing the still-pending panes', () => {
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    const sessionIds = ['s1', 's2'];
+    render({ sessionIds, onPendingPanesChange });
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
+    onPendingPanesChange.mockClear();
+    waitingSessions = new Set(['s1', 's2']);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            sessionIds={sessionIds}
+            onExit={() => {}}
+            onPendingPanesChange={onPendingPanesChange}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(onPendingPanesChange).toHaveBeenCalledExactlyOnceWith(['s1', 's2']);
+  });
+
+  it('clears the old report callback before sending pending panes to its replacement', () => {
+    waitingSessions = new Set(['s1']);
+    const oldReport = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onPendingPanesChange: oldReport });
+    expect(oldReport).toHaveBeenLastCalledWith(['s1']);
+    oldReport.mockClear();
+    const nextReport = vi.fn(() => {
+      expect(oldReport).toHaveBeenCalledExactlyOnceWith([]);
+    });
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            sessionIds={['s1', 's2']}
+            onExit={() => {}}
+            onPendingPanesChange={nextReport}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(nextReport).toHaveBeenCalledExactlyOnceWith(['s1']);
+    act(() => root!.unmount());
+    root = null;
+    expect(nextReport).toHaveBeenLastCalledWith([]);
+  });
+
+  it('keeps pending reports stable when their parent stores them in state', () => {
+    const onReport = vi.fn();
+    const sessionIds = ['s1', 's2'];
+    function Parent() {
+      const [reportedIds, setReportedIds] = React.useState<string[]>([]);
+      const handleReport = React.useCallback((ids: string[]) => {
+        onReport(ids);
+        // Bound a broken render/effect loop so the regression fails promptly.
+        if (onReport.mock.calls.length > 10) {
+          throw new Error('Pending reports did not settle');
+        }
+        setReportedIds(ids);
+      }, []);
+      return (
+        <I18nProvider language="en">
+          <output>{reportedIds.length}</output>
+          <SplitView
+            sessionIds={sessionIds}
+            onExit={() => {}}
+            onPendingPanesChange={handleReport}
+          />
+        </I18nProvider>
+      );
+    }
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => root!.render(<Parent />));
+    expect(onReport).toHaveBeenCalledExactlyOnceWith([]);
+    act(() => root!.render(<Parent />));
+    expect(onReport).toHaveBeenCalledExactlyOnceWith([]);
+  });
+
+  it('stops reporting a crashed pane even though its slot remains', async () => {
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onPendingPanesChange });
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
+    sessionsState = sessionsState.map((session) =>
+      session.sessionId === 's1'
+        ? { ...session, displayName: 'BOOM' }
+        : session,
+    );
+    openPicker();
+    await flushAsync();
+    expect(container!.textContent).toContain('This session pane hit an error');
+    expect(
+      container!.querySelector('[data-pane-session-id="s1"]'),
+    ).not.toBeNull();
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('keeps selection and focus on a neighbour when a controlled pane is removed', () => {
+    waitingSessions = new Set(['s3']);
+    render({ sessionIds: ['s1', 's2', 's3'] });
+    act(() => panes()[2].querySelector('input')!.focus());
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView sessionIds={['s1', 's2']} onExit={() => {}} />
+        </I18nProvider>,
+      ),
+    );
     expect(panes()).toHaveLength(2);
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(false);
+    expect(panes()[1].hasAttribute('data-pane-active')).toBe(true);
+    expect(document.activeElement).toBe(
+      panes()[1].closest('[data-pane-session-id]'),
+    );
+    expect(container!.querySelector('[role="status"]')?.textContent).toBe('');
+  });
+
+  it('omits title details when the host disables them', () => {
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    render({
+      sessionIds: ['s1', 's2'],
+      showSessionDetails: false,
+      onPendingPanesChange,
+    });
+    expect(titles()).toEqual(['One', 'Two']);
+    expect(
+      panes().some((pane) => pane.hasAttribute('data-session-details')),
+    ).toBe(false);
+    expect(
+      container!.querySelector(
+        '[title="Go to the next session awaiting input"]',
+      )?.textContent,
+    ).toBe('1 awaiting input');
+    expect(container!.querySelector('[role="status"]')?.textContent).toBe(
+      '1 awaiting input',
+    );
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
+  });
+
+  it('renders one pane per initial session, each under its own provider', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      registerContextUsageControls: vi.fn(),
+      onBeforeContextCompress: vi.fn(),
+      onOpenContextUsage: vi.fn(),
+    });
+    expect(panes()).toHaveLength(2);
+    for (const pane of panes()) {
+      expect(pane.getAttribute('data-context-controls')).toBe('true');
+      expect(pane.getAttribute('data-open-context-usage')).toBe('true');
+      expect(pane.getAttribute('data-before-context-compress')).toBe('true');
+    }
     expect(titles()).toEqual(['One', 'Two']);
     const providers = container!.querySelectorAll('[data-session]');
     expect(providers[0].getAttribute('data-session')).toBe('s1');
@@ -201,17 +540,36 @@ describe('SplitView', () => {
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
   });
 
+  it('leaves the outer session as the sole catalog turn-completion owner', () => {
+    render({ sessionIds: ['s3', 's1'] });
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('false');
+    expect(
+      panes()[1]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
+  });
+
+  it('reports completion for the same session id in another workspace', async () => {
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 's3', workspaceCwd: '/wsB', displayName: 'Other Three' },
+    ];
+
+    render({ sessionIds: ['s3'], workspaceCwd: '/wsB' });
+    await flushAsync();
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
+  });
+
   it('passes the prompt SSE restart option to pane providers', () => {
     render({ sessionIds: ['s1'], restartSseOnPrompt: true });
     expect(
       container!
         .querySelector('[data-session="s1"]')
         ?.getAttribute('data-restart-sse'),
-    ).toBe('true');
-    expect(
-      container!
-        .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
-        ?.getAttribute('data-pane-restart-sse'),
     ).toBe('true');
   });
 
@@ -735,24 +1093,6 @@ describe('SplitView', () => {
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
   });
 
-  it('reloads the picker list when the parent bumps the reload token', () => {
-    render({ sessionIds: ['s1'], sessionListReloadToken: 0 });
-    // The initial token is not a change, so it does not trigger a reload.
-    expect(reloadMock).not.toHaveBeenCalled();
-    act(() =>
-      root!.render(
-        <I18nProvider language="en">
-          <SplitView
-            onExit={() => {}}
-            sessionIds={['s1']}
-            sessionListReloadToken={1}
-          />
-        </I18nProvider>,
-      ),
-    );
-    expect(reloadMock).toHaveBeenCalledTimes(1);
-  });
-
   it('mirrors the live pane set up to the parent as panes change', () => {
     const onPanesChange = vi.fn();
     render({ onPanesChange });
@@ -903,7 +1243,7 @@ describe('SplitView', () => {
     // must not touch the daemon and the picker stays untagged.
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    expect(workspaceClient.listWorkspaceSessions).not.toHaveBeenCalled();
+    expect(workspaceClient.listWorkspaceSessionsPage).not.toHaveBeenCalled();
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
   });
@@ -924,15 +1264,29 @@ describe('SplitView', () => {
     ];
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    const before = workspaceClient.listWorkspaceSessions.mock.calls.length;
+    const before = workspaceClient.listWorkspaceSessionsPage.mock.calls.length;
     openPicker();
     await flushAsync();
     // Opening the picker reloads the other-workspace list so it never offers a
     // stale set (mirrors the primary `reload()` on picker open).
     expect(
-      workspaceClient.listWorkspaceSessions.mock.calls.length,
+      workspaceClient.listWorkspaceSessionsPage.mock.calls.length,
     ).toBeGreaterThan(before);
   });
+
+  it.each([undefined, false, true])(
+    'passes explicit Plan visibility to every pane: %s',
+    (planControlVisible) => {
+      render({ sessionIds: ['s1', 's2'], planControlVisible });
+      const panes = container!.querySelectorAll('[data-testid="chat-pane"]');
+      expect(panes).toHaveLength(2);
+      for (const pane of panes) {
+        expect(pane.getAttribute('data-plan-visible')).toBe(
+          String(planControlVisible ?? false),
+        );
+      }
+    },
+  );
 
   it('passes renderPaneHeaderActions through to each ChatPane', () => {
     render({

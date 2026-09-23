@@ -26,7 +26,12 @@ describe.skip('stdin context', () => {
     const lastRequest = rig.readLastApiRequest();
     expect(lastRequest).not.toBeNull();
 
-    const historyString = lastRequest.attributes.request_text;
+    // `expect(...).not.toBeNull()` is a runtime check; it does not narrow the
+    // type. Assert the shape explicitly so the `indexOf` calls below are not
+    // reaching into `unknown`.
+    const historyString = String(
+      lastRequest?.attributes?.['request_text'] ?? '',
+    );
 
     // TODO: This test currently fails in sandbox mode (Docker/Podman) because
     // stdin content is not properly forwarded to the container when used

@@ -28,6 +28,7 @@ import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { TotalSessionAdmissionSnapshot } from '../total-session-admission.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 
 interface RegisterDaemonStatusRoutesDeps {
   opts: ServeOptions;
@@ -49,9 +50,13 @@ interface RegisterDaemonStatusRoutesDeps {
   sessionShellCommandEnabled: boolean;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  getCommittedAcpChildCount?: () => number;
+  childAdmissionEnforced?: boolean;
 }
 
 export function registerDaemonStatusRoutes(
@@ -88,10 +93,14 @@ export function registerDaemonStatusRoutes(
           sessionShellCommandEnabled: deps.sessionShellCommandEnabled,
           getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
           getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+          maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
           getPerfSnapshot: deps.getPerfSnapshot,
           getMetricsSeries: deps.getMetricsSeries,
           getTotalSessionAdmissionSnapshot:
             deps.getTotalSessionAdmissionSnapshot,
+          getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+          getCommittedAcpChildCount: deps.getCommittedAcpChildCount,
+          childAdmissionEnforced: deps.childAdmissionEnforced,
         }),
       );
     } catch (err) {

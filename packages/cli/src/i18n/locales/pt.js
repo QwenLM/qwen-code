@@ -130,11 +130,10 @@ export default {
   'type to filter…': 'digite para filtrar…',
   'No skills are currently available.':
     'Nenhuma habilidade está disponível no momento.',
-  'All available skills are locked at a higher scope (see below).':
-    'Todas as habilidades disponíveis estão bloqueadas em um escopo superior (veja abaixo).',
   'No skills match the search.': 'Nenhuma habilidade corresponde à pesquisa.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Bloqueado por configurações de escopo superior (não é possível alternar aqui):',
+  'Locked by settings entries you cannot toggle here:':
+    'Bloqueado por entradas de configuração (não é possível alternar aqui):',
+  '{{count}} locked not shown': '{{count}} habilidades bloqueadas não exibidas',
   'higher scope': 'escopo superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloqueado: {{scope}}]',
@@ -431,6 +430,7 @@ export default {
   'Hide Window Title': 'Ocultar Título da Janela',
   'Show Status in Title': 'Mostrar Status no Título',
   'Hide Tips': 'Ocultar Dicas',
+  'Show Tool Call Arguments': 'Mostrar Argumentos das Chamadas de Ferramenta',
   'Show Line Numbers in Code': 'Mostrar Números de Linhas no Código',
   'Show Citations': 'Mostrar Citações',
   'Custom Witty Phrases': 'Frases de Efeito Personalizadas',
@@ -467,6 +467,7 @@ export default {
     'Linhas de Truncamento de Saída de Ferramenta',
   'Folder Trust': 'Confiança de Pasta',
   'Tool Schema Compliance': 'Conformidade de Tool Schema',
+  Unset: 'Não definido',
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
@@ -577,6 +578,10 @@ export default {
     'Esta extensão instalará as seguintes habilidades:',
   'This extension will install the following subagents:':
     'Esta extensão instalará os seguintes subagentes:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Esta extensão instalará os seguintes fluxos de trabalho (scripts JavaScript que podem iniciar subagentes):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Estes scripts de fluxo de trabalho mudaram desde a versão instalada: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Instalação cancelada para "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -729,6 +734,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurados',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Este menu é somente leitura. Para adicionar ou modificar hooks, edite settings.json diretamente ou pergunte ao Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Reabra este menu para recarregar as definições dos hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Os controles dos hooks e as configurações de segurança HTTP exigem uma reinicialização.',
+  'Failed to reload hook definitions: {{error}}':
+    'Falha ao recarregar as definições dos hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Enter para selecionar · Esc para cancelar',
   // Hooks - Detail Step
@@ -802,8 +813,8 @@ export default {
     'A entrada para o comando é JSON com tool_name, tool_input, tool_use_id, error, error_type, is_interrupt e is_timeout.',
   'Input to command is JSON with notification message and type.':
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto da TUI interativa compatível).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto capturada em um ponto de envio compatível).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
@@ -1059,6 +1070,12 @@ export default {
     'A compressão do histórico do chat não reduziu o tamanho. Isso pode indicar problemas com o prompt de compressão.',
   'Could not compress chat history due to a token counting error.':
     'Não foi possível comprimir o histórico do chat devido a um erro de contagem de tokens.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Não foi possível comprimir o histórico do chat porque o resumo da compressão estava vazio.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Não foi possível comprimir o histórico do chat porque o resumo da compressão foi truncado.',
+  'Could not compress chat history due to an API error.':
+    'Não foi possível comprimir o histórico do chat devido a um erro da API.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1123,6 +1140,12 @@ export default {
   'Clear Authentication': 'Limpar autenticação',
   disabled: 'desativado',
   enabled: 'ativado',
+  'disabled (bare mode)': 'desativado (modo mínimo)',
+  'disabled (safe mode)': 'desativado (modo seguro)',
+  'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
+  'disabled (folder not trusted)': 'desativado (pasta não confiável)',
+  'disabled (turned off for this session)':
+    'desativado (desligado nesta sessão)',
   'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',
@@ -1558,13 +1581,28 @@ export default {
   'No tasks currently running': 'Nenhuma tarefa em execução',
   'No entry to show.': 'Nenhuma entrada para mostrar.',
   'needs approval': 'precisa de aprovação',
+  'Large workflow': 'Workflow grande',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow grande: {{agents}} agentes agendados (limite de aviso {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow grande: ~{{tokens}} tokens de saída previstos (limite de aviso {{cap}}).',
   'rejected — edit config to re-approve':
     'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
     'Agente em segundo plano precisa de aprovação',
+  'from nested agent': 'do agent aninhado',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
   Running: 'Em execução',
+  Pausing: 'Pausando',
   Paused: 'Pausado',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'A pausa é cooperativa; o trabalho em andamento pode terminar antes que o fluxo de trabalho seja pausado. Uma chamada de agente aguardando aprovação de ferramenta mantém a execução neste estado e continua contando para o limite de tempo ativo até que a aprovação seja respondida.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Pausado: nenhum novo agente será iniciado; o código do script entre chamadas de agente continua em execução. Pressione p para retomar. /clear, /branch e a troca de sessão cancelam execuções pausadas.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'A pausa/retomada foi rejeitada; o estado do fluxo de trabalho mudou. Tente novamente.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Dica: use `/workflows p <runId>` ou Tarefas em segundo plano + p para pausar/retomar cooperativamente; use `/workflows <runId>` para ver detalhes.',
   Completed: 'Concluído',
   Failed: 'Falhou',
   Stopped: 'Parado',
@@ -1826,6 +1864,9 @@ export default {
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
+  'Startup context': 'Contexto inicial',
+  Unattributed: 'Não atribuído',
+  'Cached prefix': 'Prefixo em cache',
   'Run /context detail for per-item breakdown.':
     'Execute /context detail para detalhamento por item.',
   active: 'ativo',
@@ -1971,6 +2012,18 @@ export default {
   'not updatable': 'não atualizável',
   'Ask a quick side question without affecting the main conversation':
     'Fazer uma pergunta rápida paralela sem afetar a conversa principal',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Obter uma segunda opinião sobre a conversa atual de um modelo revisor',
+  'Consulting advisor...': 'Consultando o assessor...',
+  'Advisor review failed: {{error}}': 'Falha na revisão do assessor: {{error}}',
+  'No conversation context available for /advisor':
+    'Nenhum contexto de conversa disponível para /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Foco muito longo (máx. {{max}} caracteres)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Outra operação está em andamento, aguarde a conclusão antes de executar /advisor',
+  'No response received.': 'Nenhuma resposta recebida.',
+  'No model configured.': 'Nenhum modelo configurado.',
   'Manage Arena sessions': 'Gerenciar sessões da Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Iniciar uma sessão da Arena com vários modelos competindo na mesma tarefa',
@@ -2048,6 +2101,7 @@ export default {
   'Context files:': 'Arquivos de contexto:',
   'Skills:': 'Habilidades:',
   'Agents:': 'Agentes:',
+  'Workflows:': 'Fluxos de trabalho:',
   'MCP servers:': 'MCP servers:',
   'Press c to copy the authorization URL to your clipboard.':
     'Pressione c para copiar a URL de autorização para a área de transferência.',
@@ -2210,6 +2264,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2291,4 +2347,5 @@ export default {
     'As alterações do gerenciador de habilidades automáticas estão desativadas no modo seguro.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
+  'Kept model as {{model}}': 'Modelo mantido como {{model}}',
 };

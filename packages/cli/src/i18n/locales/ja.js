@@ -99,11 +99,10 @@ export default {
   'Search:': '検索：',
   'type to filter…': 'フィルタを入力…',
   'No skills are currently available.': '利用可能なスキルはありません。',
-  'All available skills are locked at a higher scope (see below).':
-    'すべての利用可能なスキルは上位スコープでロックされています（下記参照）。',
   'No skills match the search.': '検索に一致するスキルはありません。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '上位スコープ設定によってロックされています（ここでは切替不可）：',
+  'Locked by settings entries you cannot toggle here:':
+    '設定エントリによってロックされています（ここでは切替不可）：',
+  '{{count}} locked not shown': 'ロック中の {{count}} 件を非表示',
   'higher scope': '上位スコープ',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [ロック中：{{scope}}]',
@@ -357,6 +356,7 @@ export default {
   'Vim Mode': 'Vim モード',
   'Output Format': '出力形式',
   'Hide Tips': 'ヒントを非表示',
+  'Show Tool Call Arguments': 'ツール呼び出し引数を表示',
   Text: 'テキスト',
   JSON: 'JSON',
   Plan: 'プラン',
@@ -392,6 +392,7 @@ export default {
   'Tool Output Truncation Threshold': 'ツール出力切り詰めのしきい値',
   'Tool Output Truncation Lines': 'ツール出力の切り詰め行数',
   'Tool Schema Compliance': 'Tool Schema 準拠',
+  Unset: '未設定',
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (follow user input)': '自動(ユーザー入力に従う)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
@@ -511,6 +512,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 件のフックが設定されています',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、Qwen Code に尋ねてください。',
+  'Reopen this menu to reload hook definitions.':
+    'このメニューを再度開くと、フック定義を再読み込みできます。',
+  'Hook controls and HTTP security settings require a restart.':
+    'フックの制御設定と HTTP セキュリティ設定の変更には再起動が必要です。',
+  'Failed to reload hook definitions: {{error}}':
+    'フック定義の再読み込みに失敗しました: {{error}}',
   'Enter to select · Esc to cancel': 'Enter で選択 · Esc でキャンセル',
   // Hooks - Detail Step
   'Exit codes:': '終了コード：',
@@ -581,8 +588,8 @@ export default {
     'コマンドへの入力は tool_name、tool_input、tool_use_id、error、error_type、is_interrupt、is_timeout を持つ JSON です。',
   'Input to command is JSON with notification message and type.':
     'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'コマンド入力は、"prompt"（現在のモデル向けプロンプト）と、オプションの "submitted_prompt"（サポート対象の対話型 TUI で入力されたテキストの投影）を含む JSON です。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'コマンド入力は、"prompt"（現在のモデル向けプロンプト）と、オプションの "submitted_prompt"（サポート対象の送信境界でキャプチャされたテキスト投影）を含む JSON です。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'コマンドへの入力は command_name、command_args、展開後のプロンプトテキストを持つ JSON です。',
   'Input to command is JSON with session start source.':
@@ -815,6 +822,12 @@ export default {
     'チャット履歴の圧縮でサイズが減少しませんでした。圧縮プロンプトに問題がある可能性があります',
   'Could not compress chat history due to a token counting error.':
     'トークンカウントエラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was empty.':
+    '圧縮サマリーが空だったため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was truncated.':
+    '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history due to an API error.':
+    'API エラーのため、チャット履歴を圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':
@@ -870,6 +883,11 @@ export default {
   'Clear Authentication': '認証をクリア',
   disabled: '無効',
   enabled: '有効',
+  'disabled (bare mode)': '無効（ベアモード）',
+  'disabled (safe mode)': '無効（セーフモード）',
+  'disabled (disableAllHooks)': '無効（disableAllHooks）',
+  'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
+  'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',
   Reconnect: '再接続',
   'View tools': 'ツールを表示',
@@ -967,13 +985,28 @@ export default {
   'No tasks currently running': '現在実行中のタスクはありません',
   'No entry to show.': '表示するエントリはありません。',
   'needs approval': '承認待ち',
+  'Large workflow': '大規模なワークフロー',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大規模なワークフロー：{{agents}} 個のエージェントを予定（警告しきい値 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大規模なワークフロー：出力トークン ~{{tokens}} の見込み（警告しきい値 {{cap}}）。',
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
+  'from nested agent': 'ネストされた agent から',
   'Approve or deny the request above':
     '上のリクエストを承認または拒否してください',
   Running: '実行中',
+  Pausing: '一時停止に移行中',
   Paused: '一時停止中',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '一時停止は協調的です。ワークフローが一時停止される前に、実行中の作業が完了する場合があります。ツール承認を待っているエージェント呼び出しは実行をこの状態に留め、承認に応答するまでアクティブ時間の上限に加算され続けます。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '一時停止中：新しいエージェントは開始されません。エージェント呼び出し間のスクリプトコードは実行を続けます。再開するには p を押してください。/clear、/branch、またはセッションを切り替えると、一時停止中の実行はキャンセルされます。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '一時停止／再開は拒否されました。ワークフローの状態が変化しました。もう一度お試しください。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'ヒント：`/workflows p <runId>` またはバックグラウンドタスク + p で実行を協調的に一時停止／再開できます。詳細は `/workflows <runId>` で確認できます。',
   Completed: '完了',
   Failed: '失敗',
   Stopped: '停止済み',
@@ -1368,6 +1401,9 @@ export default {
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',
+  'Startup context': '起動時コンテキスト',
+  Unattributed: '未分類',
+  'Cached prefix': 'キャッシュ済みプレフィックス',
   'Run /context detail for per-item breakdown.':
     '/context detail を実行すると項目ごとの内訳を表示します。',
   active: '有効',
@@ -1571,6 +1607,19 @@ export default {
   'Tool Approval Mode': 'ツール承認モード',
   'Ask a quick side question without affecting the main conversation':
     'メインの会話に影響を与えずに、ちょっとした質問をする',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'レビューモデルに現在の会話についてのセカンドオピニオンを求める',
+  'Consulting advisor...': 'アドバイザーに相談中...',
+  'Advisor review failed: {{error}}':
+    'アドバイザーレビューに失敗しました：{{error}}',
+  'No conversation context available for /advisor':
+    '/advisor に使用できる会話コンテキストがありません',
+  'Focus too long (max {{max}} chars)':
+    'フォーカスが長すぎます（最大 {{max}} 文字）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '別の操作が進行中です。完了するまで待ってから /advisor を実行してください',
+  'No response received.': '応答がありませんでした。',
+  'No model configured.': 'モデルが設定されていません。',
   'Manage Arena sessions': 'Arena セッションを管理',
   'Start an Arena session with multiple models competing on the same task':
     '同じタスクで複数モデルを競わせる Arena セッションを開始',
@@ -1672,6 +1721,10 @@ export default {
     'この拡張機能は次のスキルをインストールします:',
   'This extension will install the following subagents:':
     'この拡張機能は次のサブエージェントをインストールします:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'この拡張機能は次のワークフローをインストールします（サブエージェントを起動できる JavaScript スクリプト）:',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'インストール済みのバージョンから次のワークフロースクリプトが変更されています: {{names}}。',
   'Installation cancelled for "{{name}}".':
     '"{{name}}" のインストールをキャンセルしました。',
   '--ref and --auto-update are not applicable for marketplace extensions.':
@@ -1730,6 +1783,7 @@ export default {
   'Context files:': 'コンテキストファイル:',
   'Skills:': 'スキル:',
   'Agents:': 'エージェント:',
+  'Workflows:': 'ワークフロー:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'リンク拡張機能のインストールに失敗しました。',
@@ -1991,6 +2045,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2073,4 +2129,5 @@ export default {
     'セーフモードでは自動スキル管理による変更は無効です。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
+  'Kept model as {{model}}': 'モデルは {{model}} のままです',
 };

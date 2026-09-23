@@ -3,22 +3,46 @@ import type {
   ChannelWebhookConfig,
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
+  GroupSenderPolicy,
 } from '@qwen-code/channel-base';
+import {
+  parseChannelOutputMode,
+  resolvePrivatePolicy,
+} from '@qwen-code/channel-base';
+import {
+  APPROVAL_MODES,
+  isInternalSecretEnvVar,
+} from '@qwen-code/qwen-code-core';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
-const CHANNEL_APPROVAL_MODES = new Set([
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-]);
+const CHANNEL_APPROVAL_MODES = new Set<string>(APPROVAL_MODES);
+const GROUP_SENDER_POLICIES = new Set<GroupSenderPolicy>(['open', 'allowlist']);
+/** Top-level group speaker keys that moved into `groups`, with their new home. */
+const MOVED_GROUP_SPEAKER_KEYS: Record<string, string> = {
+  groupSenderPolicy: 'groups["*"].senders',
+  allowedGroupUsers: 'groups["*"].allowedUsers',
+};
 
 export { findCliEntryPath } from './cli-entry-path.js';
 
 type WebhookEnvironment = Readonly<Record<string, string | undefined>>;
+
+/**
+ * Channel config is loaded from merged settings, which a trusted repository
+ * contributes to, and the resolved values are sent as credentials to
+ * repo-configured endpoints — so Qwen-internal secrets are never resolved
+ * here. Throwing matches this module's contract for every other unusable
+ * reference (unset, empty), instead of silently yielding a literal.
+ */
+function assertNotInternalSecret(envName: string, reference: string): void {
+  if (isInternalSecretEnvVar(envName)) {
+    throw new Error(
+      `Environment variable ${envName} is a Qwen-internal secret and is never resolved into channel configuration (referenced as ${reference})`,
+    );
+  }
+}
 
 export function resolveEnvVars(
   value: string,
@@ -29,6 +53,7 @@ export function resolveEnvVars(
   }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
+    assertNotInternalSecret(envName, value);
     const envValue = env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -71,11 +96,49 @@ function resolveOptionalStringField(
 type EnvResolution = boolean | 'available';
 const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
 
+interface MultiSessionCompatibilityConfig {
+  multiSession?: boolean;
+  sessionScope: ChannelConfig['sessionScope'];
+  groupHistoryLimit?: unknown;
+  groups?: Record<string, unknown>;
+  webhooks?: unknown;
+}
+
+export function multiSessionCompatibilityError(
+  name: string,
+  config: MultiSessionCompatibilityConfig,
+): string | undefined {
+  if (!config.multiSession) return undefined;
+  if (config.sessionScope !== 'user') {
+    return `Channel "${name}" requires sessionScope "user" when multiSession is enabled.`;
+  }
+  if (
+    typeof config.groupHistoryLimit === 'number' &&
+    config.groupHistoryLimit !== 0
+  ) {
+    return `Channel "${name}" cannot use groupHistoryLimit when multiSession is enabled.`;
+  }
+  for (const [groupId, group] of Object.entries(config.groups ?? {})) {
+    const groupHistoryLimit =
+      group !== null && typeof group === 'object' && !Array.isArray(group)
+        ? (group as Record<string, unknown>)['groupHistoryLimit']
+        : undefined;
+    if (typeof groupHistoryLimit === 'number' && groupHistoryLimit !== 0) {
+      return `Channel "${name}" group "${groupId}" cannot use groupHistoryLimit when multiSession is enabled.`;
+    }
+  }
+  if (config.webhooks !== undefined && config.webhooks !== null) {
+    return `Channel "${name}" cannot use webhooks when multiSession is enabled.`;
+  }
+  return undefined;
+}
+
 function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === false) return value;
   if (value.startsWith('$$')) return value.substring(1);
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
+    assertNotInternalSecret(envName, value);
     const envValue = process.env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -290,6 +353,7 @@ function resolveWebhookSecretEnv(
       `Channel "${channelName}" field "${path}.secretEnv" must be an environment variable name or $-prefixed reference.`,
     );
   }
+  assertNotInternalSecret(envName, `${path}.secretEnv`);
   const envValue = env[envName];
   if (envValue === undefined) {
     throw new Error(
@@ -352,6 +416,61 @@ function parseApprovalModeConfig(
   return approvalMode;
 }
 
+function parseUserIdList(
+  channelName: string,
+  field: string,
+  value: unknown,
+): string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error(
+      `Channel "${channelName}" field "${field}" must be an array of user IDs.`,
+    );
+  }
+  return value as string[];
+}
+
+/**
+ * `groups` is otherwise passed through as written; the speaker keys are
+ * checked here so an unknown value fails at startup instead of widening access.
+ */
+function parseGroups(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelConfig['groups'] {
+  for (const [key, newHome] of Object.entries(MOVED_GROUP_SPEAKER_KEYS)) {
+    if (rawConfig[key] !== undefined) {
+      throw new Error(
+        `Channel "${channelName}" field "${key}" moved to ${newHome}.`,
+      );
+    }
+  }
+  const groups = (rawConfig['groups'] as ChannelConfig['groups']) || {};
+  for (const [groupId, group] of Object.entries(groups)) {
+    if (typeof group !== 'object' || group === null) continue;
+    const senders = (group as Record<string, unknown>)['senders'];
+    if (
+      senders !== undefined &&
+      (typeof senders !== 'string' ||
+        !GROUP_SENDER_POLICIES.has(senders as GroupSenderPolicy))
+    ) {
+      throw new Error(
+        `Channel "${channelName}" field "groups.${groupId}.senders" must be one of: ${[
+          ...GROUP_SENDER_POLICIES,
+        ].join(', ')}.`,
+      );
+    }
+    parseUserIdList(
+      channelName,
+      `groups.${groupId}.allowedUsers`,
+      (group as Record<string, unknown>)['allowedUsers'],
+    );
+  }
+  return groups;
+}
+
 export function parseChannelWebhookConfig(
   channelName: string,
   rawConfig: Record<string, unknown>,
@@ -412,6 +531,11 @@ export async function parseChannelConfig(
   }
 
   const resolvedRawConfig = { ...rawConfig };
+  const outputMode = parseChannelOutputMode(
+    name,
+    rawConfig['outputMode'],
+    plugin.supportsOutputMode === true,
+  );
   const envResolution = options.resolveEnvVars ?? true;
   const resolvedPluginFields = new Set<string>();
 
@@ -451,6 +575,26 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
+  const configuredSessionScope =
+    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+    plugin.defaultSessionScope ||
+    'user';
+  const multiSession = optionalBooleanField(
+    name,
+    'multiSession',
+    rawConfig['multiSession'],
+  );
+  const groups = parseGroups(name, rawConfig);
+  const webhooks = parseWebhookConfig(name, rawConfig);
+
+  const multiSessionError = multiSessionCompatibilityError(name, {
+    multiSession,
+    sessionScope: configuredSessionScope,
+    groupHistoryLimit: rawConfig['groupHistoryLimit'],
+    groups,
+    webhooks,
+  });
+  if (multiSessionError) throw new Error(multiSessionError);
 
   return {
     ...resolvedRawConfig,
@@ -458,14 +602,13 @@ export async function parseChannelConfig(
     token,
     clientId,
     clientSecret,
+    privatePolicy: resolvePrivatePolicy(rawConfig),
     senderPolicy:
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
-    sessionScope:
-      (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
-      plugin?.defaultSessionScope ||
-      'user',
+    sessionScope: configuredSessionScope,
+    multiSession,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
@@ -476,10 +619,12 @@ export async function parseChannelConfig(
     ] as const) as ChannelConfig['identity'],
     memoryScope: parseMemoryScopeConfig(name, rawConfig),
     model: rawConfig['model'] as string | undefined,
+    outputMode,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
-    groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
-    webhooks: parseWebhookConfig(name, rawConfig),
+    operators: parseUserIdList(name, 'operators', rawConfig['operators']),
+    groups,
+    webhooks,
   };
 }

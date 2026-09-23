@@ -94,26 +94,29 @@ function main() {
           (typeof label === 'string' ? label : label.name).toLowerCase() ===
           AUTO_LABEL,
       );
+      // REST, not `gh pr edit`: that command's GraphQL lookup requests
+      // repository.pullRequest.projectCards, which GitHub rejects on gh
+      // builds that still send the query — the mutation then exits 1 before
+      // applying anything, and this step's continue-on-error turned that
+      // into a silent skip on every affected release. The REST label
+      // endpoints never touch that query. The label is a path segment in
+      // the DELETE, hence encodeURIComponent.
       if (shouldSkip && !hasAutoLabel) {
         execFileSync('gh', [
-          'pr',
-          'edit',
-          number,
-          '--repo',
-          repo,
-          '--add-label',
-          AUTO_LABEL,
+          'api',
+          '-X',
+          'POST',
+          `repos/${repo}/issues/${number}/labels`,
+          '-f',
+          `labels[]=${AUTO_LABEL}`,
         ]);
         labeled.push(number);
       } else if (!shouldSkip && hasAutoLabel) {
         execFileSync('gh', [
-          'pr',
-          'edit',
-          number,
-          '--repo',
-          repo,
-          '--remove-label',
-          AUTO_LABEL,
+          'api',
+          '-X',
+          'DELETE',
+          `repos/${repo}/issues/${number}/labels/${encodeURIComponent(AUTO_LABEL)}`,
         ]);
         unlabeled.push(number);
       }

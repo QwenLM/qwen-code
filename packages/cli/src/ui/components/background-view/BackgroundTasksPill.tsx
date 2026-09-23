@@ -15,6 +15,7 @@ import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 import { t } from '../../../i18n/index.js';
+import { isActiveWorkflowStatus } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
@@ -38,16 +39,35 @@ export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
 }
 
 /**
- * Pill label: prefer live running counts, then paused resumable agent counts;
+ * True if a workflow that is still active has been flagged as large. Settled
+ * runs are left out: the marker is a nudge to stop something, and they have
+ * stopped.
+ */
+export function hasLargeWorkflow(entries: readonly DialogEntry[]): boolean {
+  return entries.some(
+    (e) =>
+      e.kind === 'workflow' &&
+      isActiveWorkflowStatus(e.status) &&
+      e.sizeWarning !== undefined,
+  );
+}
+
+/**
+ * Pill label: prefer live running counts and active workflows, then paused resumable agent counts;
  * once everything is terminal, switch to a generic "done" form so the pill
  * still invites reopening the dialog to inspect final state.
  */
 export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (entries.length === 0) return '';
 
-  const running = entries.filter((e) => e.status === 'running');
-  if (running.length > 0) {
-    return groupAndFormat(running);
+  const live = entries.filter(
+    (e) =>
+      e.status === 'running' ||
+      (e.kind === 'workflow' &&
+        (e.status === 'pausing' || e.status === 'paused')),
+  );
+  if (live.length > 0) {
+    return groupAndFormat(live);
   }
   const pausedAgents = entries.filter(
     (e): e is Extract<DialogEntry, { kind: 'agent' }> =>
@@ -131,13 +151,28 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const label = getPillLabel(entries);
   const needsApproval = hasPendingApproval(entries);
+  const largeWorkflow = hasLargeWorkflow(entries);
 
   return (
     <>
-      <Text color={theme.text.secondary}> · </Text>
-      <Text inverse={pillFocused}>{label}</Text>
+      {/* Truncate every node: the pill shares the footer's shrinkable hint
+          row, where a default-wrap child grows the footer mid-turn once the
+          queued-count badge squeezes the row (#8667). */}
+      <Text color={theme.text.secondary} wrap="truncate">
+        {' · '}
+      </Text>
+      <Text inverse={pillFocused} wrap="truncate">
+        {label}
+      </Text>
       {needsApproval && (
-        <Text color={theme.status.warning}>{` ⚠ ${t('needs approval')}`}</Text>
+        <Text color={theme.status.warning} wrap="truncate">
+          {` ⚠ ${t('needs approval')}`}
+        </Text>
+      )}
+      {largeWorkflow && (
+        <Text color={theme.status.warning} wrap="truncate">
+          {` ⚠ ${t('Large workflow')}`}
+        </Text>
       )}
     </>
   );

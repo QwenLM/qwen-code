@@ -2,7 +2,7 @@
 
 Qwen Code extensions package prompts, MCP servers, subagents, skills and custom commands into a familiar and user-friendly format. With extensions, you can expand the capabilities of Qwen Code and share those capabilities with others. They are designed to be easily installable and shareable.
 
-Extensions and plugins from [Gemini CLI Extensions Gallery](https://geminicli.com/extensions/) and [Claude Code Marketplace](https://claudemarketplaces.com/) can be directly installed into Qwen Code. This cross-platform compatibility gives you access to a rich ecosystem of extensions and plugins, dramatically expanding Qwen Code's capabilities without requiring extension authors to maintain separate versions.
+Extensions and plugins from [Gemini CLI Extensions Gallery](https://geminicli.com/extensions/), [Claude Code Marketplace](https://claudemarketplaces.com/), Qoder, and the portable [Agent Plugins v1](./agent-plugins.md) format can be directly installed into Qwen Code. This cross-platform compatibility gives you access to a rich ecosystem of extensions and plugins, dramatically expanding Qwen Code's capabilities without requiring extension authors to maintain separate versions.
 
 ## Extension management
 
@@ -99,6 +99,32 @@ Gemini extensions are automatically converted to Qwen Code format during install
 - TOML command files are automatically migrated to Markdown format
 - MCP servers, context files, and settings are preserved
 
+#### From Qoder Plugins
+
+Qwen Code supports [Qoder plugins](https://docs.qoder.com/en/cli/sdk/plugins) that contain a `.qoder-plugin/plugin.json` manifest. Install a local directory, archive, Git repository, archive URL, or scoped npm package with the existing `qwen extensions install` command:
+
+```bash
+qwen extensions install ./sample-qoder-plugin
+qwen extensions install ./sample-qoder-plugin.zip
+qwen extensions install owner/sample-qoder-plugin
+```
+
+The installer converts the Qoder manifest to `qwen-extension.json` and preserves standard `commands/`, `agents/`, and `skills/` directories. MCP servers declared in a root `.mcp.json` file are included as extension MCP servers.
+
+When a Qoder plugin contains `system-prompt.md` at its root, Qwen Code loads it as extension context. If the plugin also contains `QWEN.md` or declares other context files, all context files are retained and deduplicated.
+
+#### From Agent Plugins v1
+
+Qwen Code natively loads portable Agent Plugins v1 packages without converting or rewriting `plugin.json`, `mcp.json`, or `SKILL.md` files:
+
+```bash
+qwen extensions install ./my-agent-plugin
+qwen extensions link ./my-agent-plugin
+qwen extensions install owner/my-agent-plugin
+```
+
+The portable runtime supports Agent Skills plus stdio and Streamable HTTP MCP servers. Commands, agents, hooks, client namespaces, and legacy SSE MCP are not activated. See [Agent Plugins v1](./agent-plugins.md) for the complete support matrix.
+
 #### From npm Registry
 
 Qwen Code supports installing extensions from npm registries using scoped package names. This is ideal for teams with private registries that already have auth, versioning, and publishing infrastructure in place.
@@ -125,9 +151,13 @@ Only scoped packages (`@scope/package-name`) are supported to avoid ambiguity wi
 
 **Authentication** is handled automatically via the `NPM_TOKEN` environment variable or registry-specific `_authToken` entries in your `.npmrc` file.
 
-> **Note:** npm extensions must include a `qwen-extension.json` file at the package root, following the same format as any other Qwen Code extension. See [Extension Releasing](./extension-releasing.md#releasing-through-npm-registry) for packaging details.
+> **Note:** npm extensions must include either a native `qwen-extension.json` or an Agent Plugins v1 `plugin.json` at the package root. See [Extension Releasing](./extension-releasing.md#releasing-through-npm-registry) for packaging details.
 
 #### From Git Repository
+
+Git 2.37 or newer is required for credentialed, non-GitHub, nested marketplace, submodule, and Git LFS sources because Qwen Code uses `http.curloptResolve` to pin Git connections to validated DNS results. On older Git versions, Qwen Code supports only anonymous public `https://github.com/{owner}/{repo}[.git]` root repositories by resolving the requested ref to a commit and downloading GitHub's source archive with the same public-network and archive-safety checks.
+
+Because the older-Git fallback installs from a source archive rather than a clone, it cannot install repositories that rely on submodules or Git LFS, and it caps downloads at 100 MiB compressed and archives at 100,000 entries / 1 GiB expanded / 8 MiB path metadata, including files materialized from at most 100 symlinks. Symlinks directly targeting regular files in the repository are supported on systems that permit symlink creation; Windows may require Developer Mode or elevated privileges. The fallback rejects directory, chained, dangling, absolute, escaping, hard, and POSIX literal-backslash-target links. Other Agent Plugin install paths continue to omit symlinks. Release-based installs are still preferred when a repository publishes releases.
 
 ```bash
 qwen extensions install https://github.com/github/github-mcp-server
@@ -223,7 +253,9 @@ qwen extensions update --all
 
 On startup, Qwen Code looks for extensions in `<home>/.qwen/extensions`
 
-Extensions exist as a directory that contains a `qwen-extension.json` file. For example:
+Native Qwen extensions exist as a directory that contains a `qwen-extension.json` file. Agent Plugins v1 packages instead retain their root `plugin.json`; see [Agent Plugins v1](./agent-plugins.md).
+
+For example, a native Qwen extension is stored at:
 
 `<home>/.qwen/extensions/my-extension/qwen-extension.json`
 
@@ -250,6 +282,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
   "commands": "commands",
   "skills": "skills",
   "agents": "agents",
+  "workflows": "workflows",
   "settings": [
     {
       "name": "API Key",
@@ -270,6 +303,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 - `commands`: The directory containing custom commands (default: `commands`). Commands are `.md` files that define prompts.
 - `skills`: The directory containing custom skills (default: `skills`). Skills are discovered automatically and become available via the `/skills` command.
 - `agents`: The directory containing custom subagents (default: `agents`). Subagents are `.yaml` or `.md` files that define specialized AI assistants.
+- `workflows`: A directory, or a list of directories and `.js` files, containing workflow scripts (default: `workflows`). See [Custom workflows](#custom-workflows).
 - `settings`: An array of settings that the extension requires. When installing, users will be prompted to provide values for these settings. The values are stored securely and passed to MCP servers as environment variables.
   - Each setting has the following properties:
     - `name`: Display name for the setting
@@ -332,15 +366,21 @@ Extensions can provide custom skills by placing skill files in a `skills/` subdi
 
 **Example**
 
+An extension named `gcp` with the following structure:
+
 ```
-.qwen/extensions/my-extension/
+.qwen/extensions/gcp/
 ├── qwen-extension.json
 └── skills/
     └── pdf-processor/
-        └── SKILL.md
+        └── SKILL.md   # frontmatter: name: pdf-processor
 ```
 
-The skill will be available via the `/skills` command when the extension is active.
+provides one skill, registered as `gcp:pdf-processor` — the extension's `name`, a colon, then the name the `SKILL.md` authors. Run it with `/gcp:pdf-processor`; `/skills` lists it and labels it with the extension's display name, falling back to its `name` when the manifest declares none.
+
+Unlike the extension's custom commands, which are named after their files (`/deploy` and `/gcs:sync` above, and prefixed only when one collides — see Conflict resolution below), an extension skill always carries its owner: two extensions that both ship a `pdf-processor` give you two skills instead of one shadowing the other. The prefix is added as the skill loads, so the `name` in your `SKILL.md` is never rewritten on disk.
+
+Settings that name skills treat the two spellings asymmetrically: `skills.disabled` blocks a skill under either name, while `skills.enabled` opts it in under the prefixed name only. See [Extension Skills](../features/skills.md#extension-skills).
 
 ### Custom subagents
 
@@ -356,6 +396,55 @@ Extensions can provide custom subagents by placing agent configuration files in 
 ```
 
 Extension subagents appear in the subagent manager dialog under "Extension Agents" section.
+
+### Custom workflows
+
+Extensions can ship workflow scripts by placing `.js` files in a `workflows/` subdirectory, or in the directories and files the manifest lists in `workflows`. They appear only when Workflows are enabled with the [`tools.workflowsEnabled`](../configuration/settings.md) setting, which is off by default; the install consent prompt lists them either way.
+
+**Example**
+
+An extension named `gcp` with the following structure:
+
+```
+.qwen/extensions/gcp/
+├── qwen-extension.json
+└── workflows/
+    └── deep-research.js
+```
+
+provides one workflow when its script declares a static `meta` object with `name: 'deep-research'`, registered as `gcp:deep-research` — the extension's `name`, a colon, then `meta.name`. Run it with `/gcp:deep-research`, call it from another workflow with `workflow('gcp:deep-research')`, or let the model run it by name with `Workflow({ name: 'gcp:deep-research' })`. Like an extension skill, an extension workflow always carries its owner, so it never shadows one of your project or user workflows. If the same extension also ships a skill with that name, the skill keeps `/gcp:deep-research` and the workflow's slash command is renamed to `/gcp.gcp:deep-research`, as for any colliding extension command; a `slashCommands.disabled` entry written as `gcp:deep-research` still removes both. A user or project custom command with the same name (for example `commands/gcp/deep-research.md`) loads last and takes the slash command, and the workflow then stays reachable through `workflow('gcp:deep-research')`.
+
+Each script must declare a static `export const meta = { name, description }` block. The `description` is shown in the install consent prompt and in the command list. The file name may differ from `meta.name`; calls always use the metadata name. If multiple scripts declare the same `meta.name`, the first discovered script is kept. A `description` longer than 500 characters is shortened wherever it is shown.
+
+A script can also declare `whenToUse`, a sentence saying when the workflow applies:
+
+```js
+export const meta = {
+  name: 'deep-research',
+  description: 'Researches a question across the codebase and the web',
+  whenToUse:
+    'When the user asks for a sourced, multi-angle answer to an open question',
+};
+```
+
+Only a workflow that declares `whenToUse` is listed for the model, together with its description, so the model can start it when a request matches; each run still goes through the workflow approval. Without it, the model does not see the workflow, which then runs when you invoke it, ask for it by name, or another workflow calls it. `whenToUse` is shortened past 500 characters, like `description`, and since it lives in the script, changing it makes the next update ask for consent again.
+
+In the interactive UI, `/gcp:deep-research` starts the workflow directly. In headless mode and over ACP, the same command asks the model to run it by name, and the approval follows.
+
+To let the model start your extension's workflows without letting it write and run scripts of its own, deploy with [`tools.workflowNameOnly`](../configuration/settings.md) (or `QWEN_CODE_WORKFLOW_NAME_ONLY=1`) and allow the workflows by name, for example `Workflow(name:gcp:deep-research)`. The lock makes every run the model starts addressable by such a rule; it does not approve anything by itself, so keep asking for names you have not allowed.
+
+Discovery is deliberately narrow:
+
+- Only `.js` files directly inside each directory are read; subdirectories are ignored.
+- `meta.name` must use lower-case letters, digits, and hyphens, start with a letter, and contain at most 41 characters.
+- Every declared path must stay inside the extension directory. A linked extension (`qwen extensions link`) skips symlinked workflow files and directories; an installed extension is a copy in which each symlink has already been replaced by the file it points to.
+- Scripts larger than 256 KiB, or without a valid `meta` block, are skipped with a warning.
+
+Installing an extension lists its workflows in the consent prompt. An update asks again when it adds or removes a workflow, changes a workflow's name or description, or changes a script's code; when only code changed, the prompt names the changed scripts. Extension workflows follow the same rules as your own saved workflows: they are hidden in untrusted folders and in bare mode, and each run goes through the usual workflow approval, which shows the start of the script. An "always allow" for a workflow run by name or path is saved as a rule pinned to the script's content, such as `Workflow(name:gcp:deep-research,sha256:3f2a9c1d0b4e5f67)`, so it stops applying once the script changes. A rule you write without `sha256`, such as `Workflow(name:gcp:deep-research)`, allows every version of the script.
+
+Edits to files in the default `workflows/` directory are picked up automatically. Changes under other declared paths take effect after `/reload-plugins` or a restart.
+
+Claude Code plugins that ship workflows are converted on install. A plugin that declares no `workflows` keeps its `workflows/` directory, which is discovered as the default. When the plugin declares `workflows`, the declared files retain their relative paths and are listed explicitly in the converted extension's manifest, and only those files are discovered: files with the same basename in different directories stay distinct under their `meta.name` values, and a `workflows/` directory the plugin also ships is copied but not read. A symlink inside a declared directory is copied as a regular file when its target stays inside the plugin.
 
 ### Conflict resolution
 

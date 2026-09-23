@@ -151,6 +151,7 @@ export default {
   'from {{marketplace}}': 'from {{marketplace}}',
   installed: 'installed',
   '{{count}} Agents': '{{count}} Agents',
+  '{{count}} Workflows': '{{count}} Workflows',
   '{{count}} Commands': '{{count}} Commands',
   '{{count}} MCP': '{{count}} MCP',
   '{{count}} Skills': '{{count}} Skills',
@@ -177,6 +178,7 @@ export default {
   // self-mapping and returns the bare display name. Localized values live in
   // zh.js / zh-TW.js; other locales fall back to the English display name.
   // ============================================================================
+  'toolDisplayName.Exec': 'toolDisplayName.Exec',
   'toolDisplayName.Edit': 'toolDisplayName.Edit',
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
@@ -188,10 +190,13 @@ export default {
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
   'toolDisplayName.Goal': 'toolDisplayName.Goal',
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
+  'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.RecordSource': 'toolDisplayName.RecordSource',
+  'toolDisplayName.ReportFindings': 'toolDisplayName.ReportFindings',
   'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
@@ -215,15 +220,35 @@ export default {
   'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
   'toolDisplayName.TeamPlanApproval': 'toolDisplayName.TeamPlanApproval',
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
+  'toolDisplayName.RequestShutdown': 'toolDisplayName.RequestShutdown',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
   'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
+  'toolDisplayName.ToolCall': 'toolDisplayName.ToolCall',
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
+  'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
+  'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
+  'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',
+  'toolDisplayName.ExtractKeyframes': 'toolDisplayName.ExtractKeyframes',
+  'toolDisplayName.ExtractAudio': 'toolDisplayName.ExtractAudio',
+  'toolDisplayName.ClipVideo': 'toolDisplayName.ClipVideo',
+  'toolDisplayName.ClipImage': 'toolDisplayName.ClipImage',
+  'toolDisplayName.ClipAudio': 'toolDisplayName.ClipAudio',
+  'toolDisplayName.CaptionImage': 'toolDisplayName.CaptionImage',
+  'toolDisplayName.CaptionAudio': 'toolDisplayName.CaptionAudio',
+  'toolDisplayName.OcrImage': 'toolDisplayName.OcrImage',
+  'toolDisplayName.UnderstandVideoSegments':
+    'toolDisplayName.UnderstandVideoSegments',
+  'toolDisplayName.ConvertImage': 'toolDisplayName.ConvertImage',
+  'toolDisplayName.TranscribeAudio': 'toolDisplayName.TranscribeAudio',
+  'toolDisplayName.RecallMediaMemory': 'toolDisplayName.RecallMediaMemory',
+  '[fixed-only: runs via media policies, not the model]':
+    '[fixed-only: runs via media policies, not the model]',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -358,11 +383,10 @@ export default {
   'Search:': 'Search:',
   'type to filter…': 'type to filter…',
   'No skills are currently available.': 'No skills are currently available.',
-  'All available skills are locked at a higher scope (see below).':
-    'All available skills are locked at a higher scope (see below).',
   'No skills match the search.': 'No skills match the search.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Locked by higher-scope settings (cannot toggle here):',
+  'Locked by settings entries you cannot toggle here:':
+    'Locked by settings entries you cannot toggle here:',
+  '{{count}} locked not shown': '{{count}} locked not shown',
   'higher scope': 'higher scope',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [locked: {{scope}}]',
@@ -688,6 +712,12 @@ export default {
   active: 'active',
   disabled: 'disabled',
   enabled: 'enabled',
+  'disabled (bare mode)': 'disabled (bare mode)',
+  'disabled (safe mode)': 'disabled (safe mode)',
+  'disabled (disableAllHooks)': 'disabled (disableAllHooks)',
+  'disabled (folder not trusted)': 'disabled (folder not trusted)',
+  'disabled (turned off for this session)':
+    'disabled (turned off for this session)',
   'View Details': 'View Details',
   'Update failed:': 'Update failed:',
   'Updating {{name}}...': 'Updating {{name}}...',
@@ -717,6 +747,7 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
@@ -731,6 +762,7 @@ export default {
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
   'Hide Tips': 'Hide Tips',
+  'Show Tool Call Arguments': 'Show Tool Call Arguments',
   'Show Line Numbers in Code': 'Show Line Numbers in Code',
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
@@ -765,6 +797,7 @@ export default {
   'Tool Output Truncation Lines': 'Tool Output Truncation Lines',
   'Folder Trust': 'Folder Trust',
   'Tool Schema Compliance': 'Tool Schema Compliance',
+  Unset: 'Unset',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
   'Auto (follow user input)': 'Auto (follow user input)',
@@ -900,6 +933,10 @@ export default {
     'This extension will install the following skills:',
   'This extension will install the following subagents:':
     'This extension will install the following subagents:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'This extension will install the following workflows (JavaScript scripts that can start subagents):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'These workflow scripts changed since the installed version: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation cancelled for "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -979,6 +1016,7 @@ export default {
   'Context files:': 'Context files:',
   'Skills:': 'Skills:',
   'Agents:': 'Agents:',
+  'Workflows:': 'Workflows:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.': 'Link extension failed to install.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1078,6 +1116,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configured',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Reopen this menu to reload hook definitions.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook controls and HTTP security settings require a restart.',
+  'Failed to reload hook definitions: {{error}}':
+    'Failed to reload hook definitions: {{error}}',
   'Enter to select · Esc to cancel': 'Enter to select · Esc to cancel',
   // Hooks - Detail Step
   'Exit codes:': 'Exit codes:',
@@ -1094,6 +1138,20 @@ export default {
   'No hook config selected': 'No hook config selected',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+  'Safe mode is on, so no hooks run in this session.':
+    'Safe mode is on, so no hooks run in this session.',
+  'Bare mode is on, so no hooks run in this session.':
+    'Bare mode is on, so no hooks run in this session.',
+  'All hooks are disabled by the disableAllHooks setting.':
+    'All hooks are disabled by the disableAllHooks setting.',
+  'Timeout:': 'Timeout:',
+  'Status message:': 'Status message:',
+  'Condition:': 'Condition:',
+  'Options:': 'Options:',
+  'Skill:': 'Skill:',
+  'runs in background': 'runs in background',
+  'runs once': 'runs once',
+  sequential: 'sequential',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook Configuration - Disabled',
   'All hooks are currently disabled. You have {{count}} that are not running.':
@@ -1149,8 +1207,8 @@ export default {
     'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Input to command is JSON with notification message and type.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
@@ -1618,6 +1676,12 @@ export default {
     'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
   'Could not compress chat history due to a token counting error.':
     'Could not compress chat history due to a token counting error.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Could not compress chat history because the compression summary was empty.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Could not compress chat history because the compression summary was truncated.',
+  'Could not compress chat history due to an API error.':
+    'Could not compress chat history due to an API error.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1892,6 +1956,7 @@ export default {
   'Ctrl+Q to queue · ↑ to edit queued messages':
     'Ctrl+Q to queue · ↑ to edit queued messages',
   'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  '{{count}} queued': '{{count}} queued',
   'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
@@ -2043,12 +2108,27 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'Large workflow': 'Large workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
   'rejected — edit config to re-approve':
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
+  'from nested agent': 'from nested agent',
   Running: 'Running',
+  Pausing: 'Pausing',
   Paused: 'Paused',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pause/resume was rejected; the workflow state changed. Try again.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.',
   Completed: 'Completed',
   Failed: 'Failed',
   Stopped: 'Stopped',
@@ -2356,6 +2436,9 @@ export default {
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',
+  'Startup context': 'Startup context',
+  Unattributed: 'Unattributed',
+  'Cached prefix': 'Cached prefix',
   'Run /context detail for per-item breakdown.':
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2480,8 +2563,10 @@ export default {
     'Switch to plan mode or exit plan mode',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
-  'Set a goal — keep working until the condition is met':
-    'Set a goal — keep working until the condition is met',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
+  'It is saved but does not apply while this workspace is untrusted.':
+    'It is saved but does not apply while this workspace is untrusted.',
   'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
@@ -2514,6 +2599,17 @@ export default {
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
     'Ask a quick side question without affecting the main conversation',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Get a second opinion on the current conversation from a reviewer model',
+  'Consulting advisor...': 'Consulting advisor...',
+  'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
+  'No conversation context available for /advisor':
+    'No conversation context available for /advisor',
+  'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Another operation is in progress, wait for it to complete before running /advisor',
+  'No response received.': 'No response received.',
+  'No model configured.': 'No model configured.',
   'Manage Arena sessions': 'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task':
     'Start an Arena session with multiple models competing on the same task',
@@ -2724,6 +2820,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2817,4 +2915,7 @@ export default {
     'Auto-skill curator changes are disabled in safe mode.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+  'Kept model as {{model}}': 'Kept model as {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
 };

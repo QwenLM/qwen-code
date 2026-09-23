@@ -22,26 +22,37 @@ const mockSettings = new LoadedSettings(
   new Set(),
 );
 
-export const renderWithProviders = (
+export interface RenderWithProvidersOptions {
+  shellFocus?: boolean;
+  settings?: LoadedSettings;
+  config?: Config;
+}
+
+/**
+ * Wraps a tree in the shared provider stack without rendering it. Use this
+ * to rebuild the exact same root structure for `rerender()` calls, so the
+ * reconciler updates the mounted tree in place instead of remounting.
+ */
+export const withProviders = (
   component: React.ReactElement,
   {
     shellFocus = true,
     settings = mockSettings,
     config = undefined,
-  }: {
-    shellFocus?: boolean;
-    settings?: LoadedSettings;
-    config?: Config;
-  } = {},
-): ReturnType<typeof render> =>
-  render(
-    <SettingsContext.Provider value={settings}>
-      <ConfigContext.Provider value={config}>
-        <ShellFocusContext.Provider value={shellFocus}>
-          <KeypressProvider kittyProtocolEnabled={true}>
-            {component}
-          </KeypressProvider>
-        </ShellFocusContext.Provider>
-      </ConfigContext.Provider>
-    </SettingsContext.Provider>,
-  );
+  }: RenderWithProvidersOptions = {},
+): React.ReactElement => (
+  <SettingsContext.Provider value={settings}>
+    <ConfigContext.Provider value={config}>
+      <ShellFocusContext.Provider value={shellFocus}>
+        <KeypressProvider kittyProtocolEnabled={true}>
+          {component}
+        </KeypressProvider>
+      </ShellFocusContext.Provider>
+    </ConfigContext.Provider>
+  </SettingsContext.Provider>
+);
+
+export const renderWithProviders = (
+  component: React.ReactElement,
+  options: RenderWithProvidersOptions = {},
+): ReturnType<typeof render> => render(withProviders(component, options));

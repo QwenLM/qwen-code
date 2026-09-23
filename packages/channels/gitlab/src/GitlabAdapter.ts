@@ -5,7 +5,10 @@ import type {
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
-import { PollingChannelBase } from '@qwen-code/channel-base';
+import {
+  lowercaseGroupAllowedUsers,
+  PollingChannelBase,
+} from '@qwen-code/channel-base';
 import { Gitlab, type TodoSchema } from '@gitbeaker/rest';
 import { z } from 'zod';
 import { testBotMention, stripBotMention } from './mention.js';
@@ -76,9 +79,13 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
 
-    if (cfg.groupPolicy !== 'open' && cfg.groupPolicy !== 'allowlist') {
+    if (
+      cfg.groupPolicy !== 'open' &&
+      cfg.groupPolicy !== 'allowlist' &&
+      cfg.groupPolicy !== 'pairing'
+    ) {
       process.stderr.write(
-        `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open" (or "allowlist" with the project listed) for todos to be dispatched\n`,
+        `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open", "allowlist" (with the project listed), or "pairing" (after one-time group approval) for todos to be dispatched\n`,
       );
     }
 
@@ -95,6 +102,10 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     );
     this.config.allowedUsers = allowed;
     this.gate.replaceAllowedUsers(allowed);
+    lowercaseGroupAllowedUsers(this.config.groups);
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
 
     this.startPollLoop();
   }
@@ -113,6 +124,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!threadId) {
       throw new Error(
@@ -126,7 +138,12 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
     const targetType = threadId.startsWith('mr:') ? 'mr' : 'issue';
-    await this.createNote(chatId, targetType, Number(match[1]), text);
+    await this.createNote(
+      chatId,
+      targetType,
+      Number(match[1]),
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override onPromptStart(
@@ -352,6 +369,23 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
     try {
       await this.handleInbound(envelope);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
+      );
+      try {
+        await this.createNote(
+          chatId,
+          targetType,
+          target.iid,
+          this.formatMarkdownAttributedText(
+            '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            this.getInboundErrorSourceLabel(envelope),
+          ),
+        );
+      } catch {
+        // best-effort error comment
+      }
     } finally {
       this.reactions.delete(messageId);
     }

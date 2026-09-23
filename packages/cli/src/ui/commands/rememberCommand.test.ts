@@ -47,6 +47,7 @@ describe('rememberCommand', () => {
     expect((result as { content: string }).content).not.toContain(
       '<user-content>',
     );
+    expect(result).not.toHaveProperty('refreshContextFilesOnWrite');
   });
 
   it('falls back to QWEN.md in bare mode', () => {
@@ -64,6 +65,7 @@ describe('rememberCommand', () => {
       content: expect.stringContaining('some fact'),
     });
     expect((result as { content: string }).content).toContain('QWEN.md');
+    expect(result).toHaveProperty('refreshContextFilesOnWrite', true);
   });
 
   it('declares acp in supportedModes', () => {

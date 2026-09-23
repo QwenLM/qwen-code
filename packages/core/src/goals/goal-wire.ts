@@ -5,6 +5,7 @@
  */
 
 export {
+  GOAL_PAUSE_REASON_COMMAND,
   GOAL_STATE_VERSION,
   goalRequiresExactPermit,
   type GoalActivity,
@@ -22,13 +23,12 @@ export {
 } from './goal-protocol.js';
 export {
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
 } from './goal-reducer.js';
 export {
-  projectGoalStateToLegacy,
-  type LegacyActiveGoal,
-  type LegacyGoalProjection,
-  type LegacyGoalStatus,
-  type LegacyGoalStatusKind,
-  type LegacyGoalTerminal,
-} from './goal-legacy-projection.js';
+  isGoalCheckpointBookkeepingRecord,
+  projectGoalCard,
+  type GoalCard,
+  type GoalCardKind,
+} from './goal-card.js';

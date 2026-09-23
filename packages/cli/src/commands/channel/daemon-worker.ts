@@ -1,6 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
+  CHANNEL_WORKER_KILL_GRACE_MS,
+  CHANNEL_WORKER_STOP_GRACE_MS,
+} from '@qwen-code/acp-bridge/channelControlTimeouts';
+import {
   addChannelMemoryEntries,
   clearChannelMemory,
   getChannelMemoryRevision,
@@ -12,6 +16,8 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
+import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
   ChannelLoopScheduler,
   ChannelLoopStore,
@@ -31,6 +37,7 @@ import type {
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
 } from '@qwen-code/channel-base';
+import type { ServeFeature } from '../../serve/capabilities.js';
 import type { ServeChannelSelection } from '../../serve/types.js';
 import { normalizeServeChannelSelection } from '../../serve/channel-selection.js';
 import {
@@ -41,6 +48,7 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
@@ -63,8 +71,13 @@ import {
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
+import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
@@ -79,19 +92,49 @@ import {
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
+  resolveChannelLocale,
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
-import { ObservedChannelContactStore } from './observed-contact-store.js';
+import {
+  OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
+  ObservedChannelContactStore,
+} from './observed-contact-store.js';
 import {
   createChannelLoopController,
   isChannelCronEnabled,
 } from './loop-runtime.js';
+import { disconnectChannels } from './disconnect-channels.js';
 
-const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+// Typed against the registry so renaming a capability key fails the build here
+// instead of silently degrading the worker to the pre-capability behavior.
+const SESSION_SHELL_COMMAND_FEATURE: ServeFeature = 'session_shell_command';
+const SESSION_ATTACHMENTS_FEATURE: ServeFeature = 'session_attachments';
+const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
+const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
+const SESSION_WORKTREE_PERSISTENCE_FEATURE: ServeFeature =
+  'session_worktree_persistence_v1';
+const SESSION_WORKTREE_RESET_FEATURE: ServeFeature =
+  'session_worktree_reset_v1';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
-const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
+const WORKER_CHANNEL_DISCONNECT_DRAIN_MS =
+  CHANNEL_WORKER_STOP_GRACE_MS - CHANNEL_WORKER_KILL_GRACE_MS;
+const WORKER_STARTUP_ROLLBACK_DRAIN_MS = 1_500;
+
+async function disconnectWorkerChannels(
+  channels: Iterable<ChannelBase>,
+  timeoutMs = WORKER_CHANNEL_DISCONNECT_DRAIN_MS,
+): Promise<void> {
+  await disconnectChannels(channels, {
+    timeoutMs,
+    onTimeout: () => {
+      writeStderrLineSafe(
+        `[Channel] disconnect drain exceeded ${timeoutMs}ms; continuing worker shutdown.`,
+      );
+    },
+  });
+}
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -110,6 +153,13 @@ interface DaemonCapabilitiesLike {
 
 interface DaemonClientLike {
   capabilities(): Promise<DaemonCapabilitiesLike>;
+  workspaceByCwd?(cwd: string): {
+    deleteSessionsData(sessionIds: string[]): Promise<{
+      removed: string[];
+      notFound: string[];
+      errors: Array<{ sessionId: string; error: string }>;
+    }>;
+  };
 }
 
 interface DaemonSessionClientStaticLike {
@@ -122,10 +172,11 @@ interface DaemonSessionClientStaticLike {
       approvalMode?: string;
       sourceType?: string;
       sourceId?: string;
+      worktree?: Record<string, never>;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
-  load(
+  resume(
     client: DaemonClientLike,
     sessionId: string,
     req: {
@@ -133,8 +184,24 @@ interface DaemonSessionClientStaticLike {
       modelServiceId?: string;
       sessionScope: 'thread';
       approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
     },
     clientId?: string,
+  ): Promise<DaemonChannelSessionClient>;
+  // The reset route registers no client for the caller, so unlike `create`
+  // and `resume` this takes no client id.
+  resetWorktree(
+    client: DaemonClientLike,
+    sessionId: string,
+    req: {
+      workspaceCwd: string;
+      modelServiceId?: string;
+      sessionScope: 'thread';
+      approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
+    },
   ): Promise<DaemonChannelSessionClient>;
 }
 
@@ -160,7 +227,7 @@ export interface ChannelDaemonWorkerHandle {
     task: ChannelWebhookTask,
     options?: ChannelWebhookRunOptions,
   ): Promise<void>;
-  close(): Promise<void>;
+  close(disconnectDrainMs?: number): Promise<void>;
 }
 
 export interface RunChannelDaemonWorkerOptions {
@@ -173,6 +240,7 @@ export interface RunChannelDaemonWorkerOptions {
   reportStartup?: (message: ChannelStartupReportMessage) => Promise<void>;
   startupSignal?: AbortSignal;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
+  promptAuthorization?: string;
 }
 
 export function createDaemonSessionFactory({
@@ -195,9 +263,21 @@ export function createDaemonSessionFactory({
       // sessions remain thread-scoped so different channels never share the
       // daemon's default single session.
       sessionScope: 'thread' as const,
+      sourceType: 'channel',
+      // sourceId = channel instance name (e.g. feishu-main): distinguishes
+      // channel instances on the daemon data plane; the channel kind
+      // (dingtalk/feishu) is derivable from the name via the channel config.
+      ...(req.sourceId ? { sourceId: req.sourceId } : {}),
     };
+    if (req.worktreeReset) {
+      return await DaemonSessionClient.resetWorktree(
+        client,
+        req.worktreeReset.sessionId,
+        daemonReq,
+      );
+    }
     if (req.sessionId) {
-      return await DaemonSessionClient.load(
+      return await DaemonSessionClient.resume(
         client,
         req.sessionId,
         daemonReq,
@@ -208,13 +288,7 @@ export function createDaemonSessionFactory({
       client,
       {
         ...daemonReq,
-        sourceType: 'channel',
-        // sourceId = channel instance name (e.g. feishu-main): distinguishes
-        // channel instances on the daemon data plane; the channel kind
-        // (dingtalk/feishu) is derivable from the name via the channel config.
-        // The load branch above deliberately omits it: loading never re-stamps
-        // creation attribution.
-        ...(req.sourceId ? { sourceId: req.sourceId } : {}),
+        ...(req.worktree ? { worktree: req.worktree } : {}),
       },
       clientId,
     );
@@ -223,7 +297,7 @@ export function createDaemonSessionFactory({
 
 export function createDaemonChannelBridgeFacade(
   bridge: ChannelAgentBridge,
-  opts: { exposeShellCommand: boolean },
+  opts: { exposeBtw: boolean; exposeShellCommand: boolean },
 ): ChannelAgentBridge {
   const facade: ChannelAgentBridge = {
     get availableCommands() {
@@ -237,12 +311,20 @@ export function createDaemonChannelBridgeFacade(
     cancelSession: bridge.cancelSession.bind(bridge),
   };
 
+  if (opts.exposeBtw && bridge.btw) {
+    facade.btw = bridge.btw.bind(bridge);
+  }
+
   if (bridge.respondToPermission) {
     facade.respondToPermission = bridge.respondToPermission.bind(bridge);
   }
 
   if (bridge.discardSession) {
     facade.discardSession = bridge.discardSession.bind(bridge);
+  }
+
+  if (bridge.deleteSessionData) {
+    facade.deleteSessionData = bridge.deleteSessionData.bind(bridge);
   }
 
   if (bridge.getAvailableCommands) {
@@ -255,6 +337,10 @@ export function createDaemonChannelBridgeFacade(
 
   if (bridge.listSessions) {
     facade.listSessions = bridge.listSessions.bind(bridge);
+  }
+
+  if (bridge.resetWorktreeSession) {
+    facade.resetWorktreeSession = bridge.resetWorktreeSession.bind(bridge);
   }
 
   if (bridge.registerChannelLoopToolHandler) {
@@ -307,8 +393,25 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   } catch {
     throw new Error(`${QWEN_DAEMON_URL_ENV} must be a valid URL.`);
   }
-  if (parsed.protocol !== 'http:' || !isLoopbackBind(parsed.hostname)) {
-    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http loopback URL.`);
+  // A daemon bound to a concrete interface (`--hostname 192.168.1.100`)
+  // listens on that socket ONLY — loopback is not bound, so rewriting the
+  // URL to `127.0.0.1` would trade this rejection for `ECONNREFUSED`. The
+  // worker dials the bound address itself, and an own-interface address
+  // keeps the daemon token on this host exactly as loopback does, which is
+  // the property this rule protects; anything else (a routable third-party
+  // host, a DNS name we would have to resolve to find out) stays refused.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
+        `literal address of one of this machine's interfaces.`,
+    );
+  }
+  if (isLoopbackBind(parsed.hostname)) return;
+  if (!isOwnInterfaceAddress(parsed.hostname)) {
+    throw new Error(
+      `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
+        `literal address of one of this machine's interfaces.`,
+    );
   }
 }
 
@@ -443,6 +546,12 @@ export async function runChannelDaemonWorker(
     undefined,
     settings.merged.proxy as string | undefined,
   );
+  const locale = resolveChannelLocale(settings.merged.general?.language);
+  const displayLanguage = resolveLanguage(
+    resolveLanguageSetting(
+      settings.merged.general?.language as string | undefined,
+    ),
+  );
   const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
   const parsed = await abortableStartup(
@@ -464,6 +573,24 @@ export async function runChannelDaemonWorker(
   const loopController = loopStore
     ? createChannelLoopController(loopStore)
     : undefined;
+  if (loopStore) {
+    const multiSessionChannels = new Set(
+      parsed
+        .filter(({ config }) => config.multiSession)
+        .map(({ name }) => name),
+    );
+    if (multiSessionChannels.size > 0) {
+      const loops = await abortableStartup(loopStore.list(), startupSignal);
+      const conflicting = loops.find(
+        (loop) => loop.enabled && multiSessionChannels.has(loop.channelName),
+      );
+      if (conflicting) {
+        throw new Error(
+          `Channel "${conflicting.channelName}" cannot enable multiSession while it has an enabled Channel loop. Disable the loop first.`,
+        );
+      }
+    }
+  }
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -472,6 +599,37 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
+    sessionAttachments: capabilities.features.includes(
+      SESSION_ATTACHMENTS_FEATURE,
+    ),
+    sessionPermissionVote: capabilities.features.includes(
+      SESSION_PERMISSION_VOTE_FEATURE,
+    ),
+    sessionWorktreePersistence: capabilities.features.includes(
+      SESSION_WORKTREE_PERSISTENCE_FEATURE,
+    ),
+    sessionWorktreeReset: capabilities.features.includes(
+      SESSION_WORKTREE_RESET_FEATURE,
+    ),
+    ...(opts.promptAuthorization
+      ? { promptAuthorization: opts.promptAuthorization }
+      : {}),
+    deleteSessionData: async (sessionId) => {
+      const workspaceClient = client.workspaceByCwd?.(daemonWorkspace);
+      if (!workspaceClient) {
+        throw new Error('Daemon SDK does not support session data deletion.');
+      }
+      const result = await workspaceClient.deleteSessionsData([sessionId]);
+      if (
+        !result.removed.includes(sessionId) &&
+        !result.notFound.includes(sessionId)
+      ) {
+        const detail = result.errors.find(
+          (entry) => entry.sessionId === sessionId,
+        )?.error;
+        throw new Error(detail ?? `Session ${sessionId} was not deleted.`);
+      }
+    },
     ...(modelServiceId ? { modelServiceId } : {}),
     ...(opts.channelLoopMcpHost
       ? { channelLoopMcpHost: opts.channelLoopMcpHost }
@@ -486,20 +644,11 @@ export async function runChannelDaemonWorker(
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: process.env,
   };
-  const disconnectAll = () => {
-    for (const channel of channels.values()) {
-      try {
-        channel.disconnect();
-      } catch {
-        // best-effort
-      }
-    }
-  };
-
   let router: SessionRouter | undefined;
   try {
     await abortableStartup(bridge.start(), startupSignal);
     const bridgeFacade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: capabilities.features.includes(SESSION_BTW_FEATURE),
       exposeShellCommand: capabilities.features.includes(
         SESSION_SHELL_COMMAND_FEATURE,
       ),
@@ -514,6 +663,7 @@ export async function runChannelDaemonWorker(
     router = createdRouter;
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
+      createdRouter.setChannelLoopsEnabled(name, !config.multiSession);
       if (config['webhooks']) {
         createdRouter.setChannelApprovalMode(name, config.approvalMode);
       }
@@ -532,7 +682,9 @@ export async function runChannelDaemonWorker(
         name,
         await abortableStartup(
           createChannel(name, config, bridgeFacade, {
+            locale,
             ...(proxy ? { proxy } : {}),
+            ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
             stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
@@ -553,8 +705,14 @@ export async function runChannelDaemonWorker(
               observe: (channelName, observation) => {
                 observedContacts.observe(channelName, observation);
               },
+              list: () =>
+                observedContacts.list({
+                  freshWithinSeconds: OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
+                }),
             },
-            ...(loopController ? { loopController } : {}),
+            ...(loopController && !config.multiSession
+              ? { loopController }
+              : {}),
           }),
           startupSignal,
         ),
@@ -584,7 +742,7 @@ export async function runChannelDaemonWorker(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
         try {
-          channel.disconnect();
+          await channel.disconnect();
         } catch {
           // best-effort
         }
@@ -710,9 +868,9 @@ export async function runChannelDaemonWorker(
           await channel.runWebhookTask(task);
         }
       },
-      async close() {
+      async close(disconnectDrainMs) {
         scheduler?.stop();
-        disconnectAll();
+        await disconnectWorkerChannels(channels.values(), disconnectDrainMs);
         try {
           bridge.stop();
         } finally {
@@ -722,7 +880,10 @@ export async function runChannelDaemonWorker(
     };
   } catch (err) {
     scheduler?.stop();
-    disconnectAll();
+    await disconnectWorkerChannels(
+      channels.values(),
+      WORKER_STARTUP_ROLLBACK_DRAIN_MS,
+    );
     try {
       bridge.stop();
     } catch {
@@ -752,11 +913,13 @@ function scrubDaemonWorkerEnv(): void {
   delete process.env[QWEN_DAEMON_URL_ENV];
   delete process.env[QWEN_DAEMON_WORKSPACE_ENV];
   delete process.env[QWEN_SERVER_TOKEN_ENV];
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
 }
 
 function readDaemonWorkerEnv(): {
   daemonToken: string | undefined;
   daemonUrl: string;
+  promptAuthorization: string;
   workspace: string;
 } {
   const daemonToken = process.env[QWEN_DAEMON_TOKEN_ENV];
@@ -764,6 +927,7 @@ function readDaemonWorkerEnv(): {
     return {
       daemonToken,
       daemonUrl: readRequiredEnv(QWEN_DAEMON_URL_ENV),
+      promptAuthorization: readRequiredEnv(CHANNEL_DAEMON_WORKER_SENTINEL),
       workspace: readRequiredEnv(QWEN_DAEMON_WORKSPACE_ENV),
     };
   } finally {
@@ -892,7 +1056,18 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
 
     try {
       assertInternalDaemonWorkerInvocation();
-      const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
+      const { daemonToken, daemonUrl, promptAuthorization, workspace } =
+        readDaemonWorkerEnv();
+      // Mirror the ACP-child self-scrub: in dev mode the supervisor spawns
+      // this worker with the daemon's loader-carrying base env (the harness
+      // tsx loader must reach this .ts entry), but nothing the worker spawns
+      // may inherit them into another workspace. Production base envs are
+      // scrubbed before the freeze, so this is a no-op there.
+      scrubAndReportInheritedLoaderEnv(
+        process.env,
+        'qwen channel daemon-worker',
+        'channel daemon worker',
+      );
       const send = process.send!;
       channelLoopMcpHost = new ChannelLoopMcpWorkerHost((message, callback) =>
         send.call(process, message, callback ?? (() => {})),
@@ -911,6 +1086,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       const handle = await runChannelDaemonWorker({
         daemonUrl,
         daemonToken,
+        promptAuthorization,
         workspace,
         selection,
         startupSignal: startupAbortController.signal,
@@ -1100,6 +1276,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           process.exit(1);
         } else {
           shuttingDown = true;
+          const shutdownDeadline =
+            Date.now() + WORKER_CHANNEL_DISCONNECT_DRAIN_MS;
           clearHeartbeat();
           unsubscribeMessage();
           try {
@@ -1122,12 +1300,15 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
                   ...activeWebhookTasks.values(),
                 ]),
                 new Promise<void>((resolve) => {
-                  const timer = setTimeout(resolve, WORKER_SHUTDOWN_DRAIN_MS);
+                  const timer = setTimeout(
+                    resolve,
+                    Math.max(0, shutdownDeadline - Date.now()),
+                  );
                   timer.unref();
                 }),
               ]);
             }
-            await handle.close();
+            await handle.close(Math.max(0, shutdownDeadline - Date.now()));
           } catch (err) {
             exitCode = 1;
             const safeReason = sanitizeLogText(reason, 128);

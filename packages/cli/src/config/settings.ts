@@ -20,19 +20,29 @@ import type {
   McpServerScope,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
+import {
+  parseExecutionSandboxSettings,
+  readOperatorSandboxSettings,
+  selectOperatorExecutionSandbox,
+  stripUtf8Bom,
+} from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
   type MemoryImportFormat,
-  type MergeStrategy,
   type SettingsSchema,
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
-import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
-import { setNestedPropertySafe } from '../utils/settingsUtils.js';
-import { customDeepMerge } from '../utils/deepMerge.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import {
+  setNestedPropertySafe,
+  WORKSPACE_NON_OVERRIDING_SETTINGS,
+  WORKSPACE_RESTRICTED_SETTINGS,
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS,
+} from './settingsUtils.js';
+import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
@@ -115,6 +125,17 @@ export const SETTINGS_VERSION_KEY = '$version';
  *   tools.exclude  → permissions.deny  (block tools)
  *   tools.core     → permissions.allow (only listed tools enabled)
  *                    + permissions.deny with a wildcard deny-all if needed
+ *
+ * DELIBERATELY UNWIRED — nothing calls this, and settings.md documents the
+ * legacy keys as "not automatically migrated; still honoured at startup".
+ * Do not wire it up as written: the `tools.core` → `permissions.allow` arm
+ * below encodes exactly the conflation #10075 was reported for and #10098
+ * removed. `permissions.allow` is pure auto-approval and cannot restrict
+ * registration, so that arm would delete a user's `tools.core` allowlist
+ * and silently replace it with a no-op. A real migration maps `tools.core`
+ * to `tools.eager` (defer unlisted tools) or `permissions.deny` (remove
+ * them) — see the migration table in
+ * docs/users/configuration/settings.md.
  *
  * Returns the updated settings object, or null if no migration is needed.
  */
@@ -358,19 +379,58 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  // security.allowPrivateNetworkHooks is stripped from Workspace scope during
+  // Settings restricted to trusted scopes are stripped from Workspace during
   // the merge; warn so the user knows their workspace setting has no effect.
+  // Driven by WORKSPACE_RESTRICTED_SETTINGS so the warning cannot drift from
+  // the strip that produces it.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.security?.allowPrivateNetworkHooks !==
-      undefined
-  ) {
-    warningSet.add(
-      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
+  if (workspaceFile.rawJson !== undefined) {
+    for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+      const sectionValue = workspaceFile.originalSettings[section] as
+        | Record<string, unknown>
+        | undefined;
+      if (sectionValue?.[key] === undefined) continue;
+      warningSet.add(
+        `Warning: ${section}.${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+      );
+    }
+    for (const ref of WORKSPACE_NON_OVERRIDING_SETTINGS) {
+      if (!isSettingDefined(workspaceFile.originalSettings, ref)) continue;
+      const definingScope = [
+        SettingScope.System,
+        SettingScope.User,
+        SettingScope.SystemDefaults,
+      ].find((scope) =>
+        isSettingDefined(loadedSettings.forScope(scope).originalSettings, ref),
+      );
+      if (definingScope === undefined) continue;
+      warningSet.add(
+        `Warning: ${ref.section}.${ref.key} in workspace settings (${workspaceFile.path}) is ignored because ${definingScope} scope settings also set it. A workspace value is honored only when no User, System, or SystemDefaults scope sets this setting.`,
+      );
+    }
+    // Tighten-only keys: the same verdict the merge applied, so the
+    // warning and the strip cannot disagree about a value. A value that
+    // merely repeats what is already in force is dropped without a
+    // warning — it lost nothing.
+    for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
+      const verdict = tightenOnlyVerdict(entry, workspaceFile.settings, {
+        system: loadedSettings.system.settings,
+        systemDefaults: loadedSettings.systemDefaults.settings,
+        user: loadedSettings.user.settings,
+      });
+      if (verdict === undefined || verdict.kept) continue;
+      const key = `${entry.section}.${entry.key}`;
+      if (verdict.reason === 'system-sets') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because System scope settings also set it.`,
+        );
+      } else if (verdict.reason === 'looser') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because it would loosen the ${verdict.against} value. A workspace may only make this setting stricter.`,
+        );
+      }
+    }
   }
-
   return [...warningSet];
 }
 
@@ -398,20 +458,138 @@ function tagMcpServerScope(
   return { ...settings, mcpServers: tagged };
 }
 
+type SettingKeyRef = {
+  readonly section: keyof Settings;
+  readonly key: string;
+};
+
+function isSettingDefined(
+  settings: Settings,
+  { section, key }: SettingKeyRef,
+): boolean {
+  const sectionValue = settings[section] as Record<string, unknown> | undefined;
+  return sectionValue?.[key] !== undefined;
+}
+
 /**
- * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP hooks,
- * so it must never be honored from Workspace scope — otherwise a malicious
- * repository could self-grant the bypass and point hooks at link-local or
- * private infrastructure. Strip it from workspace settings before merging.
- * Returns a shallow copy — never mutates input.
+ * Return `settings` without the given keys. Returns a shallow copy, and the
+ * input unchanged when it carries none of them.
  */
-function stripWorkspacePrivateNetworkHooks(settings: Settings): Settings {
-  if (settings.security?.allowPrivateNetworkHooks === undefined) {
-    return settings;
+function stripSettingKeys(
+  settings: Settings,
+  keys: Iterable<SettingKeyRef>,
+): Settings {
+  let stripped: Settings | undefined;
+  for (const { section, key } of keys) {
+    const source = (stripped ?? settings)[section] as
+      | Record<string, unknown>
+      | undefined;
+    if (source?.[key] === undefined) continue;
+    const { [key]: _removed, ...rest } = source;
+    stripped = { ...(stripped ?? settings), [section]: rest } as Settings;
   }
-  const { allowPrivateNetworkHooks: _stripped, ...restSecurity } =
-    settings.security;
-  return { ...settings, security: restSecurity };
+  return stripped ?? settings;
+}
+
+/**
+ * Strip the workspace-restricted settings before merging so a repository
+ * cannot opt the user into those capabilities.
+ */
+function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+  return stripSettingKeys(settings, WORKSPACE_RESTRICTED_SETTINGS);
+}
+
+/**
+ * Drop the workspace's WORKSPACE_NON_OVERRIDING_SETTINGS values that a
+ * higher scope also defines. A repository may narrow where its own HTTP
+ * hooks send data, but it must never replace a whitelist the user or
+ * platform configured: an empty whitelist means "allow all", so a replaced
+ * list is a widened one.
+ */
+function stripWorkspaceOverrides(
+  workspace: Settings,
+  higherScopes: readonly Settings[],
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_NON_OVERRIDING_SETTINGS.filter((ref) =>
+      higherScopes.some((scope) => isSettingDefined(scope, ref)),
+    ),
+  );
+}
+
+type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
+
+type TightenOnlyVerdict =
+  | { kept: true }
+  | { kept: false; reason: 'system-sets' }
+  | {
+      kept: false;
+      reason: 'looser';
+      against: 'User' | 'SystemDefaults' | 'default';
+    }
+  | { kept: false; reason: 'same' };
+
+/**
+ * Decide one tighten-only key for a workspace, or `undefined` when the
+ * workspace does not set it.
+ *
+ * System wins outright, as it does for every setting. Otherwise the
+ * workspace value is compared against the value that would be in force
+ * without it — User's when User sets the key, since User overrides
+ * SystemDefaults in the merge, else SystemDefaults', else the feature's
+ * default. Strictly stricter is kept; equal is dropped silently; looser is
+ * dropped with a warning. Comparing against the stricter of User and
+ * SystemDefaults instead would call a workspace value "equal" to a
+ * SystemDefaults value that User already loosened, and drop the one
+ * tightening that would have taken effect.
+ */
+function tightenOnlyVerdict(
+  entry: TightenOnlyEntry,
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): TightenOnlyVerdict | undefined {
+  const read = (settings: Settings): unknown =>
+    (settings[entry.section] as Record<string, unknown> | undefined)?.[
+      entry.key
+    ];
+  const candidate = read(workspace);
+  if (candidate === undefined) return undefined;
+  if (read(scopes.system) !== undefined) {
+    return { kept: false, reason: 'system-sets' };
+  }
+  const userValue = read(scopes.user);
+  const systemDefaultsValue = read(scopes.systemDefaults);
+  const against: 'User' | 'SystemDefaults' | 'default' =
+    userValue !== undefined
+      ? 'User'
+      : systemDefaultsValue !== undefined
+        ? 'SystemDefaults'
+        : 'default';
+  const baseline = entry.strictness(
+    userValue !== undefined ? userValue : systemDefaultsValue,
+  );
+  const rank = entry.strictness(candidate);
+  if (rank > baseline) return { kept: true };
+  if (rank === baseline) return { kept: false, reason: 'same' };
+  return { kept: false, reason: 'looser', against };
+}
+
+/**
+ * Drop the workspace's tighten-only values that would not make the
+ * setting stricter than the operator scopes already have it.
+ */
+function stripWorkspaceLoosenings(
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_TIGHTEN_ONLY_SETTINGS.filter((entry) => {
+      const verdict = tightenOnlyVerdict(entry, workspace, scopes);
+      return verdict !== undefined && !verdict.kept;
+    }),
+  );
 }
 
 function mergeSettings(
@@ -423,7 +601,14 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspacePrivateNetworkHooks(workspace),
+        stripWorkspaceLoosenings(
+          stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
+            systemDefaults,
+            user,
+            system,
+          ]),
+          { system, systemDefaults, user },
+        ),
         'workspace',
       )
     : ({} as Settings);
@@ -434,7 +619,7 @@ function mergeSettings(
   // 2. User Settings
   // 3. Workspace Settings
   // 4. System Settings (as overrides)
-  return customDeepMerge(
+  const merged = customDeepMerge(
     getMergeStrategyForPath,
     {}, // Start with an empty object
     systemDefaults,
@@ -442,6 +627,33 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const executionSandbox = selectOperatorExecutionSandbox(
+    systemDefaults,
+    user,
+    system,
+  );
+  const legacySandbox = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['tools']>['sandbox']
+  >((current, scope) => scope.tools?.sandbox ?? current, undefined);
+  // Restore the complete operator object even if a project replaced `tools`
+  // with null, a scalar, or an array during the ordinary settings merge.
+  if (executionSandbox) {
+    const tools = merged.tools;
+    merged.tools = {
+      ...(tools && typeof tools === 'object' && !Array.isArray(tools)
+        ? tools
+        : {}),
+      executionSandbox,
+    };
+    if (legacySandbox === undefined) {
+      delete merged.tools.sandbox;
+    } else {
+      merged.tools.sandbox = legacySandbox;
+    }
+  } else if (merged.tools && typeof merged.tools === 'object') {
+    delete merged.tools.executionSandbox;
+  }
+  return merged;
 }
 
 export class LoadedSettings {
@@ -518,6 +730,7 @@ export class LoadedSettings {
     key: string,
     value: unknown,
     assertCanCommit?: () => void,
+    opts: { throwOnWriteFailure?: boolean } = {},
   ): void {
     // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
     if (key === 'model.name' && typeof value === 'string') {
@@ -525,11 +738,23 @@ export class LoadedSettings {
     }
     assertCanCommit?.();
     const settingsFile = this.forScope(scope);
+    const replacePath = key === 'mcpServers' ? key.split('.') : [];
+    if (opts.throwOnWriteFailure) {
+      saveSettings(
+        settingsFile,
+        createSettingsUpdate(key, value),
+        replacePath,
+        {
+          throwOnWriteFailure: true,
+        },
+      );
+    }
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    const replacePath = key === 'mcpServers' ? key.split('.') : [];
-    saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
+    if (!opts.throwOnWriteFailure) {
+      saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
+    }
   }
 
   setValues(
@@ -575,20 +800,31 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
-  reloadScopeFromDisk(scope: SettingScope): void {
+  reloadScopeFromDisk(scope: SettingScope): boolean {
     const file = this.forScope(scope);
+    if (scope === SettingScope.Workspace && !this.workspaceSettingsActive) {
+      file.settings = {};
+      file.originalSettings = {};
+      file.rawJson = undefined;
+      this._merged = this.computeMergedSettings();
+      return true;
+    }
+    let reloaded = false;
     try {
       if (!fs.existsSync(file.path)) {
         file.settings = {};
         file.originalSettings = {};
         file.rawJson = undefined;
         this._merged = this.computeMergedSettings();
-        return;
+        return true;
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      const parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
+        }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
           getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
@@ -596,6 +832,11 @@ export class LoadedSettings {
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
+        reloaded = true;
+      } else {
+        debugLogger.warn(
+          `reloadScopeFromDisk(${scope}): settings file is not a JSON object, keeping previous settings`,
+        );
       }
     } catch (err) {
       debugLogger.warn(
@@ -603,6 +844,48 @@ export class LoadedSettings {
       );
     }
     this._merged = this.computeMergedSettings();
+    return reloaded;
+  }
+
+  reloadScopesFromDiskAtomically(scopes: readonly SettingScope[]): boolean {
+    const snapshots = scopes.map((scope) => {
+      const file = this.forScope(scope);
+      return {
+        file,
+        settings: structuredClone(file.settings),
+        originalSettings: structuredClone(file.originalSettings),
+        rawJson: file.rawJson,
+      };
+    });
+    const reloaded = scopes.map((scope) => this.reloadScopeFromDisk(scope));
+    if (reloaded.every(Boolean)) return true;
+
+    for (const snapshot of snapshots) {
+      snapshot.file.settings = snapshot.settings;
+      snapshot.file.originalSettings = snapshot.originalSettings;
+      snapshot.file.rawJson = snapshot.rawJson;
+    }
+    this._merged = this.computeMergedSettings();
+    return false;
+  }
+
+  /**
+   * Get system-scope hooks: the SystemDefaults and System settings files,
+   * merged with the same strategy as the full merge (each `hooks.<Event>` list
+   * is concatenated), SystemDefaults first. Administrator configuration is not
+   * gated by folder trust, exactly like user hooks. Returns undefined, not an
+   * empty object, when neither file configures hooks, so callers can tell a
+   * scope with no data apart from one with data.
+   */
+  getSystemHooks(): Record<string, unknown> | undefined {
+    const merged = customDeepMerge(
+      getMergeStrategyForPath,
+      {},
+      { hooks: this.systemDefaults.settings.hooks ?? {} },
+      { hooks: this.system.settings.hooks ?? {} },
+    ) as Settings;
+    const hooks = merged.hooks;
+    return hooks && Object.keys(hooks).length > 0 ? hooks : undefined;
   }
 
   /**
@@ -631,6 +914,20 @@ export class LoadedSettings {
  * Used in stream-json mode where settings are ignored.
  */
 export function createMinimalSettings(): LoadedSettings {
+  const operator = readOperatorSandboxSettings();
+  const executionSandbox = parseExecutionSandboxSettings(
+    operator.tools?.executionSandbox,
+  );
+  const legacy = operator.tools?.sandbox;
+  const operatorSettings: Settings =
+    executionSandbox || legacy === 'bwrap'
+      ? {
+          tools: {
+            executionSandbox,
+            sandbox: legacy as boolean | string | undefined,
+          },
+        }
+      : {};
   const emptySettingsFile: SettingsFile = {
     path: '',
     settings: {},
@@ -638,7 +935,11 @@ export function createMinimalSettings(): LoadedSettings {
     rawJson: '{}',
   };
   return new LoadedSettings(
-    emptySettingsFile,
+    {
+      ...emptySettingsFile,
+      settings: operatorSettings,
+      originalSettings: operatorSettings,
+    },
     emptySettingsFile,
     emptySettingsFile,
     emptySettingsFile,
@@ -718,6 +1019,9 @@ export function loadSettings(
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
   preResolveHomeEnvOverrides();
+  // A malformed operator file cannot silently reset a confinement policy.
+  // Validate literals before environment substitution and corruption recovery.
+  const operatorSandbox = readOperatorSandboxSettings().tools?.executionSandbox;
   const userSettingsPath = getUserSettingsPath();
   const qwenHomeRedirectWarning =
     detectQwenHomeRedirectWithoutMigration(userSettingsPath);
@@ -771,8 +1075,10 @@ export function loadSettings(
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
-          rawSettings = JSON.parse(stripJsonComments(content));
+          rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
+          if (scope !== SettingScope.Workspace || operatorSandbox)
+            throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
@@ -854,6 +1160,11 @@ export function loadSettings(
           return { settings: {} };
         }
 
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(
+            (rawSettings as Settings).tools?.executionSandbox,
+          );
+        }
         let settingsObject = rawSettings as Record<string, unknown>;
         const hasVersionKey = SETTINGS_VERSION_KEY in settingsObject;
         const versionValue = settingsObject[SETTINGS_VERSION_KEY];
@@ -864,6 +1175,7 @@ export function loadSettings(
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (operatorSandbox && scope === SettingScope.Workspace) return;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.
@@ -1008,12 +1320,18 @@ export function loadSettings(
     workspaceSettings.ui.theme = DEFAULT_DARK_THEME_NAME;
   }
 
-  // For the initial trust check, we can only use user and system settings.
+  // For the initial trust check we can only use the scopes that do not need
+  // the decision being computed. `system-defaults` participates so an operator
+  // enabling `security.folderTrust` there reaches the same "trust enabled"
+  // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
+  // use; the workspace scope stays out, since a workspace file that only a
+  // trusted workspace may contribute cannot decide its own trust.
   const initialTrustCheckSettings = customDeepMerge(
     getMergeStrategyForPath,
     {},
-    systemSettings,
+    systemDefaultSettings,
     userSettings,
+    systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
@@ -1022,7 +1340,7 @@ export function loadSettings(
       undefined,
       realWorkspaceDir,
     ).isTrusted ??
-    true;
+    false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

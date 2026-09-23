@@ -19,10 +19,11 @@ function descriptor(
 }
 
 describe('Channel platform availability', () => {
-  it('only exposes manageable DingTalk, WeCom, Feishu, GitHub, and GitLab channels', () => {
+  it('only exposes manageable built-in channel editors', () => {
     expect(
       [
         descriptor('dingtalk'),
+        descriptor('dws'),
         descriptor('wecom'),
         descriptor('feishu'),
         descriptor('github'),
@@ -35,11 +36,12 @@ describe('Channel platform availability', () => {
       ]
         .filter(isChannelPlatformAvailable)
         .map((item) => item.type),
-    ).toEqual(['dingtalk', 'wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual(['dingtalk', 'dws', 'wecom', 'feishu', 'github', 'gitlab']);
   });
 
   it('uses the same allowlist for configured Channel instances', () => {
     expect(isSupportedChannelType('dingtalk')).toBe(true);
+    expect(isSupportedChannelType('dws')).toBe(true);
     expect(isSupportedChannelType('wecom')).toBe(true);
     expect(isSupportedChannelType('feishu')).toBe(true);
     expect(isSupportedChannelType('github')).toBe(true);

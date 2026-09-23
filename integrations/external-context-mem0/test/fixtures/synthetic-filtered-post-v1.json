@@ -1,0 +1,84 @@
+{
+  "instance": {
+    "schemaVersion": 2,
+    "dialectPath": "/administrator/synthetic-filtered-post-v1.dialect.json",
+    "endpoint": {
+      "origin": "https://memory.example.com",
+      "basePath": "/tenant-a",
+      "allowInsecureHttp": false
+    },
+    "credentialEnv": "SYNTHETIC_MEMORY_TOKEN",
+    "scope": {
+      "userId": "repository-memory",
+      "agentId": "qwen-code"
+    },
+    "timeoutMs": 5000
+  },
+  "dialect": {
+    "dialectVersion": 1,
+    "id": "synthetic-filtered-post-v1",
+    "auth": "authorization-token",
+    "search": {
+      "method": "POST",
+      "path": "/v2/memories/search/",
+      "queryLocation": "json",
+      "userIdLocation": "json.filters",
+      "agentIdLocation": "json",
+      "appIdLocation": "omit",
+      "limitField": "limit",
+      "threshold": 0.1,
+      "rerank": false
+    },
+    "response": {
+      "collection": "results",
+      "idField": "id",
+      "contentField": "memory",
+      "titleField": "title",
+      "uriField": "uri",
+      "scoreField": "score",
+      "updatedAtField": "updated_at"
+    }
+  },
+  "credential": "fixture-token",
+  "query": "deployment policy",
+  "providerResponse": {
+    "results": [
+      {
+        "id": "memory-1",
+        "memory": "Use the repository deployment policy.",
+        "title": "Deployment",
+        "uri": "https://docs.example.com/deployment",
+        "score": 0.91,
+        "updated_at": "2026-08-26T00:00:00Z"
+      },
+      {
+        "id": "missing-content"
+      }
+    ]
+  },
+  "expectedRequest": {
+    "url": "https://memory.example.com/tenant-a/v2/memories/search/",
+    "method": "POST",
+    "authorization": "Token fixture-token",
+    "body": {
+      "query": "deployment policy",
+      "filters": {
+        "user_id": "repository-memory"
+      },
+      "agent_id": "qwen-code",
+      "limit": 5,
+      "threshold": 0.1,
+      "rerank": false
+    }
+  },
+  "expectedItems": [
+    {
+      "id": "memory-1",
+      "content": "Use the repository deployment policy.",
+      "title": "Deployment",
+      "uri": "https://docs.example.com/deployment",
+      "score": 0.91,
+      "updatedAt": "2026-08-26T00:00:00Z"
+    }
+  ]
+}

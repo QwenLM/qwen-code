@@ -17,7 +17,20 @@ const sourceRoot = process.env.QWEN_CODE_ROOT
   ? path.resolve(process.env.QWEN_CODE_ROOT)
   : repoRoot;
 const runtimeDir = path.join(packageDir, 'runtime');
-const packageRoot = path.join(runtimeDir, 'qwen-code');
+const finalPackageRoot = path.join(runtimeDir, 'qwen-code');
+const refreshChecksums = process.argv.indexOf('--refresh-checksums');
+if (refreshChecksums !== -1) {
+  const root = process.argv[refreshChecksums + 1]
+    ? path.resolve(process.argv[refreshChecksums + 1])
+    : finalPackageRoot;
+  writeChecksums(root);
+  console.log(`Refreshed desktop runtime checksums at ${root}`);
+  process.exit(0);
+}
+fs.mkdirSync(runtimeDir, { recursive: true });
+recoverInterruptedRuntime();
+const stagingRoot = fs.mkdtempSync(path.join(runtimeDir, '.prepare-'));
+const packageRoot = path.join(stagingRoot, 'qwen-code');
 const libDir = path.join(packageRoot, 'lib');
 const nodeDir = path.join(packageRoot, 'node');
 const qwenCodeVersion = JSON.parse(
@@ -31,6 +44,20 @@ const binDir = path.join(packageRoot, 'bin');
 const target = desktopTarget();
 const skipBuild = process.env.QWEN_DESKTOP_SKIP_BUILD === '1';
 
+// Desktop target -> the @lydell/node-pty prebuild package carrying that
+// platform's native addon. desktopTarget() already speaks the wrapper's own
+// `${process.platform}-${process.arch}` dialect, so do not borrow
+// scripts/create-standalone-package.js's TARGET_PREBUILD_DIR here: it keys
+// Windows as 'win-x64' and would resolve '@lydell/node-pty-undefined' for this
+// script's 'win32-x64'.
+const NODE_PTY_PREBUILD_PACKAGE = new Map([
+  ['darwin-arm64', '@lydell/node-pty-darwin-arm64'],
+  ['darwin-x64', '@lydell/node-pty-darwin-x64'],
+  ['linux-arm64', '@lydell/node-pty-linux-arm64'],
+  ['linux-x64', '@lydell/node-pty-linux-x64'],
+  ['win32-x64', '@lydell/node-pty-win32-x64'],
+]);
+
 const npm = process.env.npm_execpath;
 if (!npm) throw new Error('npm_execpath is unavailable. Run through npm.');
 
@@ -39,22 +66,6 @@ if (!skipBuild) {
     cwd: sourceRoot,
     stdio: 'inherit',
   });
-  execFileSync(
-    process.execPath,
-    [npm, 'run', 'build', '--workspace=packages/webui'],
-    {
-      cwd: sourceRoot,
-      stdio: 'inherit',
-    },
-  );
-  execFileSync(
-    process.execPath,
-    [npm, 'run', 'build', '--workspace=packages/web-shell'],
-    {
-      cwd: sourceRoot,
-      stdio: 'inherit',
-    },
-  );
   execFileSync(process.execPath, [npm, 'run', 'bundle'], {
     cwd: sourceRoot,
     stdio: 'inherit',
@@ -78,44 +89,49 @@ for (const required of [
   }
 }
 
-fs.rmSync(runtimeDir, { recursive: true, force: true });
-fs.mkdirSync(libDir, { recursive: true });
-fs.writeFileSync(path.join(packageRoot, '.gitkeep'), '');
-fs.mkdirSync(binDir, { recursive: true });
-copyDirectory(distDir, libDir);
-await installNodeRuntime(nodeDir, target);
-writeLaunchers(target);
-copyRequiredFile(
-  path.join(sourceRoot, 'LICENSE'),
-  path.join(packageRoot, 'LICENSE'),
-);
-copyRequiredFile(
-  path.join(packageDir, 'NOTICE'),
-  path.join(packageRoot, 'NOTICE'),
-);
-const nodeLicense = path.join(nodeDir, 'LICENSE');
-if (!fs.existsSync(nodeLicense)) {
-  throw new Error(`Bundled Node.js license is missing: ${nodeLicense}`);
+try {
+  fs.mkdirSync(libDir, { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, '.gitkeep'), '');
+  fs.mkdirSync(binDir, { recursive: true });
+  copyDirectory(distDir, libDir);
+  stageNodePty(target);
+  await installNodeRuntime(nodeDir, target);
+  writeLaunchers(target);
+  copyRequiredFile(
+    path.join(sourceRoot, 'LICENSE'),
+    path.join(packageRoot, 'LICENSE'),
+  );
+  copyRequiredFile(
+    path.join(packageDir, 'NOTICE'),
+    path.join(packageRoot, 'NOTICE'),
+  );
+  const nodeLicense = path.join(nodeDir, 'LICENSE');
+  if (!fs.existsSync(nodeLicense)) {
+    throw new Error(`Bundled Node.js license is missing: ${nodeLicense}`);
+  }
+  fs.writeFileSync(
+    path.join(packageRoot, 'manifest.json'),
+    `${JSON.stringify(
+      {
+        name: '@qwen-code/qwen-code',
+        desktopVersion,
+        qwenCodeVersion,
+        qwenCodeCommit: process.env.QWEN_CODE_COMMIT || gitCommit(sourceRoot),
+        target,
+        node: `v${process.versions.node}`,
+        builtAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeChecksums();
+  replaceRuntime();
+} finally {
+  fs.rmSync(stagingRoot, { recursive: true, force: true });
 }
-fs.writeFileSync(
-  path.join(packageRoot, 'manifest.json'),
-  `${JSON.stringify(
-    {
-      name: '@qwen-code/qwen-code',
-      desktopVersion,
-      qwenCodeVersion,
-      qwenCodeCommit: process.env.QWEN_CODE_COMMIT || gitCommit(sourceRoot),
-      target,
-      node: `v${process.versions.node}`,
-      builtAt: new Date().toISOString(),
-    },
-    null,
-    2,
-  )}\n`,
-);
-writeChecksums();
 console.log(
-  `Prepared desktop runtime at ${path.relative(repoRoot, packageRoot)}`,
+  `Prepared desktop runtime at ${path.relative(repoRoot, finalPackageRoot)}`,
 );
 
 async function installNodeRuntime(destination, desktopTarget) {
@@ -129,6 +145,12 @@ async function installNodeRuntime(destination, desktopTarget) {
   }
   const archiveName = nodeArchiveName(nodeVersion, desktopTarget);
   const downloadRoot = `https://nodejs.org/dist/v${nodeVersion}`;
+  const cacheRoot = process.env.QWEN_DESKTOP_NODE_CACHE_DIR
+    ? path.resolve(process.env.QWEN_DESKTOP_NODE_CACHE_DIR)
+    : path.join(os.tmpdir(), 'qwen-desktop-node-cache');
+  const cacheDir = path.join(cacheRoot, `v${nodeVersion}`);
+  const cachedArchivePath = path.join(cacheDir, archiveName);
+  fs.rmSync(path.join(cacheDir, 'SHASUMS256.txt'), { force: true });
   const temporaryRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'qwen-desktop-node-'),
   );
@@ -136,12 +158,28 @@ async function installNodeRuntime(destination, desktopTarget) {
     const checksumsPath = path.join(temporaryRoot, 'SHASUMS256.txt');
     const archivePath = path.join(temporaryRoot, archiveName);
     await download(`${downloadRoot}/SHASUMS256.txt`, checksumsPath);
-    await download(`${downloadRoot}/${archiveName}`, archivePath);
-    verifyChecksum(
-      archivePath,
-      archiveName,
-      fs.readFileSync(checksumsPath, 'utf8'),
-    );
+    const checksums = fs.readFileSync(checksumsPath, 'utf8');
+    if (
+      copyValidCachedArchive(
+        cachedArchivePath,
+        archivePath,
+        archiveName,
+        checksums,
+      )
+    ) {
+      console.log(`Using cached Node.js runtime ${archiveName}`);
+    } else {
+      await download(`${downloadRoot}/${archiveName}`, archivePath);
+      verifyChecksum(archivePath, archiveName, checksums);
+      fs.mkdirSync(cacheDir, { recursive: true });
+      const temporaryCachePath = `${cachedArchivePath}.${process.pid}.tmp`;
+      try {
+        fs.copyFileSync(archivePath, temporaryCachePath);
+        fs.renameSync(temporaryCachePath, cachedArchivePath);
+      } finally {
+        fs.rmSync(temporaryCachePath, { force: true });
+      }
+    }
     extractNodeArchive(archivePath, temporaryRoot);
     const extractedRoot = path.join(
       temporaryRoot,
@@ -154,6 +192,137 @@ async function installNodeRuntime(destination, desktopTarget) {
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
+}
+
+function copyValidCachedArchive(
+  cachedArchivePath,
+  archivePath,
+  archiveName,
+  checksums,
+) {
+  if (!fs.existsSync(cachedArchivePath)) return false;
+  try {
+    fs.copyFileSync(cachedArchivePath, archivePath);
+    verifyChecksum(archivePath, archiveName, checksums);
+    return true;
+  } catch {
+    fs.rmSync(cachedArchivePath, { force: true });
+    fs.rmSync(archivePath, { force: true });
+    return false;
+  }
+}
+
+// The bundled CLI resolves its PTY backend with `await
+// import('@lydell/node-pty')` (packages/core/src/utils/getPty.ts), so Node
+// walks up from lib/cli-entry.js and lib/node_modules is the first candidate.
+// Without it every Web Terminal spawn collapses to "PTY not available"
+// (#11872).
+//
+// The two packages are installed for the TARGET rather than read from the
+// host's node_modules: npm skips optionalDependencies whose os/cpu do not
+// match the machine doing the install, and the release matrix cross-builds —
+// the x86_64-apple-darwin leg runs on an arm64 macos-15 runner, where
+// `@lydell/node-pty-darwin-x64` (os darwin, cpu x64) is never installed, so a
+// host read shipped the Intel Desktop build without its addon.
+// scripts/build-standalone-release.js::stageNativeModules installs the same
+// pinned specs into a throwaway prefix for the standalone archives.
+function stageNodePty(desktopTarget) {
+  const prebuildPackage = NODE_PTY_PREBUILD_PACKAGE.get(desktopTarget);
+  const packageNames = ['@lydell/node-pty', prebuildPackage];
+  const specs = nodePtyPackageSpecs(packageNames);
+  if (!specs) {
+    // Degrade only where the repo pins nothing: upstream publishes
+    // @lydell/node-pty-linux-arm64, but the root package.json does not pin it,
+    // and failing there would trade a missing Web Terminal for no app at all.
+    // The release job still refuses to publish such a runtime —
+    // smoke-runtime.js's PTY round-trip hard-fails.
+    console.warn(
+      `[desktop] ${prebuildPackage} is not pinned in ` +
+        `${path.join(sourceRoot, 'package.json')}; bundling ${desktopTarget} ` +
+        'without PTY support (web terminal will report "PTY not available").',
+    );
+    return;
+  }
+  const installDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'qwen-desktop-node-pty-'),
+  );
+  try {
+    // cwd is the empty prefix directory so npm resolves no package.json of its
+    // own, and --force is what lets npm fetch a prebuild whose os/cpu do not
+    // match this machine.
+    execFileSync(
+      process.execPath,
+      [
+        npm,
+        'install',
+        '--prefix',
+        installDir,
+        '--package-lock=false',
+        '--no-save',
+        '--ignore-scripts',
+        '--force',
+        '--no-audit',
+        '--no-fund',
+        ...specs,
+      ],
+      { cwd: installDir, stdio: 'inherit' },
+    );
+    const modulesSrc = path.join(installDir, 'node_modules');
+    const addonDir = path.join(
+      modulesSrc,
+      prebuildPackage,
+      'prebuilds',
+      desktopTarget,
+    );
+    if (!fs.readdirSync(addonDir).some((entry) => entry.endsWith('.node'))) {
+      throw new Error(
+        `${prebuildPackage} carries no addon under prebuilds/${desktopTarget}`,
+      );
+    }
+    const modulesDest = path.join(libDir, 'node_modules');
+    for (const packageName of packageNames) {
+      fs.cpSync(
+        path.join(modulesSrc, packageName),
+        path.join(modulesDest, packageName),
+        {
+          recursive: true,
+          dereference: true,
+          verbatimSymlinks: false,
+          // The win32-x64 prebuild ships .pdb debug symbols beside its addon
+          // that nothing reads at runtime; the standalone packager drops them
+          // too.
+          filter: (source) => !source.endsWith('.pdb'),
+        },
+      );
+    }
+  } finally {
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+}
+
+// The exact versions declared by the checkout the release job installed
+// (QWEN_CODE_ROOT). The source's frozen install already verifies these pins
+// against its lockfile. Returns null when the repo pins none of them, which is
+// how an unsupported target degrades instead of inventing a version.
+function nodePtyPackageSpecs(packageNames) {
+  const rootPackage = JSON.parse(
+    fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'),
+  );
+  const pinned = rootPackage.optionalDependencies ?? {};
+  const specs = [];
+  for (const packageName of packageNames) {
+    const version = pinned[packageName];
+    if (!version) return null;
+    if (
+      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)
+    ) {
+      throw new Error(
+        `node-pty package version must be exact for ${packageName}`,
+      );
+    }
+    specs.push(`${packageName}@${version}`);
+  }
+  return specs;
 }
 
 function desktopTarget() {
@@ -249,10 +418,10 @@ function gitCommit(directory) {
   }).trim();
 }
 
-function writeChecksums() {
+function writeChecksums(root = packageRoot) {
   const checksums = {};
-  for (const file of runtimeFiles(packageRoot)) {
-    const relative = path.relative(packageRoot, file).split(path.sep).join('/');
+  for (const file of runtimeFiles(root)) {
+    const relative = path.relative(root, file).split(path.sep).join('/');
     if (relative === 'checksums.json') continue;
     checksums[relative] = crypto
       .createHash('sha256')
@@ -260,7 +429,7 @@ function writeChecksums() {
       .digest('hex');
   }
   fs.writeFileSync(
-    path.join(packageRoot, 'checksums.json'),
+    path.join(root, 'checksums.json'),
     `${JSON.stringify(checksums, null, 2)}\n`,
   );
 }
@@ -281,4 +450,31 @@ function copyDirectory(source, destination) {
     dereference: true,
     filter: (entry) => path.basename(entry) !== '.DS_Store',
   });
+}
+
+function recoverInterruptedRuntime() {
+  for (const entry of fs.readdirSync(runtimeDir)) {
+    if (!entry.startsWith('.prepare-')) continue;
+    const staleRoot = path.join(runtimeDir, entry);
+    const previousRoot = path.join(staleRoot, 'previous');
+    if (!fs.existsSync(finalPackageRoot) && fs.existsSync(previousRoot)) {
+      fs.renameSync(previousRoot, finalPackageRoot);
+    }
+    fs.rmSync(staleRoot, { recursive: true, force: true });
+  }
+}
+
+function replaceRuntime() {
+  const previousRoot = path.join(stagingRoot, 'previous');
+  if (fs.existsSync(finalPackageRoot)) {
+    fs.renameSync(finalPackageRoot, previousRoot);
+  }
+  try {
+    fs.renameSync(packageRoot, finalPackageRoot);
+  } catch (error) {
+    if (fs.existsSync(previousRoot)) {
+      fs.renameSync(previousRoot, finalPackageRoot);
+    }
+    throw error;
+  }
 }

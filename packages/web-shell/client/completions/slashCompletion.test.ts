@@ -174,6 +174,7 @@ describe('getSlashCommandCompletionResult', () => {
         detail: 'Review current code',
         apply: '/skills review ',
         type: 'skill',
+        autoSubmit: true,
       },
     ]);
   });

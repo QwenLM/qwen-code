@@ -12,6 +12,8 @@ import {
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
   resolveModelConfig,
+  resolveModelSelectionAuthType,
+  tryResolveModelProtocol,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
   type ModelProvidersConfig,
@@ -28,6 +30,7 @@ import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
  */
 const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_OPENAI]: ['OPENAI_MODEL', 'QWEN_MODEL'],
+  [AuthType.USE_OPENAI_RESPONSES]: ['OPENAI_MODEL'],
   [AuthType.USE_GEMINI]: ['GEMINI_MODEL'],
   [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
@@ -38,9 +41,10 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
  * Collect every modelProviders entry whose provider id resolves (via
  * providerProtocol) to the given protocol, in declaration order. Mirrors
  * {@link ModelRegistry}: a built-in key resolves to itself, a custom id resolves
- * through providerProtocol. Lets credential/metadata lookups find a custom
+ * through providerProtocol, with each model's api selecting its OpenAI route.
+ * Lets credential/metadata lookups find a custom
  * provider's models under their resolved protocol instead of only the protocol
- * key. For built-in-only configs this equals `modelProviders[protocol]`.
+ * key.
  */
 export function collectProviderModelsForProtocol(
   modelProviders: ModelProvidersConfig | undefined,
@@ -55,9 +59,17 @@ export function collectProviderModelsForProtocol(
     if (!Array.isArray(models)) {
       continue;
     }
-    if (resolveProviderProtocol(providerId, providerProtocol) === protocol) {
-      out.push(...models);
-    }
+    out.push(
+      ...models.filter(
+        // tryResolveModelProtocol: one entry with an invalid `wireApi` (a
+        // hand-edited settings file surviving a hot reload) must not take
+        // down every read that walks the providers map — skip that entry.
+        // Startup validation still classifies it as a FatalConfigError.
+        (model) =>
+          tryResolveModelProtocol(providerId, model, providerProtocol) ===
+          protocol,
+      ),
+    );
   }
   return out;
 }
@@ -75,10 +87,11 @@ function findProviderIdForModel(
     if (!Array.isArray(models)) {
       continue;
     }
-    if (resolveProviderProtocol(providerId, providerProtocol) !== protocol) {
-      continue;
-    }
-    if (models.includes(modelProvider)) {
+    if (
+      models.includes(modelProvider) &&
+      tryResolveModelProtocol(providerId, modelProvider, providerProtocol) ===
+        protocol
+    ) {
       return providerId;
     }
   }
@@ -99,7 +112,9 @@ function buildSkippedProviderWarnings(
     return [];
   }
   const warnings: string[] = [];
-  const known = Object.values(AuthType).join(', ');
+  const known = Object.values(AuthType)
+    .filter((value) => value !== AuthType.USE_OPENAI_RESPONSES)
+    .join(', ');
   for (const [providerId, models] of Object.entries(modelProviders)) {
     if (!Array.isArray(models) || models.length === 0) {
       continue;
@@ -183,6 +198,8 @@ export interface CliGenerationConfigInputs {
 }
 
 export interface ResolvedCliGenerationConfig {
+  /** Effective protocol after applying the selected model's API. */
+  authType: AuthType | undefined;
   /** The resolved model id (may be empty string if not resolvable at CLI layer) */
   model: string;
   /** API key for OpenAI-compatible auth */
@@ -222,6 +239,10 @@ export function getAuthTypeFromEnv(
     return AuthType.USE_VERTEX_AI;
   }
 
+  if (env['GOOGLE_CLOUD_PROJECT'] && env['GOOGLE_MODEL']) {
+    return AuthType.USE_VERTEX_AI;
+  }
+
   if (
     env['ANTHROPIC_API_KEY'] &&
     env['ANTHROPIC_MODEL'] &&
@@ -256,8 +277,6 @@ export function resolveCliGenerationConfig(
   const { argv, settings, selectedAuthType } = inputs;
   const env = inputs.env ?? (process.env as Record<string, string | undefined>);
 
-  const authType = selectedAuthType;
-
   // Resolve the target model based on strict precedence:
   // argv.model > settings.model.name > auth-specific env model vars
   // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
@@ -272,9 +291,9 @@ export function resolveCliGenerationConfig(
     // Self-heal configs already corrupted by older builds.
     resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
     resolvedFromSettings = true;
-  } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
+  } else if (selectedAuthType && AUTH_ENV_MODEL_VARS[selectedAuthType]) {
     // Only check env vars for the current auth type
-    for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
+    for (const envVar of AUTH_ENV_MODEL_VARS[selectedAuthType]) {
       if (env[envVar]) {
         resolvedModel = env[envVar];
         sourceEnvVar = envVar;
@@ -282,6 +301,22 @@ export function resolveCliGenerationConfig(
       }
     }
   }
+
+  // Only derive the wire when a model selection exists to derive it from:
+  // the resolver's no-model branch would let an unrelated `wireApi: 'responses'`
+  // entry anywhere in the map flip an `openai` selection to openai-responses,
+  // which has no DEFAULT_MODELS entry — the session would then start on a
+  // wire and a fallback model id no config file contains.
+  const authType =
+    selectedAuthType && resolvedModel !== undefined
+      ? resolveModelSelectionAuthType(
+          selectedAuthType,
+          resolvedModel,
+          settings.modelProviders,
+          settings.providerProtocol,
+          resolvedFromSettings ? settings.model?.baseUrl : undefined,
+        )
+      : selectedAuthType;
 
   // Find a matching provider for the resolved model (for metadata: generationConfig, envKey, etc.)
   // When resolvedModel is from settings and matches a provider, modelProvider.id == settings.model.name,
@@ -427,15 +462,20 @@ export function resolveCliGenerationConfig(
   // explicitly disabled (reasoning === false) so effort never silently
   // re-enables it; provider adapters clamp the tier to the active model.
   const rawReasoningEffort = settings.model?.reasoningEffort;
-  const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
+  const reasoningDisabled = rawReasoningEffort === 'none';
+  const reasoningEffort = reasoningDisabled
+    ? undefined
+    : normalizeReasoningEffort(rawReasoningEffort);
   // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
   // normalizes to undefined and is silently skipped below. Surface it as a
   // warning so the user isn't left wondering why /effort had no effect.
   const invalidReasoningEffortWarning =
-    rawReasoningEffort && !reasoningEffort
-      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
+    rawReasoningEffort && !reasoningDisabled && !reasoningEffort
+      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: none, ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
-  if (reasoningEffort && generationConfig.reasoning !== false) {
+  if (reasoningDisabled && generationConfig.thinkingMandatory !== true) {
+    generationConfig.reasoning = false;
+  } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),
       effort: reasoningEffort,
@@ -443,6 +483,7 @@ export function resolveCliGenerationConfig(
   }
 
   return {
+    authType,
     model: resolved.config.model || '',
     apiKey: resolved.config.apiKey || '',
     baseUrl: resolved.config.baseUrl || '',

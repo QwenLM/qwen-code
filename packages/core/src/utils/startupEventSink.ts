@@ -8,7 +8,7 @@
  * Cross-package sink for startup-time profiler events.
  *
  * The cli package owns the actual startup profiler (`packages/cli/src/utils/startupProfiler.ts`)
- * but core-package code (config init, MCP discovery, GeminiClient.setTools, etc.) is
+ * but core-package code (config init, MCP discovery, LlmClient.setTools, etc.) is
  * the source of several first-screen / first-paint metrics. To avoid an
  * undesirable core → cli dependency, core code records events via this sink,
  * and the cli registers a real handler at startup.

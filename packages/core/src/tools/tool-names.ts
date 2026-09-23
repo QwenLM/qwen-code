@@ -18,6 +18,7 @@
  * per-declaration `pathFields?: string[]` annotation on the tool class.)
  */
 export const ToolNames = {
+  EXEC: 'exec',
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
@@ -50,25 +51,43 @@ export const ToolNames = {
   TEAM_CREATE: 'team_create',
   TEAM_DELETE: 'team_delete',
   TEAM_PLAN_APPROVAL: 'team_plan_approval',
+  REQUEST_SHUTDOWN: 'request_shutdown',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
   NOTEBOOK_EDIT: 'notebook_edit',
+  TOOL_CALL: 'tool_call',
   TOOL_SEARCH: 'tool_search',
   READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
-  // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
-  // Their full 35-tool surface is generated into computer-use/schemas.ts and
-  // registered via computer-use/index.ts (cast to ToolName). Duplicating a
-  // subset here only goes stale on every cua-driver version bump — review
-  // round 1 removed the old ocu-era 9-name list, which still carried
-  // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  RECORD_SOURCE: 'record_source',
+  REPORT_FINDINGS: 'report_findings',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
+  // Omni media-policy tools (fixed-policy-only by default; modelAccess
+  // config can open them to the model).
+  OMNI_DOWNSAMPLE_IMAGE: 'omni_downsample_image',
+  OMNI_DOWNSCALE_VIDEO: 'omni_downscale_video',
+  OMNI_DOWNSAMPLE_AUDIO: 'omni_downsample_audio',
+  OMNI_EXTRACT_KEYFRAMES: 'omni_extract_keyframes',
+  OMNI_EXTRACT_AUDIO: 'omni_extract_audio',
+  OMNI_CLIP_VIDEO: 'omni_clip_video',
+  OMNI_CONVERT_IMAGE: 'omni_convert_image',
+  OMNI_TRANSCRIBE_AUDIO: 'omni_transcribe_audio',
+  OMNI_CLIP_IMAGE: 'omni_clip_image',
+  OMNI_CLIP_AUDIO: 'omni_clip_audio',
+  OMNI_CAPTION_IMAGE: 'omni_caption_image',
+  OMNI_CAPTION_AUDIO: 'omni_caption_audio',
+  OMNI_OCR_IMAGE: 'omni_ocr_image',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'omni_understand_video_segments',
+  // Omni memory recall (registered only when omni is enabled AND
+  // `omni.memory.recall.mode === 'active'` — D10 mutual exclusion).
+  OMNI_RECALL_MEDIA_MEMORY: 'omni_recall_media_memory',
+  PROPOSE_GOAL: 'propose_goal',
   DISPLAY_IMAGE: 'display_image',
 } as const;
 
@@ -78,6 +97,7 @@ export const ToolNames = {
  * with the actual tool display names.
  */
 export const ToolDisplayNames = {
+  EXEC: 'Exec',
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
@@ -110,20 +130,39 @@ export const ToolDisplayNames = {
   TEAM_CREATE: 'TeamCreate',
   TEAM_DELETE: 'TeamDelete',
   TEAM_PLAN_APPROVAL: 'TeamPlanApproval',
+  REQUEST_SHUTDOWN: 'RequestShutdown',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
   NOTEBOOK_EDIT: 'NotebookEdit',
+  TOOL_CALL: 'ToolCall',
   TOOL_SEARCH: 'ToolSearch',
   READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
-  // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  RECORD_SOURCE: 'RecordSource',
+  REPORT_FINDINGS: 'ReportFindings',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
+  OMNI_DOWNSAMPLE_IMAGE: 'DownsampleImage',
+  OMNI_DOWNSCALE_VIDEO: 'DownscaleVideo',
+  OMNI_DOWNSAMPLE_AUDIO: 'DownsampleAudio',
+  OMNI_EXTRACT_KEYFRAMES: 'ExtractKeyframes',
+  OMNI_EXTRACT_AUDIO: 'ExtractAudio',
+  OMNI_CLIP_VIDEO: 'ClipVideo',
+  OMNI_CONVERT_IMAGE: 'ConvertImage',
+  OMNI_TRANSCRIBE_AUDIO: 'TranscribeAudio',
+  OMNI_CLIP_IMAGE: 'ClipImage',
+  OMNI_CLIP_AUDIO: 'ClipAudio',
+  OMNI_CAPTION_IMAGE: 'CaptionImage',
+  OMNI_CAPTION_AUDIO: 'CaptionAudio',
+  OMNI_OCR_IMAGE: 'OcrImage',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'UnderstandVideoSegments',
+  OMNI_RECALL_MEDIA_MEMORY: 'RecallMediaMemory',
+  PROPOSE_GOAL: 'ProposeGoal',
   DISPLAY_IMAGE: 'DisplayImage',
 } as const;
 
@@ -136,6 +175,21 @@ export const ToolNamesMigration = {
   task: ToolNames.AGENT, // Legacy name from agent tool (renamed from task)
 } as const;
 
+/**
+ * Resolve a tool name through the legacy-alias migration map (e.g.
+ * `search_file_content` → `grep_search`) to its canonical form. The single
+ * alias-resolution site: every caller that classifies or keys tool calls by
+ * name — the scheduler, loop detection, plan redaction, memory refresh, the
+ * headless partitioner in nonInteractiveCli, the daemon/ACP session — must
+ * use this so an aliased call is treated identically everywhere.
+ */
+export function canonicalToolName(toolName: string): string {
+  if (!Object.prototype.hasOwnProperty.call(ToolNamesMigration, toolName)) {
+    return toolName;
+  }
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
 // Migration from old tool display names to new tool display names
 // These legacy display names were used before the tool naming standardization
 export const ToolDisplayNamesMigration = {
@@ -145,3 +199,44 @@ export const ToolDisplayNamesMigration = {
   Task: ToolDisplayNames.AGENT, // Old display name for Agent (renamed from Task)
   TodoWrite: ToolDisplayNames.TODO_WRITE, // Old display name for TodoList (renamed from TodoWrite)
 } as const;
+
+/**
+ * Every spelling of a built-in tool, mapped to the name it is registered
+ * under: the tool name itself, its display name, and the legacy aliases of
+ * either. Built at module end so every table above is initialised.
+ */
+const BUILTIN_TOOL_NAMES: ReadonlyMap<string, string> = (() => {
+  const lookup = new Map<string, string>();
+  const displayNames = ToolDisplayNames as Record<string, string>;
+  for (const name of Object.values(ToolNames)) {
+    lookup.set(name, name);
+  }
+  for (const [key, name] of Object.entries(ToolNames)) {
+    const display = displayNames[key];
+    if (display !== undefined && !lookup.has(display)) {
+      lookup.set(display, name);
+    }
+  }
+  for (const [legacy, name] of Object.entries(ToolNamesMigration)) {
+    if (!lookup.has(legacy)) lookup.set(legacy, name);
+  }
+  for (const [legacyDisplay, display] of Object.entries(
+    ToolDisplayNamesMigration,
+  )) {
+    const name = lookup.get(display);
+    if (name !== undefined && !lookup.has(legacyDisplay)) {
+      lookup.set(legacyDisplay, name);
+    }
+  }
+  return lookup;
+})();
+
+/**
+ * The tool name a built-in tool is registered under, given its tool name, its
+ * display name, or a legacy alias of either; `undefined` for anything that is
+ * not a built-in tool (an MCP tool, a discovered tool, a typo). Static, so the
+ * answer does not depend on whether the tool is registered in this session.
+ */
+export function resolveBuiltinToolName(name: string): string | undefined {
+  return BUILTIN_TOOL_NAMES.get(name);
+}

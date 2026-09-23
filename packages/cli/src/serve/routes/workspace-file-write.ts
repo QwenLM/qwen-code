@@ -4,11 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
+import express from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
+  MAX_UPLOAD_BYTES,
+  hasSuspiciousPathPattern,
   isContentHash,
+  isFsError,
   type ContentHash,
+  type ResolvedPath,
+  type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
   type WriteMode,
 } from '../fs/index.js';
@@ -354,6 +361,497 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
     (req, res) => {
       if (!resolve(req, res)) return;
       void handlePostFileEdit(req, res, deps);
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// File upload (`POST /file/upload`)
+//
+// Binary ingress into the workspace. Uploads NEVER overwrite: an occupied
+// name (file, directory, or in-workspace final-component symlink) is
+// auto-numbered (`name (1).ext`, `name (2).ext`, ...). The fs layer only
+// exposes a no-clobber byte create; the numbered-candidate policy lives here.
+// ---------------------------------------------------------------------------
+
+const MAX_CONCURRENT_UPLOADS = 4;
+const MAX_UPLOAD_FILENAME_BYTES = 255;
+const NUMBERED_CANDIDATE_CAP = 1000;
+/**
+ * Cap on the number of path components an upload may create recursively
+ * (the missing parent directory is materialized by `mkdir -p` before the
+ * body is buffered, so a single request must not be able to spin up an
+ * unbounded directory tree ahead of the concurrency gate).
+ */
+const MAX_UPLOAD_DIR_DEPTH = 64;
+
+interface UploadGateLease {
+  handlerStarted: boolean;
+  release(): void;
+}
+
+const uploadGateLeases = new WeakMap<Request, UploadGateLease>();
+
+export interface UploadConcurrencyGate {
+  tryAcquire(): boolean;
+  release(): void;
+}
+
+export function createUploadConcurrencyGate(
+  max: number = MAX_CONCURRENT_UPLOADS,
+): UploadConcurrencyGate {
+  let active = 0;
+  return {
+    tryAcquire() {
+      if (active >= max) return false;
+      active += 1;
+      return true;
+    },
+    release() {
+      if (active > 0) active -= 1;
+    },
+  };
+}
+
+interface UploadAdmission {
+  route: string;
+  fs: WorkspaceFileSystem;
+  basename: string;
+  resolvedDir: ResolvedPath;
+  /**
+   * The literal request directory admission validated with
+   * `fs.resolve(dir, 'write')`. Candidates are re-resolved from THIS string,
+   * never from the canonicalized `resolvedDir`: resolution re-runs
+   * `hasSuspiciousPathPattern` on its whole input, so canonical segments the
+   * client never wrote — the workspace root's own path when it trips the
+   * pattern check, or a symlinked parent whose TARGET name does
+   * (`docs -> aux`) — would otherwise fail every upload into the directory.
+   */
+  queryDir: string;
+}
+
+const uploadAdmissions = new WeakMap<Request, UploadAdmission>();
+
+function splitStemExtension(basename: string): { stem: string; ext: string } {
+  // A leading dot (`.env`) is part of the stem, not an extension separator.
+  const lastDot = basename.lastIndexOf('.');
+  if (lastDot <= 0) return { stem: basename, ext: '' };
+  return { stem: basename.slice(0, lastDot), ext: basename.slice(lastDot) };
+}
+
+/**
+ * Trim only the stem — on a Unicode code-point boundary — until
+ * `stem + suffix + ext` fits `capBytes`. Never trims the extension and never
+ * splits a UTF-8 sequence. Returns null when suffix + ext alone cannot fit.
+ */
+function fitFilenameToByteCap(
+  stem: string,
+  suffix: string,
+  ext: string,
+  capBytes: number,
+): string | null {
+  if (Buffer.byteLength(suffix + ext, 'utf-8') > capBytes) return null;
+  let chars = Array.from(stem);
+  while (Buffer.byteLength(chars.join('') + suffix + ext, 'utf-8') > capBytes) {
+    if (chars.length === 0) return null;
+    chars = chars.slice(0, -1);
+  }
+  return chars.join('') + suffix + ext;
+}
+
+function sendUploadTooLarge(res: Response): void {
+  applyReadHeaders(res);
+  res.status(413).json({
+    errorKind: 'file_too_large',
+    error: `Request body too large (max ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB)`,
+    status: 413,
+    maxBytes: MAX_UPLOAD_BYTES,
+  });
+}
+
+function fileUploadConcurrencyGate(
+  gate: UploadConcurrencyGate,
+): RequestHandler {
+  return (req, res, next) => {
+    if (!gate.tryAcquire()) {
+      applyReadHeaders(res);
+      res.status(429).set('Retry-After', '1').json({
+        errorKind: 'upload_busy',
+        error: 'Too many uploads in progress',
+        status: 429,
+        retryAfterSeconds: 1,
+      });
+      return;
+    }
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      gate.release();
+      res.off('finish', releaseBeforeHandler);
+      res.off('close', releaseBeforeHandler);
+      uploadGateLeases.delete(req);
+    };
+    const releaseBeforeHandler = () => {
+      if (!lease.handlerStarted) release();
+    };
+    const lease: UploadGateLease = { handlerStarted: false, release };
+    uploadGateLeases.set(req, lease);
+    res.once('finish', releaseBeforeHandler);
+    res.once('close', releaseBeforeHandler);
+    next();
+  };
+}
+
+// `express.raw` rejects only when the buffered body EXCEEDS `limit`, so a body
+// of exactly MAX_UPLOAD_BYTES passes and MAX_UPLOAD_BYTES+1 is rejected with
+// the upload-specific 413 envelope below. Using MAX (not MAX+1) keeps both the
+// parser and `writeBytesAtomic` on the same cap, so no body can slip past the
+// parser and then surface a generic, `maxBytes`-less 413 from the fs layer.
+export function fileUploadBodyParser(): RequestHandler {
+  const raw = express.raw({
+    type: 'application/octet-stream',
+    limit: MAX_UPLOAD_BYTES,
+    // The endpoint contract is raw octets: decoding a Content-Encoding would
+    // publish bytes the client never sent (and hash/size of the decoded form).
+    inflate: false,
+  });
+  return (req, res, next) => {
+    raw(req, res, (err?: unknown) => {
+      if (err) {
+        const status = (err as { status?: number }).status;
+        if (status === 413) {
+          sendUploadTooLarge(res);
+          return;
+        }
+        if (status === 415) {
+          applyReadHeaders(res);
+          res.status(415).json({
+            errorKind: 'unsupported_media_type',
+            error: 'File uploads do not support encoded request bodies',
+            status: 415,
+          });
+          return;
+        }
+        // A client aborting mid-body is routine for large uploads; the gate
+        // slot is already released by the pre-handler response-close
+        // listener, so the abort must not surface as an unhandled error.
+        if ((err as { code?: string }).code === 'ECONNABORTED' || req.aborted) {
+          return;
+        }
+        next(err);
+        return;
+      }
+      next();
+    });
+  };
+}
+
+function fileUploadAdmission(
+  deps: RegisterDeps & { workspaceRegistry?: WorkspaceRegistry },
+  opts: {
+    qualified: boolean;
+    isWorkspaceTrusted?: () => boolean;
+  },
+): RequestHandler {
+  return (req, res, next) => {
+    void (async () => {
+      const ROUTE = opts.qualified
+        ? 'POST /workspaces/:workspace/file/upload'
+        : 'POST /file/upload';
+      try {
+        if (opts.qualified) {
+          const registry = deps.workspaceRegistry;
+          if (!registry) {
+            throw new Error('workspace registry is not configured');
+          }
+          const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+          if (!runtime) return;
+          if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+          setWorkspaceRouteContext(req, {
+            runtime,
+            routePrefix: 'POST /workspaces/:workspace',
+          });
+        } else if (opts.isWorkspaceTrusted?.() === false) {
+          applyReadHeaders(res);
+          res.status(403).json({
+            errorKind: 'untrusted_workspace',
+            error: 'workspace is not trusted; write operations are forbidden',
+            status: 403,
+          });
+          return;
+        }
+
+        const contentType = (req.headers['content-type'] ?? '')
+          .split(';')[0]
+          .trim()
+          .toLowerCase();
+        if (contentType !== 'application/octet-stream') {
+          applyReadHeaders(res);
+          res.status(415).json({
+            errorKind: 'unsupported_media_type',
+            error: 'File uploads require application/octet-stream',
+            status: 415,
+          });
+          return;
+        }
+
+        const queryPath = req.query['path'];
+        if (typeof queryPath !== 'string' || queryPath.length === 0) {
+          sendParseError(res, ROUTE, '`path` query parameter is required');
+          return;
+        }
+        const dir = path.dirname(queryPath);
+        const basename = path.basename(queryPath);
+        // `path.dirname`/`path.basename` silently normalize a trailing slash,
+        // so a directory-shaped path must be rejected before they run.
+        if (
+          queryPath.endsWith('/') ||
+          basename.length === 0 ||
+          basename === '.' ||
+          basename === '..'
+        ) {
+          sendParseError(res, ROUTE, '`path` must name a file');
+          return;
+        }
+        // The missing parent directory is created recursively before the
+        // body is buffered; bound how much tree a single request may
+        // materialize ahead of the concurrency gate.
+        if (dir.split('/').filter(Boolean).length > MAX_UPLOAD_DIR_DEPTH) {
+          sendParseError(
+            res,
+            ROUTE,
+            `directory path exceeds ${MAX_UPLOAD_DIR_DEPTH} components`,
+          );
+          return;
+        }
+        // Reject statically detectable bad names before taking a gate slot
+        // and buffering the body; fs.resolve would throw on them anyway.
+        if (queryPath.includes('\0')) {
+          sendParseError(res, ROUTE, 'path must not contain null bytes');
+          return;
+        }
+        if (hasSuspiciousPathPattern(basename)) {
+          sendParseError(res, ROUTE, 'filename contains a suspicious pattern');
+          return;
+        }
+        if (Buffer.byteLength(basename, 'utf-8') > MAX_UPLOAD_FILENAME_BYTES) {
+          sendParseError(
+            res,
+            ROUTE,
+            `filename exceeds ${MAX_UPLOAD_FILENAME_BYTES} bytes`,
+          );
+          return;
+        }
+
+        const contentLength = req.headers['content-length'];
+        if (contentLength !== undefined) {
+          const declared = Number(contentLength);
+          if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
+            sendUploadTooLarge(res);
+            return;
+          }
+        }
+
+        const clientId = deps.parseClientId(req, res);
+        if (clientId === null) return;
+        const originatorClientId = resolveOriginatorClientId(
+          clientId,
+          deps,
+          res,
+          req,
+        );
+        if (originatorClientId === null) return;
+
+        const factory = getFsFactory(req, res);
+        if (!factory) return;
+        const fs = factory.forRequest({
+          originatorClientId,
+          route: ROUTE,
+        });
+
+        const resolvedDir = await fs.resolve(dir, 'write');
+        let dirStat;
+        try {
+          dirStat = await fs.stat(resolvedDir);
+        } catch (err) {
+          if (isFsError(err) && err.kind === 'path_not_found') {
+            // The target directory may not exist yet (e.g. a configured
+            // drop folder); create it, including missing parents.
+            await fs.mkdir(resolvedDir, { recursive: true });
+            dirStat = await fs.stat(resolvedDir);
+          } else {
+            throw err;
+          }
+        }
+        if (dirStat.kind !== 'directory') {
+          sendParseError(res, ROUTE, 'parent path is not a directory');
+          return;
+        }
+
+        uploadAdmissions.set(req, {
+          route: ROUTE,
+          fs,
+          basename,
+          resolvedDir,
+          queryDir: dir,
+        });
+        next();
+      } catch (err) {
+        sendFsError(
+          res,
+          err,
+          opts.qualified
+            ? 'POST /workspaces/:workspace/file/upload'
+            : 'POST /file/upload',
+        );
+      }
+    })();
+  };
+}
+
+async function handlePostFileUpload(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const admission = uploadAdmissions.get(req);
+  if (!admission) {
+    applyReadHeaders(res);
+    res.status(500).json({
+      errorKind: 'internal_error',
+      error: 'upload admission context is missing',
+      status: 500,
+    });
+    return;
+  }
+  const { route, fs, basename, resolvedDir, queryDir } = admission;
+  const { stem, ext } = splitStemExtension(basename);
+  const lease = uploadGateLeases.get(req);
+  if (lease) lease.handlerStarted = true;
+  try {
+    // A client disconnect during the async admission window lets the body
+    // parser continue with `req.body === undefined`; writing anyway would
+    // publish a phantom 0-byte file nobody requested.
+    if (req.aborted || res.closed) return;
+    const body = req.body;
+    const data =
+      body === undefined || body === null ? Buffer.alloc(0) : (body as Buffer);
+    for (let n = 0; n < NUMBERED_CANDIDATE_CAP; n++) {
+      const candidateBasename =
+        n === 0
+          ? basename
+          : fitFilenameToByteCap(
+              stem,
+              ` (${n})`,
+              ext,
+              MAX_UPLOAD_FILENAME_BYTES,
+            );
+      if (candidateBasename === null) {
+        sendParseError(
+          res,
+          route,
+          `filename cannot fit within ${MAX_UPLOAD_FILENAME_BYTES} bytes`,
+        );
+        return;
+      }
+      const candidateAbs = path.join(resolvedDir as string, candidateBasename);
+      let resolved: ResolvedPath;
+      try {
+        resolved = await fs.resolve(
+          path.join(queryDir, candidateBasename),
+          'write',
+        );
+      } catch (err) {
+        // A symlink CYCLE occupying the candidate (ELOOP) is merely an
+        // occupied name — number on like the other occupied cases. Boundary
+        // escapes and other resolution failures stop the loop.
+        if (
+          isFsError(err) &&
+          err.kind === 'symlink_escape' &&
+          (err.cause as NodeJS.ErrnoException | undefined)?.code === 'ELOOP'
+        ) {
+          continue;
+        }
+        sendFsError(res, err, route);
+        return;
+      }
+      if ((resolved as string) !== candidateAbs) {
+        // An in-workspace symlink already occupies this name; number on.
+        continue;
+      }
+      try {
+        const out = await fs.writeBytesAtomic(resolved, data);
+        applyReadHeaders(res);
+        res.status(201).json({
+          kind: 'file_upload',
+          path: workspaceRelative(req, resolved as string),
+          sizeBytes: out.sizeBytes,
+          hash: out.hash,
+        });
+        return;
+      } catch (err) {
+        if (isFsError(err) && err.kind === 'file_already_exists') {
+          continue;
+        }
+        sendFsError(res, err, route);
+        return;
+      }
+    }
+    applyReadHeaders(res);
+    res.status(409).json({
+      errorKind: 'file_already_exists',
+      error: `could not allocate a free filename for "${basename}"`,
+      status: 409,
+    });
+  } catch (err) {
+    sendFsError(res, err, route);
+  } finally {
+    uploadAdmissions.delete(req);
+    lease?.release();
+  }
+}
+
+export interface FileUploadLegacyDeps extends RegisterDeps {
+  uploadGate: UploadConcurrencyGate;
+  isWorkspaceTrusted?: () => boolean;
+}
+
+export interface FileUploadQualifiedDeps extends RegisterDeps {
+  uploadGate: UploadConcurrencyGate;
+  workspaceRegistry: WorkspaceRegistry;
+}
+
+export function registerWorkspaceFileUploadRoutes(
+  app: Application,
+  deps: FileUploadLegacyDeps,
+): void {
+  app.post(
+    '/file/upload',
+    deps.mutate({ strict: true }),
+    fileUploadAdmission(deps, {
+      qualified: false,
+      isWorkspaceTrusted: deps.isWorkspaceTrusted,
+    }),
+    fileUploadConcurrencyGate(deps.uploadGate),
+    fileUploadBodyParser(),
+    (req, res) => {
+      void handlePostFileUpload(req, res);
+    },
+  );
+}
+
+export function registerWorkspaceQualifiedFileUploadRoutes(
+  app: Application,
+  deps: FileUploadQualifiedDeps,
+): void {
+  app.post(
+    '/workspaces/:workspace/file/upload',
+    deps.mutate({ strict: true }),
+    fileUploadAdmission(deps, { qualified: true }),
+    fileUploadConcurrencyGate(deps.uploadGate),
+    fileUploadBodyParser(),
+    (req, res) => {
+      void handlePostFileUpload(req, res);
     },
   );
 }

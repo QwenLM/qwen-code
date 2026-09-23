@@ -110,15 +110,18 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Install dependencies and build'
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
-            if npm ci --prefer-offline --no-audit --progress=false; then
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               break
             fi
             if [[ "${attempt}" == "3" ]]; then exit 1; fi
@@ -309,8 +312,11 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' && runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Install dependencies and build'
         if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
@@ -318,7 +324,7 @@ jobs:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
-            if npm ci --prefer-offline --no-audit --progress=false; then break; fi
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then break; fi
             if [[ "${attempt}" == "3" ]]; then exit 1; fi
             sleep $((attempt * 15))
           done
@@ -418,6 +424,9 @@ jobs:
                   "write_file(/.qwen/**)",
                   "write_file(**/package.json)",
                   "write_file(**/package-lock.json)",
+                  "write_file(**/pnpm-lock.yaml)",
+                  "write_file(**/pnpm-workspace.yaml)",
+                  "write_file(**/.pnpmfile.mjs)",
                   "write_file(**/.npmrc)",
                   "write_file(**/makefile)",
                   "write_file(**/Makefile)",
@@ -431,6 +440,7 @@ jobs:
                   "write_file(**/tsconfig.*.json)",
                   "write_file(**/eslint.config.*)",
                   "write_file(**/eslint.legacy-filenames.*)",
+                  "write_file(**/eslint.legacy-core-barrel-imports.*)",
                   "write_file(**/vitest.config.*)",
                   "write_file(**/vite.config.*)",
                   "write_file(**/node_modules/**)"
@@ -842,8 +852,21 @@ jobs:
 
           # Label requested by issue #7383. Non-fatal: never create labels,
           # and a repo without it should not fail the run.
-          gh pr edit "${PR_URL}" --add-label 'autofix/repo-hygiene' \
-            || echo '⚠️  Could not add label autofix/repo-hygiene (missing in this repo?)'
+          # REST, not `gh pr edit`: its GraphQL lookup requests
+          # repository.pullRequest.projectCards, which GitHub rejects on the
+          # gh builds that still send that query (see
+          # pr-self-report-label.yml). The label autofix/repo-hygiene has
+          # never been created in this repo, and the existence probe
+          # preserves the no-create promise: the REST add alone would create
+          # a missing label. The probe cannot tell a 404 from any other API
+          # failure, so the skip message claims neither.
+          if gh api "repos/${GITHUB_REPOSITORY}/labels/autofix%2Frepo-hygiene" > /dev/null 2>&1; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_URL##*/}/labels" \
+              -f 'labels[]=autofix/repo-hygiene' > /dev/null \
+              || echo '⚠️  Could not add label autofix/repo-hygiene'
+          else
+            echo '⚠️  Could not verify label autofix/repo-hygiene; skipping'
+          fi
 
           if [[ -s "${WORKDIR}/report-only.md" ]]; then
             {

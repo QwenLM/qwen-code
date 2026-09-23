@@ -9,6 +9,7 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
 import type {
+  ChannelPairingApprovalSubject,
   ChannelManagementService,
   ChannelStartupRequest,
   ChannelUpsertRequest,
@@ -17,8 +18,10 @@ import type {
 import { assertValidChannelSecretUpdates } from '../channel-settings-store.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
+  sendConversationRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -44,6 +47,7 @@ interface RegisterWorkspaceChannelManagementRoutesDeps {
     res: Response,
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 type RuntimeResolver = (req: Request, res: Response) => WorkspaceRuntime | null;
@@ -182,19 +186,44 @@ function parsePairingCode(
   return code.trim().toUpperCase();
 }
 
-function parsePairingSenderId(
+function parsePairingApprovalSubject(
   body: Record<string, unknown>,
   res: Response,
-): string | undefined {
+): ChannelPairingApprovalSubject | undefined {
   const senderId = body['senderId'];
-  if (typeof senderId !== 'string' || senderId.length === 0) {
+  const groupId = body['groupId'];
+  if (senderId !== undefined && groupId !== undefined) {
+    res.status(400).json({
+      error: 'Provide exactly one of `senderId` or `groupId`.',
+      code: 'invalid_channel_pairing_subject',
+    });
+    return undefined;
+  }
+  if (senderId !== undefined) {
+    if (typeof senderId === 'string' && senderId.length > 0) {
+      return { type: 'user', id: senderId };
+    }
     res.status(400).json({
       error: '`senderId` must be a non-empty string.',
       code: 'invalid_channel_pairing_sender_id',
     });
     return undefined;
   }
-  return senderId;
+  if (groupId !== undefined) {
+    if (typeof groupId === 'string' && groupId.length > 0) {
+      return { type: 'group', id: groupId };
+    }
+    res.status(400).json({
+      error: '`groupId` must be a non-empty string.',
+      code: 'invalid_channel_pairing_group_id',
+    });
+    return undefined;
+  }
+  res.status(400).json({
+    error: 'Provide exactly one of `senderId` or `groupId`.',
+    code: 'invalid_channel_pairing_subject',
+  });
+  return undefined;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -224,6 +253,7 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_runtime_owner_mismatch', 409],
   ['channel_worker_not_enabled', 409],
   ['channel_service_conflict', 409],
+  ['channel_control_workspace_limit_reached', 409],
   ['channel_worker_start_failed', 502],
   ['channel_worker_stop_failed', 500],
   ['daemon_draining', 503],
@@ -256,13 +286,35 @@ async function resolveTarget(
   res: Response,
   resolveRuntime: RuntimeResolver,
   resolveService: RegisterWorkspaceChannelManagementRoutesDeps['resolveService'],
+  activity: ConversationRuntimeActivityGate | undefined,
 ): Promise<
-  { runtime: WorkspaceRuntime; service: ChannelManagementService } | undefined
+  | {
+      runtime: WorkspaceRuntime;
+      service: ChannelManagementService;
+      run: <T>(operation: () => Promise<T>) => Promise<T>;
+    }
+  | undefined
 > {
   const runtime = resolveRuntime(req, res);
   if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+  if (runtime.provenance === 'live-conversation' && req.method !== 'GET') {
+    res.status(400).json({
+      error:
+        'Channel configuration and lifecycle operations are unavailable in the Conversations workspace.',
+      code: 'live_channel_management_reserved',
+    });
+    return;
+  }
+  if (runtime.provenance === 'live-conversation' && !activity) {
+    sendConversationRuntimeUnavailable(res);
+    return;
+  }
   try {
-    const service = await resolveService(runtime);
+    const run = <T>(operation: () => Promise<T>): Promise<T> =>
+      runtime.provenance === 'live-conversation'
+        ? activity!.run(operation)
+        : operation();
+    const service = await run(async () => resolveService(runtime));
     if (!service) {
       res.status(503).json({
         error: 'Channel management is unavailable.',
@@ -270,7 +322,7 @@ async function resolveTarget(
       });
       return;
     }
-    return { runtime, service };
+    return { runtime, service, run };
   } catch (error) {
     sendManagementError(res, error);
     return;
@@ -283,7 +335,11 @@ export function registerWorkspaceChannelManagementRoutes(
 ): void {
   const primary: RuntimeResolver = () => deps.primaryRuntime;
   const qualified: RuntimeResolver = (req, res) =>
-    resolveWorkspaceRuntimeFromParam(deps.workspaceRegistry, req, res);
+    resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
 
   const register = (prefix: string, resolveRuntime: RuntimeResolver) => {
     const pairingRead = deps.mutate({ strict: true });
@@ -298,7 +354,13 @@ export function registerWorkspaceChannelManagementRoutes(
     const restart = deps.mutate({ strict: true });
 
     const target = (req: Request, res: Response) =>
-      resolveTarget(req, res, resolveRuntime, deps.resolveService);
+      resolveTarget(
+        req,
+        res,
+        resolveRuntime,
+        deps.resolveService,
+        deps.conversationRuntimeActivity,
+      );
     const validateClient = (
       req: Request,
       res: Response,
@@ -308,9 +370,23 @@ export function registerWorkspaceChannelManagementRoutes(
     app.get(`${prefix}/channel-types`, async (req, res) => {
       const runtime = resolveRuntime(req, res);
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (
+        runtime.provenance === 'live-conversation' &&
+        !deps.conversationRuntimeActivity
+      ) {
+        sendConversationRuntimeUnavailable(res);
+        return;
+      }
       try {
         noStore(res);
-        res.status(200).json(await supportedChannelCatalog());
+        const catalog =
+          runtime.provenance === 'live-conversation' &&
+          deps.conversationRuntimeActivity
+            ? await deps.conversationRuntimeActivity.run(() =>
+                supportedChannelCatalog(),
+              )
+            : await supportedChannelCatalog();
+        res.status(200).json(catalog);
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -321,7 +397,7 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!resolved || !validateClient(req, res, resolved.runtime)) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.list());
+        res.status(200).json(await resolved.run(() => resolved.service.list()));
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -337,7 +413,11 @@ export function registerWorkspaceChannelManagementRoutes(
         if (!name) return;
         try {
           noStore(res);
-          res.status(200).json(await resolved.service.pairingRequests(name));
+          res
+            .status(200)
+            .json(
+              await resolved.run(() => resolved.service.pairingRequests(name)),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -358,7 +438,11 @@ export function registerWorkspaceChannelManagementRoutes(
           noStore(res);
           res
             .status(200)
-            .json(await resolved.service.approvePairing(name, code));
+            .json(
+              await resolved.run(() =>
+                resolved.service.approvePairing(name, code),
+              ),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -375,7 +459,11 @@ export function registerWorkspaceChannelManagementRoutes(
         if (!name) return;
         try {
           noStore(res);
-          res.status(200).json(await resolved.service.pairingApprovals(name));
+          res
+            .status(200)
+            .json(
+              await resolved.run(() => resolved.service.pairingApprovals(name)),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -390,13 +478,17 @@ export function registerWorkspaceChannelManagementRoutes(
         if (!resolved || !validateClient(req, res, resolved.runtime)) return;
         const name = parseInstanceName(req, res);
         if (!name) return;
-        const senderId = parsePairingSenderId(deps.safeBody(req), res);
-        if (!senderId) return;
+        const subject = parsePairingApprovalSubject(deps.safeBody(req), res);
+        if (!subject) return;
         try {
           noStore(res);
           res
             .status(200)
-            .json(await resolved.service.revokePairingApproval(name, senderId));
+            .json(
+              await resolved.run(() =>
+                resolved.service.revokePairingApproval(name, subject),
+              ),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -412,7 +504,11 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!request) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.upsert(name, request));
+        res
+          .status(200)
+          .json(
+            await resolved.run(() => resolved.service.upsert(name, request)),
+          );
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -427,7 +523,11 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!request) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.remove(name, request));
+        res
+          .status(200)
+          .json(
+            await resolved.run(() => resolved.service.remove(name, request)),
+          );
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -442,7 +542,13 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!request) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.setStartup(name, request));
+        res
+          .status(200)
+          .json(
+            await resolved.run(() =>
+              resolved.service.setStartup(name, request),
+            ),
+          );
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -462,7 +568,11 @@ export function registerWorkspaceChannelManagementRoutes(
           if (!name) return;
           try {
             noStore(res);
-            res.status(200).json(await resolved.service[operation](name));
+            res
+              .status(200)
+              .json(
+                await resolved.run(() => resolved.service[operation](name)),
+              );
           } catch (error) {
             sendManagementError(res, error);
           }

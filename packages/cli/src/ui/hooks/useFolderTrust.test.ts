@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -90,7 +91,7 @@ describe('useFolderTrust', () => {
     expect(onTrustChange).toHaveBeenCalledWith(undefined);
   });
 
-  it('should handle TRUST_FOLDER choice', () => {
+  it('should restart after trusting an undecided folder', () => {
     isWorkspaceTrustedSpy.mockReturnValue({
       isTrusted: undefined,
       source: undefined,
@@ -108,7 +109,8 @@ describe('useFolderTrust', () => {
       '/test/path',
       TrustLevel.TRUST_FOLDER,
     );
-    expect(result.current.isFolderTrustDialogOpen).toBe(false);
+    expect(result.current.isFolderTrustDialogOpen).toBe(true);
+    expect(result.current.isRestarting).toBe(true);
     expect(onTrustChange).toHaveBeenLastCalledWith(true);
   });
 
@@ -135,7 +137,7 @@ describe('useFolderTrust', () => {
     expect(onTrustChange).toHaveBeenCalledTimes(1);
   });
 
-  it('should handle TRUST_PARENT choice', () => {
+  it('should restart after trusting an undecided parent', () => {
     isWorkspaceTrustedSpy.mockReturnValue({
       isTrusted: undefined,
       source: undefined,
@@ -153,11 +155,12 @@ describe('useFolderTrust', () => {
       '/test/path',
       TrustLevel.TRUST_PARENT,
     );
-    expect(result.current.isFolderTrustDialogOpen).toBe(false);
+    expect(result.current.isFolderTrustDialogOpen).toBe(true);
+    expect(result.current.isRestarting).toBe(true);
     expect(onTrustChange).toHaveBeenLastCalledWith(true);
   });
 
-  it('should handle DO_NOT_TRUST choice and trigger restart', () => {
+  it('should continue without restart after declining an undecided folder', () => {
     isWorkspaceTrustedSpy.mockReturnValue({
       isTrusted: undefined,
       source: undefined,
@@ -176,8 +179,8 @@ describe('useFolderTrust', () => {
       TrustLevel.DO_NOT_TRUST,
     );
     expect(onTrustChange).toHaveBeenLastCalledWith(false);
-    expect(result.current.isRestarting).toBe(true);
-    expect(result.current.isFolderTrustDialogOpen).toBe(true);
+    expect(result.current.isRestarting).toBe(false);
+    expect(result.current.isFolderTrustDialogOpen).toBe(false);
   });
 
   it('should do nothing for default choice', () => {
@@ -217,8 +220,8 @@ describe('useFolderTrust', () => {
 
   it('should not set isRestarting to true when trust status does not change', () => {
     isWorkspaceTrustedSpy.mockReturnValue({
-      isTrusted: undefined,
-      source: undefined,
+      isTrusted: true,
+      source: 'file',
     });
     const { result } = renderHook(() =>
       useFolderTrust(mockSettings, onTrustChange),

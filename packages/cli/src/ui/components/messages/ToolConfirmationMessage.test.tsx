@@ -11,12 +11,28 @@ import { Box } from 'ink';
 
 // Capture launches of the external editor so the full-plan viewer (#7001)
 // can be asserted without spawning a real editor process.
-const { launchEditorMock } = vi.hoisted(() => ({
+const { launchEditorMock, isEditorAvailableMock } = vi.hoisted(() => ({
   launchEditorMock: vi.fn((_filePath: string) => Promise.resolve()),
+  // Editor availability probes PATH for a real binary (`command -v code`),
+  // so leaving it unstubbed would make these tests depend on whether the
+  // host happens to have the configured editor installed. Default to
+  // "configured means available" and opt out per test. The detection itself
+  // is covered by packages/core/src/utils/editor.test.ts.
+  isEditorAvailableMock: vi.fn((editor: string | undefined) => Boolean(editor)),
 }));
 vi.mock('../../hooks/useLaunchEditor.js', () => ({
   useLaunchEditor: () => launchEditorMock,
 }));
+vi.mock('@qwen-code/qwen-code-core/utils/editor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/editor.js')
+    >();
+  return {
+    ...actual,
+    isEditorAvailable: isEditorAvailableMock,
+  };
+});
 
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import type {
@@ -24,7 +40,10 @@ import type {
   Config,
 } from '@qwen-code/qwen-code-core';
 import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 describe('ToolConfirmationMessage', () => {
@@ -79,6 +98,146 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame()).toContain(
       '- https://raw.githubusercontent.com/google/gemini-react/main/README.md',
     );
+  });
+
+  it('preserves urls when the prompt is rendered as plain text', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt: 'Review the literal target',
+      urls: ['https://example.com/target'],
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Review the literal target');
+    expect(lastFrame()).toContain('URLs to fetch:');
+    expect(lastFrame()).toContain('- https://example.com/target');
+  });
+
+  it('renders plain-text info prompts without interpreting Markdown or links', () => {
+    const prompt =
+      'Save "[visible](https://hidden.example/target) **bold** `code` <u>under</u>"';
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={160}
+      />,
+    );
+
+    expect(lastFrame()).toContain(prompt);
+    expect(lastFrame()).not.toContain('\u001b]8;;');
+  });
+
+  it('renders every line of a short multiline plain-text info prompt', () => {
+    const prompt =
+      'Save this exact content to the bound Mem0 repository memory?\n"LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>"';
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={10}
+        contentWidth={98}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Save this exact content to the bound Mem0 repository memory?',
+    );
+    expect(lastFrame()).toContain(
+      '"LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE',
+    );
+    expect(lastFrame()).toContain('`code-value` UNDER <u>under-value</u>"');
+  });
+
+  it('marks overflow in constrained plain-text info prompts', () => {
+    const prompt = `Confirm exact content:\n${JSON.stringify(
+      [
+        'PROMPT_TOP',
+        ...Array.from({ length: 80 }, (_, index) => `line-${index}`),
+        'PROMPT_TAIL',
+      ].join('\n'),
+    )}`;
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('PROMPT_TOP');
+    expect(frame).toMatch(/last \d+ lines hidden/);
+    expect(frame).not.toContain('PROMPT_TAIL');
+  });
+
+  it('renders the complete plain-text info prompt when unconstrained', () => {
+    const prompt = `Confirm exact content:\n${JSON.stringify(
+      [
+        'PROMPT_TOP',
+        ...Array.from({ length: 80 }, (_, index) => `line-${index}`),
+        'PROMPT_TAIL',
+      ].join('\n'),
+    )}`;
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('PROMPT_TOP');
+    expect(frame).toContain('PROMPT_TAIL');
+    expect(frame).not.toContain('lines hidden');
   });
 
   // Regression coverage for issue #4093: exec confirmations carry a
@@ -170,6 +329,64 @@ describe('ToolConfirmationMessage', () => {
       expect(onConfirm).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
       ),
+    );
+  });
+
+  it('renders blocked retry guidance without offering a mode switch', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_blocked_retry',
+        message: 'This exact action was previously blocked.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('This exact action was previously blocked.');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).not.toContain('Switch to Default Mode');
+    expect(frame).not.toContain('Always allow');
+  });
+
+  it('offers a mode switch after consecutive classifier failures', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'consecutive_unavailable',
+        message: 'Auto Mode could not classify consecutive actions.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame() ?? '').toContain(
+      'Switch to Default Mode and allow once (recommended)',
     );
   });
 
@@ -438,6 +655,84 @@ describe('ToolConfirmationMessage', () => {
         expect(lastFrame()).not.toContain(alwaysAllowText);
       });
     });
+
+    describe('unguarded entrances', () => {
+      const infoDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'info',
+        title: 'Confirm Web Fetch',
+        prompt: 'https://example.com',
+        urls: ['https://example.com'],
+        onConfirm,
+      });
+
+      const planDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Plan\n- Step 1',
+        onConfirm,
+      });
+
+      const renderWith = (
+        trusted: boolean,
+        details: ToolCallConfirmationDetails,
+        compactMode = false,
+      ) => {
+        const config = {
+          isTrustedFolder: () => trusted,
+          getIdeMode: () => false,
+        } as unknown as Config;
+        return renderWithProviders(
+          <ToolConfirmationMessage
+            confirmationDetails={details}
+            config={config}
+            availableTerminalHeight={30}
+            contentWidth={80}
+            compactMode={compactMode}
+          />,
+        );
+      };
+
+      it('compactMode offers "Allow always" only in a trusted folder', () => {
+        expect(renderWith(true, infoDetails(), true).lastFrame()).toContain(
+          'Allow always',
+        );
+        const untrusted = renderWith(false, infoDetails(), true).lastFrame();
+        expect(untrusted).toContain('Yes, allow once');
+        expect(untrusted).not.toContain('Allow always');
+      });
+
+      it('plan exit offers auto-accept only in a trusted folder', () => {
+        expect(renderWith(true, planDetails()).lastFrame()).toContain(
+          'Yes, and auto-accept edits',
+        );
+        const untrusted = renderWith(false, planDetails()).lastFrame();
+        // Both remaining exits must survive: the gate admits DEFAULT and PLAN.
+        expect(untrusted).toContain('Yes, and manually approve edits');
+        expect(untrusted).toContain('restore previous mode');
+        expect(untrusted).not.toContain('Yes, and auto-accept edits');
+      });
+
+      it('subscribes to the promise onConfirm returns instead of letting it float', async () => {
+        // A floating rejection reaches the process-level handler (llm.tsx) and
+        // shows a "file a bug report" banner over a correctly-refused action,
+        // so the call site must consume what onConfirm returns. Asserted via a
+        // thenable: `Promise.resolve(x).catch(...)` subscribes through `then`,
+        // a bare `onConfirm(outcome)` statement never does.
+        const then = vi.fn();
+        const thenable = { then } as unknown as Promise<void>;
+        const onConfirm = vi.fn(() => thenable);
+        const { stdin } = renderWith(true, infoDetails(onConfirm));
+
+        stdin.write('\r');
+
+        await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+        expect(then).toHaveBeenCalled();
+      });
+    });
   });
 
   describe('external editor option', () => {
@@ -451,12 +746,23 @@ describe('ToolConfirmationMessage', () => {
       newContent: 'b',
       onConfirm: vi.fn(),
     };
+    const execConfirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+    const preferredEditorSettings = {
+      merged: { general: { preferredEditor: 'vscode' } },
+    } as unknown as LoadedSettings;
 
     it('should show "Modify with external editor" when preferredEditor is set', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -465,14 +771,64 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
       expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledWith('vscode');
+    });
+
+    it('probes editor availability once for the dialog lifetime', () => {
+      isEditorAvailableMock.mockClear();
+
+      const component = (height: number) => (
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={height}
+          contentWidth={80}
+        />
+      );
+      const { lastFrame, rerender } = renderWithProviders(component(30), {
+        settings: preferredEditorSettings,
+      });
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+
+      // A terminal resize re-renders the dialog; the availability probe shells
+      // out, so it must not run again.
+      rerender(
+        withProviders(component(31), { settings: preferredEditorSettings }),
+      );
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+    });
+
+    // #10745: the option was offered whenever `preferredEditor` was merely
+    // set, so picking it tried to launch a binary that is not installed and
+    // the modify flow failed. Offer it only when the editor is available.
+    it('should NOT show "Modify with external editor" when the configured editor is unavailable', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+      isEditorAvailableMock.mockClear();
+      isEditorAvailableMock.mockReturnValueOnce(false);
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
     it('should NOT show "Modify with external editor" when preferredEditor is not set', () => {
@@ -480,6 +836,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -495,6 +852,7 @@ describe('ToolConfirmationMessage', () => {
         },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
@@ -503,6 +861,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -511,14 +870,47 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability in compactMode', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
+      expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability for a non-edit confirmation', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={execConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
     });
 
     it('renders edit warnings and honors hideAlwaysAllow on small terminals', () => {
@@ -826,6 +1218,40 @@ describe('ToolConfirmationMessage', () => {
         'Switch to Default Mode and allow once (recommended)',
       );
       expect(frame).toContain('No');
+      expect(frame).not.toContain('Allow always');
+    });
+
+    it('budgets the two-option blocked retry layout on a tight terminal', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: ['line-1', 'line-2', 'line-3', 'line-4'].join('\n'),
+        rootCommand: 'line-1',
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'classifier_blocked_retry',
+          message: 'This exact action was previously blocked.',
+        },
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('previously blocked');
+      expect(frame).toContain('line-1');
+      expect(frame).toContain('last 2 lines hidden');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+      expect(frame).not.toContain('Switch to Default Mode');
       expect(frame).not.toContain('Allow always');
     });
 

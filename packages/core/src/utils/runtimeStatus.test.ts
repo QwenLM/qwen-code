@@ -7,7 +7,7 @@
 import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RUNTIME_STATUS_SCHEMA_VERSION,
   clearRuntimeStatus,
@@ -15,9 +15,20 @@ import {
   writeRuntimeStatus,
 } from './runtimeStatus.js';
 
+const fsMocks = vi.hoisted(() => ({
+  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.readFile.mockImplementation(actual.readFile);
+  return { ...actual, readFile: fsMocks.readFile };
+});
+
 let tmpDir: string;
 
 beforeEach(async () => {
+  fsMocks.readFile.mockClear();
   tmpDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-runtime-status-'));
 });
 
@@ -108,6 +119,32 @@ describe('writeRuntimeStatus', () => {
 });
 
 describe('readRuntimeStatus', () => {
+  it('propagates the caller abort reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('runtime status read cancelled');
+    controller.abort(reason);
+
+    await expect(
+      readRuntimeStatus(targetPath(), { signal: controller.signal }),
+    ).rejects.toBe(reason);
+  });
+
+  it('passes the caller signal to the file read', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      workDir: '/some/where',
+      pid: 99,
+    });
+    const controller = new AbortController();
+
+    await readRuntimeStatus(targetPath(), { signal: controller.signal });
+
+    expect(fsMocks.readFile).toHaveBeenLastCalledWith(targetPath(), {
+      encoding: 'utf-8',
+      signal: controller.signal,
+    });
+  });
+
   it('round-trips a written record', async () => {
     await writeRuntimeStatus(targetPath(), {
       sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',

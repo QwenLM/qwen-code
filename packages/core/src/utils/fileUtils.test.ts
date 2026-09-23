@@ -36,7 +36,7 @@ import {
   detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
-import { decodeBufferWithEncodingInfo } from './sync-file-encoding.js';
+import { decodeBufferWithEncodingInfo } from '../services/sync-file-encoding.js';
 import { iconvEncode } from './iconvHelper.js';
 import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
@@ -47,7 +47,7 @@ import {
   renderPDFPagesToImages,
   resetPdftotextCache,
 } from './pdf.js';
-import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
+import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },
@@ -96,6 +96,18 @@ vi.mock('./pdf.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./pdf.js')>();
   return { ...actual, renderPDFPagesToImages: vi.fn() };
 });
+
+// Config lazily loads the Omni module for processSingleFileContent;
+// vitest intercepts dynamic imports too, so a registry mock is what stubs
+// the delivery pipeline. Safe for every non-omni test: the cheap
+// `config.isOmniEnabled?.()` gate runs BEFORE the import, and the default
+// mockConfig has no isOmniEnabled.
+const omniGateMocks = vi.hoisted(() => ({
+  isOmniDeliveryActive: vi.fn(),
+  sniffFileModality: vi.fn(),
+  readMediaViaOmniDelivery: vi.fn(),
+}));
+vi.mock('../omni/index.js', () => omniGateMocks);
 
 const mockMimeGetType = mime.getType as Mock;
 const mockExecFile = vi.mocked(execFile);
@@ -150,6 +162,17 @@ describe('fileUtils', () => {
       modalities: { image: true, video: true },
     }),
     getFileSystemService: () => fsService,
+    getToolRegistry: () => ({
+      getFunctionDeclarations: () => [
+        { name: 'read_file' },
+        { name: 'tool_search' },
+      ],
+      getDeferredToolSummary: () => [{ name: 'zoom_image' }],
+      getCodeModeBindingPlan: () => ({
+        bindings: [{ name: 'zoom_image' }],
+        collisions: [],
+      }),
+    }),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -867,12 +890,50 @@ describe('fileUtils', () => {
 
     it('should detect image type by extension (png)', async () => {
       mockMimeGetType.mockReturnValueOnce('image/png');
-      expect(await detectFileType('file.png')).toBe('image');
+      const pngPath = path.join(tempRootDir, 'file.png');
+      actualNodeFs.writeFileSync(
+        pngPath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
+
+      expect(await detectFileType(pngPath)).toBe('image');
+    });
+
+    it('should keep empty image files classified as images', async () => {
+      const emptyImagePath = path.join(tempRootDir, 'empty.png');
+      actualNodeFs.writeFileSync(emptyImagePath, '');
+      mockMimeGetType.mockReturnValueOnce('image/png');
+
+      expect(await detectFileType(emptyImagePath)).toBe('image');
     });
 
     it('should detect image type by extension (jpeg)', async () => {
       mockMimeGetType.mockReturnValueOnce('image/jpeg');
-      expect(await detectFileType('file.jpg')).toBe('image');
+      const jpgPath = path.join(tempRootDir, 'file.jpg');
+      actualNodeFs.writeFileSync(jpgPath, Buffer.from([0xff, 0xd8, 0xff]));
+
+      expect(await detectFileType(jpgPath)).toBe('image');
+    });
+
+    it('should detect a canonical image saved with a different image extension', async () => {
+      mockMimeGetType.mockReturnValueOnce('image/jpeg');
+      const mislabeledPath = path.join(tempRootDir, 'photo.jpg');
+      actualNodeFs.writeFileSync(
+        mislabeledPath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
+
+      expect(await detectFileType(mislabeledPath)).toBe('image');
+    });
+
+    it('should preserve image classification when image sniffing cannot open the file', async () => {
+      const imagePath = path.join(tempRootDir, 'unreadable.png');
+      mockMimeGetType.mockReturnValueOnce('image/png');
+      vi.spyOn(fsPromises, 'open').mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+
+      expect(await detectFileType(imagePath)).toBe('image');
     });
 
     it('should detect svg type by extension', async () => {
@@ -902,6 +963,22 @@ describe('fileUtils', () => {
       mockMimeGetType.mockReturnValueOnce(null);
       expect(await detectFileType('tutorial.m4v')).toBe('video');
     });
+
+    it.each([
+      ['movie.mkv', 'video'],
+      ['clip.avi', 'video'],
+      ['song.flac', 'audio'],
+      ['stream.aac', 'audio'],
+    ] as const)(
+      'should detect %s via the mime/lite override map as %s',
+      async (fileName, expected) => {
+        // Same mime/lite gap as .m4v: the standard database returns null for
+        // these container extensions, so only the override map keeps a real
+        // media file out of the binary content sampler.
+        mockMimeGetType.mockReturnValueOnce(null);
+        expect(await detectFileType(fileName)).toBe(expected);
+      },
+    );
 
     it('should detect known binary extensions as binary (e.g. .zip)', async () => {
       mockMimeGetType.mockReturnValueOnce('application/zip');
@@ -1087,6 +1164,31 @@ describe('fileUtils', () => {
         actualNodeFs.unlinkSync(testBinaryFilePath);
     });
 
+    it.each([undefined, '1-2'])(
+      'rejects sandbox PDF processing before invoking host helpers (pages=%s)',
+      async (pages) => {
+        actualNodeFs.writeFileSync(testPdfFilePath, '%PDF-1.4\n');
+        const config = {
+          ...mockConfig,
+          getShellExecutionSandbox: () => ({
+            workspace: tempRootDir,
+            installation: '/installation',
+            state: '/state',
+            filesystem: 'workspace-write',
+            network: 'closed',
+          }),
+        } as Config;
+        const result = await processSingleFileContent(testPdfFilePath, config, {
+          fileType: 'pdf',
+          pages,
+        });
+        expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.error).toContain('sandboxed Shell');
+        expect(execFile).not.toHaveBeenCalled();
+        expect(mockRender).not.toHaveBeenCalled();
+      },
+    );
+
     it('should read a text file successfully', async () => {
       const content = 'Line 1\\nLine 2\\nLine 3';
       actualNodeFs.writeFileSync(testTextFilePath, content);
@@ -1166,7 +1268,10 @@ describe('fileUtils', () => {
     });
 
     it('should handle read errors for image/pdf files', async () => {
-      actualNodeFs.writeFileSync(testImageFilePath, 'content'); // File must exist
+      actualNodeFs.writeFileSync(
+        testImageFilePath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
       mockMimeGetType.mockReturnValue('image/png');
       const readError = new Error('Simulated image read error');
       vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
@@ -1177,6 +1282,89 @@ describe('fileUtils', () => {
       );
       expect(result.error).toContain('Simulated image read error');
       expect(result.returnDisplay).toContain('Simulated image read error');
+    });
+
+    it('honors an explicitly provided file type without re-detecting content', async () => {
+      actualNodeFs.writeFileSync(testImageFilePath, 'plain text content');
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfig,
+        { fileType: 'image' },
+      );
+
+      expect(result.llmContent).not.toBe('plain text content');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('omits provider-unsupported image formats instead of forwarding raw bytes (#9291)', async () => {
+      // A MIME type the model endpoint cannot safely consume (image/heic on
+      // Responses-compatible routes) must not be forwarded verbatim: the
+      // provider rejects it with a 400 that aborts the whole session. The
+      // read must stay in-band — a text notice, no inline image, no error.
+      const heicPath = path.join(tempRootDir, 'photo.heic');
+      actualNodeFs.writeFileSync(heicPath, 'not decodable heic bytes');
+      mockMimeGetType.mockReturnValue('image/heic');
+
+      const result = await processSingleFileContent(heicPath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('image/heic');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+    });
+
+    it('keeps provider-unsupported images inline for the vision bridge', async () => {
+      const heicPath = path.join(tempRootDir, 'photo.heic');
+      const bytes = Buffer.from('heic bytes for bridge');
+      actualNodeFs.writeFileSync(heicPath, bytes);
+      mockMimeGetType.mockReturnValue('image/heic');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        heicPath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/heic',
+          displayName: 'photo.heic',
+        },
+      });
+    });
+
+    it('keeps undecodable images inline for the vision bridge', async () => {
+      const corruptPath = path.join(tempRootDir, 'corrupt.png');
+      const bytes = Buffer.from('not a png');
+      actualNodeFs.writeFileSync(corruptPath, bytes);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        corruptPath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/png',
+          displayName: 'corrupt.png',
+        },
+      });
     });
 
     it('should process an image file', async () => {
@@ -1197,10 +1385,13 @@ describe('fileUtils', () => {
       );
       const parts = result.llmContent as Part[];
       expect(parts[0]).toEqual({
+        // The shared stub declares tool_search and defers zoom_image, so the
+        // hint takes the bridge form: review through tool_search, invoke
+        // through tool_call.
         text:
-          'Image overview: 20x10; oriented source: 20x10. ' +
-          'If details are too small, use tool_search for "zoom image", then ' +
-          'call zoom_image with coordinates normalized from 0 to 1000.',
+          'Image overview: 20x10; oriented source: 20x10.' +
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
       });
       expect(parts[1]).toEqual({
         inlineData: {
@@ -1214,6 +1405,110 @@ describe('fileUtils', () => {
       ).metadata();
       expect(metadata).toMatchObject({ width: 20, height: 10 });
       expect(result.returnDisplay).toContain('Read image file: image.png');
+    });
+
+    it.each<{
+      codeModeOnly: boolean;
+      declared: string[];
+      deferred: string[];
+      bindings: string[];
+      hint: string;
+    }>([
+      {
+        codeModeOnly: false,
+        declared: ['read_file', 'tool_search'],
+        deferred: [],
+        bindings: [],
+        hint: '',
+      },
+      {
+        codeModeOnly: false,
+        declared: ['read_file', 'tool_search'],
+        deferred: ['zoom_image'],
+        bindings: [],
+        hint:
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
+      },
+      {
+        codeModeOnly: false,
+        declared: ['read_file', 'zoom_image'],
+        deferred: [],
+        bindings: [],
+        hint: ' If details are too small, call zoom_image with coordinates normalized from 0 to 1000.',
+      },
+      {
+        codeModeOnly: true,
+        declared: ['exec'],
+        deferred: [],
+        bindings: [],
+        hint: '',
+      },
+      {
+        codeModeOnly: true,
+        declared: ['exec'],
+        deferred: [],
+        bindings: ['zoom_image'],
+        hint: ' If details are too small, call tools.zoom_image with coordinates normalized from 0 to 1000.',
+      },
+    ])(
+      'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
+      async ({ codeModeOnly, declared, deferred, bindings, hint }) => {
+        await sharp({
+          create: { width: 20, height: 10, channels: 3, background: '#306090' },
+        })
+          .png()
+          .toFile(testImageFilePath);
+        mockMimeGetType.mockReturnValue('image/png');
+        const result = await processSingleFileContent(testImageFilePath, {
+          ...mockConfig,
+          getCodeModeOnly: () => codeModeOnly,
+          getToolRegistry: () => ({
+            getFunctionDeclarations: () => declared.map((name) => ({ name })),
+            getDeferredToolSummary: () => deferred.map((name) => ({ name })),
+            getCodeModeBindingPlan: () => ({
+              bindings: bindings.map((name) => ({ name })),
+              collisions: [],
+            }),
+          }),
+        } as unknown as Config);
+        const parts = result.llmContent as Part[];
+        expect(parts[0]).toEqual({
+          text: `Image overview: 20x10; oriented source: 20x10.${hint}`,
+        });
+        expect(parts[1].inlineData?.mimeType).toBe('image/jpeg');
+      },
+    );
+
+    it('points the zoom hint at tools.zoom_image in CodeModeOnly', async () => {
+      await sharp({
+        create: {
+          width: 20,
+          height: 10,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toFile(testImageFilePath);
+      mockMimeGetType.mockReturnValue('image/png');
+      const codeModeConfig = {
+        ...mockConfig,
+        getCodeModeOnly: () => true,
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        codeModeConfig,
+      );
+
+      const parts = result.llmContent as Part[];
+      expect(parts[0]).toEqual({
+        text:
+          'Image overview: 20x10; oriented source: 20x10. ' +
+          'If details are too small, call tools.zoom_image with ' +
+          'coordinates normalized from 0 to 1000.',
+      });
     });
 
     it('returns a bounded overview when a PNG exceeds the old data URI limit', async () => {
@@ -1266,7 +1561,7 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('100 MB source limit');
     });
 
-    it('forwards a corrupt canonical image verbatim instead of failing the read', async () => {
+    it('reads text-looking corrupt canonical image content as text', async () => {
       const corruptPath = path.join(tempRootDir, 'corrupt.png');
       const bytes = Buffer.from('not a real png');
       await fsPromises.writeFile(corruptPath, bytes);
@@ -1274,15 +1569,8 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(corruptPath, mockConfig);
 
+      expect(result.llmContent).toBe(bytes.toString());
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: bytes.toString('base64'),
-          mimeType: 'image/png',
-          displayName: 'corrupt.png',
-        },
-      });
-      expect(result.returnDisplay).toContain('Read image file: corrupt.png');
     });
 
     it('forwards an animated canonical image verbatim instead of failing the read', async () => {
@@ -1308,7 +1596,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: animated.webp');
     });
 
-    it('forwards non-canonical content behind a canonical extension verbatim', async () => {
+    it('omits non-canonical content behind a canonical extension (#9291)', async () => {
       const gifBytes = Buffer.from(
         '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
         'hex',
@@ -1319,15 +1607,124 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(mismatchPath, mockConfig);
 
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain(
+        'Skipped binary file: mismatch.png',
+      );
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: gifBytes.toString('base64'),
-          mimeType: 'image/png',
-          displayName: 'mismatch.png',
-        },
-      });
     });
+
+    it('rejects ZIP containers behind an image extension', async () => {
+      const zipPath = path.join(tempRootDir, 'archive.png');
+      await fsPromises.writeFile(
+        zipPath,
+        Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      );
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(zipPath, mockConfig);
+
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain(
+        'Skipped binary file: archive.png',
+      );
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+    });
+
+    it('rejects unrecognized binary content behind an image extension', async () => {
+      const binaryPath = path.join(tempRootDir, 'garbage.png');
+      await fsPromises.writeFile(
+        binaryPath,
+        Buffer.from([0x00, 0x01, 0x02, 0x03]),
+      );
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(binaryPath, mockConfig);
+
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain(
+        'Skipped binary file: garbage.png',
+      );
+      expect(result.error).toBeUndefined();
+    });
+
+    it('rejects two-byte content behind an image extension as binary', async () => {
+      const tinyPath = path.join(tempRootDir, 'tiny.png');
+      await fsPromises.writeFile(tinyPath, Buffer.from('hi'));
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(tinyPath, mockConfig);
+
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain('Skipped binary file: tiny.png');
+      expect(result.error).toBeUndefined();
+    });
+
+    it.each([
+      { extension: 'png', mimeType: 'image/png' },
+      { extension: 'jpg', mimeType: 'image/jpeg' },
+      { extension: 'gif', mimeType: 'image/gif' },
+      { extension: 'webp', mimeType: 'image/webp' },
+    ])(
+      'reads text content behind a .$extension extension as text',
+      async ({ extension, mimeType }) => {
+        const jsonBytes = Buffer.from(
+          '{"meta":{"format":"png"},"data":"not-a-real-image"}',
+        );
+        const screenshotPath = path.join(
+          tempRootDir,
+          `screenshot.${extension}`,
+        );
+        await fsPromises.writeFile(screenshotPath, jsonBytes);
+        mockMimeGetType.mockReturnValue(mimeType);
+
+        const result = await processSingleFileContent(
+          screenshotPath,
+          mockConfig,
+        );
+
+        expect(result.llmContent).toBe(jsonBytes.toString());
+        expect(result.returnDisplay).toBe('');
+        expect(result.error).toBeUndefined();
+      },
+    );
+
+    it.each([
+      { extension: 'png', mimeType: 'image/png' },
+      { extension: 'jpg', mimeType: 'image/jpeg' },
+      { extension: 'gif', mimeType: 'image/gif' },
+      { extension: 'webp', mimeType: 'image/webp' },
+    ])(
+      'reads BOM-prefixed UTF-16 text behind a .$extension extension as text',
+      async ({ extension, mimeType }) => {
+        const text = 'text saved with the wrong extension';
+        const imagePath = path.join(tempRootDir, `notes.${extension}`);
+        await fsPromises.writeFile(
+          imagePath,
+          Buffer.concat([
+            Buffer.from([0xff, 0xfe]),
+            Buffer.from(text, 'utf16le'),
+          ]),
+        );
+        mockMimeGetType.mockReturnValue(mimeType);
+
+        const result = await processSingleFileContent(imagePath, mockConfig);
+
+        expect(result.llmContent).toBe(text);
+        expect(result.returnDisplay).toBe('');
+        expect(result.error).toBeUndefined();
+      },
+    );
 
     it('applies EXIF orientation before describing and rendering an overview', async () => {
       const orientedPath = path.join(tempRootDir, 'oriented.jpg');
@@ -1388,28 +1785,82 @@ describe('fileUtils', () => {
       ]);
     });
 
-    it.each([
-      ['animated GIF', 'animation.gif', 'image/gif'],
-      ['BMP', 'bitmap.bmp', 'image/bmp'],
-    ])('keeps %s image bytes unchanged', async (_label, name, mimeType) => {
-      const filePath = path.join(tempRootDir, name);
-      const bytes = Buffer.from('unchanged image bytes');
-      actualNodeFs.writeFileSync(filePath, bytes);
-      mockMimeGetType.mockReturnValue(mimeType);
+    it('keeps animated GIF image bytes unchanged', async () => {
+      // A real, decodable GIF: forwarded verbatim (never re-encoded).
+      const gifBytes = Buffer.from(
+        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
+        'hex',
+      );
+      const filePath = path.join(tempRootDir, 'animation.gif');
+      actualNodeFs.writeFileSync(filePath, gifBytes);
+      mockMimeGetType.mockReturnValue('image/gif');
 
       const result = await processSingleFileContent(filePath, mockConfig);
 
       expect(result.llmContent).toEqual({
         inlineData: {
-          data: bytes.toString('base64'),
-          mimeType,
-          displayName: name,
+          data: gifBytes.toString('base64'),
+          mimeType: 'image/gif',
+          displayName: 'animation.gif',
         },
       });
     });
 
+    it('omits a corrupt GIF instead of forwarding undecodable bytes (#9291)', async () => {
+      const filePath = path.join(tempRootDir, 'broken.gif');
+      actualNodeFs.writeFileSync(filePath, Buffer.from('not a real gif'));
+      mockMimeGetType.mockReturnValue('image/gif');
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+    });
+
+    it('keeps corrupt GIF bytes inline for the vision bridge', async () => {
+      const filePath = path.join(tempRootDir, 'broken.gif');
+      const bytes = Buffer.from('not a real gif');
+      actualNodeFs.writeFileSync(filePath, bytes);
+      mockMimeGetType.mockReturnValue('image/gif');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        filePath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/gif',
+          displayName: 'broken.gif',
+        },
+      });
+    });
+
+    it('omits BMP image bytes the provider cannot safely consume (#9291)', async () => {
+      const filePath = path.join(tempRootDir, 'bitmap.bmp');
+      const bytes = Buffer.from('unchanged image bytes');
+      actualNodeFs.writeFileSync(filePath, bytes);
+      mockMimeGetType.mockReturnValue('image/bmp');
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('image/bmp');
+    });
+
     it('should reject image files when model does not support image', async () => {
-      const fakePngData = Buffer.from('fake png data');
+      const fakePngData = Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      ]);
       actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
       mockMimeGetType.mockReturnValue('image/png');
 
@@ -1426,6 +1877,129 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('Unsupported image file');
       expect(result.llmContent).toContain('does not support image input');
       expect(result.returnDisplay).toContain('Skipped image file');
+    });
+
+    describe('omni delivery gating', () => {
+      // Exercises the omni-vs-legacy decision in processSingleFileContent:
+      // enablement gate → delivery-active gate → content pre-sniff → per-
+      // modality config. The pipeline itself is mocked (index.test.ts owns
+      // it); what is pinned here is WHICH path a file takes.
+      function omniConfig(overrides: Record<string, unknown> = {}): Config {
+        return {
+          ...mockConfig,
+          isOmniEnabled: () => true,
+          loadOmniMediaReader: () => import('../omni/index.js'),
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, audio: true, video: true },
+          }),
+          ...overrides,
+        } as unknown as Config;
+      }
+
+      beforeEach(() => {
+        omniGateMocks.isOmniDeliveryActive.mockReturnValue(true);
+        omniGateMocks.readMediaViaOmniDelivery.mockResolvedValue({
+          llmContent: {
+            fileData: { fileUri: 'oss://bucket/key', mimeType: 'video/mp4' },
+          },
+          returnDisplay: 'Delivered via omni upload.',
+        });
+      });
+
+      it('routes a sniff-confirmed video through readMediaViaOmniDelivery', async () => {
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('fake mp4'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+        omniGateMocks.sniffFileModality.mockResolvedValue('video');
+
+        const result = await processSingleFileContent(videoPath, omniConfig());
+
+        expect(omniGateMocks.readMediaViaOmniDelivery).toHaveBeenCalledWith(
+          expect.objectContaining({
+            filePath: videoPath,
+            expectedModality: 'video',
+          }),
+        );
+        expect(result.returnDisplay).toBe('Delivered via omni upload.');
+      });
+
+      it('falls back to the legacy inline path when the sniff disagrees with the extension', async () => {
+        // A file whose bytes sniff as a DIFFERENT modality than its
+        // extension suggests must take the legacy path (inline under its
+        // extension-derived type), not the fail-closed pipeline.
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('small bytes'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+        omniGateMocks.sniffFileModality.mockResolvedValue(null);
+
+        const result = await processSingleFileContent(videoPath, omniConfig());
+
+        expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
+        const content = result.llmContent as Part;
+        expect(content.inlineData?.mimeType).toBe('video/mp4');
+      });
+
+      it('never sniffs or delivers when the modality is disabled in config', async () => {
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('fake mp4'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+
+        const result = await processSingleFileContent(
+          videoPath,
+          omniConfig({
+            getContentGeneratorConfig: () => ({
+              modalities: { video: false },
+            }),
+          }),
+        );
+
+        expect(omniGateMocks.sniffFileModality).not.toHaveBeenCalled();
+        expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
+        expect(result.returnDisplay).toContain('Skipped video file');
+      });
+
+      it('takes the legacy path when omni delivery is not active for the endpoint', async () => {
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('small bytes'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+        omniGateMocks.isOmniDeliveryActive.mockReturnValue(false);
+
+        const result = await processSingleFileContent(videoPath, omniConfig());
+
+        expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
+        const content = result.llmContent as Part;
+        expect(content.inlineData?.mimeType).toBe('video/mp4');
+      });
+
+      it('bypasses the 100 MB image source cap when omni takes the file', async () => {
+        // The cap protects the overview DECODER; the omni path uploads
+        // original bytes without decoding and enforces its own ceiling, so
+        // an over-cap image must delegate to omni delivery instead of being
+        // rejected. Sparse file: only the stat size matters — the mocked
+        // pipeline never reads the bytes.
+        const imagePath = path.join(tempRootDir, 'huge.png');
+        actualNodeFs.writeFileSync(imagePath, Buffer.alloc(0));
+        actualNodeFs.truncateSync(imagePath, 101 * 1024 * 1024);
+        mockMimeGetType.mockReturnValue('image/png');
+        omniGateMocks.sniffFileModality.mockResolvedValue('image');
+        omniGateMocks.readMediaViaOmniDelivery.mockResolvedValue({
+          llmContent: {
+            fileData: { fileUri: 'oss://bucket/key', mimeType: 'image/png' },
+          },
+          returnDisplay: 'Delivered via omni upload.',
+        });
+
+        const result = await processSingleFileContent(imagePath, omniConfig());
+
+        expect(result.error).toBeUndefined();
+        expect(result.returnDisplay).toBe('Delivered via omni upload.');
+        expect(omniGateMocks.readMediaViaOmniDelivery).toHaveBeenCalledWith(
+          expect.objectContaining({
+            filePath: imagePath,
+            expectedModality: 'image',
+          }),
+        );
+      });
     });
 
     it('keeps image inline when preserveUnsupportedImage is true', async () => {
@@ -1463,7 +2037,9 @@ describe('fileUtils', () => {
     });
 
     it('still strips image for agent reads without the preserve flag', async () => {
-      const fakePngData = Buffer.from('fake png data');
+      const fakePngData = Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      ]);
       actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
       mockMimeGetType.mockReturnValue('image/png');
 
@@ -1545,6 +2121,28 @@ describe('fileUtils', () => {
         (result.llmContent as { inlineData: { mimeType: string } }).inlineData
           .mimeType,
       ).toBe('video/x-m4v');
+      expect(result.returnDisplay).toContain('Read video file');
+    });
+
+    it('processes an .mkv video as inline data despite the mime/lite gap', async () => {
+      // Same regression class as .m4v: mime/lite's standard database has no
+      // .mkv entry, so without the override map a Matroska movie fell into
+      // the binary/size-cap path instead of the media pipeline.
+      const fakeVideo = Buffer.from('fake mkv data');
+      const testVideoPath = path.join(tempRootDir, 'movie.mkv');
+      actualNodeFs.writeFileSync(testVideoPath, fakeVideo);
+      mockMimeGetType.mockReturnValue(null);
+
+      const result = await processSingleFileContent(testVideoPath, mockConfig);
+
+      expect(typeof result.llmContent).toBe('object');
+      expect(
+        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
+      ).toBe(fakeVideo.toString('base64'));
+      expect(
+        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
+          .mimeType,
+      ).toBe('video/x-matroska');
       expect(result.returnDisplay).toContain('Read video file');
     });
 
@@ -2832,7 +3430,10 @@ describe('fileUtils', () => {
       });
 
       it('does not preserve ordinary images with the PDF-only bridge flag', async () => {
-        actualNodeFs.writeFileSync(testImageFilePath, Buffer.from('png'));
+        actualNodeFs.writeFileSync(
+          testImageFilePath,
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        );
         mockMimeGetType.mockReturnValue('image/png');
 
         const result = await processSingleFileContent(

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -25,6 +26,7 @@ import {
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
+  qualifySkillName,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -79,7 +81,9 @@ export class SkillManager {
   // so future async listeners get checked instead of relying on the
   // `Promise.resolve().then(listener)` runtime adapter to swallow the
   // mismatch silently.
-  private readonly changeListeners: Set<() => void | Promise<void>> = new Set();
+  private readonly changeListeners: Set<
+    (options?: { throwOnError?: boolean }) => void | Promise<void>
+  > = new Set();
   // One-shot signal: when true, the *next* `notifyChangeListeners()` run
   // will tell `slashCommandProcessor`'s reload-listener (and any other
   // opt-in consumer) that an external reload is about to be redundant —
@@ -115,7 +119,9 @@ export class SkillManager {
    * updated state before continuing.
    * @returns A function to remove the listener.
    */
-  addChangeListener(listener: () => void | Promise<void>): () => void {
+  addChangeListener(
+    listener: (options?: { throwOnError?: boolean }) => void | Promise<void>,
+  ): () => void {
     this.changeListeners.add(listener);
     return () => {
       this.changeListeners.delete(listener);
@@ -187,7 +193,9 @@ export class SkillManager {
    * `allSettled` (not `Promise.all`) so a single listener throwing
    * still lets the others finish.
    */
-  private async notifyChangeListeners(): Promise<void> {
+  private async notifyChangeListeners(options?: {
+    throwOnError?: boolean;
+  }): Promise<void> {
     // Cap each listener at 30s. Without this, a hung listener (e.g.
     // `SkillTool.refreshSkills` blocked on a slow skill reload) would
     // permanently stall
@@ -224,16 +232,25 @@ export class SkillManager {
     };
     const results = await Promise.allSettled(
       Array.from(this.changeListeners).map((listener) =>
-        withTimeout(Promise.resolve().then(listener)),
+        withTimeout(
+          Promise.resolve().then(() =>
+            options ? listener(options) : listener(),
+          ),
+        ),
       ),
     );
+    const errors: unknown[] = [];
     for (const result of results) {
       if (result.status === 'rejected') {
+        errors.push(result.reason);
         debugLogger.warn(
           'Skill change listener threw an error:',
           result.reason,
         );
       }
+    }
+    if (options?.throwOnError && errors.length > 0) {
+      throw new AggregateError(errors, 'Skill change listeners failed.');
     }
   }
 
@@ -420,7 +437,7 @@ export class SkillManager {
   /**
    * Refreshes the skills cache by loading all skills from disk.
    */
-  async refreshCache(): Promise<void> {
+  async refreshCache(options?: { throwOnError?: boolean }): Promise<void> {
     debugLogger.info('Refreshing skills cache...');
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
@@ -444,6 +461,7 @@ export class SkillManager {
     );
 
     let totalSkills = 0;
+    const errors: unknown[] = [];
     for (let i = 0; i < settled.length; i++) {
       const result = settled[i];
       if (result.status === 'fulfilled') {
@@ -451,6 +469,7 @@ export class SkillManager {
         skillsCache.set(level, levelSkills);
         totalSkills += levelSkills.length;
       } else {
+        errors.push(result.reason);
         debugLogger.warn(
           `Failed to load ${levels[i]} level skills:`,
           result.reason,
@@ -510,7 +529,14 @@ export class SkillManager {
       `Skills cache refreshed: ${totalSkills} total skills loaded ` +
         `(${conditional.length} conditional)`,
     );
-    await this.notifyChangeListeners();
+    try {
+      await this.notifyChangeListeners(options);
+    } catch (error) {
+      errors.push(error);
+    }
+    if (options?.throwOnError && errors.length > 0) {
+      throw new AggregateError(errors, 'Skill cache refresh failed.');
+    }
   }
 
   /**
@@ -603,7 +629,7 @@ export class SkillManager {
   stopWatching(): void {
     debugLogger.info('Stopping skill directory watchers...');
     for (const watcher of this.watchers.values()) {
-      void watcher.close().catch((error) => {
+      void closeFileWatcher(watcher).catch((error) => {
         debugLogger.warn('Failed to close skills watcher:', error);
       });
     }
@@ -1003,7 +1029,15 @@ export class SkillManager {
           }
           skills.push({
             ...skill,
-            extensionName: extension.displayName ?? extension.name,
+            // The registry identity carries the owner, so two extensions
+            // shipping `pdf` contribute two names and a reader can tell where
+            // a skill came from. The manifest and the workspace
+            // extension-skill store keep using the authored spelling;
+            // `Config.isSkillEnabled` bridges the two.
+            name: qualifySkillName(extension.name, skill.name),
+            authoredName: skill.name,
+            extensionName: extension.name,
+            extensionDisplayName: extension.displayName,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.
@@ -1079,6 +1113,24 @@ export class SkillManager {
       // any ordering assumption (`tools/skill.ts`); preserve that contract.
       const loaded = await Promise.all(
         entries.map(async (entry) => {
+          // Skip transient install artifacts (backup / staging dirs left
+          // behind by a crashed reinstall). Without this filter a stale
+          // `.backup-*` sibling with a valid SKILL.md would be loaded as a
+          // duplicate skill, and a "deleted" skill could reappear from its
+          // backup sibling.
+          // Match only the actual artifact shape
+          // (`.backup-<pid>-<timestamp>` / `.installing-<pid>-<timestamp>`,
+          // anchored at the end of the entry name) so that legitimate skill
+          // dirs whose names merely contain `.backup-` or `.installing-`
+          // (e.g. `db.backup-2024`) are not skipped.
+          if (
+            /\.backup-\d+-\d+$/.test(entry.name) ||
+            /\.installing-\d+-\d+$/.test(entry.name)
+          ) {
+            debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+            return null;
+          }
+
           const isDirectory = entry.isDirectory();
           const isSymlink = entry.isSymbolicLink();
 
@@ -1191,15 +1243,14 @@ export class SkillManager {
 
     for (const existingPath of this.watchers.keys()) {
       if (!watchTargets.has(existingPath)) {
-        void this.watchers
-          .get(existingPath)
-          ?.close()
-          .catch((error) => {
+        void closeFileWatcher(this.watchers.get(existingPath)).catch(
+          (error) => {
             debugLogger.warn(
               `Failed to close skills watcher for ${existingPath}:`,
               error,
             );
-          });
+          },
+        );
         this.watchers.delete(existingPath);
       }
     }

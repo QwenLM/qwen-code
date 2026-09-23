@@ -14,6 +14,10 @@ import { DaemonTransportClosedError } from './DaemonTransport.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import { parseSseStream } from './sse.js';
 
+// Keep in sync with the daemon route's predecessor-query validator.
+const SSE_STREAM_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /**
  * Default REST+SSE transport. Delegates `fetch()` to the underlying
  * `_fetch` callable and implements `subscribeEvents()` by opening an
@@ -96,6 +100,9 @@ export class RestSseTransport implements DaemonTransport {
       if (this.token) {
         headers['Authorization'] = `Bearer ${this.token}`;
       }
+      if (opts.clientId) {
+        headers['X-Qwen-Client-Id'] = opts.clientId;
+      }
       if (opts.lastEventId !== undefined) {
         headers['Last-Event-ID'] = String(opts.lastEventId);
         // Pair the resume cursor with the epoch of the bus that produced
@@ -111,10 +118,21 @@ export class RestSseTransport implements DaemonTransport {
         ? composeAbortSignals([opts.signal, requestCtrl.signal])
         : requestCtrl.signal;
 
-      // Build the SSE URL, optionally with `?maxQueued=N`.
+      // Build the SSE URL with optional subscription diagnostics.
       let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
+      const query = new URLSearchParams();
       if (opts.maxQueued !== undefined) {
-        url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
+        query.set('maxQueued', String(opts.maxQueued));
+      }
+      if (opts.sseConnectReason !== undefined) {
+        query.set('connectReason', opts.sseConnectReason);
+      }
+      if (opts.previousSseStreamId !== undefined) {
+        query.set('previousStreamId', opts.previousSseStreamId);
+      }
+      const queryString = query.toString();
+      if (queryString) {
+        url += `?${queryString}`;
       }
 
       // Connect-phase timeout (request → headers received). The SSE
@@ -188,6 +206,13 @@ export class RestSseTransport implements DaemonTransport {
       if (!res.body) {
         throw new Error('No SSE body');
       }
+
+      const responseStreamId = res.headers.get('x-qwen-sse-stream-id');
+      opts.onSseStreamAccepted?.(
+        responseStreamId && SSE_STREAM_ID_RE.test(responseStreamId)
+          ? responseStreamId.toLowerCase()
+          : undefined,
+      );
 
       // Learn the daemon's current bus epoch so the caller can pair it
       // with its resume cursor on the next reconnect (DAEMON-001).

@@ -34,6 +34,8 @@ describe('validateAuthMethod', () => {
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['ANTHROPIC_BASE_URL'];
     delete process.env['GOOGLE_API_KEY'];
+    delete process.env['GOOGLE_API_KEY_VERTEX'];
+    delete process.env['GOOGLE_CLOUD_PROJECT'];
     delete process.env['IDEALAB_KEY'];
     delete process.env['TOKEN_PLAN_KEY'];
   });
@@ -41,6 +43,18 @@ describe('validateAuthMethod', () => {
   it('should return null for USE_OPENAI with default env key', () => {
     process.env['OPENAI_API_KEY'] = 'fake-key';
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+  });
+
+  it('validates USE_OPENAI_RESPONSES with the default OpenAI API key', () => {
+    process.env['OPENAI_API_KEY'] = 'fake-key';
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toBeNull();
+  });
+
+  it('reports the OpenAI API key requirement for USE_OPENAI_RESPONSES', () => {
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toBe(
+      "Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the 'OPENAI_API_KEY' environment variable.",
+    );
   });
 
   it('should return an error message for USE_OPENAI if no API key is available', () => {
@@ -90,6 +104,54 @@ describe('validateAuthMethod', () => {
     process.env['IDEALAB_KEY'] = 'idealab-key';
 
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+  });
+
+  it('finds the canonical Responses entry during OpenAI preflight', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        model: { name: 'gpt-model' },
+        modelProviders: {
+          openai: [
+            { id: 'gpt-model', wireApi: 'responses', envKey: 'CUSTOM_API_KEY' },
+          ],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+    vi.stubEnv('CUSTOM_API_KEY', 'responses-key');
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toBeNull();
+  });
+
+  it('checks the effective API credential when both API routes share an id and URL', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        model: { name: 'gpt-model', baseUrl: 'https://example.test/v1' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'gpt-model',
+              baseUrl: 'https://example.test/v1',
+              wireApi: 'chat-completions',
+              envKey: 'CHAT_KEY',
+            },
+            {
+              id: 'gpt-model',
+              baseUrl: 'https://example.test/v1',
+              wireApi: 'responses',
+              envKey: 'RESPONSES_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+    vi.stubEnv('CHAT_KEY', 'chat-key');
+    vi.stubEnv('RESPONSES_KEY', '');
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toContain(
+      "'RESPONSES_KEY'",
+    );
   });
 
   it('disambiguates by settings.model.baseUrl when providers share a model id', () => {
@@ -259,6 +321,62 @@ describe('validateAuthMethod', () => {
     process.env['GOOGLE_API_KEY_VERTEX'] = 'vertex-key';
 
     expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toBeNull();
+  });
+
+  it('should return null for USE_VERTEX_AI with a project and no API key', () => {
+    process.env['GOOGLE_CLOUD_PROJECT'] = 'my-project';
+
+    expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toBeNull();
+  });
+
+  it('should return null for a keyless USE_VERTEX_AI modelProviders entry when a project is set', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        env: { GOOGLE_CLOUD_PROJECT: 'my-project' },
+        model: { name: 'vertex-model' },
+        modelProviders: {
+          'vertex-ai': [{ id: 'vertex-model' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toBeNull();
+  });
+
+  it('should return an error for USE_VERTEX_AI with neither an API key nor a project', () => {
+    const result = validateAuthMethod(AuthType.USE_VERTEX_AI);
+
+    expect(result).toContain('GOOGLE_API_KEY');
+    // The first error a Vertex user hits must name the keyless alternative,
+    // otherwise the advice is "set a key", which forces Express mode.
+    expect(result).toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('should keep requiring the declared envKey for USE_VERTEX_AI even when a project is set', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        env: { GOOGLE_CLOUD_PROJECT: 'my-project' },
+        model: { name: 'vertex-model' },
+        modelProviders: {
+          'vertex-ai': [{ id: 'vertex-model', envKey: 'MY_VERTEX_KEY' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const result = validateAuthMethod(AuthType.USE_VERTEX_AI);
+
+    expect(result).toContain('MY_VERTEX_KEY');
+    // The entry never takes the ADC path, so pointing at a project would be
+    // advice that cannot work.
+    expect(result).not.toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('should not treat a whitespace-only project as configured', () => {
+    process.env['GOOGLE_CLOUD_PROJECT'] = '   ';
+
+    expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toContain(
+      'GOOGLE_API_KEY',
+    );
   });
 
   it('should use config.getModelsConfig().getModel() when Config is provided', () => {

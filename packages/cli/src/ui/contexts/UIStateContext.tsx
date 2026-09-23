@@ -26,6 +26,7 @@ import type {
   IdeContext,
   ApprovalMode,
   IdeInfo,
+  OutputStyleDefinition,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
@@ -39,6 +40,7 @@ import { type HelpTab } from './UIActionsContext.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import type { StartupIdeConnectionStatus } from '../../utils/events.js';
 
@@ -80,6 +82,8 @@ export interface UIState {
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isEffortDialogOpen: boolean;
+  isOutputStyleDialogOpen: boolean;
+  outputStyleChoices: readonly OutputStyleDefinition[];
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;
@@ -96,10 +100,10 @@ export interface UIState {
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
-  geminiMdFileCount: number;
+  memoryFileCount: number;
   streamingState: StreamingState;
   initError: string | null;
-  pendingGeminiHistoryItems: HistoryItemWithoutId[];
+  pendingLlmHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;
   shellModeActive: boolean;
   userMessages: string[];
@@ -171,6 +175,7 @@ export interface UIState {
   terminalWidth: number;
   terminalHeight: number;
   mainControlsRef: React.MutableRefObject<DOMElement | null>;
+  voiceMicWarnedStatusRef: React.MutableRefObject<MicrophonePermission | null>;
   currentIDE: IdeInfo | null;
   startupIdeConnectionStatus: StartupIdeConnectionStatus;
   updateInfo: UpdateObject | null;

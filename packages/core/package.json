@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.21.5",
+  "private": true,
+  "version": "0.24.4",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -13,9 +14,25 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./omni": {
+      "types": "./dist/src/omni/index.d.ts",
+      "import": "./dist/src/omni/index.js"
+    },
+    "./omniPolicyCollection": {
+      "types": "./dist/src/omni/policy/model-call-collection.d.ts",
+      "import": "./dist/src/omni/policy/model-call-collection.js"
+    },
+    "./subagentRuntime": {
+      "types": "./dist/src/subagent-runtime.d.ts",
+      "import": "./dist/src/subagent-runtime.js"
+    },
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"
+    },
+    "./envVarResolver": {
+      "types": "./dist/src/utils/envVarResolver.d.ts",
+      "import": "./dist/src/utils/envVarResolver.js"
     },
     "./goalWire": {
       "types": "./dist/src/goals/goal-wire.d.ts",
@@ -25,15 +42,57 @@
       "types": "./dist/src/memory/scopes.d.ts",
       "import": "./dist/src/memory/scopes.js"
     },
+    "./subSessionConstants": {
+      "types": "./dist/src/tools/sub-session-constants.d.ts",
+      "import": "./dist/src/tools/sub-session-constants.js"
+    },
+    "./telemetryConstants": {
+      "types": "./dist/src/telemetry/constants.d.ts",
+      "import": "./dist/src/telemetry/constants.js"
+    },
+    "./toolWriteOrigin": {
+      "types": "./dist/src/services/tool-write-origin.d.ts",
+      "import": "./dist/src/services/tool-write-origin.js"
+    },
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"
     },
+    "./board": {
+      "types": "./dist/src/board.d.ts",
+      "import": "./dist/src/board.js"
+    },
+    "./noFollowOpen": {
+      "types": "./dist/src/utils/no-follow-open.d.ts",
+      "import": "./dist/src/utils/no-follow-open.js"
+    },
+    "./storage": {
+      "types": "./dist/src/config/storage.d.ts",
+      "import": "./dist/src/config/storage.js"
+    },
+    "./atomicFileWrite": {
+      "types": "./dist/src/utils/atomicFileWrite.d.ts",
+      "import": "./dist/src/utils/atomicFileWrite.js"
+    },
+    "./debugLogger": {
+      "types": "./dist/src/utils/debugLogger.d.ts",
+      "import": "./dist/src/utils/debugLogger.js"
+    },
+    "./conversationsRuntimeMarker": {
+      "types": "./dist/src/utils/conversations-runtime-marker.d.ts",
+      "import": "./dist/src/utils/conversations-runtime-marker.js"
+    },
     "./package.json": "./package.json",
+    "./*": "./dist/src/*",
     "./dist/*": "./dist/*",
-    "./src/*": "./src/*"
+    "./src/*": "./src/*",
+    "./shellResult": {
+      "types": "./dist/src/utils/shell-result.d.ts",
+      "import": "./dist/src/utils/shell-result.js"
+    }
   },
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').accessSync('../browser-use/dist/index.js')\" || npm --prefix ../browser-use run build",
     "build": "node ../../scripts/build_package.js",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
@@ -51,17 +110,28 @@
     "@anthropic-ai/sdk": "^0.36.1",
     "@google/genai": "2.6.0",
     "@iarna/toml": "^2.2.5",
+    "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/exporter-logs-otlp-grpc": "^0.203.0",
-    "@opentelemetry/exporter-logs-otlp-http": "^0.203.0",
-    "@opentelemetry/exporter-metrics-otlp-grpc": "^0.203.0",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.203.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.203.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.203.0",
-    "@opentelemetry/instrumentation-http": "^0.203.0",
-    "@opentelemetry/instrumentation-undici": "^0.14.0",
-    "@opentelemetry/sdk-node": "^0.203.0",
+    "@opentelemetry/api-logs": "^0.221.0",
+    "@opentelemetry/core": "^2.0.1",
+    "@opentelemetry/exporter-logs-otlp-grpc": "^0.221.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-grpc": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/instrumentation-http": "^0.221.0",
+    "@opentelemetry/instrumentation-undici": "^0.31.0",
+    "@opentelemetry/otlp-exporter-base": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@opentelemetry/semantic-conventions": "^1.36.0",
     "@xterm/headless": "5.5.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",
@@ -87,7 +157,8 @@
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",
-    "sharp": "^0.34.5",
+    "quickjs-emscripten-core": "0.32.0",
+    "sharp": "^0.35.4",
     "shell-quote": "^1.9.0",
     "simple-git": "^3.36.0",
     "strip-ansi": "^7.1.0",
@@ -98,7 +169,8 @@
     "web-tree-sitter": "^0.24.7",
     "ws": "^8.18.0",
     "yaml": "^2.8.1",
-    "yauzl": "^2.10.0"
+    "yauzl": "^2.10.0",
+    "zod": "^3.25.76"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",
@@ -109,10 +181,12 @@
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "devDependencies": {
+    "@qwen-code/browser-use": "file:../browser-use",
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",
     "@types/minimatch": "^5.1.2",
+    "@types/node": "20.19.1",
     "@types/picomatch": "^4.0.1",
     "@types/prompts": "^2.4.9",
     "@types/tar": "^6.1.13",
@@ -120,6 +194,7 @@
     "@types/ws": "^8.5.10",
     "@types/yauzl": "^2.9.1",
     "msw": "^2.3.4",
+    "strip-json-comments": "^3.1.1",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"

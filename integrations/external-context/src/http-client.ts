@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const MAX_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 class ProviderResponseError extends Error {
   constructor() {
@@ -13,7 +13,17 @@ class ProviderResponseError extends Error {
   }
 }
 
-export function validateProviderBaseUrl(value: string): URL {
+export class ProviderHttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super('External context provider rejected the request.');
+    this.name = 'ProviderHttpStatusError';
+  }
+}
+
+export function validateProviderBaseUrl(
+  value: string,
+  options?: { allowInsecureHttp?: boolean; allowInsecureHttpHint?: boolean },
+): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -31,23 +41,28 @@ export function validateProviderBaseUrl(value: string): URL {
       'Provider URL must not contain credentials, path, query, or fragment.',
     );
   }
-  if (url.protocol === 'https:') {
-    return url;
-  }
   if (
-    url.protocol === 'http:' &&
-    (url.hostname === 'localhost' ||
-      url.hostname === '127.0.0.1' ||
-      url.hostname === '[::1]')
+    url.protocol === 'https:' ||
+    (url.protocol === 'http:' &&
+      (url.hostname === 'localhost' ||
+        url.hostname === '127.0.0.1' ||
+        url.hostname === '[::1]' ||
+        options?.allowInsecureHttp === true))
   ) {
     return url;
   }
-  throw new Error('Provider URL must use HTTPS or loopback HTTP.');
+  throw new Error(
+    options?.allowInsecureHttpHint === true && url.protocol === 'http:'
+      ? 'Provider URL must use HTTPS or loopback HTTP; set "allowInsecureHttp": true to permit plain HTTP for this provider.'
+      : 'Provider URL must use HTTPS or loopback HTTP.',
+  );
 }
-
 export async function postJson(input: {
   url: URL;
-  authorization: string;
+  credentialHeader: {
+    name: 'authorization' | 'x-api-key';
+    value: string;
+  };
   body: unknown;
   signal: AbortSignal;
 }): Promise<unknown> {
@@ -57,7 +72,7 @@ export async function postJson(input: {
       method: 'POST',
       headers: {
         accept: 'application/json',
-        authorization: input.authorization,
+        [input.credentialHeader.name]: input.credentialHeader.value,
         'content-type': 'application/json',
       },
       body: JSON.stringify(input.body),
@@ -74,7 +89,7 @@ export async function postJson(input: {
   }
   if (!response.ok) {
     cancelResponseBody(response);
-    throw new Error('External context provider rejected the request.');
+    throw new ProviderHttpStatusError(response.status);
   }
 
   const declaredLength = response.headers.get('content-length');
@@ -112,14 +127,43 @@ async function readBoundedBody(response: Response): Promise<string> {
     throw new ProviderResponseError();
   }
 
+  // getReader(), not `for await`: async-iterating a ReadableStream needs
+  // [Symbol.asyncIterator] on the TYPE, and whether it is there depends on
+  // which lib set the program resolves — @types/node's stream has it, the
+  // DOM lib's needs lib.dom.asynciterable. That resolution flipped
+  // underneath this file once: installing @types/jsdom at the root (#8693)
+  // dragged lib.dom into this program and failed the build with TS2504 on
+  // this exact line. The reader API types identically in every lib set, so
+  // the build no longer depends on that resolution.
+  const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for await (const chunk of response.body) {
-    total += chunk.byteLength;
-    if (total > MAX_RESPONSE_BYTES) {
-      throw new ProviderResponseError();
+  let finished = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        finished = true;
+        break;
+      }
+      if (value === undefined) {
+        continue;
+      }
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        throw new ProviderResponseError();
+      }
+      chunks.push(value);
     }
-    chunks.push(chunk);
+  } finally {
+    // Parity with `for await`, whose implicit iterator return() cancels the
+    // stream when the loop exits early (the oversize throw above) and is
+    // awaited before the error propagates — an immediate retry must not
+    // overlap this response's still-settling teardown.
+    if (!finished) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
   }
 
   const body = new Uint8Array(total);

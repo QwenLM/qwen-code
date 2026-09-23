@@ -5,6 +5,83 @@ set -eo pipefail
 # environment from the caller. WORKDIR and BRANCH are job-level env;
 # GITHUB_OUTPUT and RUNNER_TEMP are runner-provided. None is defined here.
 
+# Deterministic verification must not read the RUNNER's git config: the
+# persistent pool accumulates state, and a leaked global exec knob fails
+# branch tests the branch never caused. Measured counterexample, run
+# 31516789251: a stray `diff.external=global-driver` in the runner user's
+# ~/.gitconfig killed four per-hunk probe tests in packages/cli on #8613 —
+# charged to the round (package tests are A/B-exempt), which burned the
+# 18-minute repair on a failure no repair can reach and ended the round as
+# a timeout. Every git this script or its checks spawn (vitest fixture
+# repos included) reads a per-run throwaway global config instead — seeded
+# with the workspace safe.directory actions/checkout put in the real one —
+# and no system config — any system-level git setting the checks ever
+# come to depend on (a CA bundle, a proxy) must be replicated via per-job
+# env, not /etc/gitconfig, because the redirect silently drops it. The
+# redirect also keeps a branch-authored `git config --global` from writing
+# durable state onto the host: it lands in the throwaway file and dies
+# with the run. Enforcement is inherited-env only — branch code writing
+# the real file directly bypasses it, which is why the PAT-bearing steps
+# re-run resanitize-git-config.sh afterwards.
+# Environment-carried config outranks BOTH file redirects and defeats
+# every file-level guard: GIT_CONFIG_COUNT/_PARAMETERS carry config at
+# command-line precedence, GIT_SSL_* / GIT_PROXY_COMMAND steer transport,
+# GIT_EXEC_PATH swaps the transport-helper binary, GIT_DIR/GIT_WORK_TREE
+# repoint git, GIT_ASKPASS/GIT_SSH* hijack auth/exec — branch code in an
+# earlier step can inject any of them through $GITHUB_ENV. Strip them, then
+# redirect the file scopes. Keep this env+redirect block equal to the
+# issue-fix gate's copy (the contract test pins them).
+unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+  GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+  GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+  GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+export GIT_CONFIG_COUNT=0
+export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+: > "${GIT_CONFIG_GLOBAL}"
+git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+if [ -s /etc/gitconfig ]; then
+  echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
+fi
+# Two more inherited knobs steer EXECUTION itself, and neither has a
+# legitimate setter: BASH_ENV names a file every non-interactive bash
+# sources at STARTUP — a body-side unset is one hop late (bash sources a
+# plant before line 1), so the verify steps pin it empty at step level AND
+# launch this gate through their env -i clean child; the unset here keeps
+# the gate's own bash children clean too. BITE_RUNNER selects the bite
+# check's runner command, which executes unwrapped with the gate's full
+# environment. Strip them with the GIT_* class.
+unset BASH_ENV BITE_RUNNER
+# The verdict variables are GATE state, not inherited state: a plant of
+# AUDIT_VERDICT_RECORDED=true plus a verdict from an earlier step would
+# otherwise ride the every-exit re-append back into this step's outputs on
+# paths where the gate validated nothing.
+unset AUDIT_VERDICT AUDIT_VERDICT_RECORDED
+# The runner backs $GITHUB_ENV/$GITHUB_PATH/$GITHUB_STEP_SUMMARY with files
+# under $RUNNER_TEMP/_runner_file_commands/ that it reads back at step end.
+# The channel strip below removes the VARIABLES from the checks, but the
+# files stay discoverable under the inherited (predictable) $RUNNER_TEMP
+# and stay WRITABLE — a check that appends there plants environment into
+# every later step of this job, the PAT-bearing one included (discovery
+# verified on a live runner). Lock the files for the lifetime of this
+# step. The $GITHUB_OUTPUT backing file is the ONE exception: the gate
+# must keep writing it, and forges against it lose to the every-exit
+# re-append below plus the conclusion gate Finalize verification applies
+# to outcome. The directory itself stays writable on purpose: the runner
+# creates the NEXT step's backing files there at step start, and a locked
+# directory would stall every later step of the job; the residual
+# rename-over (create + rename onto a locked file) is documented in the
+# design doc instead of bought at that price.
+if [[ -n "${GITHUB_OUTPUT:-}" && -d "${RUNNER_TEMP}/_runner_file_commands" ]]; then
+  for _rfc in "${RUNNER_TEMP}/_runner_file_commands"/*; do
+    if [[ -f "${_rfc}" && "${_rfc}" != "${GITHUB_OUTPUT}" ]]; then
+      chmod a-w "${_rfc}" 2> /dev/null || true
+    fi
+  done
+fi
+
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
 # agent that commits and then aborts. The failure handoff keys its
@@ -19,19 +96,245 @@ if [[ "${committed_rc}" -eq 1 ]]; then
   echo "committed=true" >> "${GITHUB_OUTPUT}"
 fi
 
+GATE_LOG="${WORKDIR}/gate-output.log"
+: > "${GATE_LOG}"
+rm -f "${GATE_LOG}.bite"
+# Single reset point for the gate-authored advisory file: every writer
+# below APPENDS, so no later section can wipe an earlier section's
+# advisory (the footprint advisory used to die to the shrink section's rm).
+rm -f "${WORKDIR}/gate-advisories.md"
+reject_fix() {
+  local label="${1}"
+  local preexisting="${2:-false}"
+  local retryable="${3:-true}"
+  echo "❌ ${label}"
+  # Declare the verdict before writing its detail. An empty outcome on a failed
+  # step means the gate itself crashed, so losing the detail file must not turn
+  # a deterministic rejection into an infrastructure retry.
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  if [[ "${preexisting}" == 'true' ]]; then
+    # NOT retryable: the repair agent is only allowed to amend this round's
+    # fix, and a failure that exists without the fix is outside that boundary
+    # by definition — the 60-minute repair budget cannot reach it. The remedy
+    # is a base update (merge main into the branch), not a repair.
+    echo "preexisting=true" >> "${GITHUB_OUTPUT}"
+  elif [[ "${retryable}" == 'true' ]]; then
+    echo "retryable=true" >> "${GITHUB_OUTPUT}"
+  fi
+  # The evidence tail flexes so the WHOLE document stays under the report
+  # step's head -c 3900 render cap: truncating the finished document from
+  # the outside cuts the closing fence and malforms everything after it in
+  # the posted comment. Budget = 3300 minus the preamble, floored at 500.
+  local preamble tail_budget
+  preamble="**${label}**"
+  if [[ "${preexisting}" == 'true' ]]; then
+    # shellcheck disable=SC2016
+    preamble+="$(printf '\n\nMeasured fact: the same check also fails at `origin/%s` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass may only amend the round'"'"'s own fix, so it cannot reach this failure. If the branch is behind `main`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
+  fi
+  tail_budget=$(( 3300 - ${#preamble} ))
+  (( tail_budget < 500 )) && tail_budget=500
+  {
+    printf '%s\n' "${preamble}"
+    echo
+    # Captured output can contain triple-backtick fences.
+    echo '````'
+    tail -c "${tail_budget}" "${GATE_LOG}" 2> /dev/null
+    echo '````'
+  } > "${WORKDIR}/gate-rejection.md" ||
+    echo "::warning::could not write the gate rejection detail; the verdict stands."
+  exit 1
+}
+# Last-writer binding for the audit verdict: the record below happens
+# BEFORE the branch's build/tests run, and a check can still discover the
+# step-output FILE through the inherited $RUNNER_TEMP (the strip removes
+# the variable, not the backing file) and append its own audit_verdict —
+# step outputs are last-write-wins. EVERY exit therefore re-appends the
+# validated verdict INLINE (no function call: gate snippets extracted by
+# the contract suite must stay executable standalone), including the exits
+# that run after branch checks (a forge appended mid-check loses to the
+# exit's rewrite) — so the gate's copy outwrites any forged append. The
+# flag gates it: a verdict rejected BEFORE its record (missing, malformed,
+# or a routing violation) never surfaces. kiss_audit rides the same
+# discipline (recorded above, re-appended unconditionally at every exit).
+# Defended control-bit surface: kiss_audit reaches every later step ONLY
+# through this output — recorded HERE, before any branch code runs in this
+# step, and re-appended at every exit below with the same last-writer
+# discipline as the verdict. A consumer that read steps.prepare's copy
+# directly would route the bit around the gate's defenses.
+echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+
+# Growth-audit verdict gate: a round tagged KISS_AUDIT (its counting window
+# is over the growth budget) must carry the audit's machine-readable verdict
+# — the audit IS the round's judgment of the over-budget approach, and a
+# round that skipped it must not push (the rubber-stamp hole by absence).
+# Sits BEFORE the failure.md early-exits below: a conflict round stops
+# BLOCKED via failure.md, and its verdict must be validated and surfaced to
+# GITHUB_OUTPUT before that exit writes outcome=failed — otherwise the
+# conflict trail marker never posts and the idempotent park never engages.
+# Also before the build/schema/footprint checks AND the no-commit/no-op
+# exits further down: the verdict is required even for a no-op audit round
+# whose verdict is sound with nothing left to fix. Malformed is agent
+# misbehavior, not a build problem — NON-retryable, so the repair pass is
+# never invoked and the next scan simply re-runs the audit.
+if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
+  AUDIT_VERDICT=''
+  if [[ -f "${WORKDIR}/growth-audit.json" ]]; then
+    # Slurp so the document COUNT is part of validation: the per-document
+    # parse accepted a valid first document followed by one jq errors on
+    # (or shape-filters out) on the FIRST document's verdict — the gate's
+    # contract is a single JSON document, so reject every multi-document
+    # stream.
+    AUDIT_VERDICT="$(jq -rs '
+        if length != 1 then empty else .[0]
+        | select((.verdict // "") | IN("sound", "drift", "conflict"))
+        | select((.kiss.result // "") | IN("pass", "fail"))
+        | select((.minimal_change.result // "") | IN("pass", "fail"))
+        | select((.verdict != "sound")
+            or ((.kiss.result == "pass") and (.minimal_change.result == "pass")))
+        | select((.verdict != "drift")
+            or ((.kiss.result == "fail") or (.minimal_change.result == "fail")))
+        | .verdict end' "${WORKDIR}/growth-audit.json" 2> /dev/null || true)"
+  fi
+  # Anchor the parsed value (defense in depth now that slurp rejects
+  # multi-document streams outright).
+  [[ "${AUDIT_VERDICT}" =~ ^(sound|drift|conflict)$ ]] || AUDIT_VERDICT=''
+  if [[ -z "${AUDIT_VERDICT}" ]]; then
+    {
+      echo "Growth-audit round (this counting window is over its growth budget) without a valid growth-audit.json verdict."
+      echo "The audit must run BEFORE any edit this round, and the verdict file must be a single JSON document carrying verdict sound|drift|conflict plus kiss.result and minimal_change.result each pass|fail, consistent with the taxonomy (sound requires both axes pass; drift requires at least one axis fail). Re-run the audit and produce the file; do not push without it."
+    } >> "${GATE_LOG}"
+    reject_fix 'growth-audit round missing a valid growth-audit.json verdict (audit skipped or malformed)' 'false' 'false'
+  fi
+  echo "🔎 growth-audit verdict: ${AUDIT_VERDICT}"
+  # Conflict routing is enforced HERE, not by convention: a conflict verdict
+  # must STOP BLOCKED with a handoff (the only growth path to a human). A
+  # round that kept fixing and committed would otherwise clear the gate like
+  # sound/drift, push the contested code, and park the next scan on a
+  # handoff question that was never asked. NON-retryable: re-audit, don't
+  # repair.
+  if [[ "${AUDIT_VERDICT}" == 'conflict' && ! -f "${WORKDIR}/failure.md" && ! -s "${WORKDIR}/handoff.md" ]]; then
+    reject_fix 'growth-audit verdict is conflict but the round did not stop with a handoff; conflict must STOP BLOCKED (no push)' 'false' 'false'
+  fi
+  # The no-push half of this routing is enforced at the success exit
+  # below: a repair pass re-auditing to conflict LEGITIMATELY runs behind
+  # the first pass's commit (committed_rc=1), so the push shape cannot be
+  # refused here without refusing it — the refusal sits at the push
+  # boundary itself.
+  # Record the verdict the GATE validated, for the report step to consume
+  # via the step output. The report must NOT re-read the file itself: the
+  # branch's own build/tests run as the runner user after this point and
+  # WORKDIR is a predictable path they can write — the validated verdict is
+  # the only verdict that may reach the trail marker and the re-arm.
+  echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  AUDIT_VERDICT_RECORDED='true'
+fi
+
 if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
   echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
   git status --short
-  cat "${WORKDIR}/failure.md"
+  # Agent-written content on step stdout: both workflow-command syntaxes
+  # parse here (`##[` mid-line too — measured on #9761). Same reason
+  # 'Show run artifacts' neutralizes these files.
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
 if [[ -f "${WORKDIR}/failure.md" ]]; then
   echo "🛑 Agent aborted intentionally:"
-  cat "${WORKDIR}/failure.md"
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
+fi
+
+# These three handoff classifications skip a growth-audit CONFLICT verdict:
+# that round has its own routing — the verdict gate (stop enforced here) and
+# the push-boundary refusal at the success exit — and it must land
+# outcome=failed so the conflict trail marker posts and the park engages,
+# never the clean outcome=handoff. A plain (non-audit) handoff still takes
+# these.
+# A handoff claims the round changed NOTHING — dirt beside it is a
+# brake-violating partial patch (otherwise reported as a clean stop and
+# discarded silently with the runner), and untracked leftovers would trip
+# the NEXT round's dirty assert on the persistent pool. The ref-level
+# commit diff below is blind to both. Non-retryable like failure.md+dirty
+# above (a retryable rejection would engage the repair pass, which deletes
+# handoff.md and may commit against the brake), but under its OWN outcome:
+# outcome=failed would make the report step dress the rejection as a
+# failed FIX ("could not produce a passing fix", or a stale-base retry
+# promise) when no fix existed — the report step gives this shape its own
+# honest headline.
+if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" \
+  && "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+  echo "❌ Agent wrote handoff.md after leaving a dirty workspace:"
+  git status --short
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
+  echo "outcome=dirty_handoff" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 1
+fi
+
+# The committed sibling of the brake violation above: the round HAS a commit
+# beside handoff.md. Judged by dirt alone it slips both guards — the dirty
+# check sees a clean tree, and the no-commit handoff branch below requires
+# an unchanged ref — so it would reach the structural checks, where
+# reject_fix defaults to retryable and the repair pass deletes
+# handoff.md and may commit AGAIN against the brake's stop. Non-retryable
+# under its OWN outcome: a commit DID happen, so the dirty-handoff headline
+# claiming nothing was committed would misreport it. Same reasoning as the
+# dirty guard otherwise.
+if [[ -s "${WORKDIR}/handoff.md" && "${committed_rc:-0}" -eq 1 \
+  && "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+  echo "❌ Agent wrote handoff.md but the round HAS a commit — a brake violation:"
+  git log --oneline "origin/${BRANCH}..${BRANCH}"
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
+  echo "outcome=committed_handoff" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 1
+fi
+
+# No-commit brake handoff, classified BEFORE the structural checks below:
+# those judge the PR's OWN diff (core rebuild, schema freshness, contracts)
+# and reject_fix on failure, and the growth brake fires on exactly the red
+# PRs whose diff trips them. A compliant handoff commits nothing, so
+# running the checks first would reclassify it as a retryable failure —
+# the repair pass would delete handoff.md and commit against the brake's
+# stop. A handoff claims nothing (acted=false, deferred to a human), so
+# the checks' false-no-action rationale does not apply. failure.md
+# coexistence keeps the failed classification via the exits above.
+if git diff --quiet "origin/${BRANCH}...${BRANCH}" \
+  && [[ -s "${WORKDIR}/handoff.md" ]] \
+  && [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+  echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
+  # Agent-written content: both workflow-command syntaxes parse on step
+  # stdout — a line-start `::` (::error::, ::add-mask::) AND `##[` even
+  # mid-line (a quoted `##[add-matcher]` fails the step; measured on
+  #9761). The same reason 'Show run artifacts' neutralizes these files.
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
+  echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 0
 fi
 
 # Convention: hooks are severed at EVERY host checkout of the PR
@@ -39,32 +342,194 @@ fi
 # hook still runs branch code on the host).
 git config core.hooksPath /dev/null
 git checkout "${BRANCH}"
-
-GATE_LOG="${WORKDIR}/gate-output.log"
-: > "${GATE_LOG}"
-reject_fix() {
-  echo "❌ ${1}"
-  # Declare the verdict before writing its detail. An empty outcome on a failed
-  # step means the gate itself crashed, so losing the detail file must not turn
-  # a deterministic rejection into an infrastructure retry.
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  echo "retryable=true" >> "${GITHUB_OUTPUT}"
-  {
-    echo "**${1}**"
-    echo
-    # Captured output can contain triple-backtick fences.
-    echo '````'
-    tail -c 3000 "${GATE_LOG}" 2> /dev/null
-    echo '````'
-  } > "${WORKDIR}/gate-rejection.md" ||
-    echo "::warning::could not write the gate rejection detail; the verdict stands."
-  exit 1
+baseline_also_fails() {
+  # A deterministic rejection is only chargeable to this round if the same
+  # check passes WITHOUT the round's commits. Measured counterexample, run
+  # 31276008548: PR #8614's branch predated #8693's tsconfig guard while
+  # node_modules came from the post-#8693 trusted base, so `npm run build`
+  # was just as red at origin/<branch> — 63 minutes of accepted agent work
+  # were discarded and an 18-minute repair burned on a failure the repair
+  # agent is forbidden to touch, thirteen rounds in a row.
+  # Returns 0 (pre-existing) only when the SAME command demonstrably fails
+  # at the pre-round ref; any A/B infrastructure problem returns 1 so the
+  # rejection keeps today's semantics (fail closed toward "charge the fix").
+  local current baseline rc
+  current="$(git rev-parse HEAD)" || return 1
+  baseline="$(git rev-parse --quiet --verify "origin/${BRANCH}^{commit}")" ||
+    return 1
+  # No round commit (the core-rebuild check runs before the commit gate and
+  # is A/B-eligible) — the baseline IS the tree under test; nothing to
+  # compare.
+  [[ "${baseline}" != "${current}" ]] || return 1
+  # The head transcript is already complete, and an empty head signature
+  # fails closed regardless of what the baseline would say — so decide it
+  # BEFORE paying the detach + full re-run + restore for a verdict that was
+  # never in question (esbuild/vite/crash failures, the KNOWN LIMIT class).
+  local sig_head
+  sig_head="$(fail_signature "${GATE_LOG}.check")" || true
+  if [[ -z "${sig_head}" ]]; then
+    echo "🔁 no failure identity in the head transcript — charged to the round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  fi
+  echo "🔁 Baseline A/B: re-running the failed check at origin/${BRANCH}" \
+    "(${baseline})" | tee -a "${GATE_LOG}"
+  # The build under test may have REWRITTEN tracked artifacts (the vscode
+  # companion settings schema is regenerated by scripts/build.js): discard
+  # build dirt or the checkout refuses and a real verdict degrades into the
+  # restore-failure crash below. Tracked-only, and the tree was asserted
+  # clean before the deterministic checks — anything here is build output.
+  git restore -- . 2>> "${GATE_LOG}" || true
+  git checkout --quiet --detach "${baseline}" 2>> "${GATE_LOG}" || return 1
+  # The baseline transcript goes to a SIDE log: gate-rejection.md renders
+  # the dynamic `tail_budget` tail of GATE_LOG as the evidence window, and
+  # on a green baseline a chatty success transcript would fill it and push the actual
+  # failure text out — misdirecting the repair agent, the PR comment, and
+  # the next round's LAST_REJECTION block all at once.
+  local ab_log="${GATE_LOG}.baseline"
+  : > "${ab_log}"
+  rc=0
+  if ! strip_runner_channels "$@" >> "${ab_log}" 2>&1; then
+    rc=1
+  fi
+  git restore -- . 2>> "${GATE_LOG}" || true
+  if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}"; then
+    # The tree is no longer the one under verification and nothing after
+    # this point may trust it — including the repair agent (its commit would
+    # orphan on the detached baseline). But a transient git-state failure is
+    # NOT a verdict about the failure's origin, and a plain outcome=failed
+    # is an EVALUATED rejection: the watermark advances and the item is
+    # handed off for good. Leave outcome UNSET so the report's gate-crashed
+    # path retries on the next scan's fresh checkout — and write the detail
+    # document so the crash comment still explains itself.
+    echo "❌ could not restore the verification tree after the baseline check"
+    {
+      echo '**could not restore the verification tree after the baseline check**'
+      echo
+      echo '````'
+      tail -c 3000 "${GATE_LOG}" 2> /dev/null
+      echo '````'
+    } > "${WORKDIR}/gate-rejection.md" || true
+    echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+    if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+      echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+    fi
+    exit 1
+  fi
+  # Every retryable exit below hands the tree to the repair agent with
+  # dist/ REBUILT FROM BASELINE SOURCES (the restore checkout brings back
+  # tracked files only) — the mirror of the dist confound that exempted
+  # typecheck from the A/B. seed_dist_note seeds the repair feedback so
+  # the agent rebuilds before it trusts any dist-consuming check. The
+  # pre-existing exit is the exception: no repair runs for it, so the
+  # note stays out of its document.
+  if [[ "${rc}" -ne 1 ]]; then
+    seed_dist_note
+    echo "🔁 baseline is green — the failure belongs to this round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  fi
+  # A nonzero baseline is NOT enough: the branch can fail there for reason A
+  # while the round fails for reason B, and an infrastructure hiccup in the
+  # baseline leg is a nonzero exit too. Pre-existing requires the round's
+  # failing signatures to be a SUBSET of the baseline's — compiler
+  # diagnostics normalized to file + error code + message (line/column shift
+  # with the round's edits): a round that ADDS a diagnostic charges the
+  # failure to the round even when it also shares baseline diagnostics. The
+  # difference is captured before testing — piping `comm` into `grep -q`
+  # exits `grep` at the first match and SIGPIPEs `comm` under pipefail once
+  # the shared output outruns the pipe buffer, flipping identical large
+  # failure sets to NO-MATCH. No diagnostics on either side means identity
+  # cannot be established, and the rejection stays charged to the round
+  # (fail closed).
+  local sig_base new_in_round
+  # `|| true`: grep exits 1 on the NORMAL no-match case, and these
+  # assignments only survive `set -e` today because this function is called
+  # from an `if` condition (which suspends errexit). A future unconditional
+  # call site would otherwise turn the documented fail-closed path into a
+  # verdict-less gate crash.
+  # (sig_head was extracted before the detach.)
+  sig_base="$(fail_signature "${ab_log}")" || true
+  new_in_round="$(comm -23 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}"))" || {
+    seed_dist_note
+    echo "🔁 signature comparison failed — fail-closed, charged to the round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  }
+  if [[ -z "${sig_head}" || -z "${sig_base}" ]] || [[ -n "${new_in_round}" ]]; then
+    seed_dist_note
+    echo "🔁 baseline fails for a DIFFERENT reason — charged to the round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  fi
+  # Only a FAILING baseline transcript with a matching signature is
+  # evidence — merge its tail into the window, where it backs the label.
+  tail -c 1500 "${ab_log}" >> "${GATE_LOG}" 2> /dev/null || true
+  return 0
+}
+fail_signature() {
+  # Stable identity of a failed check: tsc-style diagnostics with the
+  # position stripped but the MESSAGE kept ("src/a.ts: error TS2504: …").
+  # Position strips because line/column shift with the round's edits; the
+  # message stays because file + code alone collide — two unrelated defects
+  # in one file sharing a common code (TS2339 is everywhere) would compare
+  # as "the same failure" and skip a repair that could have worked. A
+  # message naming a round-renamed identifier then under-matches — the
+  # fail-closed direction. Sorted unique so two transcripts compare with
+  # comm(1). KNOWN LIMIT: only tsc diagnostics carry identity; vite/esbuild
+  # failures yield an empty signature and deliberately fail closed (charged
+  # to the round) — widening needs their position formats normalized first.
+  grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+.*" "${1}" 2> /dev/null \
+    | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u
+}
+# The one emit point for the dist-rebuild steering note — every retryable
+# exit of baseline_also_fails after the baseline leg calls this, so the
+# guidance cannot drift across exits.
+seed_dist_note() {
+  echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
+}
+# Every check below runs the BRANCH's own code (npm scripts, tests, and
+# their lifecycle children) with this step's inherited environment. Strip
+# the runner injection channels first: a check appending to GITHUB_OUTPUT
+# would overwrite the gate's own outputs last-write-wins (a forged
+# audit_verdict=sound after the gate's write), GITHUB_ENV/GITHUB_PATH
+# plant environment for the PAT-bearing steps that follow, and
+# GITHUB_STEP_SUMMARY lets branch code forge the job summary styled as
+# gate output (the display-channel sibling; qwen-triage strips it when
+# running external-author branch code for the same reason). Same class the
+# deferred-upsert child closes with env -i; targeted -u here because the
+# checks need the ordinary environment (PATH, HOME, …) to run at all.
+strip_runner_channels() {
+  env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY "$@"
 }
 run_check() {
-  # pipefail makes the pipeline carry the command's status, not tee's.
+  # pipefail makes the pipeline carry the command's status, not tee's. The
+  # side copy holds THIS check's transcript alone — the identity comparison
+  # must not match diagnostics an earlier check left in the shared log.
   local label="${1}"
   shift
-  if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+  : > "${GATE_LOG}.check"
+  if ! strip_runner_channels "$@" 2>&1 | tee -a "${GATE_LOG}" "${GATE_LOG}.check"; then
+    if baseline_also_fails "$@"; then
+      reject_fix "${label} (pre-existing: also fails without this round's commit)" 'true'
+    fi
+    reject_fix "${label}"
+  fi
+}
+run_check_no_ab() {
+  # A/B-exempt: for checks whose baseline re-run would compare a DIFFERENT
+  # computation than the one that failed, so a baseline verdict proves
+  # nothing. The contracts check consumes its file list from stdin, which
+  # the first run drains — the baseline leg would re-check an empty list
+  # and pass vacuously. The schema check reads packages/core/dist, which
+  # the core-rebuild guard built from the ROUND's sources and which,
+  # being gitignored, survives the detach and confounds the baseline. Their
+  # rejections stay charged to the round — which is also where the repair
+  # agent can actually act on them (generate:settings-schema is in its
+  # allowlist).
+  local label="${1}"
+  shift
+  if ! strip_runner_channels "$@" 2>&1 | tee -a "${GATE_LOG}"; then
     reject_fix "${label}"
   fi
 }
@@ -84,11 +549,55 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 VERIFICATION_HEAD="$(git rev-parse HEAD)"
 
+# The schema generator resolves '@qwen-code/qwen-code-core' to core's DIST
+# entry point, which the CLI bundle restored from the TRUSTED BASE. When the
+# branch itself changed core's sources, that base-built dist can disagree
+# with the branch's committed schema (changed runtime constants) or crash
+# the generator (changed exports) — the same false "settings schema is
+# stale" rejection class this gate exists to prevent. Rebuild core from
+# branch sources in that case: the gate already runs a full `npm run build`
+# on branch sources for every commit path, so this widens no trust surface,
+# and the build's git-ignored output cannot trip the dirty-tree asserts.
+if git diff --name-only "origin/main...${BRANCH}" \
+  | grep -Eq '^packages/core/(src/|index\.ts$)'; then
+  run_check 'core rebuild failed on the agent-committed fix' \
+    npm run build --workspace packages/core
+fi
+
+# Load clamps for every vitest this gate launches.
+#
+# The gate runs through an env -i allowlist that (deliberately) drops
+# RUNNER_NAME, so the vitest configs' ECS clamps — keyed on a runner name
+# starting `ecs-qwen-` — silently deactivate in here: 15s timeouts,
+# unbounded workers and coverage on, on a host shared with up to 20 other
+# autofix jobs. Under pool saturation that produced both false rejections
+# (73 load-induced timeouts charged to a round on #10171) and gate deaths
+# past the step's 60-minute cap that discarded verified fixes (#10171
+# rounds 1/2/5-7, #10543 x5). Passing the values explicitly takes the
+# verdict off env plumbing at the vitest-config layer; coverage is off
+# because nothing in the gate or the report path consumes it, and its
+# collection was the bulk of the overrun.
+#
+# Known residual, NOT covered here: a handful of test files set their own
+# ceiling with a runtime `vi.setConfig` keyed on the same RUNNER_NAME
+# (workspace-registration-store, update, server-default-bridge-wiring,
+# clipboardUtils, worktreeStartup). A runtime setConfig outranks the CLI,
+# so those keep their non-ECS ceilings in here. Closing that needs a gate
+# sentinel on both env -i allowlists and a change in each file — a
+# separate slice.
+VITEST_LOAD_CLAMPS=(
+  --maxWorkers=25%
+  --testTimeout=60000
+  --hookTimeout=60000
+  --coverage.enabled=false
+)
+
 # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
 # write no-action.md, and without this the no-op path would report the
 # feedback as evaluated (acted=false) while CI stays red — the exact bug
-# this PR fixes. So it runs on EVERY path. The gate is shared with the
+# this PR fixes. So it runs on every path but the no-commit handoff,
+# which claims nothing and exits above. The gate is shared with the
 # issue-fix verify step (rationale + the generator crash guard live in
 # the script); the write is on a tracked file compared by `git status`,
 # not the commit-level no-op git-diff below, and it is restored on
@@ -97,36 +606,1048 @@ VERIFICATION_HEAD="$(git rev-parse HEAD)"
 # that predates the script does not contain it (bash would exit 127
 # and kill the gate with no outcome), and the gate logic must come
 # from the trusted base, not the branch under verification.
-run_check 'settings schema is stale on the agent-committed fix' \
+run_check_no_ab 'settings schema is stale on the agent-committed fix' \
   bash "${RUNNER_TEMP}/check-settings-schema.sh"
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
-run_check 'cross-package contract verification failed' \
+# The contracts check launches a web-shell vitest inside this same env -i
+# child, and web-shell's config sets no timeouts and no RUNNER_NAME branch
+# — so the drift test runs at vitest's 5s default on the same saturating
+# host. Hand the shared script our clamps; the issue-fix gate and
+# repo-hygiene's docker leg call it without them and accept that default.
+AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"
+export AUTOFIX_VITEST_FLAGS
+run_check_no_ab 'cross-package contract verification failed' \
   bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
+unset AUTOFIX_VITEST_FLAGS
 assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
-  # No new commit. That is only legitimate as a deliberate no-action.
+  # No new commit. That is only legitimate as a deliberate no-action; the
+  # no-commit handoff was classified before the structural checks above.
   if [[ -s "${WORKDIR}/no-action.md" ]]; then
     echo "🟰 No action needed:"
-    cat "${WORKDIR}/no-action.md"
+    # Both command syntaxes, like every other echo of agent-written files
+    # (`##[` parses mid-line too — #9761).
+    sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/no-action.md"
+    echo "verified_head=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
     echo "outcome=noop" >> "${GITHUB_OUTPUT}"
+    echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+    if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+      echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+    fi
     exit 0
   fi
   echo "❌ Branch unchanged and no no-action.md — agent produced nothing"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
 if [[ ! -s "${WORKDIR}/address-summary.md" ]]; then
   echo "❌ Branch changed but address-summary.md is missing"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
+fi
+
+# --- Content-based validity checks -------------------------------------------
+# Feedback validity is judged by CONTENT, never by AUTHOR: a maintainer's
+# comment, the review bot's finding, and a model-drafted suggestion pasted by
+# a human all drive the agent the same way, so the gate checks what the round
+# DID, not who asked for it. Two deterministic checks below (sensitive-area
+# footprint here, the bite check after the package tests) plus one advisory
+# (test deletion). All three read only git state and run before/around the
+# existing deterministic re-checks.
+
+# Sensitive-area footprint: a review round must not EXPAND into CI or
+# verification machinery the PR itself was never about — a single review
+# comment (any author) must not be able to alter the loop's own guardrails.
+# Judged by AREA CLASS, not file: a PR whose own pre-round diff already
+# touches a class (an infra PR under takeover) keeps full freedom there;
+# a round reaching into a class the PR never touched is rejected. Retryable:
+# the repair pass can revert the offending files in a follow-up commit.
+# `scripts` sections of workspace manifests are their own class because the
+# gate's every command resolves through them (`npm run build/typecheck/
+# lint/test`) — a scripts edit can hollow out the gate while every check
+# "passes". Only the root manifest and DECLARED workspace manifests count
+# (resolver-backed, nested workspaces included): fixture manifests deeper
+# in a src tree are ordinary test data.
+was_workspace_dir() {
+  # Pre-round workspace membership without the on-disk resolver: match the
+  # dir against the workspaces globs recorded in the REF's root manifest.
+  # Used where the tree can no longer answer (deleted manifests/dirs).
+  # PATH-AWARE matching: npm workspaces globs are wildmatch-style, where
+  # '*' stops at '/'; a bash case '*' would span slashes and swallow
+  # nested fixture dirs. Translate to an anchored regex ('**'→.*,
+  # '*'→[^/]*, '?'→[^/]). Negated ('!') entries are skipped — ignoring a
+  # subtraction only ever classifies MORE dirs as workspaces, the
+  # conservative direction for a protection class.
+  local ref="${1}" d="${2}" g re
+  while IFS= read -r g; do
+    [[ -n "${g}" && "${g}" != '!'* ]] || continue
+    re="$(printf '%s' "${g}" | sed -e 's/[.^$+(){}|[]/\\&/g' -e 's/]/\\]/g' -e 's/\*\*/\x01/g' -e 's/\*/[^\/]*/g' -e 's/?/[^\/]/g' -e 's/\x01/.*/g')"
+    [[ "${d}" =~ ^${re}$ ]] && return 0
+  done < <(git show "${ref}:package.json" 2> /dev/null | jq -r '.workspaces[]?' 2> /dev/null)
+  return 1
+}
+at_workspace_root() {
+  # True when the path sits at the repo root or at a DECLARED workspace's
+  # root (resolved through the same trusted resolver the package-test loop
+  # uses — nested workspaces like packages/channels/* included). Deeper
+  # copies are fixtures/templates: ordinary data, not machinery.
+  local f="${1}" d
+  [[ "${f}" == */* ]] || return 0
+  d="${f%/*}"
+  [[ "$(printf '%s\n' "${f}" | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")" == "${d}" ]]
+}
+sensitive_class_of() {
+  # Prints the class name for a path, or nothing. Kept as one function so
+  # the round scan and the PR-footprint scan cannot drift. Classes are
+  # NARROW on purpose: a PR that only edits issue templates must not
+  # thereby license rounds to rewrite workflows, and the loop's OWN
+  # enforcement files are their own classes — no footprint short of
+  # touching them themselves licenses a round to rewrite the referee.
+  # scripts/tests/** is ordinary test code the gate never executes.
+  local f="${1}"
+  case "${f}" in
+    *$'\n'*)
+      # A newline-bearing path cannot round-trip the line-based resolver or
+      # the class ledger — fail CLOSED as its own class instead of open.
+      echo 'suspicious-path' ;;
+    .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml | .github/workflows/qwen-pr-safety-precheck.yml) echo 'autofix-loop' ;;
+    .github/scripts/run-autofix-review-verification.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs | .github/scripts/pr-safety-precheck.mjs) echo 'autofix-loop' ;;
+    .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
+    .github/scripts/*) echo 'ci-scripts' ;;
+    .github/*) echo 'gh-metadata' ;;
+    .husky/*) echo 'git-hooks' ;;
+    .qwen/*) echo 'agent-skills' ;;
+    AGENTS.md | CLAUDE.md) echo 'agent-policy' ;;
+    scripts/tests/*) ;;
+    scripts/*) echo 'repo-scripts' ;;
+    .npmrc | .nvmrc | */.npmrc | */.nvmrc) echo 'toolchain-config' ;;
+    package-lock.json | npm-shrinkwrap.json | */package-lock.json | */npm-shrinkwrap.json | pnpm-lock.yaml | pnpm-workspace.yaml | .pnpmfile.mjs | patches/*) echo 'supply-chain' ;;
+    .gitattributes | */.gitattributes) echo 'measurement-config' ;;
+    *) case "${f##*/}" in
+      eslint.config.* | eslint.legacy-filenames.mjs | eslint.legacy-core-barrel-imports.mjs | vitest.config.* | tsconfig.json | tsconfig.*.json)
+        # Workspace-root configs are machinery; a scaffold template deep in
+        # a src tree is test/fixture data (same exemption manifests get).
+        if at_workspace_root "${f}"; then
+          case "${f##*/}" in
+            eslint.config.* | eslint.legacy-filenames.mjs | eslint.legacy-core-barrel-imports.mjs) echo 'lint-config' ;;
+            vitest.config.*) echo 'test-config' ;;
+            *) echo 'ts-config' ;;
+          esac
+        fi ;;
+    esac ;;
+  esac
+}
+manifest_scripts_changed() {
+  # True when the gate-relevant sections of a manifest differ between two
+  # refs. For the ROOT manifest that is scripts AND the workspaces array —
+  # both steer what the gate's npm commands execute (a negated workspaces
+  # entry silently drops a package from build/typecheck). Missing file on
+  # either side reads as {}.
+  local f="${1}" from="${2}" to="${3}" filt a b
+  filt='{s: (.scripts // {}), e: (.exports // {}), m: (.main // ""), t: (.types // "")}'
+  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // []), e: (.exports // {}), m: (.main // ""), t: (.types // ""), l: (."lint-staged" // {}), c: (.config // {})}'
+  a="$(git show "${from}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || a='{}'
+  b="$(git show "${to}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || b='{}'
+  [[ "${a}" != "${b}" ]]
+}
+ROUND_RANGE="origin/${BRANCH}...${BRANCH}"
+PR_RANGE="origin/main...origin/${BRANCH}"
+# Content comparisons for the PR footprint anchor at the MERGE BASE, not a
+# moving origin/main: main-side drift on a manifest must not read as "the
+# PR touched scripts" and license a round to rewrite the command surface.
+PR_BASE="$(git merge-base origin/main "origin/${BRANCH}" 2> /dev/null)" || PR_BASE='origin/main'
+ROUND_CLASSES=''
+while IFS= read -r -d '' f; do
+  [[ -n "${f}" ]] || continue
+  # A round that merges origin/main makes ROUND_RANGE degenerate (the
+  # pre-round head is an ancestor), attributing every incoming main-side
+  # change to the round. Content identical to current main is merge
+  # freight, not the round's authorship — skip it.
+  if git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null; then
+    continue
+  fi
+  c="$(sensitive_class_of "${f}")"
+  case "${c}" in
+    lint-config | test-config | ts-config)
+      # Only a config born WITH its round-added workspace is the round's
+      # own surface: added into a pre-existing workspace, it is new
+      # machinery the gate's legs will execute.
+      if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+        d="${f%/*}"; [[ "${f}" != */* ]] && d='.'
+        if [[ "${d}" == '.' ]] || git cat-file -e "origin/${BRANCH}:${d}/package.json" 2> /dev/null; then
+          : # pre-existing home → keep the class
+        else
+          c=''
+        fi
+      fi ;;
+  esac
+  if [[ -z "${c}" ]]; then
+    case "${f}" in
+      package.json | */package.json)
+        # DELETED workspace manifests never resolve on the round's tree —
+        # classify them from pre-round existence instead (deleting a
+        # workspace removes command surface the gate dispatched over).
+        if [[ ! -e "${f}" ]]; then
+          # Same fixture exemption as the alive arm, answered from the
+          # PRE-ROUND root manifest's workspaces globs (the on-disk
+          # resolver can no longer see a deleted dir): only a deleted
+          # DECLARED workspace manifest is command surface.
+          if git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+            if [[ "${f}" == 'package.json' ]]; then
+              c='manifest-scripts-root'
+            elif was_workspace_dir "origin/${BRANCH}" "${f%/package.json}"; then
+              c='manifest-scripts-ws'
+            fi
+          fi
+          [[ -n "${c}" ]] && ROUND_CLASSES+="${c} ${f}"$'\n'
+          continue
+        fi
+        # Any DECLARED workspace manifest (nested included) is command
+        # surface; fixture manifests deeper in a src tree are data. A
+        # manifest the round ADDED (a new workspace) is the round's own
+        # new surface, not a rewrite of commands the gate already ran —
+        # only edits to a manifest that existed pre-round count. Root and
+        # workspace manifests are SEPARATE classes: a workspace-scripts
+        # footprint must not license rewriting the root dispatcher.
+        at_workspace_root "${f}" || continue
+        git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null || continue
+        if manifest_scripts_changed "${f}" "origin/${BRANCH}" "${BRANCH}"; then
+          c='manifest-scripts-ws'
+          [[ "${f}" == 'package.json' ]] && c='manifest-scripts-root'
+        fi ;;
+    esac
+  fi
+  [[ -n "${c}" ]] && ROUND_CLASSES+="${c} ${f}"$'\n'
+# -z --no-renames: NUL-delimited raw paths (a specially named file is not
+# core.quotePath-mangled past the case patterns), and a rename decomposes
+# into A+D so the VACATED sensitive path is classified too — moving a
+# workflow out of .github/ is a removal of verification machinery.
+done < <(git diff --name-only -z --no-renames "${ROUND_RANGE}")
+if [[ -n "${ROUND_CLASSES}" ]]; then
+  PR_CLASSES=''
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    c="$(sensitive_class_of "${f}")"
+    if [[ -z "${c}" ]]; then
+      case "${f}" in
+        package.json | */package.json)
+          # The footprint describes the PR (main → origin/BRANCH); the
+          # round's on-disk tree must not answer for it — a round-deleted,
+          # PR-added workspace manifest is alive at origin/BRANCH and its
+          # class must stay granted, or the round's own deletion walls.
+          if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+            # Deleted BY THE PR itself: membership from the merge base.
+            if [[ "${f}" == 'package.json' ]]; then
+              c='manifest-scripts-root'
+            elif was_workspace_dir "${PR_BASE}" "${f%/package.json}"; then
+              c='manifest-scripts-ws'
+            fi
+            [[ -n "${c}" ]] && PR_CLASSES+="${c}"$'\n'
+            continue
+          fi
+          if [[ -e "${f}" ]]; then
+            at_workspace_root "${f}" || continue
+          else
+            was_workspace_dir "origin/${BRANCH}" "${f%/package.json}" || [[ "${f}" == 'package.json' ]] || continue
+          fi
+          if manifest_scripts_changed "${f}" "${PR_BASE}" "origin/${BRANCH}"; then
+            c='manifest-scripts-ws'
+            [[ "${f}" == 'package.json' ]] && c='manifest-scripts-root'
+          fi ;;
+      esac
+    fi
+    [[ -n "${c}" ]] && PR_CLASSES+="${c}"$'\n'
+  done < <(git diff --name-only -z --no-renames "${PR_RANGE}")
+  VIOLATIONS="$(while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    cls="${line%% *}"
+    grep -qx "${cls}" <<< "${PR_CLASSES}" || printf '%s\n' "${line}"
+  done <<< "${ROUND_CLASSES}")"
+  if [[ -n "${VIOLATIONS}" ]]; then
+    {
+      echo 'This round modified CI/verification machinery in area(s) the PR itself never touched:'
+      # Branch-controlled paths in a trusted-voice document: same safe
+      # charset as the advisory renderer.
+      printf '%s\n' "${VIOLATIONS//[^A-Za-z0-9._\/ -]/?}"
+      echo 'Review feedback alone — from ANY author — cannot authorize changes to the loop'"'"'s own guardrails. Revert these files; if the feedback genuinely requires them, escalate it to a maintainer as an open question instead of implementing it.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round expands into CI/verification machinery outside the PR footprint'
+  fi
+fi
+
+# Merge freight (content identical to current main) is not the round's
+# authorship — the same doctrine the class scan applies. Filter it out of
+# every bite input so a base-merging round is judged on its own changes.
+not_merge_freight() {
+  while IFS= read -r -d '' f; do
+    git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null || printf '%s\0' "${f}"
+  done
+}
+# --- Deny-by-default footprint areas ----------------------------------------
+# The class gate above protects an ENUMERATED surface, and enumeration is
+# never complete (a denylist is not a boundary). This check inverts the
+# default: every file a round touches is mapped to an AREA — its declared
+# workspace, else its top-level directory, else the root file itself — and
+# any area outside the PR's own footprint is surfaced. Consequence is
+# staged via QWEN_AUTOFIX_FOOTPRINT_ENFORCE: 'advisory' (default) writes a
+# gate-authored report section; 'reject' turns expansions into a retryable
+# rejection. Merge freight is excluded from the round side; deleted
+# workspaces degrade to their top-level segment (conservative: mismatch
+# surfaces rather than hides).
+list_areas() {
+  # $1: NUL-separated path file; $2: the REF whose recorded workspaces
+  # globs define membership. Ref-anchored on purpose: the round's on-disk
+  # manifest must not redefine its own footprint boundary. The ref's globs
+  # are read and translated ONCE per invocation (the per-file ancestor
+  # walk then matches in-bash — was_workspace_dir per (file×dir) re-ran
+  # git+jq+sed each time, ~21 ms a call). Longest ancestor wins (nested
+  # workspaces); non-workspace paths under packages/ keep TWO segments so
+  # sibling projects stay distinct areas. Emitted keys are printf %q —
+  # line-safe AND injective, so two distinct areas can never collapse
+  # into one comparison key (a lossy charset map hid expansions).
+  local ref="${2}" f d a g re
+  local -a ws_res=()
+  while IFS= read -r g; do
+    [[ -n "${g}" && "${g}" != '!'* ]] || continue
+    re="$(printf '%s' "${g}" | sed -e 's/[.^$+(){}|[]/\\&/g' -e 's/]/\\]/g' -e 's/\*\*/\x01/g' -e 's/\*/[^\/]*/g' -e 's/?/[^\/]/g' -e 's/\x01/.*/g')"
+    ws_res+=("${re}")
+  done < <(git show "${ref}:package.json" 2> /dev/null | jq -r '.workspaces[]?' 2> /dev/null)
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    a=''
+    d="${f%/*}"
+    while [[ -n "${d}" && "${d}" != "${f}" ]]; do
+      for re in "${ws_res[@]}"; do
+        if [[ "${d}" =~ ^${re}$ ]]; then
+          a="${d}"
+          break 2
+        fi
+      done
+      [[ "${d}" == */* ]] || break
+      d="${d%/*}"
+    done
+    if [[ -z "${a}" ]]; then
+      if [[ "${f}" == packages/*/* ]]; then
+        a="${f#packages/}"
+        a="packages/${a%%/*}"
+      elif [[ "${f}" == */* ]]; then
+        a="${f%%/*}"
+      else
+        a="/${f}"
+      fi
+    fi
+    printf '%q\n' "${a}"
+  done < "${1}" | sort -u
+}
+FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"
+[[ "${FOOTPRINT_ENFORCE}" == 'reject' ]] || FOOTPRINT_ENFORCE='advisory'
+ROUND_FILES_Z="$(mktemp)"
+PR_FILES_Z="$(mktemp)"
+# Unmeasurable is a STATE here too: a failed producer (no merge base on an
+# orphan-history takeover, a transient git error) must skip the check
+# loudly, not shrink one side into a verdict — an empty PR side would
+# read as "every round area is an expansion".
+FOOTPRINT_MEASURED='true'
+git diff --name-only -z --no-renames "${ROUND_RANGE}" 2> /dev/null | not_merge_freight > "${ROUND_FILES_Z}" || FOOTPRINT_MEASURED='false'
+git diff --name-only -z --no-renames "${PR_RANGE}" 2> /dev/null > "${PR_FILES_Z}" || FOOTPRINT_MEASURED='false'
+if [[ "${FOOTPRINT_MEASURED}" != 'true' ]]; then
+  echo "🧭 footprint measurement UNAVAILABLE this round (diff producer failed) — check skipped" | tee -a "${GATE_LOG}"
+fi
+OUT_AREAS="$(comm -23 <(list_areas "${ROUND_FILES_Z}" "origin/${BRANCH}") <(list_areas "${PR_FILES_Z}" "origin/${BRANCH}"))" || OUT_AREAS=''
+rm -f "${ROUND_FILES_Z}" "${PR_FILES_Z}"
+if [[ "${FOOTPRINT_MEASURED}" == 'true' && -n "${OUT_AREAS}" ]]; then
+  if [[ "${FOOTPRINT_ENFORCE}" == 'reject' ]]; then
+    {
+      echo 'This round modified areas entirely outside the PR footprint:'
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
+      echo 'Footprint enforcement is set to reject: revert these files, or escalate the feedback that requires them to a maintainer as an open question.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round expands into areas outside the PR footprint'
+  else
+    {
+      echo '🧭 **Gate advisory — this round modified areas outside the PR footprint** (machine-measured, not agent-authored):'
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
+      echo 'Review the expansion deliberately; the footprint gate is in advisory mode. · 本轮改动了 PR 足迹之外的区域（门自动测量，非 agent 文本），当前足迹门为 advisory 模式，请有意识地审阅该扩张。'
+    } >> "${WORKDIR}/gate-advisories.md"
+    echo "🧭 footprint expansion (advisory): $(tr '\n' ' ' <<< "${OUT_AREAS}")" | tee -a "${GATE_LOG}"
+  fi
+fi
+
+# Test-deletion advisory: deleting or shrinking tests is sometimes right
+# (the pinned behavior was wrong, or coverage is duplicated) and the agent
+# is required to justify it in its summary — but the SURFACING must not be
+# the agent's own prose. The gate writes its own advisory into the round
+# report so a maintainer always sees exactly which tests disappeared,
+# whoever suggested it.
+TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
+DELETED_TESTS="$(git diff --name-only -z --no-renames --diff-filter=D "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
+  not_merge_freight | tr '\0' '\n')"
+# Per-file sum with the merge-freight skip the class scan applies: a
+# base-merging round must not be charged (or credited) main-side test
+# churn in trusted-voice advisory text. -z numstat records are
+# add<TAB>del<TAB>path NUL-terminated (renames are disabled above).
+NET_TEST_LINES="$(git diff --numstat -z --no-renames "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
+  { total=0
+    while IFS=$'\t' read -r -d '' add del path; do
+      [[ -n "${path}" ]] || continue
+      git diff --quiet origin/main "${BRANCH}" -- "${path}" 2> /dev/null && continue
+      [[ "${add}" != '-' ]] && total=$(( total + add ))
+      [[ "${del}" != '-' ]] && total=$(( total - del ))
+    done
+    echo "${total}"; })"
+if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
+  {
+    echo '⚖️ **Gate advisory — test coverage shrank this round** (machine-measured, not agent-authored): '"net ${NET_TEST_LINES} test lines."
+    if [[ -n "${DELETED_TESTS}" ]]; then
+      echo
+      echo 'Deleted test files:'
+      # Filenames are branch-controlled bytes rendered inside a gate-authored
+      # (trusted-voice) document: a backtick in a legal git filename would
+      # close the code span and let the name forge "machine-measured" text.
+      # Render through a conservative safe-character set; anything else
+      # (backticks, newlines, control bytes) becomes '?'.
+      while IFS= read -r f; do
+        [[ -n "${f}" ]] && echo "- \`${f//[^A-Za-z0-9._\/ -]/?}\`"
+      done <<< "${DELETED_TESTS}"
+    fi
+    echo
+    echo 'The justification must be in the round summary above; a deletion is only sound when the pinned behavior itself was wrong (evidence shown) or the coverage demonstrably survives elsewhere. · 本轮测试覆盖净减少（门自动测量，非 agent 文本）；删除是否成立请对照上方轮次摘要中的理由——仅当被钉住的行为本身有误（需给出证据）或覆盖确有替代时才合理。'
+  } >> "${WORKDIR}/gate-advisories.md"
+  echo '⚖️ test coverage shrank this round — advisory written for the report' | tee -a "${GATE_LOG}"
+fi
+
+# --- Test-weakening gate ----------------------------------------------------
+# The advisory above renders in the round report only AFTER the round has
+# already been accepted, and the SKILL rule it points at ("deleting or
+# weakening tests requires content evidence, not an author's say-so") had no
+# deterministic enforcement at all. Relaxing an existing assertion is the
+# cheapest way for a fix to reach green while the behaviour it broke goes
+# unpinned, and it is structurally invisible to every other check here:
+# build/typecheck/lint never read assertions, the package tests run the
+# WEAKENED file, and the bite check reads only the tests a round ADDS --
+# never the ones it edits away.
+#
+# CONTRACT. Any pre-existing test file whose DECLARED test surface this
+# round shrinks must be named in <workdir>/test-weakening.json -- a JSON
+# array of {"path": "<file>", "reason": "<evidence>"} -- or the round is
+# rejected, retryably. The gate judges that the claim EXISTS and carries a
+# non-trivial reason, never the reason's merit: no semantic oracle is
+# available here, and turning a silent edit into an explicit, attributable
+# claim is the whole point. The reasons ride into the round report, where
+# a maintainer reads them against the diff.
+#
+# AUTHORITY. The surface is measured by count-test-surface.mjs -- the
+# TypeScript compiler's parser over the WHOLE file, never text patterns
+# over diff lines -- so comments, strings, regex literals, JSX and line
+# breaks are the parser's business and can neither decoy nor hide a token.
+# Per file it counts statement-position assertion call chains, test/
+# describe registrations with their enabled/disabled state (every collector
+# spelling of skip/todo/fails, the x-aliases, a constant skipIf/runIf or
+# options object, a body-level unconditional skip(), a disabled describe's
+# nesting), and bare early returns ahead of a test body's assertions. The
+# script's header is the definition of record. Neither the counter nor its
+# parser is the round's to choose: both are staged from the trusted base
+# (the parser installed from the base lockfile's pin) and digested there,
+# and the digests -- carried in expression context, unreachable from any
+# disk write branch code makes later -- are verified here before either
+# executes. A mismatch is tampering and rejects non-retryably; an
+# instrument that was never digested measures nothing (UNAVAILABLE below).
+# The parser is a `.cjs` copy of typescript's single-file build, so its
+# loading cannot be steered by a package.json planted beside it.
+#
+# ATTRIBUTION. Each file's round delta is tip - pre-round - main's own
+# contribution. Across a main-derived merge (any parent from the second on
+# that origin/main reaches), main's contribution is MAIN'S OWN DELTA,
+# measured on main's own side against the merge base; across a
+# fast-forwarded main commit it is the commit's own delta. Never a
+# three-way splice of the two sides: an auto-merge mixes the round's edits
+# into main's contribution and can invent a surface neither side ever had
+# -- an un-skip the round made, spliced with a test main added, produces
+# an enabled registration that existed in no tree and is then charged to
+# somebody. Measuring main where main made it removes that whole class,
+# and it makes the two arms one rule: a modify/delete resolved for main
+# was already measured from the merge base.
+# So a weakening committed before, during, or after a merge of main
+# measures the same, an assertion moved within a file nets zero whichever
+# commit sequence produced the tip, and main's own delta neither charges
+# nor shields the round. An event that moved nothing for the file
+# (byte-identical or absent on both sides) is not recorded.
+#
+# What main did is not always what the merge KEPT, so the contribution is
+# clamped by the blob the merge commit actually landed, measured against
+# the same merge base. Main's REMOVALS are credited only as far as they
+# landed: a round could otherwise merge main, discard its side, and let
+# the phantom credit absorb its own removal exactly. Main's ADDITIONS are
+# never clamped: they raise the baseline whatever the merge kept, or a
+# round that drops what main added during the round gets that removal for
+# free. Presence is a running state, not a reading of the newest event.
+# Main ADDING the path puts the file in the baseline; so does main moving
+# its measured surface; main deleting it takes it out only when the merge
+# adopted that deletion. Where both sides MEASURE to nothing -- the Python
+# and Rust shapes, and equally a JS file that declares nothing -- movement
+# is read from the bytes instead, since "the surface did not move" is
+# unmeasurable there. That reads main touching such a file at all as a
+# contribution, so a file an earlier round deleted is charged again: one
+# ack entry answers it, where the alternative is losing the deletion arm,
+# the only arm those shapes have.
+# What none of this can see is identity: main removing one assertion while
+# the resolution puts it back and drops a different one nets to zero, the
+# same way an assertion moved within a file always has.
+#
+# The model assumes main's side is MAIN's. It stops being main's if the
+# round's own work reaches origin/main WHILE THE LOOP IS STILL RUNNING --
+# the PR squash-merged or cherry-picked mid-round -- because main's chain
+# then carries the round's authorship while the merge base does not, and
+# measuring the round against it cancels the round's own removals. (Main
+# MERGING the branch is self-correcting: the merge base carries the same
+# commit, so the two cancel.) A guard was written for it and removed:
+# every history these fixtures can build measures correctly without one,
+# so it was code no test could reach. The residual is bounded by the same
+# thing that bounds the flake carve-out -- a round whose work has already
+# landed has nothing left to gate.
+# Assertions are counted per file; registrations by kind and title as
+# multisets, so un-skipping one test never licenses silencing another,
+# while a brand-new todo/skip registration is the round's own and charges
+# nothing. Every file is measured under ONE name end to end: a round that
+# RENAMES a test file is measured as the deletion of the old path plus a
+# new file at the new one, so the rename costs one ack entry naming the
+# old path -- deliberately fail-closed, and never silent, since whatever
+# shrank inside the destination rides into the round report as the
+# reason a maintainer reads against the diff. Following a name across a
+# round's own renames is a non-goal: it is a second rename tracker layered
+# on git's own, and every reading of it that this gate tried disagreed
+# with git in some history shape. A parentless commit in the round's
+# history is the round's own authorship, measured against the empty tree.
+#
+# SIGNALS, one entry per file, the first that applies: the file was
+# deleted (held by the baseline -- pre-round, or landed by main during the
+# round -- and absent at the tip); a baseline-enabled registration now
+# disabled; net assertions removed (an early return planted ahead of them
+# counts here: the runner then reports the test passed having asserted
+# nothing); net enabled tests removed. Files are selected by NAME: `*.test.*`, `*.spec.*`,
+# `test_*.py`, and the `tests/*.rs` / `*_test.rs` / `*_tests.rs` shapes,
+# snapshots excluded. Non-JS shapes measure a zero surface and are judged
+# by the deletion arm alone. A test surface only a runner can enumerate --
+# a Rust `#[cfg(test)]` module inside a production file, a suite registered
+# under a condition -- is outside this gate by design.
+#
+# NOT MEASURED, by design: whether an assertion is REACHABLE (dead code, a
+# condition false in CI, a helper never called), condition-valued guards
+# (`.skipIf(cond)`, `skip(cond, reason)`, `if (cond) ctx.skip()` -- this
+# repository's environment-guard idiom, which the runner reports as
+# skipped), and options or collector names carried by a binding. Those are
+# runtime facts; the package test run and the bite check are the
+# runner-backed instruments, and this gate certifies only what it
+# measures: the declared surface.
+#
+# Fails OPEN on the measured signals -- a counter or parser that is absent
+# or unverifiable, or a history the walk cannot read, skips them with a
+# logged UNAVAILABLE -- and never on a whole-file deletion or typechange,
+# which the pre-round->tip pair proves without the walk; an enumeration git
+# itself refuses fails CLOSED there, since the absence of deletions cannot
+# then be certified.
+WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/test_*.py' ':(glob)**/tests/*.rs' ':(glob)**/*_test.rs' ':(glob)**/*_tests.rs' ':(exclude,glob)**/__snapshots__/**')
+WEAKEN_COUNTER="${RUNNER_TEMP}/count-test-surface.mjs"
+WEAKEN_PARSER="${RUNNER_TEMP}/weaken-parser/typescript.cjs"
+WEAKEN_MEASURED='true'
+WEAKEN_TMP="$(mktemp -d "${RUNNER_TEMP}/weaken.XXXXXX")"
+EMPTY_TREE="$(git hash-object -t tree /dev/null)"
+# Parallel indexed arrays throughout (bash 3.2 has no associative arrays):
+# measured files and their signal text.
+WEAKENED_PATHS=()
+WEAKENED_SIGNALS=()
+# Success when ${1} exactly matches one of the remaining arguments.
+weaken_member() {
+  local f="${1}" weaken_e
+  shift
+  for weaken_e in "$@"; do
+    if [[ "${weaken_e}" == "${f}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+weaken_digest() {
+  if command -v sha256sum > /dev/null 2>&1; then
+    sha256sum "${1}" | cut -d' ' -f1
+  else
+    shasum -a 256 "${1}" | cut -d' ' -f1
+  fi
+}
+# The instrument's trust chain: digested at staging, present, unchanged.
+# Undigested (never staged) measures nothing; a digested instrument that is
+# now absent or changed is tampering.
+weaken_trusted() {
+  local file="${1}" expected="${2}" what="${3}" actual
+  [[ -n "${expected}" ]] || return 1
+  if [[ ! -f "${file}" ]]; then
+    echo "staged ${what} is missing although it was digested at staging (${expected})" >> "${GATE_LOG}"
+    reject_fix "staged ${what} was removed after staging" 'false' 'false'
+  fi
+  if ! actual="$(weaken_digest "${file}")"; then
+    echo "staged ${what} cannot be digested although it was digested at staging (${expected})" >> "${GATE_LOG}"
+    reject_fix "staged ${what} was made unreadable after staging" 'false' 'false'
+  fi
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "staged ${what} does not match its trusted-base digest (expected ${expected}, found ${actual})" >> "${GATE_LOG}"
+    reject_fix "staged ${what} was modified after staging" 'false' 'false'
+  fi
+  return 0
+}
+weaken_trusted "${WEAKEN_COUNTER}" "${WEAKEN_COUNTER_SHA256:-}" 'test-surface counter' || WEAKEN_MEASURED='false'
+weaken_trusted "${WEAKEN_PARSER}" "${WEAKEN_PARSER_SHA256:-}" 'test-surface parser' || WEAKEN_MEASURED='false'
+# The round's first-parent history, oldest first, each commit classified
+# once: main = a commit on origin/main's own FIRST-PARENT chain (a
+# fast-forwarded ride of main's own history), merge = a merge one of whose
+# parents from the second on sits on that chain, own = the round's
+# authorship, a parentless root included. Reachability alone is not
+# enough: a commit main merged in as someone's feature-branch tip is
+# reachable from origin/main while never having been main, and merging one
+# with `-s ours` would otherwise credit the round with a smaller copy of a
+# file that main never carried. Only main and merge commits are events the
+# measurement subtracts; the round's own commits are already inside
+# tip - pre-round.
+WEAKEN_COMMITS=()
+WEAKEN_KINDS=()
+WEAKEN_MAIN_PARENT=()
+WEAKEN_MAIN_LINE="$(git rev-list --first-parent origin/main 2> /dev/null)" || WEAKEN_MEASURED='false'
+# Success when ${1} is a commit origin/main itself has been.
+weaken_on_main_line() {
+  local weaken_sha
+  weaken_sha="$(git rev-parse -q --verify "${1}^{commit}" 2> /dev/null)" || return 1
+  grep -qxF -- "${weaken_sha}" <<< "${WEAKEN_MAIN_LINE}"
+}
+if weaken_list="$(git rev-list --first-parent --reverse "origin/${BRANCH}..${BRANCH}" 2> /dev/null)"; then
+  while IFS= read -r c; do
+    [[ -n "${c}" ]] || continue
+    weaken_kind='own'
+    weaken_mp=''
+    if weaken_on_main_line "${c}"; then
+      weaken_kind='main'
+    else
+      weaken_pi=2
+      while git rev-parse -q --verify "${c}^${weaken_pi}" > /dev/null 2>&1; do
+        if weaken_on_main_line "${c}^${weaken_pi}"; then
+          weaken_kind='merge'
+          weaken_mp="${weaken_pi}"
+          break
+        fi
+        weaken_pi=$(( weaken_pi + 1 ))
+      done
+    fi
+    WEAKEN_COMMITS+=("${c}")
+    WEAKEN_KINDS+=("${weaken_kind}")
+    WEAKEN_MAIN_PARENT+=("${weaken_mp}")
+  done <<< "${weaken_list}"
+else
+  WEAKEN_MEASURED='false'
+fi
+# The first parent of ${1}, or the empty tree for a parentless root.
+weaken_parent() {
+  git rev-parse -q --verify "${1}^" 2> /dev/null || printf '%s\n' "${EMPTY_TREE}"
+}
+# Export ${1}:${2} to a file under WEAKEN_TMP named ${3}; print the file's
+# path, or nothing when the ref holds no such blob. Failure means git
+# itself failed, never an absent blob.
+# Success when ${1}:${2} is a BLOB -- a tree that took the file's name is
+# not the file, and `git cat-file -e` alone accepts one.
+weaken_is_blob() {
+  [[ "$(git cat-file -t "${1}:${2}" 2> /dev/null || true)" == 'blob' ]]
+}
+weaken_blob() {
+  local ref="${1}" f="${2}" out="${WEAKEN_TMP}/${3}"
+  if weaken_is_blob "${ref}" "${f}"; then
+    git show "${ref}:${f}" > "${out}" 2> /dev/null || return 1
+    printf '%s\n' "${out}"
+  fi
+}
+# One event, five lines, always: main's own side at the event, the merge
+# base to measure it against, the blob the merge commit actually landed,
+# whether main held the file at all, and the BRANCH's own side at the
+# merge -- the baseline the landed delta is measured against, so the
+# round's own pre-merge edits never enter main's landed contribution
+# (R27-20). Empty lines are absent sides.
+weaken_emit() {
+  printf '%s\n%s\n%s\n%s\n%s\n' "${1}" "${2}" "${3}" "${4}" "${5}"
+}
+# MAIN's contribution at merge commit ${1} for file ${2}, main being parent
+# ${3}: main's OWN delta, measured on main's own side against the merge
+# base. Never a three-way splice of the two sides -- an auto-merge mixes
+# the round's edits into main's contribution and can invent a surface
+# neither side ever had, which is then credited or charged to somebody.
+# What the merge actually DID with that contribution rides along as the
+# landed blob, and the counter clamps by it.
+weaken_auto_blob() {
+  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p1 p2 base res holds='0'
+  # A criss-cross history has more than one equally valid merge base, and
+  # git picks one without promising which. Main's delta is measured against
+  # that base, so a pick can decide the verdict -- one candidate can credit
+  # main with the ROUND's own removal. It only matters when the candidates
+  # DISAGREE about this file: refuse then (the caller charges it as
+  # unmeasurable, which one ack entry answers) and measure normally when
+  # they hold the same blob, which is the ordinary case.
+  local weaken_bases weaken_b weaken_seen='' weaken_seen_set='' weaken_bi=0
+  weaken_bases="$(git merge-base --all "${c}^" "${c}^${mp}" 2> /dev/null)" || weaken_bases=''
+  while IFS= read -r weaken_b; do
+    [[ -n "${weaken_b}" ]] || continue
+    # Compared through weaken_blob, the very reader the measurement uses,
+    # rather than a second identity built beside it: one reader cannot
+    # drift from the other about what counts as holding the file. Absent
+    # and present are told apart by weaken_seen_set, not by the path being
+    # empty -- an empty path IS the absent case.
+    weaken_bi=$(( weaken_bi + 1 ))
+    weaken_b="$(weaken_blob "${weaken_b}" "${f}" "${tag}.mb${weaken_bi}")" || return 1
+    if [[ -z "${weaken_seen_set}" ]]; then
+      weaken_seen="${weaken_b}"
+      weaken_seen_set='1'
+    elif [[ -z "${weaken_seen}" && -z "${weaken_b}" ]]; then
+      :
+    elif [[ -z "${weaken_seen}" || -z "${weaken_b}" ]]; then
+      return 1
+    elif ! cmp -s "${weaken_seen}" "${weaken_b}"; then
+      return 1
+    fi
+  done <<< "${weaken_bases}"
+  mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
+  p1="$(weaken_blob "${c}^" "${f}" "${tag}.p1")" || return 1
+  p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
+  res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
+  base=''
+  if [[ -n "${mb}" ]]; then
+    base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
+  fi
+  if [[ -z "${p2}" ]] && weaken_is_blob "${c}" "${f}"; then
+    # Main holds no side and the merge left the file in the round's hands:
+    # main contributed nothing here. Not an event -- recording it would let
+    # the round's own copy stand in for main's side as the LANDED blob,
+    # and a copy weaker than whatever it is measured against would credit
+    # main with the round's own removal. The merge base is not part of the
+    # test: after main deletes a file the round keeps, the NEXT merge sees
+    # no base either, and that is the same case.
+    return 0
+  fi
+  [[ -z "${p2}" ]] || holds='1'
+  weaken_emit "${p2}" "${base}" "${res}" "${holds}" "${p1}"
+}
+# Measure file ${1}: write the manifest (tip, pre-round, and every main
+# event that moved the file) and print the counter's verdict JSON. One
+# name throughout -- a round that renames a test file is measured as the
+# deletion of the old path and a new file at the new one.
+weaken_measure() {
+  local f="${1}" tag="${2}" tip pre before after landed holds branch_side events='' weaken_i c kind mp j=0
+  local weaken_pair weaken_prev='' weaken_prev_set=''
+  tip="$(weaken_blob "${BRANCH}" "${f}" "${tag}.tip")" || return 1
+  pre="$(weaken_blob "origin/${BRANCH}" "${f}" "${tag}.pre")" || return 1
+  for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
+    c="${WEAKEN_COMMITS[weaken_i]}"
+    kind="${WEAKEN_KINDS[weaken_i]}"
+    mp="${WEAKEN_MAIN_PARENT[weaken_i]}"
+    [[ "${kind}" != 'own' ]] || continue
+    # An event only where the commit moved this file relative to a parent.
+    if git diff --quiet "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null &&
+      { [[ "${kind}" != 'merge' ]] || git diff --quiet "${c}^${mp}" "${c}" -- ":(literal)${f}" 2> /dev/null; }; then
+      continue
+    fi
+    j=$(( j + 1 ))
+    before="$(weaken_blob "${c}^" "${f}" "${tag}.e${j}.before")" || return 1
+    landed=''
+    holds='0'
+    branch_side=''
+    if [[ "${kind}" == 'main' ]]; then
+      # A commit main itself has been: its own delta IS main's, and what it
+      # landed is what it holds.
+      after="$(weaken_blob "${c}" "${f}" "${tag}.e${j}.after")" || return 1
+      landed="${after}"
+      [[ -z "${after}" ]] || holds='1'
+    else
+      weaken_pair="$(weaken_auto_blob "${c}" "${f}" "${mp}" "${tag}.e${j}")" || return 1
+      if [[ -z "${weaken_pair}" ]]; then
+        j=$(( j - 1 ))
+        continue
+      fi
+      # Main's own side. The first event measures it against the merge
+      # base; later ones against main's side at the previous event (the
+      # chain below), never against the branch's side, which is the round's
+      # own authorship and already inside tip - pre-round.
+      after="$(sed -n 1p <<< "${weaken_pair}")"
+      before="$(sed -n 2p <<< "${weaken_pair}")"
+      landed="$(sed -n 3p <<< "${weaken_pair}")"
+      holds="$(sed -n 4p <<< "${weaken_pair}")"
+      branch_side="$(sed -n 5p <<< "${weaken_pair}")"
+      [[ "${holds}" == '1' ]] || holds='0'
+    fi
+    # Main's contributions CHAIN: after the first event, main's side is
+    # measured against main's side at the PREVIOUS event, not against a
+    # fresh merge base that already reflects it. Chained, the events
+    # telescope to main's own net for the round; unchained, main deleting
+    # and re-adding a file is credited for the re-add twice.
+    [[ -z "${weaken_prev_set}" ]] || before="${weaken_prev}"
+    weaken_prev="${after}"
+    weaken_prev_set='1'
+    events+="$(jq -cn --arg b "${before}" --arg a "${after}" --arg l "${landed}" \
+      --arg bs "${branch_side}" --argjson h "${holds}" \
+      '{before: (if $b == "" then null else $b end),
+        after: (if $a == "" then null else $a end),
+        landed: (if $l == "" then null else $l end),
+        branch: (if $bs == "" then null else $bs end),
+        mainHolds: ($h == 1)}'),"
+  done
+  jq -n --arg path "${f}" --arg tip "${tip}" --arg pre "${pre}" --argjson events "[${events%,}]" '
+    {path: $path,
+     tip: (if $tip == "" then null else $tip end),
+     pre: (if $pre == "" then null else $pre end),
+     events: $events}' > "${WEAKEN_TMP}/${tag}.json" || return 1
+  local weaken_out
+  weaken_out="$(WEAKEN_PARSER_FILE="${WEAKEN_PARSER}" node "${WEAKEN_COUNTER}" measure "${WEAKEN_TMP}/${tag}.json")" || return 1
+  # An exit-0 run that printed no readable verdict is a measurement
+  # FAILURE, not a verdict: read as one, its missing `baselinePresent`
+  # would say "not the round's to weaken" and silently uncharge the file
+  # while the round still reports itself measured. Every field the reader
+  # below consumes must be present and of the right type, or the caller's
+  # fail-closed arm takes the file.
+  jq -e '(.baselinePresent | type) == "boolean"
+    and (.assertions | type) == "number"
+    and (.enabled | type) == "number"
+    and (.newlyDisabled | type) == "array"' <<< "${weaken_out}" > /dev/null 2>&1 || return 1
+  printf '%s\n' "${weaken_out}"
+}
+weaken_add_file() {
+  local weaken_e
+  for weaken_e in "${WEAKEN_FILES[@]}"; do
+    [[ "${weaken_e}" != "${1}" ]] || return 0
+  done
+  WEAKEN_FILES+=("${1}")
+}
+# Add every pathspec file `git diff ${@}` lists. The producer's status is
+# read, not swallowed behind a process substitution: an enumeration git
+# could not perform marks the measurement UNAVAILABLE instead of silently
+# measuring nothing.
+weaken_add_diff() {
+  if ! git diff --name-only -z --no-renames "$@" -- "${WEAKEN_PATHSPEC[@]}" > "${WEAKEN_TMP}/list" 2> /dev/null; then
+    WEAKEN_MEASURED='false'
+    return 0
+  fi
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    weaken_add_file "${f}"
+  done < "${WEAKEN_TMP}/list"
+}
+# Candidates: every pathspec file the round's pre-round->tip pair moved at
+# all -- the authority on what the round changed, and the only arm that
+# sees a merge whose TREE equals its first parent's (`-s ours` onto main,
+# a reset that drops a pre-round commit): those move nothing per commit
+# while moving plenty end to end. A file only MAIN moved comes in here too
+# and measures to a zero delta, so the wider net costs a measurement, never
+# a verdict. The per-commit arms stay: a merge lists what it moved relative
+# to MAIN's side as well, so an --ours resolution that discards a test main
+# landed mid-round is enumerated even though the pre-round ref never held
+# it.
+WEAKEN_FILES=()
+if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
+  for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
+    c="${WEAKEN_COMMITS[weaken_i]}"
+    [[ "${WEAKEN_KINDS[weaken_i]}" != 'main' ]] || continue
+    weaken_add_diff "$(weaken_parent "${c}")" "${c}"
+    [[ "${WEAKEN_KINDS[weaken_i]}" == 'merge' ]] || continue
+    weaken_add_diff "${c}^${WEAKEN_MAIN_PARENT[weaken_i]}" "${c}"
+  done
+fi
+weaken_add_diff "origin/${BRANCH}" "${BRANCH}"
+# A pre-existing test replaced by a symlink or a submodule still has a blob
+# at the tip, so the deletion arm reads the tip's MODE: anything but a
+# regular file at that path is the deletion of its surface, whatever the
+# counter would read from the link's target text. Direction matters -- a
+# symlink the round replaces with a real test file grew the surface and is
+# measured, not charged.
+weaken_tip_mode() {
+  git ls-tree "${BRANCH}" -- ":(literal)${1}" 2> /dev/null | awk '{print $1; exit}'
+}
+# Success when the round's BASELINE holds ${1} -- the pre-round ref, or any
+# main-derived event that carried it during the round. Deliberately WIDER
+# than the measured arm's `baselinePresent`, which also asks whether main
+# contributed anything and whether the merge adopted its deletion: the
+# fail-closed arm must never be the narrower of the two, so a file it
+# cannot measure is charged rather than waived.
+weaken_baseline_holds() {
+  local weaken_bi
+  weaken_is_blob "origin/${BRANCH}" "${1}" && return 0
+  for (( weaken_bi = 0; weaken_bi < ${#WEAKEN_COMMITS[@]}; weaken_bi++ )); do
+    [[ "${WEAKEN_KINDS[weaken_bi]}" != 'own' ]] || continue
+    if weaken_is_blob "${WEAKEN_COMMITS[weaken_bi]}" "${1}"; then
+      return 0
+    fi
+    if [[ "${WEAKEN_KINDS[weaken_bi]}" == 'merge' ]] &&
+      weaken_is_blob "${WEAKEN_COMMITS[weaken_bi]}^${WEAKEN_MAIN_PARENT[weaken_bi]}" "${1}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
+  for (( weaken_idx = 0; weaken_idx < ${#WEAKEN_FILES[@]}; weaken_idx++ )); do
+    f="${WEAKEN_FILES[weaken_idx]}"
+    if ! weaken_verdict="$(weaken_measure "${f}" "f${weaken_idx}")"; then
+      # The instrument could not measure THIS file -- an input the round
+      # itself authored can exhaust the parser. Fail closed for the file
+      # alone (one ack entry answers it) and keep measuring the rest of
+      # the round, rather than waiving every measured signal because one
+      # file was unreadable. A file the round's BASELINE never held has no
+      # coverage to weaken, so it is skipped rather than charged.
+      if weaken_baseline_holds "${f}"; then
+        WEAKENED_PATHS+=("${f}")
+        WEAKENED_SIGNALS+=('test surface could not be measured')
+      fi
+      continue
+    fi
+    weaken_baseline="$(jq -r '.baselinePresent' <<< "${weaken_verdict}" 2> /dev/null)" || weaken_baseline=''
+    signal=''
+    if [[ "${weaken_baseline}" != 'true' ]]; then
+      # Not the round's to weaken: the file is its own (pre-round absent and
+      # never landed by main) or main itself removed it.
+      :
+    elif [[ "$(weaken_tip_mode "${f}")" != '100644' &&
+      "$(weaken_tip_mode "${f}")" != '100755' ]]; then
+      signal='test file deleted'
+    else
+      signal="$(jq -r '
+        if (.newlyDisabled | length) > 0 then "\(.newlyDisabled | length) pre-existing test registration(s) disabled"
+        elif .assertions < 0 then "net \(-.assertions) assertion(s) removed"
+        elif .enabled < 0 then "net \(-.enabled) enabled test(s) removed"
+        else "" end' <<< "${weaken_verdict}" 2> /dev/null)" || signal=''
+    fi
+    if [[ -n "${signal}" ]]; then
+      WEAKENED_PATHS+=("${f}")
+      WEAKENED_SIGNALS+=("${signal}")
+    fi
+  done
+fi
+if [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
+  # UNAVAILABLE: only whole-file deletions and typechanges are judged, from
+  # the explicit pre-round->tip pair, and every one of them is surfaced --
+  # without the walk nothing proves that main, not the round, removed a
+  # file, and a deletion main did make is acknowledged like any other. An
+  # enumeration git refuses is a fail-closed rejection: the absence of
+  # deletions cannot be certified from nothing.
+  echo '🧪 test-weakening measurement UNAVAILABLE this round (instrument or history unreadable) — only whole-file deletions are judged' | tee -a "${GATE_LOG}"
+  WEAKENED_PATHS=()
+  WEAKENED_SIGNALS=()
+  if ! git diff --name-only -z --no-renames --diff-filter=DT "origin/${BRANCH}" "${BRANCH}" \
+    -- "${WEAKEN_PATHSPEC[@]}" > "${WEAKEN_TMP}/deleted" 2> /dev/null; then
+    echo 'the pre-round->tip deletion enumeration failed; the absence of test deletions cannot be certified' >> "${GATE_LOG}"
+    reject_fix 'test-weakening gate could not enumerate whole-file deletions; refusing to certify their absence'
+  fi
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    WEAKENED_PATHS+=("${f}")
+    WEAKENED_SIGNALS+=('test file deleted')
+  done < "${WEAKEN_TMP}/deleted"
+fi
+rm -rf "${WEAKEN_TMP}"
+if (( ${#WEAKENED_PATHS[@]} > 0 )); then
+  # The acknowledgement is the agent's own machine-readable claim, held to
+  # the same shape rules as deferred-findings.json: an array, a string path,
+  # and a reason with enough substance to be read as evidence. A malformed or
+  # unreadable file acknowledges nothing rather than everything.
+  # Acknowledged paths travel base64-encoded: newline-safe through the
+  # line-based read below, and comparable against the measured set without
+  # ever decoding branch-controlled bytes through shell parsing.
+  WEAKEN_ACKED=()
+  if [[ -s "${WORKDIR}/test-weakening.json" ]]; then
+    weaken_ack_b64="$(jq -j '
+      if type == "array" then
+        .[]
+        | select((.path? | type) == "string")
+        | select((.path | length) > 0)
+        | select((.reason? | type) == "string")
+        | select((.reason | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | length) >= 40)
+        | (.path | @base64) + "\n"
+      else empty end' "${WORKDIR}/test-weakening.json" 2> /dev/null)" || weaken_ack_b64=''
+    while IFS= read -r weaken_entry; do
+      [[ -n "${weaken_entry}" ]] && WEAKEN_ACKED+=("${weaken_entry}")
+    done <<< "${weaken_ack_b64}"
+  fi
+  WEAKEN_MISSING=''
+  WEAKEN_OK=''
+  WEAKEN_OK_B64=''
+  for (( weaken_idx = 0; weaken_idx < ${#WEAKENED_PATHS[@]}; weaken_idx++ )); do
+    f="${WEAKENED_PATHS[weaken_idx]}"
+    signal="${WEAKENED_SIGNALS[weaken_idx]}"
+    # Filenames are branch-controlled bytes rendered inside gate-authored
+    # (trusted-voice) documents, so they go through the same conservative
+    # safe-character set the shrink advisory above uses.
+    if weaken_member "$(printf '%s' "${f}" | base64 | tr -d '\n')" "${WEAKEN_ACKED[@]}"; then
+      WEAKEN_OK+="- \`${f//[^A-Za-z0-9._\/ -]/?}\` — ${signal}"$'\n'
+      WEAKEN_OK_B64+="$(printf '%s' "${f}" | base64 | tr -d '\n')"$'\n'
+    else
+      WEAKEN_MISSING+="- \`${f//[^A-Za-z0-9._\/ -]/?}\` — ${signal}"$'\n'
+    fi
+  done
+  if [[ -n "${WEAKEN_MISSING}" ]]; then
+    # The ack list must be complete and reachable: the rejection document
+    # is a tail-bounded window of GATE_LOG, and a long list gets cut from
+    # the FRONT while the remedy text below survives — the agent would be
+    # told to ack a list it was never shown (R32-2). The full measured
+    # list rides in its own file, which the repair pass can read from the
+    # same workdir.
+    printf '%s' "${WEAKEN_MISSING}" > "${WORKDIR}/weaken-missing.txt"
+    {
+      echo 'This round deleted or weakened pre-existing tests without recording the required evidence:'
+      printf '%s' "${WEAKEN_MISSING}"
+      echo 'Deleting or weakening a test is sound only when the pinned behaviour itself was wrong (show the probe that proves the correct behaviour) or the coverage demonstrably survives in a named surviving test.'
+      echo 'Either restore the assertions, or record the evidence: write <workdir>/test-weakening.json — a JSON array of {"path": "<file>", "reason": "<evidence, at least 40 characters>"} carrying one entry for every file listed above. If the list above is cut off, the complete list is <workdir>/weaken-missing.txt.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round weakened pre-existing tests without recorded evidence'
+  fi
+  {
+    echo '🧪 **Gate advisory — this round weakened or removed pre-existing tests** (machine-measured, not agent-authored):'
+    printf '%s' "${WEAKEN_OK}"
+    echo
+    echo 'The round recorded evidence for each (below, agent-authored). Weakening is sound only when the pinned behaviour itself was wrong or the coverage demonstrably survives elsewhere — read each reason against the diff. · 本轮弱化或删除了既有测试（门自动测量，非 agent 文本）。下列理由由 agent 撰写：仅当被钉住的行为本身有误、或覆盖确有替代时才成立，请对照 diff 逐条审阅。'
+    # Agent-authored bytes inside a gate-authored document: neutralize both
+    # comment-marker and details/summary forms (a severed <details> would
+    # swallow the rest of the posted comment) and cap each reason, the same
+    # hygiene the report step applies to failure.md excerpts.
+    # Rendered from the MEASURED set, one line per file: the entries are
+    # agent-authored and otherwise unbounded, so an ack file stuffed with
+    # thousands of junk rows would decide the size of a posted PR comment.
+    jq -r --arg ok "${WEAKEN_OK_B64}" '
+      ($ok | split("\n") | map(select(length > 0) | @base64d)) as $ok
+      | if type == "array" then
+          map(select((.path? | type) == "string")
+            | select(.path | IN($ok[]))
+            | select((.reason? | type) == "string")
+            | select((.reason | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | length) >= 40))
+          | unique_by(.path) | .[]
+          | "  - \(.path | gsub("[^A-Za-z0-9._/ -]"; "?")): \(.reason | gsub("\\s+"; " "))"
+        else empty end' "${WORKDIR}/test-weakening.json" 2> /dev/null |
+      cut -b1-300 | iconv -f utf-8 -t utf-8 -c |
+      sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' \
+        -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' \
+        -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
+  } >> "${WORKDIR}/gate-advisories.md"
+  echo "🧪 test weakening recorded and acknowledged: $(grep -c '^- ' <<< "${WEAKEN_OK}" || true) file(s)" | tee -a "${GATE_LOG}"
 fi
 
 echo '🔬 Re-running deterministic checks (independent of the agent)...'
 run_check 'build failed on the agent-committed fix' npm run build
-run_check 'typecheck failed on the agent-committed fix' npm run typecheck
-run_check 'lint failed on the agent-committed fix' npm run lint
+# Typecheck consumes core's dist (sdk-typescript resolves
+# @qwen-code/qwen-code-core through the package exports to ./dist/*.d.ts),
+# and dist is gitignored — it survives the baseline detach carrying the
+# ROUND's build, so a baseline typecheck would run reverted sources against
+# round-built declarations. Probe-verified three-arm flip on this tree. Same
+# class as the schema check: A/B-exempt.
+run_check_no_ab 'typecheck failed on the agent-committed fix' npm run typecheck
+run_check_no_ab 'lint failed on the agent-committed fix' npm run lint
 
 # Test changed/related files for the packages this PR touches.
 # --changed follows the import graph so transitive breakage is caught.
@@ -157,10 +1678,354 @@ else
       continue
     fi
     echo "🧪 Testing ${p} (changed files only)..."
-    run_check "tests failed in ${p}" \
-      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+    # A/B-exempt: package tests resolve sibling workspaces through their
+    # dist exports (channels/github -> @qwen-code/channel-base/dist), and
+    # dist survives the baseline detach carrying the ROUND's build — a
+    # baseline leg would test reverted sources against round-built
+    # dependencies. (A round-ADDED workspace also has no baseline at all:
+    # npm exits 1 there with "No workspaces found".) Their rejections stay
+    # charged to the round, where the repair agent can act.
+    run_check_no_ab "tests failed in ${p}" \
+      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"
   done
 fi
+
+# Bite check: run this round's changed tests against the PRE-ROUND tree
+# (origin/<branch> sources + the round's test files). If EVERY changed test
+# also passes there, the tests demonstrate nothing — the classic shape of a
+# plausible-but-false finding implemented as a "fix" whose regression test
+# was green all along.
+#
+# INTENT decides the consequence, and intent is read from the round's own
+# machine-readable artifacts, not inferred from the diff shape: a round is
+# a DEFECT-CLAIM round only when resolved-comments.txt marks a finding
+# resolved-in-code whose thread is Critical-tagged or belongs to a
+# CHANGES_REQUESTED review (matched in rc.json/rv.json). Those rounds get a
+# non-retryable rejection on all-green — the 60-minute repair pass cannot
+# make a nonexistent defect reproduce; the next full round re-reads the
+# feedback with the evidence in LAST_REJECTION and can decline or escalate
+# instead. Every OTHER src+test round (a refactor pinning existing
+# behavior, an optional cleanup adding coverage) legitimately produces
+# all-green pre-round tests, so all-green there is a gate-authored ADVISORY
+# in the report, never a rejection.
+# Scope guards (all fail OPEN — only the clean "ran and all passed" verdict
+# has consequences):
+#   - Runnable unit tests only: *.test.* / *.spec.* files. Snapshots and
+#     integration-tests/ are not directly runnable here.
+#   - Single-package rounds only: on the detached pre-round tree, gitignored
+#     dist/ still carries the ROUND's build, so a cross-package fix leaks
+#     into the baseline through dist-resolved imports and would read as
+#     "no bite" — the same dist confound that A/B-exempts typecheck above.
+#     Same-package imports resolve through vitest src aliases and relative
+#     paths, which the detach does revert.
+#   - A test that fails on the pre-round tree for ANY reason (assertion,
+#     collection, import of a round-added symbol) counts as biting; the
+#     check's power is the all-green case, which no honest defect fix
+#     produces. KNOWN LIMIT, deliberate: the verdict is existential over
+#     the batch, so in a mixed Critical round one genuinely biting test
+#     vouches for the batch — binding each behavior to its own probe needs
+#     per-test result parsing and is out of scope here. Also known: a
+#     re-raised finding whose fix already sits in origin/<branch> is
+#     legitimately all-green (SKILL directs re-verified items into
+#     resolved-comments.txt); the rejection text tells the agent to
+#     resolve such items in a no-code round of their own.
+BITE_RUNNER="${BITE_RUNNER:-bite_runner_default}"
+bite_runner_default() {
+  # $1 = workspace dir, rest = test paths relative to the workspace.
+  local ws="${1}"
+  shift
+  strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"
+}
+mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
+  -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \
+  ':(exclude,glob)integration-tests/**' | not_merge_freight || true)
+# Changed snapshots ride the overlay (a fix proven by a regenerated
+# snapshot must not revert to the pre-round snapshot and read as green)
+# but are never passed to the runner as test-file arguments.
+mapfile -d '' -t BITE_SNAPS < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
+  -- ':(glob)**/__snapshots__/**' | not_merge_freight || true)
+# No blanket *.md exclusion: .qwen/skills/**/*.md is EXECUTABLE agent
+# behavior (and scripts/tests pins it), so markdown counts as source; the
+# consequence gating above keeps doc-only rounds from ever being rejected.
+BITE_SRC="$(git diff --name-only -z --no-renames "${ROUND_RANGE}" \
+  -- ':(exclude,glob)**/*.test.*' ':(exclude,glob)**/*.spec.*' \
+  ':(exclude,glob)**/__snapshots__/**' ':(exclude,glob)**/__tests__/**' \
+  ':(exclude,glob)**/test-utils/**' ':(exclude,glob)integration-tests/**' |
+  not_merge_freight | tr '\0' '\n')"
+# Does this round RESOLVE a Critical-tagged or CHANGES_REQUESTED finding in
+# code? resolved-comments.txt is the agent's own machine-readable claim of
+# what it fixed; rc.json/rv.json carry the thread bodies and review states
+# the scan already fetched. Absent/empty inputs read as "no defect claim".
+BITE_ENFORCE='false'
+if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
+  # Ids tolerate the rc: prefix and CR the other consumers strip (SKILL
+  # tells the agent to write the rc:<id> handle); a reply resolved inside a
+  # Critical-rooted thread is a defect claim too, matching how the feedback
+  # renderers classify replies.
+  BITE_ENFORCE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
+    --slurpfile reviews "${WORKDIR}/rv.json" '
+    (add // []) as $comments
+    | ($reviews | add // []) as $reviews
+    | ($ids | split("\n")
+        | map(sub("^rc:"; "") | sub("\r$"; "")
+          | select(test("^[0-9]+$")) | tonumber)) as $resolved
+    | def cr_attached($x):
+        (($x.pull_request_review_id // null) as $review
+          | $review != null
+          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+      def leading_critical:
+        gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+        | startswith("**[Critical]**");
+      def critical($c):
+        (($c.body // "") | leading_critical)
+        or (($c.in_reply_to_id // null) as $root
+          | $root != null
+          and any($comments[];
+            .id == $root
+            and (((.body // "") | leading_critical) or cr_attached(.))))
+        or cr_attached($c);
+    any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
+    "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
+  [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
+  # A defect claim whose EVERY resolved-Critical thread sits on a test file
+  # is a test-side claim ("this test asserts the wrong behavior"): its fixed
+  # test legitimately passes on the pre-round tree, so it takes the advisory
+  # arm, never the rejection.
+  if [[ "${BITE_ENFORCE}" == 'true' ]]; then
+    TESTSIDE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
+      --slurpfile reviews "${WORKDIR}/rv.json" '
+      (add // []) as $comments
+      | ($reviews | add // []) as $reviews
+      | ($ids | split("\n")
+          | map(sub("^rc:"; "") | sub("\r$"; "")
+            | select(test("^[0-9]+$")) | tonumber)) as $resolved
+      | def cr_attached($x):
+          (($x.pull_request_review_id // null) as $review
+            | $review != null
+            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+        def leading_critical:
+          gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+          | startswith("**[Critical]**");
+        def critical($c):
+          (($c.body // "") | leading_critical)
+          or (($c.in_reply_to_id // null) as $root
+            | $root != null
+            and any($comments[];
+              .id == $root
+              and (((.body // "") | leading_critical) or cr_attached(.))))
+          or cr_attached($c);
+      [ $comments[]
+        | select(.id as $id | $resolved | index($id) != null)
+        | select(critical(.)) | (.path // "") ]
+      | (length > 0) and all(.[];
+          test("\\.(test|spec)\\.") or test("__tests__/|__snapshots__/|test-utils/|^integration-tests/"))' \
+      "${WORKDIR}/rc.json" 2> /dev/null)" || TESTSIDE='false'
+    [[ "${TESTSIDE}" == 'true' ]] && BITE_ENFORCE='advisory'
+  fi
+fi
+if [[ -z "${BITE_SRC}" && ( "${BITE_ENFORCE}" == 'true' || "${BITE_ENFORCE}" == 'advisory' ) ]]; then
+  # A defect-claim round that changed only tests cannot be bite-checked
+  # (a fixed test legitimately passes on the pre-round tree) — surface
+  # that the claim went unverified rather than skipping silently.
+  {
+    echo '🦷 **Gate advisory — this round resolves a Critical/Request-changes finding with test-only changes** (machine-measured): the bite check cannot verify a test-side fix, so the resolution rests on the round summary alone. · 本轮以纯测试改动解决 Critical/Request-changes 反馈（门自动测量）：bite 检查无法验证测试侧修复，该解决仅以轮次摘要为凭。'
+  } >> "${WORKDIR}/gate-advisories.md"
+  echo "🦷 defect-claim round changed only tests — advisory written (bite not applicable)" \
+    | tee -a "${GATE_LOG}"
+fi
+if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
+  BITE_PKGS="$(printf '%s\n' "${BITE_FILES[@]}" "${BITE_SRC}" |
+    bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
+  # The resolver silently drops files owned by NO workspace (repo-level
+  # scripts, root configs): the single-workspace verdict below would then
+  # judge only the workspace subset. Detect strays directly — every input
+  # path must live under the one resolved workspace.
+  BITE_STRAY='false'
+  while IFS= read -r f; do
+    [[ -z "${f}" ]] && continue
+    [[ "${f}" == "${BITE_PKGS}"/* ]] || BITE_STRAY='true'
+  done < <(printf '%s\n' "${BITE_FILES[@]}" "${BITE_SRC}")
+  # Read the test script from the PRE-ROUND tree: that is the manifest the
+  # detached runner will actually execute (the round tree's copy can
+  # differ on infra PRs).
+  BITE_TEST_SCRIPT="$(git show "origin/${BRANCH}:${BITE_PKGS}/package.json" 2> /dev/null |
+    node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).scripts?.test||"")}catch{}})' 2> /dev/null)" || BITE_TEST_SCRIPT=''
+  BITE_SELF_IMPORT='false'
+  if [[ -n "${BITE_PKGS}" && -f "${BITE_PKGS}/package.json" ]]; then
+    BITE_PKG_NAME="$(node -e 'const fs=require("node:fs");process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).name||"")' "${BITE_PKGS}/package.json" 2> /dev/null)" || BITE_PKG_NAME=''
+    if [[ -n "${BITE_PKG_NAME}" ]] &&
+      git grep -qE "[\"']${BITE_PKG_NAME}[\"'/]" "${BRANCH}" -- "${BITE_FILES[@]}" 2> /dev/null; then
+      # A test importing its own package BY NAME resolves through the
+      # package exports into round-built dist/ on the detached tree — the
+      # fix leaks into the "pre-round" run (packages/core has no self-alias
+      # in its vitest config). Fail open.
+      BITE_SELF_IMPORT='true'
+    fi
+  fi
+  if [[ "$(wc -l <<< "${BITE_PKGS}")" -ne 1 || -z "${BITE_PKGS}" || "${BITE_STRAY}" == 'true' ]]; then
+    echo "🦷 bite check skipped: round spans multiple/no workspaces (dist confound)" \
+      | tee -a "${GATE_LOG}"
+  elif [[ "${BITE_TEST_SCRIPT}" != *vitest* ]]; then
+    # Mirrors the deterministic package-test loop's guard: a workspace
+    # without a vitest test script would run NOTHING under --if-present
+    # (or a non-vitest runner whose exit reflects environment health), and
+    # a vacuous "all passed" must never reject a round.
+    echo "🦷 bite check skipped: ${BITE_PKGS} test script is not Vitest" \
+      | tee -a "${GATE_LOG}"
+  elif [[ "${BITE_SELF_IMPORT}" == 'true' ]]; then
+    echo "🦷 bite check skipped: changed tests import ${BITE_PKG_NAME} by package name (dist confound)" \
+      | tee -a "${GATE_LOG}"
+  else
+    echo "🦷 bite check: running this round's changed tests on the pre-round tree" \
+      | tee -a "${GATE_LOG}"
+    git restore -- . 2>> "${GATE_LOG}" || true
+    if git checkout --quiet --detach "origin/${BRANCH}" 2>> "${GATE_LOG}"; then
+      BITE_BIT='false'
+      BITE_RAN='false'
+      if git checkout --quiet "${BRANCH}" -- "${BITE_FILES[@]}" "${BITE_SNAPS[@]}" 2>> "${GATE_LOG}"; then
+        BITE_ARGS=()
+        for f in "${BITE_FILES[@]}"; do
+          BITE_ARGS+=("${f#"${BITE_PKGS}"/}")
+        done
+        BITE_RAN='true'
+        if ! "${BITE_RUNNER}" "${BITE_PKGS}" "${BITE_ARGS[@]}" \
+          > "${GATE_LOG}.bite" 2>&1; then
+          BITE_BIT='true'
+        fi
+      else
+        echo "🦷 bite check skipped: could not overlay the round's tests" \
+          | tee -a "${GATE_LOG}"
+      fi
+      git checkout --quiet --force "${BRANCH}" 2>> "${GATE_LOG}" || {
+        # Same crash contract as the baseline A/B: the tree is no longer the
+        # one under verification, and a plain outcome=failed would advance
+        # the watermark on a verdict the gate never reached. Leave outcome
+        # unset so the next scan retries on a fresh checkout.
+        echo "❌ could not restore the verification tree after the bite check"
+        {
+          echo '**could not restore the verification tree after the bite check**'
+          echo
+          echo '````'
+          tail -c 3000 "${GATE_LOG}" 2> /dev/null
+          echo '````'
+        } > "${WORKDIR}/gate-rejection.md" || true
+        echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+        if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+          echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+        fi
+        exit 1
+      }
+      git reset --quiet 2>> "${GATE_LOG}" || true
+      if [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' && "${BITE_ENFORCE}" == 'true' ]]; then
+        {
+          echo 'Every test this round added or changed ALSO PASSES on the pre-round tree (the branch as pushed, with only your test files overlaid). This round resolves a Critical / Request-changes finding in code, and a defect fix must come with a test that fails before the fix and passes after it — an all-green result here means the claimed defect does not reproduce, no matter who reported it.'
+          echo
+          echo 'If the finding does not reproduce, do not implement it: decline it (for a disproved finding) or escalate it as an open question, attaching this measurement as the evidence.'
+          echo
+          echo 'If the finding was already fixed by an EARLIER commit on this branch (a re-raised item you re-verified), resolve it in a round of its own without bundling new code changes — re-verification is a no-code claim and is never bite-checked.'
+          echo
+          echo 'Changed tests measured:'
+          for bf in "${BITE_FILES[@]}"; do
+            echo "- ${bf//[^A-Za-z0-9._\/ -]/?}"
+          done
+          # No fence here: reject_fix wraps this whole tail in its own
+          # 4-backtick fence, and CommonMark closes a fence at any inner
+          # run of >= the opener's length — so collapse any backtick run in
+          # the branch-controlled runner output below the opener's length.
+          tail -c 1200 "${GATE_LOG}.bite" 2> /dev/null | sed 's/\x60\x60\x60\x60*/```/g'
+        } >> "${GATE_LOG}"
+        reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'
+      elif [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' ]]; then
+        # All-green without rejection: either no defect claim (refactor or
+        # coverage addition — legitimate) or a TEST-SIDE claim, whose fixed
+        # test is EXPECTED to pass pre-round. Say which.
+        if [[ "${BITE_ENFORCE}" == 'advisory' ]]; then
+          {
+            echo '🦷 **Gate advisory — test-side defect claim, changed tests all pass on the pre-round tree** (machine-measured, not agent-authored). Expected when the defect was in the test itself; the resolution rests on the round summary. · 本轮为测试侧缺陷声明，改动的测试在轮前树上全部通过（门自动测量）。若缺陷在测试本身属预期；该解决以轮次摘要为凭。'
+          } >> "${WORKDIR}/gate-advisories.md"
+          echo "🦷 test-side defect claim — advisory written (all-green is the expected shape)" \
+            | tee -a "${GATE_LOG}"
+        else
+          {
+            echo '🦷 **Gate advisory — this round'"'"'s changed tests all pass on the pre-round tree** (machine-measured, not agent-authored). Expected for a refactor or coverage addition; if this round was meant to FIX a defect, that defect did not reproduce. · 本轮改动的测试在轮前树上全部通过（门自动测量，非 agent 文本）。对重构或补充覆盖属正常；若本轮意在修复缺陷，则该缺陷未能复现。'
+          } >> "${WORKDIR}/gate-advisories.md"
+          echo "🦷 changed tests all pass on the pre-round tree — advisory written (no defect claim in this round)" \
+            | tee -a "${GATE_LOG}"
+        fi
+      elif [[ "${BITE_BIT}" == 'true' ]]; then
+        echo "🦷 bite confirmed: at least one changed test fails on the pre-round tree" \
+          | tee -a "${GATE_LOG}"
+      fi
+    else
+      echo "🦷 bite check skipped: could not detach to the pre-round tree" \
+        | tee -a "${GATE_LOG}"
+    fi
+  fi
+fi
 assert_verification_tree
+# In-round self-review record (A/B arm, advisory — af-156). Runs after the
+# tree assertion above so HEAD is the proven verification head, never a
+# bite-check detach that failed to restore. Prepare resolved the arm per
+# PR and it arrives as SELF_REVIEW_ARM; an armed agent writes
+# <workdir>/self-review.json after its commit. The gate trusts none of the
+# file's claims: it validates the shape, binds the record to the tree id
+# of the commit about to be pushed (a tree id, not a diff text — the same
+# on every git version, inside the sandbox or out), and publishes ONE
+# token string the report renders as the autofix-self-review marker.
+# Every token is [a-z0-9=.-]+, so the record can carry neither a marker
+# terminator nor a forged field, and nothing here rejects: the A/B
+# measures, it does not enforce.
+SELF_REVIEW_RECORD='arm=off'
+if [[ "${SELF_REVIEW_ARM:-off}" == 'on' ]]; then
+  SELF_REVIEW_RECORD='arm=on status=missing'
+  if [[ -s "${WORKDIR}/self-review.json" ]]; then
+    SELF_REVIEW_RECORD="$(jq -r '
+      select(type == "object" and .version == 1)
+      | select((.status // "") | IN("converged", "findings-fixed", "deadline", "review-failed", "skipped-small", "skipped-deadline"))
+      | select(.passes | type == "number" and . >= 0 and . == floor)
+      | select((.findings | type) == "object"
+          and all(.findings.act, .findings.declined, .findings.deferred;
+                  type == "number" and . >= 0 and . == floor))
+      | select(.minutes | type == "number" and . >= 0)
+      | select(((.status // "") | startswith("skipped-"))
+          or ((.tree // "") | type == "string" and test("^[0-9a-f]{40}$")))
+      | "arm=on status=\(.status) passes=\(.passes) act=\(.findings.act) declined=\(.findings.declined) deferred=\(.findings.deferred) minutes=\(.minutes | floor)"
+    ' "${WORKDIR}/self-review.json" 2> /dev/null)" || SELF_REVIEW_RECORD=''
+    SELF_REVIEW_RE='^arm=on status=[a-z-]+ passes=[0-9]+ act=[0-9]+ declined=[0-9]+ deferred=[0-9]+ minutes=[0-9]+$'
+    if [[ ! "${SELF_REVIEW_RECORD}" =~ ${SELF_REVIEW_RE} ]]; then
+      SELF_REVIEW_RECORD='arm=on status=invalid'
+    elif [[ "${SELF_REVIEW_RECORD}" != *' status=skipped-'* ]]; then
+      # Binding: the tree id the skill recorded after its commit must be
+      # the tree of what is about to be pushed. A mismatch is not a
+      # rejection — it marks the record so the A/B can discount a pass
+      # whose record does not describe the pushed commit.
+      CLAIMED_TREE="$(jq -r '.tree // ""' "${WORKDIR}/self-review.json" 2> /dev/null || true)"
+      ACTUAL_TREE="$(git rev-parse 'HEAD^{tree}' 2> /dev/null)" || ACTUAL_TREE=''
+      if [[ -n "${ACTUAL_TREE}" && "${CLAIMED_TREE}" == "${ACTUAL_TREE}" ]]; then
+        SELF_REVIEW_RECORD="${SELF_REVIEW_RECORD} bound=true"
+      else
+        SELF_REVIEW_RECORD="${SELF_REVIEW_RECORD} bound=false"
+      fi
+    fi
+  fi
+  {
+    echo "🪞 **Gate advisory — in-round self-review** (machine-read, not agent prose): \`${SELF_REVIEW_RECORD}\`. \`bound=false\` means the record does not describe the commit being pushed. · 轮内自审（门自动读取，非 agent 文本）：\`${SELF_REVIEW_RECORD}\`。\`bound=false\` 表示该记录描述的不是本次推送的提交。"
+  } >> "${WORKDIR}/gate-advisories.md"
+  echo "🪞 self-review record: ${SELF_REVIEW_RECORD}" | tee -a "${GATE_LOG}"
+fi
+# A conflict verdict must STOP BLOCKED: completing as fixed would push the
+# contested code under the PAT while the report posts the park marker —
+# the exact outcome the routing check above exists to prevent. The routing
+# check cannot see this shape (a planted handoff.md satisfies it), so
+# refuse at the push boundary. NON-retryable: re-audit, don't repair.
+if [[ "${AUDIT_VERDICT:-}" == 'conflict' ]]; then
+  reject_fix 'growth-audit verdict is conflict but the round completed as fixed; conflict must STOP BLOCKED (no push)' 'false' 'false'
+fi
 echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
+echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+# Published only on the fixed path: the marker measures pushed rounds.
+echo "self_review=${SELF_REVIEW_RECORD}" >> "${GITHUB_OUTPUT}"
+if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+  echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+fi

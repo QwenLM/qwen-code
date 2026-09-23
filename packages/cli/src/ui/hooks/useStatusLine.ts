@@ -6,12 +6,15 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
+import wrapAnsi from 'wrap-ansi';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { getReasoningForDisplay } from '../../acp-integration/model-configuration.js';
 import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
+import { useTerminalSize } from './useTerminalSize.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
@@ -20,6 +23,7 @@ import {
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
   normalizeStatusLinePresetConfig,
   type StatusLinePresetConfig,
+  type StatusLinePresetItemId,
 } from '../statusLinePresets.js';
 
 /**
@@ -100,6 +104,39 @@ interface StatusLineCommandConfig {
   // When true, the built-in context usage indicator in the footer right
   // section is hidden. Useful when the statusline already shows context info.
   hideContextIndicator?: boolean;
+}
+
+// Preset items that already render context usage. When one of them is active
+// the footer indicator would show the same information twice (issue #8695).
+const CONTEXT_PRESET_ITEM_IDS = new Set<StatusLinePresetItemId>([
+  'context-used',
+  'context-remaining',
+]);
+
+/**
+ * Resolves the tri-state `hideContextIndicator` setting:
+ * - explicit `true`/`false` always wins, so users can force either behavior;
+ * - when unset, a preset status line that already shows context usage hides
+ *   the footer indicator to avoid duplicating it;
+ * - callers can keep the automatic indicator when their layout may clip it;
+ * - when unset for a `command` status line, the indicator stays visible — the
+ *   command output is opaque, so we never guess what it contains.
+ */
+export function resolveHideContextIndicator(
+  config: StatusLineConfig | undefined,
+  isContextOverLimit = false,
+  keepAutomaticIndicator = false,
+): boolean {
+  if (typeof config?.hideContextIndicator === 'boolean') {
+    return config.hideContextIndicator;
+  }
+  if (isContextOverLimit || keepAutomaticIndicator) {
+    return false;
+  }
+  if (config?.type === 'preset') {
+    return config.items.some((item) => CONTEXT_PRESET_ITEM_IDS.has(item));
+  }
+  return false;
 }
 
 type StatusLineConfig = StatusLineCommandConfig | StatusLinePresetConfig;
@@ -198,7 +235,10 @@ function buildMetricsPayload(
  * on a timer so external data (git branch, quota, clock) stays fresh even
  * when no Agent state has changed.
  */
-export function useStatusLine(): {
+export function useStatusLine(
+  keepAutomaticContextIndicator = false,
+  availableWidth?: number,
+): {
   lines: string[];
   useThemeColors: boolean;
   respectUserColors: boolean;
@@ -208,6 +248,7 @@ export function useStatusLine(): {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { columns: terminalWidth } = useTerminalSize();
 
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -218,7 +259,9 @@ export function useStatusLine(): {
       ? statusLineConfigOverride
       : settingsStatusLineConfig;
   const statusLineCommand =
-    statusLineConfig?.type === 'command' ? statusLineConfig.command : undefined;
+    !config.getShellExecutionSandbox?.() && statusLineConfig?.type === 'command'
+      ? statusLineConfig.command
+      : undefined;
   const statusLinePreset =
     statusLineConfig?.type === 'preset' ? statusLineConfig : undefined;
   const statusLineSettingsVersion = uiState.statusLineSettingsVersion ?? 0;
@@ -274,7 +317,9 @@ export function useStatusLine(): {
   // Reasoning effort lives on the content-generator config, not uiState, so it
   // isn't a natural render trigger. Track it as a string key so the status line
   // recomputes immediately when `/effort` changes it mid-session.
-  const reasoningConfig = config.getContentGeneratorConfig()?.reasoning;
+  const generationConfig = config.getContentGeneratorConfig();
+  const reasoningConfig =
+    generationConfig && getReasoningForDisplay(config, generationConfig);
   const reasoningEffortKey =
     reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
   const prevStateRef = useRef<{
@@ -337,7 +382,11 @@ export function useStatusLine(): {
       currentDir: string,
       branch: string | undefined,
     ) => {
-      if (!preset.items.includes('pull-request-number') || !branch) {
+      if (
+        configRef.current.getShellExecutionSandbox?.() ||
+        !preset.items.includes('pull-request-number') ||
+        !branch
+      ) {
         clearPullRequestLookup();
         return;
       }
@@ -421,7 +470,9 @@ export function useStatusLine(): {
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
         modelDisplayName,
-        reasoning: contentGeneratorConfig?.reasoning,
+        reasoning:
+          contentGeneratorConfig &&
+          getReasoningForDisplay(cfg, contentGeneratorConfig),
         currentDir,
         branch: ui.branchName,
         pullRequestNumber: pullRequestNumberRef.current,
@@ -732,6 +783,18 @@ export function useStatusLine(): {
     respectUserColors:
       statusLineConfig?.type === 'command' &&
       statusLineConfig.respectUserColors === true,
-    hideContextIndicator: statusLineConfig?.hideContextIndicator === true,
+    hideContextIndicator: resolveHideContextIndicator(
+      statusLineConfig,
+      uiState.sessionStats.lastPromptTokenCount >
+        (config.getContentGeneratorConfig()?.contextWindowSize ?? Infinity),
+      keepAutomaticContextIndicator ||
+        output.some(
+          (line) =>
+            wrapAnsi(line, Math.max(1, availableWidth ?? terminalWidth - 4), {
+              trim: false,
+              hard: true,
+            }).split('\n').length > MAX_STATUS_LINES,
+        ),
+    ),
   };
 }

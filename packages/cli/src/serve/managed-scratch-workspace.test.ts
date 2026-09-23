@@ -13,16 +13,30 @@ import {
   rm,
   symlink,
 } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createManagedScratchDirectory,
   isManagedScratchChild,
   isScratchRootCompatible,
   prepareManagedScratchRoot,
 } from './managed-scratch-workspace.js';
+
+// Lets a test pose as a volume that exposes no inode numbers: lstatSync
+// reports ino 0 while enabled, everything else delegates to the real thing.
+const inoZeroVolume = vi.hoisted(() => ({ enabled: false }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const lstatSync = ((filePath: string) => {
+    const stats = actual.lstatSync(filePath);
+    if (inoZeroVolume.enabled) stats.ino = 0;
+    return stats;
+  }) as typeof actual.lstatSync;
+  return { ...actual, lstatSync, default: { ...actual, lstatSync } };
+});
 
 const cleanup: string[] = [];
 
@@ -110,16 +124,43 @@ describe('managed scratch workspace boundary', () => {
     );
   });
 
+  it('rejects a root whose identity cannot be inode-verified', async () => {
+    // Volumes that expose no inode numbers (FAT/exFAT, some SMB mounts)
+    // cannot identity-pin the root, so a later same-path replacement would
+    // be indistinguishable — acceptance itself must fail closed there.
+    const parent = await mkdtemp(join(realpathSync.native(tmpdir()), 'qws-'));
+    cleanup.push(parent);
+    const rootPath = join(parent, 'root');
+    await mkdir(rootPath, { mode: 0o700 });
+    inoZeroVolume.enabled = true;
+    try {
+      expect(() => prepareManagedScratchRoot(rootPath, [])).toThrow(
+        /cannot be verified/,
+      );
+    } finally {
+      inoZeroVolume.enabled = false;
+    }
+  });
+
   it('fails closed if the accepted root is replaced', async () => {
     const parent = await mkdtemp(join(realpathSync.native(tmpdir()), 'qws-'));
     cleanup.push(parent);
     const rootPath = join(parent, 'root');
-    const root = prepareManagedScratchRoot(rootPath, []);
-    await rename(rootPath, join(parent, 'old-root'));
     await mkdir(rootPath, { mode: 0o700 });
-
-    await expect(createManagedScratchDirectory(root)).rejects.toThrow(
-      /identity changed/,
-    );
+    if (Number(lstatSync(rootPath).ino) === 0) {
+      // On a volume that exposes no inode numbers the root cannot be
+      // identity-pinned, so acceptance fails closed before any swap can be
+      // staged — assert that rejection instead.
+      expect(() => prepareManagedScratchRoot(rootPath, [])).toThrow(
+        /cannot be verified/,
+      );
+    } else {
+      const root = prepareManagedScratchRoot(rootPath, []);
+      await rename(rootPath, join(parent, 'old-root'));
+      await mkdir(rootPath, { mode: 0o700 });
+      await expect(createManagedScratchDirectory(root)).rejects.toThrow(
+        /identity changed/,
+      );
+    }
   });
 });

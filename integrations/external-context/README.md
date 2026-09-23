@@ -2,33 +2,50 @@
 
 This private Qwen Code integration connects one interactive CLI process to one
 administrator-bound external context corpus without changing Qwen Core. It has
-two mutually exclusive retrieval-only profiles:
+three managed deployment variants:
 
-- **On-demand:** version 1 configuration and the MCP
+- **Read-only on-demand:** version 1 configuration and the MCP
   `context_search({ query })` tool.
+- **Mem0 write:** version 1 Mem0 configuration, the on-demand search tool, and
+  the optional `context_remember({ content })` tool with a separate
+  content-visible confirmation Hook.
 - **Auto-recall:** version 2 configuration and an administrator-installed
   `UserPromptSubmit` Hook, with no external-context MCP server.
 
-The built-in adapters support Mem0 Platform V3 search and a small Generic HTTP
-Search V1 contract for existing knowledge or RAG services. There are no write
-tools, personal memory, trusted user identity, per-document ACLs, or
-tamper-resistant audit.
+The built-in adapters support Mem0 Platform V3, the stock self-hosted Mem0
+REST server, the Aliyun PolarDB Mem0 management API, and a small Generic HTTP
+Search V1 contract for existing knowledge or RAG services. Only Mem0 providers
+with a verified direct-import operation have an optional write path.
+There is no generic ingestion protocol, personal memory,
+trusted user identity, per-document ACL, or tamper-resistant audit.
+
+Provider teams that need a separately owned and released integration should
+implement the
+[External Context Provider Extension Profile v1](../../docs/design/external-context-provider-extensions.md).
+Modern services can publish a Remote MCP Extension; services with an existing
+REST API can copy the local adapter example under
+`examples/provider-extension-local/`. These provider-owned extensions do not
+add cases to this workspace's private Provider factory.
 
 Use the governed Gateway/Orchestrator Profile described in #7449 when those
 controls are required.
 
 ## Trust boundary
 
-In the on-demand profile, the model can provide only the search query. In the
-auto-recall profile, the query is derived only from Qwen's optional
-`submitted_prompt` provenance, captured before model-bound expansions.
-Provider type, endpoint, credential, Mem0 `app_id`, and all other corpus
-selectors are fixed before either process starts.
+In the read-only on-demand profile, the model can provide only the search
+query. In the Mem0 write variant, it can additionally provide only the exact
+content to store. In the auto-recall profile, the query is derived only from
+Qwen's optional `submitted_prompt` provenance, captured before model-bound
+expansions.
+Provider type, endpoint, credential, Mem0 `app_id`, `user_id`, `agent_id`, and
+all other corpus selectors are fixed before either process starts.
 
 The actual corpus-isolation boundary is the provider-side credential, project,
 index, or corpus. A Mem0 `app_id` or any other client-supplied filter is
-classification, not authorization. The credential must be restricted to the
-intended corpus and should be read-only where the provider supports that.
+classification, not authorization. Read-only deployments should use a
+read-only credential where the provider supports one. The write variant
+requires a credential that can add memories and therefore grants same-UID code
+access to that capability outside Qwen as well.
 
 For on-demand retrieval, the extension manifest alone is not a managed binding.
 Qwen merges MCP servers by name, and a settings, project, or command-line
@@ -49,13 +66,19 @@ prevents same-name MCP configuration collisions; it is not a process sandbox.
 Use the governed profile when those inputs may be hostile or when credentials
 and process execution must be isolated.
 
-The extension omits MCP `readOnlyHint` because a provider search may record
+The search tool omits MCP `readOnlyHint` because a provider search may record
 access metadata or otherwise have provider-side read effects. It exposes no
-explicit mutation operation, but the Qwen process still passes search queries
-to an external service, so this integration is not a DLP boundary. Credentials
+explicit mutation in the default extension manifest. The managed Mem0 write
+variant exposes an explicit add operation. Both variants pass content to an
+external service, so this integration is not a DLP boundary. Credentials
 inherited by Qwen may also be visible to same-UID processes and tools. Use the
-governed profile when the credential or outbound-query policy must be isolated
-from the CLI user.
+governed profile when the credential, write authorization, or outbound-content
+policy must be isolated from the CLI user.
+
+Retrieved context remains untrusted reference data if the model proposes
+storing it back into the shared corpus. A user approval does not upgrade that
+trust label. Review the complete write carefully because persisting retrieved
+or injected text can expose it to later users and model turns.
 
 The managed-settings example allows Qwen to invoke search without per-call
 confirmation. It is on-demand rather than prompt-triggered, but it is not
@@ -74,9 +97,9 @@ confirmation; use the governed profile when that is required.
    select another corpus.
 2. Copy the applicable provider configuration from `examples/` to an
    administrator-owned location outside the repository that the CLI user
-   cannot modify. Configure `apiKeyEnv` or `tokenEnv` if needed, then set the
-   referenced environment variable to the credential. `timeoutMs` defaults to
-   5000 and may be between 1 and 30000 milliseconds.
+   cannot modify. Configure `apiKeyEnv`, `credentialEnv`, or `tokenEnv` if
+   needed, then set the referenced environment variable to the credential.
+   `timeoutMs` defaults to 5000 and may be between 1 and 30000 milliseconds.
 3. Have the managed launcher set `QWEN_EXTERNAL_CONTEXT_CONFIG` to the absolute
    configuration path.
 4. From the Qwen Code checkout, install dependencies and build this workspace:
@@ -106,7 +129,7 @@ confirmation; use the governed profile when that is required.
    through an environment-aware dispatcher. If the provider requires an
    egress proxy, the launcher must include the administrator-approved proxy
    variables in that clean environment. Include `localhost`, `127.0.0.1`, and
-   `[::1]` in `NO_PROXY` when using the loopback Generic HTTP provider.
+   `[::1]` in `NO_PROXY` when using any loopback provider endpoint.
 
 6. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
    of `examples/managed-settings.json` only inside this managed launcher; do not
@@ -133,15 +156,94 @@ managed settings disable Qwen's `/cd` command as an accidental-misuse guard,
 but cannot prevent every same-UID action. To switch corpora, terminate the old
 Qwen session and start a new one with a new managed configuration path.
 
+### Managed Mem0 write variant
+
+This variant is an explicit opt-in for trusted collaborators who need to save
+repository-shared notes. It uses Mem0 Direct Import with `infer: false`, so the
+validated input is sent unchanged as one `user` message. Direct Import skips
+Mem0 inference and duplicate detection. Repeating an approved write may create
+another copy of the same content.
+
+1. Provision a dedicated Mem0 Project for the repository. Do not share its key
+   with another security domain. Mem0 `app_id` remains classification within
+   the Project, not authorization.
+2. Copy `examples/mem0-write.json` to an administrator-owned path and set the
+   referenced `MEM0_API_KEY`. `write` is accepted only for version 1 Mem0
+   configurations. Generic HTTP and version 2 configurations reject it. The
+   top-level `timeoutMs` applies to both search and write; choose a write budget
+   appropriate for the deployment because a client timeout produces an
+   ambiguous `unknown` result.
+3. Build the workspace so both `dist/main.js` and
+   `dist/write-confirmation.js` exist.
+4. Start Qwen with an administrator-owned copy of
+   `examples/managed-mem0-write-mcp.json`. The default extension manifest stays
+   search-only and does not enable `context_remember`. Register this managed
+   MCP server under exactly `external-context`; the Hook matcher uses
+   `mcp__external-context__context_remember`, and the command ignores other
+   tools if a matcher is accidentally broadened. Another server name would
+   therefore prevent the content confirmation from running.
+5. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
+   of `examples/managed-mem0-write-system-settings.json`. The provided system
+   settings deliberately omit the Hook. Put the applicable POSIX or Windows
+   managed write user-settings example in a dedicated administrator-controlled
+   `QWEN_HOME/settings.json`. User-scope Hooks take precedence over legacy
+   merged Hooks, but a system-scope Hook can still run when user Hooks are
+   absent, so audit both scopes and avoid additional matchers for this command.
+6. Use the same fixed-path, no-user-arguments, environment-allowlist launcher
+   requirements as the read-only profile. In addition, pin the Hook and
+   dedicated `QWEN_HOME`; refuse headless, ACP, `serve`, resume/continue, and
+   startup YOLO modes; and set `QWEN_CODE_MEMORY_TEAM=0`,
+   `QWEN_CODE_MEMORY_TEAM_SYNC=0`, `QWEN_TELEMETRY_ENABLED=0`,
+   `QWEN_TELEMETRY_LOG_PROMPTS=0`,
+   `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES=0`, and
+   `QWEN_USAGE_STATISTICS_ENABLED=0`.
+   On Windows, the approved `PATH` must resolve `powershell` to the system
+   executable, and PowerShell profiles must be absent or
+   administrator-controlled.
+
+In regular interactive mode, the `permissions.ask` rule presents Qwen's normal
+server/tool confirmation and the `PreToolUse` Hook then presents a second
+confirmation containing a reversible, safely escaped representation of the
+complete text. The Hook confirmation is rendered literally rather than as
+inline Markdown, so formatting markers and link targets remain visible. If the
+text exceeds the constrained terminal area, Qwen reports the hidden line count
+and `Ctrl-S` reveals the remaining confirmation content. YOLO
+bypasses the ordinary permission rule, but a working Hook still asks once.
+Plan mode, unknown permission modes, malformed Hook input, and environments
+unable to confirm are denied. Extra tool arguments are ignored consistently by
+the Hook and MCP schema and never reach Mem0. Hook transport failure follows Qwen's existing
+fail-open semantics, so this is a user-experience safeguard, not an enforceable
+authorization boundary. Strict approval requires the governed profile.
+
+The confirmation Hook code does not read the Provider configuration or
+credential, but Qwen command Hooks inherit ordinary third-party credentials
+from the parent environment. The Hook process may therefore receive the Mem0
+key in its environment. The Direct Profile does not provide credential
+isolation from administrator-pinned child processes or same-UID code.
+
+`context_remember` accepts at most 4000 Unicode code points, preserves leading
+and trailing whitespace, and rejects empty/invisible-only text and malformed
+UTF-16. It never accepts a model-selected tenant, Project, `app_id`, filter, or
+metadata. Each approval performs exactly one request; the integration does not
+pre-search, retry, poll, cache, or deduplicate.
+
+Mem0 V3 Add is asynchronous in normal operation. `PENDING` with a UUID
+`event_id` is therefore the expected successful response and returns
+`accepted`, not `stored`. A valid synchronous `SUCCEEDED` response returns
+`stored` as a defensive compatibility path. Explicit `FAILED` and HTTP 400,
+401, 403, or 404 responses return a stable failed result. A timeout,
+cancellation, redirect, other HTTP status, broken response, unexpected status,
+or invalid operation identifier returns `unknown` and an MCP error warning the
+model not to retry automatically, because Mem0 may already have accepted the
+write. Cancellation therefore does not prove that no memory was created.
+
 ### Auto-recall profile
 
-Auto-recall sends a sanitized best-effort query to the external provider for
-each eligible ordinary interactive prompt. It requires a non-empty
-`submitted_prompt` captured by the supported interactive TUI before reminders,
-file and resource expansion, extension output, and vision expansion. It never
-falls back to the legacy model-bound `prompt`. Missing or invalid provenance
-fails closed before configuration or credentials are read. Common credential
-shapes are removed from the submitted text, but this is not DLP.
+This managed Auto Profile supports a fresh interactive TTY launcher, as constrained below. It sends a sanitized best-effort query to the external provider for eligible submissions. The Hook requires a non-empty `submitted_prompt` and never falls back to legacy `prompt`.
+
+The field itself has a broader producer contract than this managed launcher: supported TUI and first-turn headless submissions, and explicitly declared fresh non-channel turns on the ACP path used by ACP clients, `serve`, and daemon hosts. ACP declarations are opt-in per request; ordinary clients without them, internal background dispatches, and all channel messages (including human messages) do not trigger recall. See [UserPromptSubmit](../../docs/users/features/hooks.md#userpromptsubmit) for the current field contract. This does not expand this Direct Profile's supported launchers. The original [Direct Auto Recall design](../../docs/design/direct-external-context-auto-recall.md) describes its TTY deployment constraints; its producer enumeration predates subsequent headless and ACP support.
+
+Missing or invalid provenance fails closed before configuration or credentials are read. Common credential shapes are removed from the submitted text, but this is not DLP.
 
 1. Copy `examples/auto-recall-mem0.json` or
    `examples/auto-recall-generic-http.json` to an
@@ -195,7 +297,7 @@ fails open as `{}` after the Node entry point starts. Failure to spawn the
 pinned Node process and a Qwen outer command timeout retain Qwen's blocking
 command-Hook semantics. The Provider timeout defaults to 1500ms and is capped
 at 5000ms; the internal Hook wall-clock budget is 6500ms and the managed Qwen
-command timeout is 8000ms. Each Hook invocation destroys its own proxy
+command timeout is 8 seconds. Each Hook invocation destroys its own proxy
 dispatcher after the attempted retrieval so stalled proxy connections cannot
 retain the child process; the long-running MCP process keeps its dispatcher.
 
@@ -260,7 +362,14 @@ The adapter calls `POST /v3/memories/search/` with the configured `app_id`,
 `top_k: 5`, `threshold: 0.1`, and `rerank: false`. The API key's effective
 Mem0 Project must already be restricted to the intended corpus; a different
 `app_id` in the same broadly accessible Project does not establish isolation.
-This extension does not call Mem0 add, update, or delete APIs.
+The default extension manifest and read-only examples do not enable writes.
+
+The managed write variant additionally calls `POST /v3/memories/add/` with one
+exact user message, the configured `app_id`, and `infer: false`. It exposes no
+get-all, update, delete, delete-all, entity, event, or Project-management tool.
+Mem0 Direct Import does not perform duplicate detection, and the asynchronous
+Add API can leave the client unable to determine whether a write was accepted.
+The integration therefore never retries an ambiguous write.
 
 Mem0 Memory Decay is opt-in and off by default. If enabled, search reinforces
 returned memories, updates access history, and can affect later ranking. Keep
@@ -268,16 +377,113 @@ it disabled when search must have no semantic provider-side state change.
 Provider audit or access logs may still be retained. See
 [Mem0 Memory Decay](https://docs.mem0.ai/platform/features/memory-decay).
 
+## Versioned Mem0-compatible providers
+
+New Mem0-compatible deployments use one `mem0` provider type and select a
+reviewed built-in wire contract through `preset`. The endpoint is split into an
+`origin` and optional static `basePath`, while the credential and fixed scope
+remain administrator-owned:
+
+```json
+{
+  "type": "mem0",
+  "preset": "aliyun-polardb-mysql-2026-08",
+  "endpoint": {
+    "origin": "https://memory.example.com",
+    "basePath": ""
+  },
+  "credentialEnv": "MEM0_API_KEY",
+  "scope": {
+    "userId": "repository-memory",
+    "agentId": "qwen-code"
+  }
+}
+```
+
+The built-in presets are:
+
+- `mem0-platform-v3`: `/v3` Platform API, `Authorization: Token`, fixed
+  `appId`.
+- `mem0-oss-rest-2026-08`: stock self-hosted Mem0 `/search` and `/memories`,
+  `X-API-Key`, fixed `userId`, and optional `agentId`.
+- `aliyun-polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
+  `/v1/memories`, `Authorization: Token`, fixed `userId`, and optional
+  `agentId`.
+
+#### Connecting a PolarDB Mem0 instance
+
+After the instance finishes initializing, obtain its private or public address
+and `secret.access.apikey` from the console. Public access must be requested
+separately, and the application whitelist must allow the client independently
+of any PolarDB cluster whitelist. The console endpoint is plain HTTP with an IP
+address and port rather than a TLS name, so pasting it into the HTTPS example
+fails the URL policy: the credential, queries, and returned memories would
+otherwise cross the network in cleartext.
+
+`examples/polardb-mem0-loopback.json` is the path that needs no policy opt-in.
+Use a jump host that can reach the endpoint and is allowed by the application
+whitelist, then relay the endpoint to loopback:
+
+```bash
+ssh -N -L 127.0.0.1:8080:<endpoint-host>:<endpoint-port> <jump-host>
+export MEM0_API_KEY=<the console's secret.access.apikey>
+```
+
+Then copy that example to an administrator-owned path, replace
+`<your-user-id>`, and point `QWEN_EXTERNAL_CONTEXT_CONFIG` at it. Loopback
+HTTP needs no `allowInsecureHttp` opt-in. A new instance has no searchable
+memories; seed it through the PolarDB API or the explicitly enabled managed
+write profile before validating search.
+
+Two alternatives, in preference order: bind a domain to the instance and
+terminate TLS, then use `examples/polardb-mem0.json`; or, only when the operator
+explicitly accepts cleartext traffic on an isolated trusted network, keep the
+console endpoint and add `"allowInsecureHttp": true`.
+
+Put the API key in the environment variable named by `credentialEnv`, never in
+the configuration file. PolarDB documents optional `agentId` at the request
+root; use a stable value when memories must be isolated by application.
+
+The preset records the whole protocol, not just one API version. Search always
+sends a maximum of five through the preset's `top_k` field. The engine does not
+probe versions or fall back to a different preset. See
+`examples/polardb-mem0.json`, `examples/polardb-mem0-loopback.json`,
+`examples/mem0-oss.json`, and the
+[preset design](../../docs/design/direct-external-context-mem0-presets.md).
+
+Non-loopback plain HTTP remains an explicit `allowInsecureHttp` endpoint
+opt-in. Because it sends credentials, queries, and memory content in cleartext,
+prefer HTTPS or a loopback relay such as `ssh -L`. The HTTPS example and the
+loopback HTTP example both omit the non-loopback insecure-HTTP opt-in.
+
+Preset scope is fixed in configuration and never supplied by the model. A
+missing required scope or an unused configured scope fails startup. The
+examples are read-only as shipped: `context_remember` is registered only when
+the version 1 configuration carries `"write": { "enabled": true }` and the
+selected preset defines verified direct import. Enabling writes must reuse the
+managed write-confirmation Hook and permissions above.
+
 ## Rollout and rollback
 
-Start with the pinned on-demand MCP for one workspace and validate search
-quality and provenance. Enable auto-recall only after the administrator accepts
-automatic query forwarding, first with a fake provider, then one trusted
-repository, and finally a small team. Do not run both profiles in one process.
+Start with the pinned read-only on-demand MCP for one workspace and validate
+search quality and provenance. For writes, first run the repository's
+interactive fake-Mem0 test harness, then progress through an isolated temporary
+Mem0 Project, one trusted repository, and a small team. The shipped Mem0
+Platform configuration always targets Mem0 Platform, and only the test harness
+injects a local endpoint. A versioned `mem0` configuration instead points at
+the operator-selected endpoint — plain HTTP included when
+`allowInsecureHttp` is on — so treat that endpoint, credential, preset, scope,
+and network policy as one immutable access boundary and validate search
+read-only before enabling writes. Enable auto-recall only after the
+administrator accepts automatic query forwarding. Do not run auto-recall and
+an on-demand MCP in one process, and do not expose this server alongside a
+second Mem0 Extension for the same corpus.
 
 Removing the pinned MCP or auto-recall Hook from the managed launcher rolls
 back the Qwen integration; local on-demand trials can instead disable or remove
 the extension. Restore a preserved v1 configuration before rolling back to a
-binary that does not understand v2. The integration does not call explicit
-mutation or deletion APIs, but rollback does not remove provider-side search
-logs or access metadata.
+binary that does not understand v2. To roll back the write variant, remove its
+MCP configuration, Hook, and credential, restore the read-only v1
+configuration, and restart Qwen. Rollback does not delete memories already
+accepted by Mem0 or remove provider-side search logs and access metadata;
+administrators must handle existing records at the Provider.

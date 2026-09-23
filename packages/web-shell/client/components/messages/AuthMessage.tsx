@@ -1,25 +1,55 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  useDaemonSessionOwnerGuard,
   useWorkspaceActions,
   type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderCatalog,
   type DaemonAuthProviderDescriptor,
-} from '@qwen-code/webui/daemon-react-sdk';
+  type DaemonAuthProviderInstallRequest,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { Checkbox } from '../ui/checkbox';
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from '../ui/field';
+import { Input } from '../ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
+import { isVoiceModelId } from '../../voice/voiceModels';
+import { Switch } from '../ui/switch';
 import styles from './AuthMessage.module.css';
+
+const TOS_PRIVACY_URL =
+  'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
 type AuthGroup = DaemonAuthProviderCatalog['groups'][number];
-type AuthStep = 'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig';
-type AdvancedOptionValue =
-  | 'thinking'
-  | 'modality'
-  | 'image'
-  | 'video'
-  | 'audio'
-  | 'pdf'
-  | 'context';
+type ModelWireApi = 'chat-completions' | 'responses';
+type AuthStep =
+  | 'protocol'
+  | 'wireApi'
+  | 'baseUrl'
+  | 'apiKey'
+  | 'models'
+  | 'advancedConfig';
 
 interface AuthMessageProps {
   onMessage: (text: string, type?: 'status' | 'error') => void;
@@ -54,9 +84,14 @@ function getProtocolOptions(
   ];
 }
 
-function defaultBaseUrl(protocol: string): string {
+function defaultBaseUrl(protocol: string, wireApi?: ModelWireApi): string {
   if (protocol === 'anthropic') return 'https://api.anthropic.com/v1';
   if (protocol === 'gemini') return 'https://generativelanguage.googleapis.com';
+  // The Responses wire dials the /v1-less default endpoint (the pipeline
+  // appends /v1/responses itself); the Chat Completions wire keeps /v1.
+  if (protocol === 'openai-responses' || wireApi === 'responses') {
+    return 'https://api.openai.com';
+  }
   return 'https://api.openai.com/v1';
 }
 
@@ -77,6 +112,7 @@ function titleForStep(
   t: ReturnType<typeof useI18n>['t'],
 ): string {
   if (step === 'protocol') return t('auth.step.protocol');
+  if (step === 'wireApi') return t('auth.step.api');
   if (step === 'baseUrl') {
     return provider.uiLabels?.baseUrlStepTitle ?? t('auth.step.baseUrl');
   }
@@ -85,14 +121,13 @@ function titleForStep(
   return t('auth.step.advanced');
 }
 
-function maskApiKey(
-  value: string,
-  t?: (key: string, vars?: Record<string, string | number>) => string,
-): string {
-  const trimmed = value.trim();
-  if (!trimmed) return t ? t('auth.notSet') : '(not set)';
-  if (trimmed.length <= 6) return '***';
-  return `${trimmed.slice(0, 3)}...${trimmed.slice(-4)}`;
+function invalidTokenLimit(value: string): boolean {
+  return (
+    value.trim() !== '' &&
+    (!/^\d+$/.test(value.trim()) ||
+      Number(value) < 1 ||
+      Number(value) > 10_000_000)
+  );
 }
 
 function normalizeModelIds(value: string): string[] {
@@ -108,7 +143,14 @@ function normalizeModelIds(value: string): string[] {
 
 export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const { t } = useI18n();
+  const fieldId = useId();
+  const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
+  const ownerRef = useRef(sessionOwnerGuard.capture());
+  const ownerChanged = !ownerRef.current.isCurrent();
+  if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
+  const saveOperationRef = useRef(0);
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
   const [providerIndex, setProviderIndex] = useState(0);
@@ -120,6 +162,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     null,
   );
   const [protocol, setProtocol] = useState('openai');
+  const [wireApi, setWireApi] = useState<ModelWireApi>('chat-completions');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState('');
@@ -129,7 +172,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const [modalityVideo, setModalityVideo] = useState(true);
   const [modalityAudio, setModalityAudio] = useState(false);
   const [modalityPdf, setModalityPdf] = useState(false);
+  const [purpose, setPurpose] = useState<'chat' | 'image' | 'voice'>('chat');
   const [contextWindow, setContextWindow] = useState('');
+  const [maxTokens, setMaxTokens] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,23 +210,47 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       );
   }, [catalog, groupId, groups]);
 
-  const steps = useMemo(() => provider?.steps ?? [], [provider?.steps]);
+  const steps = useMemo(
+    () =>
+      (provider?.steps ?? []).filter(
+        (step) => step !== 'wireApi' || protocol === 'openai',
+      ),
+    [provider?.steps, protocol],
+  );
+  const protocolOptions = useMemo(
+    () =>
+      getProtocolOptions(t).filter((option) =>
+        (provider?.protocolOptions ?? [provider?.protocol]).includes(
+          option.value,
+        ),
+      ),
+    [provider, t],
+  );
+  const apiOptions: Array<Option<ModelWireApi>> = [
+    { value: 'chat-completions', label: t('auth.api.chatCompletions') },
+    { value: 'responses', label: t('auth.api.responses') },
+  ];
   const currentStep = steps[stepIndex] as AuthStep | undefined;
   const shouldReview = provider?.showAdvancedConfig === true;
-  const advancedOptionValues = useMemo<AdvancedOptionValue[]>(
-    () =>
-      modality
-        ? ['thinking', 'modality', 'image', 'video', 'audio', 'pdf', 'context']
-        : ['thinking', 'modality', 'context'],
-    [modality],
-  );
-  const advancedContextIndex = advancedOptionValues.indexOf('context');
   const isInputStep =
     currentStep === 'apiKey' ||
     currentStep === 'models' ||
     (currentStep === 'baseUrl' && !Array.isArray(provider?.baseUrl));
 
   const [optionIndex, setOptionIndex] = useState(0);
+
+  useEffect(() => {
+    if (currentStep === 'wireApi') {
+      setOptionIndex(wireApi === 'responses' ? 1 : 0);
+    }
+  }, [wireApi, currentStep]);
+
+  useEffect(() => {
+    if (!ownerChanged) return;
+    saveOperationRef.current += 1;
+    setSaving(false);
+    setError(null);
+  }, [ownerChanged]);
 
   const startProvider = useCallback(
     (
@@ -192,13 +261,18 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setSetupBackView(backView);
       const nextProtocol =
         nextProvider.protocolOptions?.[0] ?? nextProvider.protocol;
-      setProtocol(nextProtocol);
+      const nextWireApi: ModelWireApi =
+        nextProtocol === 'openai-responses' ? 'responses' : 'chat-completions';
+      setProtocol(
+        nextProtocol === 'openai-responses' ? 'openai' : nextProtocol,
+      );
+      setWireApi(nextWireApi);
       if (typeof nextProvider.baseUrl === 'string') {
         setBaseUrl(nextProvider.baseUrl);
       } else if (Array.isArray(nextProvider.baseUrl)) {
         setBaseUrl(nextProvider.baseUrl[0]?.url ?? '');
       } else {
-        setBaseUrl(defaultBaseUrl(nextProtocol));
+        setBaseUrl(defaultBaseUrl(nextProtocol, nextWireApi));
       }
       setApiKey('');
       setModels(modelIds(nextProvider));
@@ -208,7 +282,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setModalityVideo(true);
       setModalityAudio(false);
       setModalityPdf(false);
+      setPurpose('chat');
       setContextWindow('');
+      setMaxTokens('');
       setStepIndex(0);
       setOptionIndex(0);
       setError(null);
@@ -244,71 +320,166 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     setView(setupBackView);
   }, [onClose, setupBackView, stepIndex, steps.length, view]);
 
+  const advancedConfig = useMemo<
+    DaemonAuthProviderInstallRequest['advancedConfig']
+  >(() => {
+    if (!steps.includes('advancedConfig')) return undefined;
+    const config: NonNullable<
+      DaemonAuthProviderInstallRequest['advancedConfig']
+    > = {
+      replaceExisting: true,
+      ...(purpose !== 'chat' ? { purpose } : {}),
+      ...(purpose === 'chat' && thinking ? { enableThinking: true } : {}),
+      ...(purpose === 'chat' && modality
+        ? {
+            multimodal: {
+              ...(modalityImage ? { image: true } : {}),
+              ...(modalityVideo ? { video: true } : {}),
+              ...(modalityAudio ? { audio: true } : {}),
+              ...(modalityPdf ? { pdf: true } : {}),
+            },
+          }
+        : {}),
+      ...(contextWindow.trim() && !invalidTokenLimit(contextWindow)
+        ? { contextWindowSize: Number(contextWindow) }
+        : {}),
+      ...(purpose === 'chat' &&
+      maxTokens.trim() &&
+      !invalidTokenLimit(maxTokens)
+        ? { maxTokens: Number(maxTokens) }
+        : {}),
+    };
+    return config;
+  }, [
+    steps,
+    purpose,
+    thinking,
+    modality,
+    modalityImage,
+    modalityVideo,
+    modalityAudio,
+    modalityPdf,
+    contextWindow,
+    maxTokens,
+  ]);
+
+  const validateAdvanced = useCallback(() => {
+    if (!steps.includes('advancedConfig')) return true;
+    if (
+      purpose === 'voice' &&
+      (protocol !== 'openai' ||
+        wireApi === 'responses' ||
+        !normalizeModelIds(models).every(isVoiceModelId))
+    ) {
+      setError(t('auth.purpose.voiceHint'));
+      return false;
+    }
+    if (purpose === 'image') {
+      try {
+        const url = new URL(baseUrl.trim());
+        if (url.protocol !== 'https:' || url.search || url.hash)
+          throw new Error();
+      } catch {
+        setError(t('auth.purpose.imageHint'));
+        return false;
+      }
+    }
+    for (const [value, label] of [
+      [contextWindow, 'auth.advanced.contextWindow'],
+      [purpose === 'chat' ? maxTokens : '', 'auth.advanced.maxTokens'],
+    ]) {
+      if (invalidTokenLimit(value)) {
+        setError(t('auth.advanced.tokenLimitInvalid', { field: t(label) }));
+        return false;
+      }
+    }
+    if (
+      purpose === 'chat' &&
+      modality &&
+      !modalityImage &&
+      !modalityVideo &&
+      !modalityAudio &&
+      !modalityPdf
+    ) {
+      setError(t('auth.advanced.modalitiesRequired'));
+      return false;
+    }
+    return true;
+  }, [
+    purpose,
+    protocol,
+    wireApi,
+    models,
+    baseUrl,
+    steps,
+    contextWindow,
+    maxTokens,
+    modality,
+    modalityImage,
+    modalityVideo,
+    modalityAudio,
+    modalityPdf,
+    t,
+  ]);
+
   const save = useCallback(() => {
-    if (!provider || saving) return;
+    if (!provider || saving || !validateAdvanced()) return;
+    const owner = ownerRef.current;
+    const operation = ++saveOperationRef.current;
+    const isCurrent = () =>
+      saveOperationRef.current === operation && owner.isCurrent();
     setSaving(true);
     setError(null);
-    const ctxSize = Number(contextWindow);
     workspaceActions
       .installAuthProvider({
         providerId: provider.id,
         protocol,
-        baseUrl,
-        apiKey,
+        ...(protocol === 'openai' && provider.steps.includes('wireApi')
+          ? { wireApi }
+          : {}),
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim(),
         modelIds: normalizeModelIds(models),
-        advancedConfig:
-          thinking || modality || (Number.isFinite(ctxSize) && ctxSize > 0)
-            ? {
-                ...(thinking ? { enableThinking: true } : {}),
-                ...(modality
-                  ? {
-                      multimodal: {
-                        ...(modalityImage ? { image: true } : {}),
-                        ...(modalityVideo ? { video: true } : {}),
-                        ...(modalityAudio ? { audio: true } : {}),
-                        ...(modalityPdf ? { pdf: true } : {}),
-                      },
-                    }
-                  : {}),
-                ...(Number.isFinite(ctxSize) && ctxSize > 0
-                  ? { contextWindowSize: ctxSize }
-                  : {}),
-              }
-            : undefined,
+        advancedConfig,
       })
       .then((result) => {
-        onMessage(result.message);
+        if (!isCurrent()) return;
+        onMessage(
+          result.runtimeSync?.status === 'failed'
+            ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
+            : result.message,
+        );
         onClose();
       })
       .catch((err: unknown) => {
+        if (!isCurrent()) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
         onMessage(message, 'error');
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        if (isCurrent()) setSaving(false);
+      });
   }, [
+    wireApi,
     apiKey,
     baseUrl,
-    contextWindow,
-    modality,
-    modalityAudio,
-    modalityImage,
-    modalityPdf,
-    modalityVideo,
+    advancedConfig,
+    validateAdvanced,
     models,
     onClose,
     onMessage,
     protocol,
     provider,
     saving,
-    thinking,
+    t,
     workspaceActions,
   ]);
 
   const goNext = useCallback(() => {
-    if (!provider) return;
+    if (!provider || saving) return;
     if (currentStep === 'baseUrl') {
-      const effective = baseUrl.trim() || defaultBaseUrl(protocol);
+      const effective = baseUrl.trim() || defaultBaseUrl(protocol, wireApi);
       if (!effective) {
         setError(t('auth.baseUrlRequired'));
         return;
@@ -327,6 +498,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setError(t('auth.modelsRequired'));
       return;
     }
+    if (currentStep === 'advancedConfig' && !validateAdvanced()) return;
     setError(null);
     if (stepIndex >= steps.length - 1) {
       if (shouldReview) {
@@ -339,10 +511,13 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setOptionIndex(0);
     }
   }, [
+    wireApi,
     apiKey,
     baseUrl,
     currentStep,
     models,
+    saving,
+    validateAdvanced,
     protocol,
     provider,
     save,
@@ -351,37 +526,6 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     steps.length,
     t,
   ]);
-
-  const activateAdvancedOption = useCallback(
-    (value: AdvancedOptionValue | undefined) => {
-      switch (value) {
-        case 'thinking':
-          setThinking((current) => !current);
-          return;
-        case 'modality':
-          setModality((current) => !current);
-          return;
-        case 'image':
-          setModalityImage((current) => !current);
-          return;
-        case 'video':
-          setModalityVideo((current) => !current);
-          return;
-        case 'audio':
-          setModalityAudio((current) => !current);
-          return;
-        case 'pdf':
-          setModalityPdf((current) => !current);
-          return;
-        case 'context':
-          goNext();
-          return;
-        default:
-          return;
-      }
-    },
-    [goNext],
-  );
 
   const activate = useCallback(() => {
     if (view === 'groups') {
@@ -418,13 +562,28 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     }
     if (!provider || !currentStep) return;
     if (currentStep === 'protocol') {
-      const value = (provider.protocolOptions ?? [provider.protocol])[
-        optionIndex
-      ];
+      const value = protocolOptions[optionIndex]?.value;
       if (value) {
         setProtocol(value);
+        setWireApi('chat-completions');
         if (!provider.baseUrl) setBaseUrl(defaultBaseUrl(value));
       }
+      goNext();
+      return;
+    }
+    if (currentStep === 'wireApi') {
+      const nextWireApi: ModelWireApi =
+        optionIndex === 1 ? 'responses' : 'chat-completions';
+      // A wire change re-derives the default endpoint; a no-op re-selection
+      // must not clobber a baseUrl the user already typed.
+      if (
+        nextWireApi !== wireApi &&
+        !provider.baseUrl &&
+        baseUrl === defaultBaseUrl(protocol, wireApi)
+      ) {
+        setBaseUrl(defaultBaseUrl(protocol, nextWireApi));
+      }
+      setWireApi(nextWireApi);
       goNext();
       return;
     }
@@ -434,12 +593,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       goNext();
       return;
     }
-    if (currentStep === 'advancedConfig') {
-      activateAdvancedOption(advancedOptionValues[optionIndex]);
-      return;
-    }
     goNext();
   }, [
+    wireApi,
+    baseUrl,
     currentStep,
     catalog,
     goNext,
@@ -448,12 +605,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     optionIndex,
     provider,
     providerIndex,
+    protocol,
+    protocolOptions,
     providers,
     save,
     startProvider,
     view,
-    activateAdvancedOption,
-    advancedOptionValues,
   ]);
 
   const activateAtIndex = useCallback(
@@ -491,11 +648,26 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         return;
       }
       if (currentStep === 'protocol') {
-        const value = (provider.protocolOptions ?? [provider.protocol])[index];
+        const value = protocolOptions[index]?.value;
         if (value) {
           setProtocol(value);
+          setWireApi('chat-completions');
           if (!provider.baseUrl) setBaseUrl(defaultBaseUrl(value));
         }
+        goNext();
+        return;
+      }
+      if (currentStep === 'wireApi') {
+        const nextWireApi: ModelWireApi =
+          index === 1 ? 'responses' : 'chat-completions';
+        if (
+          nextWireApi !== wireApi &&
+          !provider.baseUrl &&
+          baseUrl === defaultBaseUrl(protocol, wireApi)
+        ) {
+          setBaseUrl(defaultBaseUrl(protocol, nextWireApi));
+        }
+        setWireApi(nextWireApi);
         goNext();
         return;
       }
@@ -505,18 +677,17 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         goNext();
         return;
       }
-      if (currentStep === 'advancedConfig') {
-        activateAdvancedOption(advancedOptionValues[index]);
-      }
     },
     [
+      wireApi,
+      baseUrl,
       currentStep,
       catalog,
       goNext,
       groups,
-      activateAdvancedOption,
-      advancedOptionValues,
       provider,
+      protocol,
+      protocolOptions,
       providers,
       save,
       startProvider,
@@ -534,6 +705,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         <button
           type="button"
           key={option.value}
+          disabled={saving}
           className={`${styles.option} ${selected === index ? styles.optionActive : ''}`}
           onClick={() => {
             onSelect(index);
@@ -554,14 +726,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const renderStep = () => {
     if (!provider || !currentStep) return null;
     if (currentStep === 'protocol') {
-      const allowed = provider.protocolOptions ?? [provider.protocol];
-      return renderOptions(
-        getProtocolOptions(t).filter((option) =>
-          allowed.includes(option.value),
-        ),
-        optionIndex,
-        setOptionIndex,
-      );
+      return renderOptions(protocolOptions, optionIndex, setOptionIndex);
+    }
+    if (currentStep === 'wireApi') {
+      return renderOptions(apiOptions, optionIndex, setOptionIndex);
     }
     if (currentStep === 'baseUrl') {
       if (Array.isArray(provider.baseUrl)) {
@@ -581,7 +749,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
           <input
             className={styles.input}
             value={baseUrl}
-            placeholder={defaultBaseUrl(protocol)}
+            aria-label={t('auth.step.baseUrl')}
+            disabled={saving}
+            placeholder={defaultBaseUrl(protocol, wireApi)}
             onChange={(event) => {
               setBaseUrl(event.target.value);
               setError(null);
@@ -601,6 +771,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={provider.documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}
             </a>
@@ -617,6 +790,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={provider.documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}: {provider.documentationUrl}
             </a>
@@ -625,6 +801,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             className={styles.input}
             type="password"
             value={apiKey}
+            aria-label={t('auth.step.apiKey')}
+            autoComplete="new-password"
+            disabled={saving}
             placeholder={
               provider.apiKeyPlaceholder ?? t('auth.apiKeyPlaceholder')
             }
@@ -656,6 +835,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
           <input
             className={styles.input}
             value={models}
+            aria-label={t('auth.step.models')}
+            disabled={saving}
             placeholder={defaultIds || t('auth.modelsPlaceholder')}
             onChange={(event) => {
               setModels(event.target.value);
@@ -673,122 +854,251 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         </>
       );
     }
-    const checkmark = (enabled: boolean) => (enabled ? '◉' : '○');
-    const advancedOptions: Array<Option<AdvancedOptionValue>> = [
-      {
-        value: 'thinking',
-        label: `${checkmark(thinking)} ${t('auth.advanced.thinking')}`,
-        description: t('auth.advanced.thinkingDesc'),
-      },
-      {
-        value: 'modality',
-        label: `${checkmark(modality)} ${t('auth.advanced.modality')}`,
-        description: t('auth.advanced.modalityDesc'),
-      },
-    ];
-    if (modality) {
-      advancedOptions.push(
-        {
-          value: 'image',
-          label: `${checkmark(modalityImage)} ${t('auth.advanced.modalityImage')}`,
-        },
-        {
-          value: 'video',
-          label: `${checkmark(modalityVideo)} ${t('auth.advanced.modalityVideo')}`,
-        },
-        {
-          value: 'audio',
-          label: `${checkmark(modalityAudio)} ${t('auth.advanced.modalityAudio')}`,
-        },
-        {
-          value: 'pdf',
-          label: `${checkmark(modalityPdf)} ${t('auth.advanced.modalityPdf')}`,
-        },
-      );
-    }
-    advancedOptions.push({
-      value: 'context',
-      label: `${t('auth.advanced.contextWindow')}: ${contextWindow || 'auto'}`,
-      description: t('auth.advanced.contextDesc'),
-    });
     return (
-      <>
-        <div className={styles.text}>{t('auth.advanced.prompt')}</div>
-        {renderOptions(advancedOptions, optionIndex, setOptionIndex)}
-        <input
-          className={styles.input}
-          value={contextWindow}
-          placeholder={t('common.auto')}
-          onChange={(event) =>
-            setContextWindow(event.target.value.replace(/[^0-9]/g, ''))
-          }
-          onFocus={() => setOptionIndex(advancedContextIndex)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              event.stopPropagation();
-              goNext();
-            }
-          }}
-        />
-      </>
+      <FieldGroup>
+        <Field>
+          <FieldLabel htmlFor={`${fieldId}-purpose`}>
+            {t('auth.purpose.label')}
+          </FieldLabel>
+          <Select
+            value={purpose}
+            disabled={saving}
+            onValueChange={(value) => {
+              setPurpose(value as typeof purpose);
+              setError(null);
+            }}
+          >
+            <SelectTrigger
+              id={`${fieldId}-purpose`}
+              aria-label={t('auth.purpose.label')}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(['chat', 'image', 'voice'] as const).map((value) => (
+                <SelectItem key={value} value={value}>
+                  {t(`auth.purpose.${value}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {purpose !== 'chat' && (
+            <FieldDescription>
+              {t(`auth.purpose.${purpose}Hint`)}
+            </FieldDescription>
+          )}
+        </Field>
+
+        <p className="text-sm text-muted-foreground">
+          {t('auth.advanced.prompt')}
+        </p>
+        {purpose === 'chat' &&
+          (
+            [
+              [
+                'thinking',
+                thinking,
+                setThinking,
+                'auth.advanced.thinking',
+                'auth.advanced.thinkingDesc',
+              ],
+              [
+                'modality',
+                modality,
+                setModality,
+                'auth.advanced.modality',
+                'auth.advanced.modalityDesc',
+              ],
+            ] as const
+          ).map(([key, checked, setChecked, label, description]) => (
+            <Field orientation="horizontal" key={key}>
+              <FieldContent>
+                <FieldLabel htmlFor={`${fieldId}-${key}`}>
+                  {t(label)}
+                </FieldLabel>
+                <FieldDescription id={`${fieldId}-${key}-hint`}>
+                  {t(description)}
+                </FieldDescription>
+              </FieldContent>
+              <Switch
+                id={`${fieldId}-${key}`}
+                checked={checked}
+                disabled={saving || purpose !== 'chat'}
+                aria-label={t(label)}
+                aria-describedby={`${fieldId}-${key}-hint`}
+                onCheckedChange={(value) => {
+                  setChecked(value);
+                  setError(null);
+                }}
+              />
+            </Field>
+          ))}
+        {purpose === 'chat' && modality && (
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            {(
+              [
+                [
+                  'image',
+                  modalityImage,
+                  setModalityImage,
+                  'auth.advanced.modalityImage',
+                ],
+                [
+                  'video',
+                  modalityVideo,
+                  setModalityVideo,
+                  'auth.advanced.modalityVideo',
+                ],
+                [
+                  'audio',
+                  modalityAudio,
+                  setModalityAudio,
+                  'auth.advanced.modalityAudio',
+                ],
+                [
+                  'pdf',
+                  modalityPdf,
+                  setModalityPdf,
+                  'auth.advanced.modalityPdf',
+                ],
+              ] as const
+            ).map(([key, checked, setChecked, label]) => (
+              <Field orientation="horizontal" key={key}>
+                <Checkbox
+                  id={`${fieldId}-${key}`}
+                  checked={checked}
+                  disabled={saving || purpose !== 'chat'}
+                  onCheckedChange={(value) => {
+                    setChecked(value === true);
+                    setError(null);
+                  }}
+                />
+                <FieldLabel htmlFor={`${fieldId}-${key}`}>
+                  {t(label)}
+                </FieldLabel>
+              </Field>
+            ))}
+          </div>
+        )}
+        <div className="grid gap-5 sm:grid-cols-2">
+          {(
+            [
+              [
+                'context',
+                contextWindow,
+                setContextWindow,
+                'auth.advanced.contextWindow',
+                'auth.advanced.contextDesc',
+              ],
+              [
+                'output',
+                maxTokens,
+                setMaxTokens,
+                'auth.advanced.maxTokens',
+                'auth.advanced.maxTokensDesc',
+              ],
+            ] as const
+          )
+            .filter(([key]) => purpose === 'chat' || key === 'context')
+            .map(([key, value, setValue, label, description]) => (
+              <Field key={key} data-invalid={invalidTokenLimit(value)}>
+                <FieldLabel htmlFor={`${fieldId}-${key}`}>
+                  {t(label)}
+                </FieldLabel>
+                <Input
+                  id={`${fieldId}-${key}`}
+                  aria-label={t(label)}
+                  inputMode="numeric"
+                  value={value}
+                  placeholder={t('common.auto')}
+                  disabled={saving || (key === 'output' && purpose !== 'chat')}
+                  aria-invalid={invalidTokenLimit(value)}
+                  aria-describedby={`${fieldId}-${key}-hint`}
+                  onChange={(event) => {
+                    setValue(event.target.value);
+                    setError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      goNext();
+                    }
+                  }}
+                />
+                <FieldDescription id={`${fieldId}-${key}-hint`}>
+                  {invalidTokenLimit(value)
+                    ? t('auth.advanced.tokenLimitInvalid', { field: t(label) })
+                    : t(description)}
+                </FieldDescription>
+              </Field>
+            ))}
+        </div>
+      </FieldGroup>
     );
   };
 
-  const review = useMemo(() => {
-    if (!provider) return '';
-    const envKey = provider.envKey ?? `${protocol.toUpperCase()}_API_KEY`;
-    const normalizedIds = normalizeModelIds(models);
-    const generationConfig: Record<string, unknown> = {};
-    if (thinking) generationConfig['extra_body'] = { enable_thinking: true };
-    if (modality) {
-      const modalities: Record<string, boolean> = {};
-      if (modalityImage) modalities['image'] = true;
-      if (modalityVideo) modalities['video'] = true;
-      if (modalityAudio) modalities['audio'] = true;
-      if (modalityPdf) modalities['pdf'] = true;
-      if (Object.keys(modalities).length > 0) {
-        generationConfig['modalities'] = modalities;
-      }
-    }
-    const ctxSize = Number(contextWindow);
-    if (Number.isFinite(ctxSize) && ctxSize > 0) {
-      generationConfig['contextWindowSize'] = ctxSize;
-    }
-    const hasGenerationConfig = Object.keys(generationConfig).length > 0;
-    return JSON.stringify(
-      {
-        env: { [envKey]: maskApiKey(apiKey, t) },
-        modelProviders: {
-          [protocol]: normalizedIds.map((id) => ({
-            id,
-            name: id,
-            baseUrl: baseUrl.trim(),
-            envKey,
-            ...(hasGenerationConfig ? { generationConfig } : {}),
-          })),
-        },
-        security: { auth: { selectedType: protocol } },
-        model: { name: normalizedIds[0] },
-      },
-      null,
-      2,
-    );
-  }, [
-    apiKey,
-    baseUrl,
-    contextWindow,
-    modality,
-    modalityAudio,
-    modalityImage,
-    modalityPdf,
-    modalityVideo,
-    models,
-    protocol,
-    provider,
-    t,
-    thinking,
-  ]);
+  const review = provider
+    ? [
+        [t('auth.step.provider'), t(provider.label)],
+        [
+          t('auth.step.protocol'),
+          getProtocolOptions(t).find((option) => option.value === protocol)
+            ?.label ?? protocol,
+        ],
+        ...(steps.includes('wireApi')
+          ? [
+              [
+                t('auth.step.api'),
+                apiOptions.find((option) => option.value === wireApi)?.label ??
+                  wireApi,
+              ],
+            ]
+          : []),
+        [t('auth.step.baseUrl'), baseUrl.trim()],
+        [
+          t('auth.step.apiKey'),
+          apiKey.trim() ? t('auth.apiKeySet') : t('auth.notSet'),
+        ],
+        [t('auth.step.models'), normalizeModelIds(models).join(', ')],
+        ...(steps.includes('advancedConfig')
+          ? [[t('auth.purpose.label'), t(`auth.purpose.${purpose}`)]]
+          : []),
+        ...(steps.includes('advancedConfig')
+          ? [
+              [
+                t('auth.advanced.thinking'),
+                advancedConfig?.enableThinking
+                  ? t('common.enabled')
+                  : t('auth.advanced.defaults'),
+              ],
+              [
+                t('auth.advanced.modality'),
+                (
+                  [
+                    ['image', 'auth.advanced.modalityImage'],
+                    ['video', 'auth.advanced.modalityVideo'],
+                    ['audio', 'auth.advanced.modalityAudio'],
+                    ['pdf', 'auth.advanced.modalityPdf'],
+                  ] as const
+                )
+                  .filter(([key]) => advancedConfig?.multimodal?.[key])
+                  .map(([, label]) => t(label))
+                  .join(', ') || t('auth.advanced.defaults'),
+              ],
+              [
+                t('auth.advanced.contextWindow'),
+                advancedConfig?.contextWindowSize ??
+                  t('auth.advanced.defaults'),
+              ],
+              [
+                t('auth.advanced.maxTokens'),
+                advancedConfig?.maxTokens ?? t('auth.advanced.defaults'),
+              ],
+            ]
+          : []),
+      ]
+    : [];
 
   const stepItems = useMemo(() => {
     const items = [t('auth.step.group'), t('auth.step.provider')];
@@ -827,11 +1137,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             <div>{t('auth.termsTitle')}:</div>
             <a
               className={styles.link}
-              href="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
+              href={TOS_PRIVACY_URL}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) => openExternalLink(event, TOS_PRIVACY_URL)}
             >
-              https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
+              {TOS_PRIVACY_URL}
             </a>
           </div>
         </>
@@ -852,7 +1163,22 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     return (
       <>
         <div className={styles.text}>{t('auth.reviewText')}</div>
-        <div className={styles.preview}>{review}</div>
+        <dl className="grid gap-3 rounded-lg border border-border bg-background p-4 text-sm">
+          {review.map(([label, value]) => (
+            <div
+              key={label}
+              className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] sm:gap-4"
+            >
+              <dt className="text-muted-foreground">{label}</dt>
+              <dd className="m-0 break-words [overflow-wrap:anywhere]">
+                {value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        {provider?.showAdvancedConfig && (
+          <div className={styles.text}>{t(`auth.purpose.${purpose}Hint`)}</div>
+        )}
       </>
     );
   })();
@@ -888,7 +1214,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         })}
       </div>
       <div className={styles.body}>{body}</div>
-      {error && <div className={styles.error}>{error}</div>}
+      {error && (
+        <div className={styles.error} role="alert">
+          {error}
+        </div>
+      )}
       <div className={styles.actions}>
         <button
           type="button"

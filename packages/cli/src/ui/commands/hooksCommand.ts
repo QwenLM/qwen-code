@@ -13,12 +13,73 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import type {
+  Config,
   HookRegistryEntry,
   SessionHookEntry,
   HookEventName,
 } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { supportsMatchers } from '../components/hooks/constants.js';
 import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import { MessageType } from '../types.js';
+import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
+
+const debugLogger = createDebugLogger('HOOKS_COMMAND');
+
+/**
+ * Re-reads the settings files and reloads the hook registry, so hooks added,
+ * changed or removed since startup run without a restart. The hook fields are
+ * resolved exactly as at startup (bare and safe mode load none; project hooks
+ * only in a trusted folder). Session hooks registered by skills, the SDK or
+ * `/goal` live outside the registry and are unaffected.
+ */
+async function reloadHooksFromSettings(
+  config: Config,
+  settings: LoadedSettings,
+): Promise<void> {
+  const hookSystem = config.getHookSystem();
+  if (!hookSystem) {
+    return;
+  }
+  // Keep the startup settings paths after --worktree changes cwd, and never
+  // run startup corruption recovery while refreshing an active session.
+  if (
+    !settings.reloadScopesFromDiskAtomically([
+      SettingScope.User,
+      SettingScope.Workspace,
+    ])
+  ) {
+    throw new Error(
+      'Settings could not be read; the previous hooks are still active.',
+    );
+  }
+  // The system files are reloaded on their own: a user usually cannot repair
+  // an administrator's file, so a broken one must not block the user's own
+  // edits. On failure their previous snapshot stays in effect.
+  const systemScopes = [SettingScope.System, SettingScope.SystemDefaults];
+  const systemReloaded = settings.reloadScopesFromDiskAtomically(systemScopes);
+  config.setHooksFromSettings(
+    resolveHookSettingsForConfig(
+      settings.merged.hooks,
+      {
+        systemHooks: settings.getSystemHooks(),
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
+      config.getBareMode() || config.isSafeMode(),
+    ),
+  );
+  await hookSystem.reload();
+  if (!systemReloaded) {
+    const paths = systemScopes
+      .map((scope) => settings.forScope(scope).path)
+      .join(', ');
+    throw new Error(
+      `System settings could not be read (${paths}); hooks from them are unchanged, and other hook edits were applied.`,
+    );
+  }
+}
 
 /**
  * Format hook source for display
@@ -197,12 +258,31 @@ export const hooksCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<SlashCommandActionReturn> => {
     const executionMode = context.executionMode ?? 'interactive';
     if (executionMode === 'interactive') {
+      const { config, settings } = context.services;
+      if (config) {
+        try {
+          await reloadHooksFromSettings(config, settings);
+        } catch (error) {
+          // The menu still opens on the hooks loaded so far.
+          debugLogger.warn(`Failed to reload hooks for /hooks: ${error}`);
+          context.ui.addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Failed to reload hook definitions: {{error}}', {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            },
+            Date.now(),
+          );
+        }
+      }
       return {
         type: 'dialog',
         dialog: 'hooks',

@@ -21,11 +21,13 @@ type ContentGeneratorConfig =
 export const MODEL_GENERATION_CONFIG_FIELDS = [
   'samplingParams',
   'timeout',
+  'streamIdleTimeoutMs',
   'maxRetries',
   'retryInitialDelayMs',
   'retryMaxDelayMs',
   'retryErrorCodes',
   'enableCacheControl',
+  'enableRequestMetadata',
   'forceGlobalCacheScope',
   'cacheRetention',
   'cacheRetentionByBlock',
@@ -74,6 +76,11 @@ export const AUTH_ENV_MAPPINGS = {
     apiKey: ['OPENAI_API_KEY'],
     baseUrl: ['OPENAI_BASE_URL'],
     model: ['OPENAI_MODEL', 'QWEN_MODEL'],
+  },
+  'openai-responses': {
+    apiKey: ['OPENAI_API_KEY'],
+    baseUrl: ['OPENAI_BASE_URL'],
+    model: ['OPENAI_MODEL'],
   },
   anthropic: {
     apiKey: ['ANTHROPIC_API_KEY'],

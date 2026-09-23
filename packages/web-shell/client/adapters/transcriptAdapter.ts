@@ -1,4 +1,4 @@
-import type { DaemonTranscriptBlock } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonTranscriptBlock } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   ContentBlock,
   PermissionRequest,
@@ -33,6 +33,9 @@ export function extractPendingPermission(
       typeof metaRecord?.['toolName'] === 'string'
         ? metaRecord['toolName']
         : undefined;
+    const todoApproval = getRecord(metaRecord?.['qwenTodoApproval']);
+    const planId = getString(todoApproval, 'planId');
+    const sourceCallId = getString(todoApproval, 'sourceCallId');
     return {
       id: perm.requestId,
       sessionId: perm.sessionId,
@@ -40,7 +43,9 @@ export function extractPendingPermission(
       title: perm.title,
       toolKind,
       toolName,
-      content: getPermissionContent(toolCallRecord, perm.title),
+      hasDiffPreview: hasPermissionDiffPreview(toolCallRecord),
+      ...(planId && sourceCallId ? { todoPlan: { planId, sourceCallId } } : {}),
+      ...getPermissionContent(toolCallRecord, perm.title),
       options: perm.options.map((opt) => ({
         id: opt.optionId,
         label: opt.label,
@@ -52,14 +57,59 @@ export function extractPendingPermission(
   return null;
 }
 
+function hasPermissionDiffPreview(
+  toolCall: Record<string, unknown> | undefined,
+): boolean {
+  const content = toolCall?.['content'];
+  if (!Array.isArray(content)) return false;
+  return content.some((value) => {
+    const block = getRecord(value);
+    return (
+      block?.['type'] === 'diff' &&
+      typeof block['path'] === 'string' &&
+      (typeof block['oldText'] === 'string' ||
+        typeof block['newText'] === 'string')
+    );
+  });
+}
+
+function escapePreviewText(text: string): string {
+  return text.replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) =>
+    character
+      .split('')
+      .map(
+        (codeUnit) =>
+          `\\u${codeUnit.charCodeAt(0).toString(16).padStart(4, '0')}`,
+      )
+      .join(''),
+  );
+}
+
 function getPermissionContent(
   toolCall: Record<string, unknown> | undefined,
   fallback?: string,
-): ContentBlock[] {
+): Pick<PermissionRequest, 'content' | 'contentIsInput'> {
   const rawContent = toolCall?.['content'];
   if (Array.isArray(rawContent)) {
     const content = rawContent.flatMap((value): ContentBlock[] => {
       const block = getRecord(value);
+      if (
+        block?.['type'] === 'diff' &&
+        typeof block['path'] === 'string' &&
+        typeof block['newText'] === 'string'
+      ) {
+        return [
+          {
+            type: 'diff',
+            path: escapePreviewText(block['path']),
+            oldText:
+              typeof block['oldText'] === 'string'
+                ? escapePreviewText(block['oldText'])
+                : '',
+            newText: escapePreviewText(block['newText']),
+          },
+        ];
+      }
       const nested = getRecord(block?.['content']);
       const text =
         block?.['type'] === 'text' && typeof block['text'] === 'string'
@@ -69,9 +119,21 @@ function getPermissionContent(
             : undefined;
       return text ? [{ type: 'text', text }] : [];
     });
-    if (content.length > 0) return content;
+    if (content.length > 0) return { content };
   }
-  return [{ type: 'text', text: fallback || 'Tool permission' }];
+  const input = getExplicitPermissionInput(toolCall);
+  if (input && !hasPermissionDiffPreview(toolCall)) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: escapePreviewText(JSON.stringify(input, null, 2)),
+        },
+      ],
+      contentIsInput: true,
+    };
+  }
+  return { content: [{ type: 'text', text: fallback || 'Tool permission' }] };
 }
 
 function isPermissionBlock(
@@ -88,11 +150,17 @@ function getPermissionRawInput(
     return undefined;
   }
 
-  const nested =
-    getRecord(record['rawInput']) ??
-    getRecord(record['input']) ??
-    getRecord(record['args']);
-  return nested ?? record;
+  return getExplicitPermissionInput(record) ?? record;
+}
+
+function getExplicitPermissionInput(
+  record: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  return (
+    getRecord(record?.['rawInput']) ??
+    getRecord(record?.['input']) ??
+    getRecord(record?.['args'])
+  );
 }
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
@@ -100,6 +168,14 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+function getString(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = record?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function getPermissionOptionKind(

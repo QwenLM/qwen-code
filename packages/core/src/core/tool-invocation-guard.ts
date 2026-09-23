@@ -5,12 +5,33 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { InvocationContextV1 } from '../utils/invocation-context.js';
 
 export interface ToolInvocationGuardContext {
   callId: string;
   toolName: string;
   args: Readonly<Record<string, unknown>>;
   signal: AbortSignal;
+  /**
+   * Runtime-owned managed invocation identity. Ordinary CLI/SDK calls may not
+   * have one; a host that requires it must fail closed when it is absent.
+   */
+  invocationContext?: Readonly<InvocationContextV1>;
+  /**
+   * Owning session id from the scheduler's session config. Present even when
+   * {@link invocationContext} is absent (subagents, cron turns, and resumed
+   * background agents run without one); a host whose policy only needs
+   * session scope may fall back to it instead of failing closed.
+   */
+  sessionId?: string;
+  /**
+   * The directory the invocation will actually execute in — the scheduler's
+   * `config.getTargetDir()`. A sub-agent pinned to a worktree (`working_dir`,
+   * or `isolation`, which rebinds the child Config's cwd surfaces) runs there
+   * while still reporting the parent's {@link sessionId}, so a host that
+   * reasons about paths cannot assume the session's own directory.
+   */
+  cwd?: string;
 }
 
 export type ToolInvocationGuardDecision =
@@ -58,6 +79,13 @@ export async function evaluateToolInvocationGuard(
     const decision = await guard({
       ...context,
       args: structuredClone(context.args),
+      ...(context.invocationContext
+        ? {
+            invocationContext: Object.freeze({
+              ...context.invocationContext,
+            }),
+          }
+        : {}),
     });
     if (context.signal.aborted) {
       return { allowed: false, reason: FAILED_MESSAGE };

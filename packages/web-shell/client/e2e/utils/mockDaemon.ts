@@ -6,6 +6,7 @@ import {
   type DaemonChannelsSnapshot,
   type DaemonChannelPairingRequest,
   type DaemonChannelTypeCatalog,
+  type DaemonPersistedBranchedSession,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
@@ -13,14 +14,22 @@ import {
   type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
   type DaemonSessionGroupCatalog,
+  type DaemonSessionCatalogVersion,
   type DaemonSessionState,
   type DaemonSessionSummary,
+  type DaemonRestoredStandaloneSession,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
   type DaemonWorkspaceFile,
   type DaemonGitHubPullRequestList,
+  type DaemonGitRemoteInfo,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
+  type WorkspaceExtensionProjection,
+  type DaemonWorkspaceHooksStatus,
+  type DaemonWorkspaceMemoryStatus,
   type DaemonWorkspaceMcpToolsStatus,
   type DaemonWorkspaceProvidersStatus,
   type DaemonWorkspaceSettingsStatus,
@@ -29,10 +38,22 @@ import {
   type DaemonWorkspaceVoiceStatus,
   type ExtensionActiveOperations,
   type ExtensionUpdateCheckResponse,
+  type GoalControlRequest,
+  type GoalSnapshotV2,
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
 import { installSseTransport, type SseTransport } from './sseTransport';
+
+/** One transcript page as the mock daemon serves it. */
+export interface MockTranscriptPage {
+  events: DaemonEvent[];
+  hasMore?: boolean;
+  nextCursor?: string;
+}
+
+/** Cursors whose one-off failure has already been served, per scenario. */
+const failedTranscriptReads = new WeakMap<object, Set<string>>();
 
 export interface DaemonRequestRecord {
   method: string;
@@ -49,6 +70,12 @@ export interface WebShellDaemonScenario {
   currentModel: string;
   currentMode: string;
   capabilities: DaemonCapabilities;
+  /** Extra fields merged into `GET /session/:id/supported-commands`. */
+  supportedCommands?: Record<string, unknown>;
+  /** Tasks returned by `GET /session/:id/tasks` (workflow snapshots included). */
+  workflowTasks?: unknown[];
+  /** Definitions served by `GET /session/:id/saved-workflows/:name`, keyed by name. */
+  savedWorkflowDetails?: Record<string, Record<string, unknown>>;
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
@@ -56,18 +83,56 @@ export interface WebShellDaemonScenario {
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
+  mcp: DaemonWorkspaceMcpStatus;
+  /**
+   * Per-workspace overrides for the sidebar overview facets, keyed by the
+   * workspace cwd the qualified route names. Unlisted workspaces answer the
+   * scenario-level `mcp` / `skills` and empty daemon-side facets, so a spec
+   * can give a secondary workspace counts that differ from the primary's.
+   */
+  workspaceOverviews: Record<string, WorkspaceOverviewOverrides>;
   channelTypes: DaemonChannelTypeCatalog;
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals: Record<string, string[]>;
+  pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  standaloneSessions: DaemonStandaloneSessionSummary[];
+  standaloneCreateError?: {
+    status: number;
+    code: string;
+    message: string;
+  };
   sessionGroups: DaemonSessionGroup[];
+  sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
+  contextDelayMs?: number;
+  providersDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
+  /**
+   * Pages served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as. `older` is
+   * keyed by the `cursor` the previous page handed back, so a spec can walk
+   * backwards. A `{ status }` entry answers that read with a failure instead
+   * of a page; with `then`, only the first read fails and later ones get the
+   * page, which is how a retry is exercised.
+   */
+  transcriptPage?: MockTranscriptPage & {
+    older?: Record<
+      string,
+      MockTranscriptPage | { status: number; then?: MockTranscriptPage }
+    >;
+  };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
+  /**
+   * Directory names `GET /workspace-path-suggestions` lists for a requested
+   * prefix, keyed by that prefix with or without its trailing separator. An
+   * unlisted prefix answers an empty list.
+   */
+  pathSuggestions?: Record<string, string[]>;
   /**
    * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
    * (non-git workspace), matching the real daemon's graceful degradation.
@@ -80,12 +145,26 @@ export interface WebShellDaemonScenario {
   gitHubPrs?: DaemonGitHubPullRequestList;
   /** Response for `GET /workspaces/:cwd/git/branches`. */
   gitBranches?: unknown;
+  /**
+   * Remotes served by `GET /workspaces/:cwd/git/remotes`. The add/remove
+   * routes mutate this array in place so later reads see earlier writes.
+   */
+  gitRemotes?: DaemonGitRemoteInfo[];
   /** Response for `GET /workspaces/:cwd/git/diff`. */
   gitDiff?: unknown;
   /** Response for `GET /workspaces/:cwd/git/log`. */
   gitLog?: unknown;
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
+  goalSnapshot: GoalSnapshotV2;
+  midTurnMessages: Array<{ messageId: string; text: string }>;
+  /** Stateful response and replay used by historical branch E2E flows. */
+  branch?: {
+    sessionId: string;
+    clientId?: string;
+    displayName: string;
+    events: DaemonEvent[];
+  };
 }
 
 export interface MockDaemonController {
@@ -97,6 +176,16 @@ export interface MockDaemonController {
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
+  branchRequests(): DaemonRequestRecord[];
+  configOptionRequests(): DaemonRequestRecord[];
+}
+
+export interface WorkspaceOverviewOverrides {
+  mcp?: Partial<DaemonWorkspaceMcpStatus>;
+  skills?: Partial<DaemonWorkspaceSkillsStatus>;
+  extensions?: Partial<WorkspaceExtensionProjection>;
+  memory?: Partial<DaemonWorkspaceMemoryStatus>;
+  hooks?: Partial<DaemonWorkspaceHooksStatus>;
 }
 
 type ScenarioOverrides = Partial<
@@ -110,12 +199,16 @@ type ScenarioOverrides = Partial<
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
+    | 'mcp'
+    | 'workspaceOverviews'
     | 'channelTypes'
     | 'channels'
     | 'pairingRequests'
     | 'pairingApprovals'
+    | 'pairingGroupApprovals'
     | 'sessions'
     | 'sessionGroups'
+    | 'sessionCatalogVersion'
     | 'state'
   >
 > & {
@@ -127,12 +220,16 @@ type ScenarioOverrides = Partial<
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
+  mcp?: Partial<DaemonWorkspaceMcpStatus>;
+  workspaceOverviews?: Record<string, WorkspaceOverviewOverrides>;
   channelTypes?: DaemonChannelTypeCatalog;
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals?: Record<string, string[]>;
+  pairingGroupApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
+  sessionCatalogVersion?: DaemonSessionCatalogVersion;
   state?: Partial<DaemonSessionState>;
 };
 
@@ -306,6 +403,19 @@ export function createWebShellDaemonScenario(
     ...(overrides.extensionUpdateCheck ?? {}),
   };
 
+  const mcp: DaemonWorkspaceMcpStatus = {
+    v: 1,
+    workspaceCwd,
+    initialized: true,
+    discoveryState: 'completed',
+    servers: [],
+    errors: [],
+    clientCount: 0,
+    budgetMode: 'off',
+    budgets: [],
+    ...(overrides.mcp ?? {}),
+  };
+
   const sessions = overrides.sessions ?? [
     {
       sessionId,
@@ -342,24 +452,67 @@ export function createWebShellDaemonScenario(
     extensions,
     extensionOperations,
     extensionUpdateCheck,
+    mcp,
+    workspaceOverviews: overrides.workspaceOverviews ?? {},
     channelTypes: overrides.channelTypes ?? [],
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
     pairingApprovals: overrides.pairingApprovals ?? {},
+    pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    standaloneSessions: overrides.standaloneSessions ?? [],
+    standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
+    sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
+      generation: 'web-shell-e2e',
+      revision: 0,
+    },
     events: overrides.events ?? [],
     state,
+    contextDelayMs: overrides.contextDelayMs,
+    supportedCommands: overrides.supportedCommands,
+    workflowTasks: overrides.workflowTasks,
+    savedWorkflowDetails: overrides.savedWorkflowDetails,
+    providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
+    transcriptPage: overrides.transcriptPage,
     workspaceFiles: overrides.workspaceFiles ?? {},
+    pathSuggestions: overrides.pathSuggestions,
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
+    gitRemotes: overrides.gitRemotes,
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
+    goalSnapshot: overrides.goalSnapshot ?? {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    },
+    midTurnMessages: overrides.midTurnMessages ?? [],
+    branch: overrides.branch,
   };
 }
+
+/**
+ * One daemon installed on a page, addressable by the proxy routes the shell
+ * uses to reach a second computer without navigating away from the first.
+ */
+interface DaemonPeer {
+  scenario: WebShellDaemonScenario;
+  requests: DaemonRequestRecord[];
+}
+
+/**
+ * Daemons installed on one page, keyed by origin. A real daemon answers
+ * `/remote-workspace-path-suggestions` and `/remote-workspaces` by fetching the
+ * target daemon server-side; the mock has no server side, so the route handler
+ * for the page origin dispatches to the mock installed for the target origin
+ * and records the forwarded request there, exactly as the upstream daemon would
+ * see it. Keyed by page so scenarios never leak between tests.
+ */
+const installedDaemons = new WeakMap<Page, Map<string, DaemonPeer>>();
 
 export async function installMockDaemon(
   page: Page,
@@ -369,6 +522,11 @@ export async function installMockDaemon(
   const baseURL = options.baseURL ?? getPlaywrightBaseURL();
   const baseOrigin = new URL(baseURL).origin;
   const requests: DaemonRequestRecord[] = [];
+  const peers = installedDaemons.get(page) ?? new Map<string, DaemonPeer>();
+  installedDaemons.set(page, peers);
+  peers.set(baseOrigin, { scenario, requests });
+  const resolvePeer = (origin: string): DaemonPeer | undefined =>
+    origin ? peers.get(origin) : undefined;
   const sse = await installSseTransport<DaemonEvent>(page, { baseURL });
 
   await page.route(`${baseOrigin}/**`, async (route) => {
@@ -407,6 +565,7 @@ export async function installMockDaemon(
       scenario,
       body,
       url.searchParams,
+      resolvePeer,
     );
   });
 
@@ -425,6 +584,14 @@ export async function installMockDaemon(
     modelRequests: () =>
       requests.filter((request) =>
         /\/session\/[^/]+\/model$/.test(request.path),
+      ),
+    branchRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/branch\/?$/.test(request.path),
+      ),
+    configOptionRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/config-option$/.test(request.path),
       ),
   };
 }
@@ -445,13 +612,59 @@ export function userTextEvent(
 
 export function assistantTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: {
+    id?: number;
+    sessionId?: string;
+    branchRecordId?: string;
+  } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.branchRecordId
+        ? {
+            _meta: {
+              qwenTranscript: { branchRecordId: options.branchRecordId },
+            },
+          }
+        : {}),
+    },
+    options.id,
+  );
+}
+
+export function thoughtTextEvent(
+  text: string,
+  options: { id?: number; sessionId?: string } = {},
+): DaemonEvent {
+  return sessionUpdateEvent(
+    {
+      sessionUpdate: 'agent_thought_chunk',
+      content: { type: 'text', text },
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    },
+    options.id,
+  );
+}
+
+export function toolCallEvent(
+  toolCallId: string,
+  toolName: string,
+  rawInput: Record<string, unknown>,
+  options: { id?: number; rawOutput?: Record<string, unknown> } = {},
+): DaemonEvent {
+  return sessionUpdateEvent(
+    {
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      toolName,
+      title: toolName,
+      kind: 'other',
+      status: 'completed',
+      rawInput,
+      ...(options.rawOutput ? { rawOutput: options.rawOutput } : {}),
     },
     options.id,
   );
@@ -537,10 +750,82 @@ function readRequestBody(raw: string | null): unknown {
   }
 }
 
+// Mirror production query modes: `group=pinned` is the pinned bucket;
+// `group=all` (and missing group) returns the full active list. The UI
+// renders pinned rows in the Pinned section and keeps them inside their
+// named groups; unassigned pinned rows stay out of Ungrouped.
+function filterScenarioSessions(
+  scenario: WebShellDaemonScenario,
+  searchParams: URLSearchParams,
+  workspaceCwd: string,
+): DaemonSessionSummary[] {
+  const group = searchParams.get('group');
+  const sourceType = searchParams.get('sourceType');
+  const workspaceSessions = scenario.sessions.filter(
+    (session) => session.workspaceCwd === workspaceCwd,
+  );
+  const sourceSessions = sourceType
+    ? workspaceSessions.filter(
+        (session) =>
+          session.sourceType === sourceType ||
+          (sourceType === 'default' &&
+            (session.sourceType === undefined ||
+              session.sourceType === 'qwen-live')),
+      )
+    : workspaceSessions;
+  return group === 'pinned'
+    ? sourceSessions.filter((session) => Boolean(session.isPinned))
+    : sourceSessions;
+}
+
+type WorkspaceSessionsRouteMatch = {
+  workspaceCwd: string;
+  liveState: boolean;
+};
+
+function decodeRouteSegment(segment: string): string | undefined {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
+function matchWorkspaceSessionsRoute(
+  path: string,
+): WorkspaceSessionsRouteMatch | undefined {
+  const liveStateMatch = path.match(
+    /^\/workspaces\/([^/]+)\/sessions\/live-state\/?$/,
+  );
+  if (liveStateMatch) {
+    const workspaceCwd = decodeRouteSegment(liveStateMatch[1]);
+    if (workspaceCwd === undefined) return undefined;
+    return {
+      workspaceCwd,
+      liveState: true,
+    };
+  }
+
+  const sessionsMatch =
+    path.match(/^\/workspaces\/([^/]+)\/sessions\/?$/) ??
+    path.match(/^\/workspace\/([^/]+)\/sessions\/?$/);
+  if (!sessionsMatch) {
+    return undefined;
+  }
+  const workspaceCwd = decodeRouteSegment(sessionsMatch[1]);
+  if (workspaceCwd === undefined) return undefined;
+
+  return {
+    workspaceCwd,
+    liveState: false,
+  };
+}
+
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/brand' ||
     path === '/workspace/settings' ||
     path === '/workspace/providers' ||
     path === '/workspace/skills' ||
@@ -550,7 +835,14 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    path === '/workspace-path-suggestions' ||
+    path === '/remote-workspace-path-suggestions' ||
+    path === '/remote-workspaces' ||
+    path === '/workspaces' ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/open\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
@@ -560,12 +852,17 @@ function isDaemonPath(path: string): boolean {
     ) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
-    /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    Boolean(matchWorkspaceSessionsRoute(path)) ||
+    /^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
-    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log|remotes|remote(?:\/remove)?)\/?$/.test(
       path,
     ) ||
+    // Remotes are scoped-only in the real daemon; the legacy git table
+    // intentionally omits them.
     /^\/workspace\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
       path,
     ) ||
@@ -573,20 +870,41 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
+    path === '/standalone/sessions' ||
+    /^\/standalone\/sessions\/[^/]+(?:\/(?:load|resume|repair-directory|metadata|export))?\/?$/.test(
+      path,
+    ) ||
+    path === '/goals' ||
     /^\/file\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
+    /^\/session\/[^/]+\/transcript\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
+    /^\/session\/[^/]+\/goal\/?$/.test(path) ||
+    /^\/session\/[^/]+\/status\/?$/.test(path) ||
+    /^\/session\/[^/]+\/tasks\/?$/.test(path) ||
+    /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
+    /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
+    /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
-  if (method === 'GET' && (path === '/health' || path === '/capabilities')) {
+  if (
+    method === 'GET' &&
+    (path === '/health' || path === '/capabilities' || path === '/brand')
+  ) {
     return true;
   }
+  if (method === 'GET' && path === '/workspace-path-suggestions') return true;
+  if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
+    return true;
+  }
+  if (method === 'POST' && path === '/workspaces') return true;
+  if (method === 'POST' && path === '/remote-workspaces') return true;
   if (
     (method === 'GET' || method === 'POST') &&
     path === '/workspace/settings'
@@ -623,6 +941,18 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/skills\/?$/.test(path)) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -632,10 +962,22 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  const workspaceSessionsRoute = matchWorkspaceSessionsRoute(path);
+  if (method === 'GET' && workspaceSessionsRoute) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     return true;
   }
   if (
@@ -661,7 +1003,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'GET' &&
-    /^\/workspaces\/.+\/git\/(branches|diff|log)\/?$/.test(path)
+    /^\/workspaces\/.+\/git\/(branches|diff|log|remotes)\/?$/.test(path)
   )
     return true;
   if (
@@ -671,7 +1013,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (
     method === 'POST' &&
-    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit|remote|remote\/remove)\/?$/.test(
+      path,
+    )
   )
     return true;
   if (
@@ -698,7 +1042,61 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
   }
+  if (method === 'GET' && /^\/session\/[^/]+\/transcript\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'POST' && path === '/session') return true;
+  if (
+    path === '/standalone/sessions' &&
+    (method === 'GET' || method === 'POST')
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^\/standalone\/sessions\/(archive|unarchive|delete)\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/standalone\/sessions\/[^/]+(?:\/export)?\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^\/standalone\/sessions\/[^/]+\/(load|resume|repair-directory)\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+  if (
+    method === 'PATCH' &&
+    /^\/standalone\/sessions\/[^/]+\/metadata\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (method === 'GET' && path === '/goals') return true;
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/session\/[^/]+\/goal\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    (method === 'GET' || method === 'DELETE') &&
+    /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
     (method === 'GET' || method === 'DELETE') &&
@@ -709,6 +1107,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && /^\/session\/[^/]+\/events\/?$/.test(path)) {
     return true;
   }
+  if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
     return true;
   }
@@ -717,16 +1118,120 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
     return true;
   }
   return (
-    method === 'GET' &&
-    /^\/session\/[^/]+\/(context|supported-commands)\/?$/.test(path)
+    (method === 'GET' &&
+      /^\/session\/[^/]+\/(context|supported-commands|tasks)\/?$/.test(path)) ||
+    (method === 'GET' &&
+      /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path))
   );
+}
+
+// The remotes list lives on the scenario so the add/remove routes can
+// mutate what later GETs (and later mutations) observe — the same contract
+// the real daemon's fresh-list responses give the client.
+function materializeRemotes(
+  scenario: WebShellDaemonScenario,
+): DaemonGitRemoteInfo[] {
+  scenario.gitRemotes ??= [
+    {
+      name: 'origin',
+      fetchUrl: 'https://example.com/o/r.git',
+      pushUrl: 'https://example.com/o/r.git',
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    },
+  ];
+  return scenario.gitRemotes;
+}
+
+function plainRemote(name: string, url: string): DaemonGitRemoteInfo {
+  return {
+    name,
+    fetchUrl: url,
+    pushUrl: url,
+    extraFetchUrls: 0,
+    extraPushUrls: 0,
+    promisor: false,
+    customRefspec: false,
+    otherSettings: 0,
+  };
+}
+
+/** Directory listing the daemon answers with, for a requested prefix. */
+function pathSuggestionsPayload(
+  scenario: WebShellDaemonScenario,
+  prefix: string,
+): Record<string, unknown> {
+  const listed =
+    scenario.pathSuggestions?.[prefix] ??
+    scenario.pathSuggestions?.[prefix.replace(/\/+$/, '')] ??
+    [];
+  const base = !prefix || prefix.endsWith('/') ? prefix : `${prefix}/`;
+  return {
+    kind: 'workspace-path-suggestions',
+    dir: prefix,
+    sep: '/',
+    suggestions: listed.map((name) => ({ name, path: `${base}${name}` })),
+    truncated: false,
+  };
+}
+
+/**
+ * Registers a workspace and reports it, the way `POST /workspaces` does. Also
+ * used by the proxy route, which registers on the target daemon's behalf.
+ */
+function registerWorkspacePayload(
+  scenario: WebShellDaemonScenario,
+  body: unknown,
+): Record<string, unknown> {
+  const record = isRecord(body) ? body : {};
+  const cwd = typeof record['cwd'] === 'string' ? record['cwd'] : '';
+  const displayName =
+    typeof record['displayName'] === 'string'
+      ? record['displayName']
+      : undefined;
+  const workspace = {
+    id: `e2e-${cwd.replace(/[^a-zA-Z0-9]+/g, '-')}`,
+    cwd,
+    ...(displayName ? { displayName } : {}),
+    primary: false,
+    trusted: true,
+  };
+  // Mutate the capability snapshot so the refresh the app performs right
+  // after registering reports the new workspace, as the real daemon does.
+  scenario.capabilities = {
+    ...scenario.capabilities,
+    workspaces: [...(scenario.capabilities.workspaces ?? []), workspace],
+  };
+  return { ...workspace, persisted: record['persist'] === true };
+}
+
+/** The proxy routes only forward to a plain HTTP(S) origin. */
+function daemonOriginParam(raw: string | null): string {
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+}
+
+function remoteUnreachable(): Record<string, unknown> {
+  return {
+    error: 'Failed to reach remote daemon',
+    code: 'remote_unreachable',
+  };
 }
 
 async function handleDaemonRoute(
@@ -736,6 +1241,7 @@ async function handleDaemonRoute(
   scenario: WebShellDaemonScenario,
   body: unknown,
   searchParams: URLSearchParams = new URLSearchParams(),
+  resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
     await json(route, { ok: true, healthy: true });
@@ -745,12 +1251,142 @@ async function handleDaemonRoute(
     await json(route, scenario.capabilities);
     return;
   }
+  if (method === 'GET' && path === '/brand') {
+    // Always an empty brand, so the mock serves the built-in name and logo and
+    // the visual baselines stay valid. A spec that needs a white-label shell
+    // should give this a scenario field rather than loosening it here.
+    await json(route, {});
+    return;
+  }
+  if (method === 'GET' && path === '/workspace-path-suggestions') {
+    await json(
+      route,
+      pathSuggestionsPayload(scenario, searchParams.get('prefix') ?? ''),
+    );
+    return;
+  }
+  // The shell browses another computer through this daemon's proxy route, so
+  // the forwarded request is served by — and recorded against — the mock
+  // installed for the target origin.
+  if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
+    const peer = resolvePeer?.(daemonOriginParam(searchParams.get('daemon')));
+    if (!peer) {
+      await json(route, remoteUnreachable(), 502);
+      return;
+    }
+    peer.requests.push({
+      method: 'GET',
+      path: '/workspace-path-suggestions',
+      body: null,
+      headers: {},
+    });
+    await json(
+      route,
+      pathSuggestionsPayload(peer.scenario, searchParams.get('prefix') ?? ''),
+    );
+    return;
+  }
+  if (method === 'POST' && path === '/workspaces') {
+    await json(route, registerWorkspacePayload(scenario, body));
+    return;
+  }
+  if (method === 'POST' && path === '/remote-workspaces') {
+    const record = isRecord(body) ? body : {};
+    const peer = resolvePeer?.(
+      daemonOriginParam(
+        typeof record['daemon'] === 'string' ? record['daemon'] : '',
+      ),
+    );
+    if (!peer || typeof record['cwd'] !== 'string' || !record['cwd']) {
+      await json(route, remoteUnreachable(), 502);
+      return;
+    }
+    const upstreamBody = {
+      cwd: record['cwd'],
+      ...(record['persist'] === true ? { persist: true } : {}),
+      ...(typeof record['displayName'] === 'string'
+        ? { displayName: record['displayName'] }
+        : {}),
+    };
+    peer.requests.push({
+      method: 'POST',
+      path: '/workspaces',
+      body: upstreamBody,
+      headers: { 'content-type': 'application/json' },
+    });
+    await json(route, registerWorkspacePayload(peer.scenario, upstreamBody));
+    return;
+  }
   if (method === 'GET' && path === '/workspace/providers') {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && path === '/workspace/skills') {
     await json(route, scenario.skills);
+    return;
+  }
+  // Sidebar workspace overview facets, keyed by the workspace the route
+  // names so two workspaces can answer differently. The qualified extensions
+  // route answers with the workspace projection, not the manager's status
+  // document.
+  const overviewMatch = path.match(
+    /^\/workspaces\/([^/]+)\/(mcp|skills|extensions|memory|hooks)\/?$/,
+  );
+  if (method === 'GET' && overviewMatch) {
+    const workspaceCwd = decodeURIComponent(overviewMatch[1] ?? '');
+    const facet = overviewMatch[2];
+    const overrides = scenario.workspaceOverviews[workspaceCwd] ?? {};
+    if (facet === 'mcp') {
+      await json(route, {
+        ...workspaceMcp(scenario),
+        workspaceCwd,
+        ...(overrides.mcp ?? {}),
+      });
+    } else if (facet === 'skills') {
+      await json(route, {
+        ...scenario.skills,
+        workspaceCwd,
+        ...(overrides.skills ?? {}),
+      });
+    } else if (facet === 'extensions') {
+      await json(route, {
+        v: 1,
+        workspaceId: workspaceCwd,
+        workspaceCwd,
+        trusted: true,
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+        extensions: [],
+        ...(overrides.extensions ?? {}),
+      });
+    } else if (facet === 'memory') {
+      await json(route, {
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        files: [],
+        totalBytes: 0,
+        fileCount: 0,
+        ruleCount: 0,
+        ...(overrides.memory ?? {}),
+      });
+    } else {
+      await json(route, {
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        disabled: false,
+        hooks: [],
+        events: {},
+        ...(overrides.hooks ?? {}),
+      });
+    }
     return;
   }
   if (method === 'GET' && path === '/workspace/settings') {
@@ -814,7 +1450,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
@@ -843,19 +1485,65 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    // Mirror production query modes: `group=pinned` is the pinned bucket;
-    // `group=all` (and missing group) returns the full active list. The UI
-    // excludes pinned rows from organized sections via `excludePinned`.
-    const group = searchParams.get('group');
-    const sessions =
-      group === 'pinned'
-        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions;
-    await json(route, { sessions });
+  const workspaceSessionsRoute = matchWorkspaceSessionsRoute(path);
+  if (method === 'GET' && workspaceSessionsRoute?.liveState) {
+    const { workspaceCwd } = workspaceSessionsRoute;
+    await json(route, {
+      v: 1,
+      catalogVersion: scenario.sessionCatalogVersion,
+      sessions: scenario.sessions
+        .filter((session) => session.workspaceCwd === workspaceCwd)
+        .filter(
+          (session) =>
+            (session.clientCount ?? 0) > 0 ||
+            session.hasActivePrompt === true ||
+            session.isWaitingForPermission === true ||
+            session.isWaitingForUserQuestion === true,
+        )
+        .map((session) => ({
+          sessionId: session.sessionId,
+          clientCount: session.clientCount ?? 0,
+          hasActivePrompt: session.hasActivePrompt ?? false,
+          isWaitingForPermission: session.isWaitingForPermission ?? false,
+          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        })),
+    });
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
+  ) {
+    // Content search scans transcript bodies server-side; scenarios don't
+    // model those, so answer with no hits and let the client fall back to
+    // its local title/id/git filter.
+    await json(route, { results: [] });
+    return;
+  }
+  if (method === 'GET' && workspaceSessionsRoute) {
+    const { workspaceCwd } = workspaceSessionsRoute;
+    if (searchParams.has('group') && searchParams.get('view') !== 'organized') {
+      await json(
+        route,
+        {
+          error: '`group` requires `view=organized`',
+          code: 'invalid_session_group_filter',
+        },
+        400,
+      );
+      return;
+    }
+    await json(route, {
+      sessions: filterScenarioSessions(scenario, searchParams, workspaceCwd),
+    });
+    return;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     const catalog: DaemonSessionGroupCatalog = {
       groups: scenario.sessionGroups,
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
@@ -896,15 +1584,27 @@ async function handleDaemonRoute(
         ...scenario.pairingRequests,
         [name]: remaining,
       };
-      scenario.pairingApprovals = {
-        ...scenario.pairingApprovals,
-        [name]: Array.from(
-          new Set([
-            ...(scenario.pairingApprovals[name] ?? []),
-            approved.senderId,
-          ]),
-        ),
-      };
+      if (approved.subject?.type === 'group') {
+        scenario.pairingGroupApprovals = {
+          ...scenario.pairingGroupApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingGroupApprovals[name] ?? []),
+              approved.subject.id,
+            ]),
+          ),
+        };
+      } else {
+        scenario.pairingApprovals = {
+          ...scenario.pairingApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingApprovals[name] ?? []),
+              approved.senderId,
+            ]),
+          ),
+        };
+      }
       await json(route, { approved, requests: remaining });
       return;
     }
@@ -915,13 +1615,18 @@ async function handleDaemonRoute(
   if (pairingApprovalsMatch) {
     const name = decodeURIComponent(pairingApprovalsMatch[1]);
     const senderIds = scenario.pairingApprovals[name] ?? [];
+    const groupIds = scenario.pairingGroupApprovals[name] ?? [];
     if (method === 'GET') {
-      await json(route, { senderIds });
+      await json(route, { senderIds, groupIds });
       return;
     }
     if (method === 'DELETE') {
       const senderId = String(getRecordValue(body, 'senderId') ?? '');
-      if (!senderIds.includes(senderId)) {
+      const groupId = String(getRecordValue(body, 'groupId') ?? '');
+      const known = senderId
+        ? senderIds.includes(senderId)
+        : groupIds.includes(groupId);
+      if (!known) {
         await json(
           route,
           {
@@ -932,12 +1637,26 @@ async function handleDaemonRoute(
         );
         return;
       }
-      const remaining = senderIds.filter((item) => item !== senderId);
+      const remainingSenders = senderId
+        ? senderIds.filter((item) => item !== senderId)
+        : senderIds;
+      const remainingGroups =
+        groupId && !senderId
+          ? groupIds.filter((item) => item !== groupId)
+          : groupIds;
       scenario.pairingApprovals = {
         ...scenario.pairingApprovals,
-        [name]: remaining,
+        [name]: remainingSenders,
       };
-      await json(route, { revoked: senderId, senderIds: remaining });
+      scenario.pairingGroupApprovals = {
+        ...scenario.pairingGroupApprovals,
+        [name]: remainingGroups,
+      };
+      await json(route, {
+        revoked: senderId || groupId,
+        senderIds: remainingSenders,
+        groupIds: remainingGroups,
+      });
       return;
     }
   }
@@ -1009,6 +1728,10 @@ async function handleDaemonRoute(
         branch: null,
       },
     );
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    await json(route, { kind: 'workspace-local-open', opened: true });
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
@@ -1153,6 +1876,63 @@ async function handleDaemonRoute(
     );
     return;
   }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/remotes\/?$/.test(path)) {
+    await json(route, {
+      v: 1,
+      workspaceCwd: scenario.workspaceCwd,
+      available: true,
+      remotes: materializeRemotes(scenario),
+    });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/git\/remote(?:\/remove)?\/?$/.test(path)
+  ) {
+    const remotes = materializeRemotes(scenario);
+    const name =
+      body && typeof body === 'object' && 'name' in body
+        ? String(body.name)
+        : '';
+    if (path.includes('/remote/remove')) {
+      const index = remotes.findIndex((r) => r.name === name);
+      if (index === -1) {
+        await json(
+          route,
+          {
+            error: 'no_such_remote',
+            message: `error: No such remote: '${name}'`,
+          },
+          404,
+        );
+        return;
+      }
+      remotes.splice(index, 1);
+    } else {
+      const url =
+        body && typeof body === 'object' && 'url' in body
+          ? String(body.url)
+          : '';
+      if (remotes.some((r) => r.name === name)) {
+        await json(
+          route,
+          {
+            error: 'remote_already_exists',
+            message: `error: remote ${name} already exists.`,
+          },
+          409,
+        );
+        return;
+      }
+      remotes.push(plainRemote(name, url));
+    }
+    await json(route, {
+      v: 1,
+      workspaceCwd: scenario.workspaceCwd,
+      remotes,
+    });
+    return;
+  }
   if (
     method === 'POST' &&
     /^\/(workspaces\/.+\/|workspace\/)?git\/(checkout|branch|push|pull|commit)\/?$/.test(
@@ -1196,8 +1976,253 @@ async function handleDaemonRoute(
     });
     return;
   }
+  if (path === '/standalone/sessions') {
+    if (method === 'GET') {
+      const archiveState = searchParams.get('archiveState') ?? 'active';
+      await json(route, {
+        sessions: scenario.standaloneSessions.filter((session) =>
+          archiveState === 'archived'
+            ? session.isArchived === true
+            : session.isArchived !== true,
+        ),
+      });
+      return;
+    }
+    if (scenario.standaloneCreateError) {
+      await json(
+        route,
+        {
+          code: scenario.standaloneCreateError.code,
+          message: scenario.standaloneCreateError.message,
+        },
+        scenario.standaloneCreateError.status,
+      );
+      return;
+    }
+    const sessionId = readStringField(body, 'sessionId');
+    if (!sessionId) {
+      await badRequest(route, 'Standalone sessionId is required.');
+      return;
+    }
+    let summary = scenario.standaloneSessions.find(
+      (session) => session.sessionId === sessionId,
+    );
+    if (!summary) {
+      summary = standaloneSummary(scenario, sessionId);
+      scenario.standaloneSessions.unshift(summary);
+    }
+    await json(route, standaloneSessionEnvelope(scenario, summary, false), 201);
+    return;
+  }
+
+  const standaloneBatchMatch = path.match(
+    /^\/standalone\/sessions\/(archive|unarchive|delete)\/?$/,
+  );
+  if (method === 'POST' && standaloneBatchMatch) {
+    const action = standaloneBatchMatch[1];
+    const sessionIds = readStringArrayField(body, 'sessionIds');
+    const found = sessionIds.filter((sessionId) =>
+      scenario.standaloneSessions.some(
+        (session) => session.sessionId === sessionId,
+      ),
+    );
+    const notFound = sessionIds.filter(
+      (sessionId) => !found.includes(sessionId),
+    );
+    if (action === 'delete') {
+      scenario.standaloneSessions = scenario.standaloneSessions.filter(
+        (session) => !found.includes(session.sessionId),
+      );
+      await json(route, {
+        removed: found,
+        notFound,
+        errors: [],
+        fileCleanupPending: [],
+      });
+      return;
+    }
+    const targetArchived = action === 'archive';
+    const changed: string[] = [];
+    const unchanged: string[] = [];
+    scenario.standaloneSessions = scenario.standaloneSessions.map((session) => {
+      if (!found.includes(session.sessionId)) return session;
+      if (Boolean(session.isArchived) === targetArchived) {
+        unchanged.push(session.sessionId);
+        return session;
+      }
+      changed.push(session.sessionId);
+      return { ...session, isArchived: targetArchived, updatedAt: now };
+    });
+    await json(
+      route,
+      action === 'archive'
+        ? {
+            archived: changed,
+            alreadyArchived: unchanged,
+            notFound,
+            errors: [],
+          }
+        : {
+            unarchived: changed,
+            alreadyActive: unchanged,
+            notFound,
+            errors: [],
+          },
+    );
+    return;
+  }
+
+  const standaloneMatch = path.match(
+    /^\/standalone\/sessions\/([^/]+)(?:\/(load|resume|repair-directory|metadata|export))?\/?$/,
+  );
+  if (standaloneMatch) {
+    const sessionId = decodeURIComponent(standaloneMatch[1]);
+    const action = standaloneMatch[2];
+    const index = scenario.standaloneSessions.findIndex(
+      (session) => session.sessionId === sessionId,
+    );
+    const summary = scenario.standaloneSessions[index];
+    if (!summary) {
+      await json(
+        route,
+        {
+          code: 'standalone_session_not_found',
+          message: `Standalone session ${sessionId} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
+    if (method === 'GET' && !action) {
+      await json(route, summary);
+      return;
+    }
+    if (method === 'POST' && (action === 'load' || action === 'resume')) {
+      await json(route, restoredStandaloneSessionEnvelope(scenario, summary));
+      return;
+    }
+    if (method === 'POST' && action === 'repair-directory') {
+      await json(route, {
+        sessionId,
+        projectlessOutputDirectory: standaloneOutputDirectory(sessionId),
+        workingDirectory: { state: 'ready' },
+      });
+      return;
+    }
+    if (method === 'PATCH' && action === 'metadata') {
+      const displayName = readStringField(body, 'displayName') ?? '';
+      scenario.standaloneSessions[index] = {
+        ...summary,
+        displayName,
+        updatedAt: now,
+      };
+      await json(route, { sessionId, displayName });
+      return;
+    }
+    if (method === 'GET' && action === 'export') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        headers: {
+          'access-control-allow-origin': '*',
+          'content-disposition': `attachment; filename="${sessionId}.html"`,
+        },
+        body: `<p>${summary.displayName ?? sessionId}</p>`,
+      });
+      return;
+    }
+  }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));
+    return;
+  }
+  if (method === 'GET' && path === '/goals') {
+    const goal = scenario.goalSnapshot.goal;
+    await json(route, {
+      v: 1,
+      goals:
+        goal && goal.status !== 'complete'
+          ? [
+              {
+                sessionId: scenario.sessionId,
+                displayName: scenario.displayName,
+                condition: goal.objective,
+                iterations: goal.turnCount,
+                setAt: goal.createdAt,
+                hasActivePrompt: scenario.goalSnapshot.activity !== 'idle',
+                snapshot: scenario.goalSnapshot,
+              },
+            ]
+          : [],
+      droppedCount: 0,
+    });
+    return;
+  }
+
+  const goalMatch = path.match(/^\/session\/([^/]+)\/goal\/?$/);
+  if (goalMatch) {
+    if (method === 'GET') {
+      await json(route, { snapshot: scenario.goalSnapshot });
+      return;
+    }
+    scenario.goalSnapshot = reduceMockGoal(
+      scenario.goalSnapshot,
+      body as GoalControlRequest,
+    );
+    await json(route, { snapshot: scenario.goalSnapshot });
+    return;
+  }
+  if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
+    // The real route answers with a flat `DaemonSessionSummary`; a `{v, state}`
+    // envelope leaves every field the client reads (workspaceCwd, displayName,
+    // worktree, branch) undefined, so session metadata restoration silently
+    // does nothing in every scenario.
+    await json(route, {
+      sessionId: scenario.sessionId,
+      workspaceCwd: scenario.workspaceCwd,
+      displayName: scenario.displayName,
+    });
+    return;
+  }
+
+  const midTurnMatch = path.match(
+    /^\/session\/([^/]+)\/mid-turn-messages(?:\/([^/]+))?\/?$/,
+  );
+  if (midTurnMatch) {
+    const messageId = midTurnMatch[2]
+      ? decodeURIComponent(midTurnMatch[2])
+      : undefined;
+    if (method === 'DELETE' && messageId) {
+      const before = scenario.midTurnMessages.length;
+      scenario.midTurnMessages = scenario.midTurnMessages.filter(
+        (message) => message.messageId !== messageId,
+      );
+      await json(route, {
+        removed: scenario.midTurnMessages.length !== before,
+      });
+      return;
+    }
+    await json(route, {
+      messages: scenario.midTurnMessages,
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path)
+  ) {
+    const text = readStringField(body, 'message');
+    const messageId =
+      readStringField(body, 'messageId') ??
+      `mid-turn-${scenario.midTurnMessages.length + 1}`;
+    if (!text) {
+      await badRequest(route, 'Invalid mid-turn message.');
+      return;
+    }
+    scenario.midTurnMessages.push({ messageId, text });
+    await json(route, { accepted: true, messageId });
     return;
   }
 
@@ -1212,8 +2237,81 @@ async function handleDaemonRoute(
       await json(route, restoredSessionEnvelope(scenario, sessionId));
       return;
     }
+    if (action === 'branch') {
+      if (!scenario.branch) {
+        await json(route, { error: 'Branch scenario is not configured.' }, 404);
+        return;
+      }
+      const branch = scenario.branch;
+      const response: DaemonPersistedBranchedSession = {
+        sessionId: branch.sessionId,
+        displayName: branch.displayName,
+        forkedFrom: {
+          sessionId,
+          displayName: scenario.displayName,
+        },
+      };
+      await json(route, response, 201);
+      return;
+    }
     if (action === 'artifacts') {
       await json(route, sessionArtifactsEnvelope(scenario, sessionId));
+      return;
+    }
+    if (action === 'transcript') {
+      const cursor = searchParams.get('cursor');
+      // The daemon refuses a cursor sent with a direction or an anchor: the
+      // cursor already carries both. Answer the same way, so a client that
+      // sends the pair fails here rather than only against a real daemon.
+      if (
+        cursor &&
+        (searchParams.has('direction') ||
+          searchParams.has('beforeRecordId') ||
+          searchParams.has('atRecordId'))
+      ) {
+        await json(
+          route,
+          {
+            error: 'Invalid transcript cursor and anchor combination',
+            code: 'invalid_transcript_cursor',
+          },
+          400,
+        );
+        return;
+      }
+      const configured = scenario.transcriptPage;
+      let page: MockTranscriptPage | undefined = configured;
+      if (cursor) {
+        const entry = configured?.older?.[cursor];
+        if (entry && 'status' in entry) {
+          let failed = failedTranscriptReads.get(scenario);
+          if (!failed) {
+            failed = new Set();
+            failedTranscriptReads.set(scenario, failed);
+          }
+          if (!entry.then || !failed.has(cursor)) {
+            failed.add(cursor);
+            await json(
+              route,
+              { error: 'Transcript page is unavailable' },
+              entry.status,
+            );
+            return;
+          }
+          page = entry.then;
+        } else {
+          page = entry;
+        }
+      }
+      await json(route, {
+        v: 1,
+        sessionId,
+        events: page?.events ?? [],
+        hasMore: page?.hasMore ?? false,
+        ...(page?.nextCursor !== undefined
+          ? { nextCursor: page.nextCursor }
+          : {}),
+      });
       return;
     }
     if (action === 'prompt') {
@@ -1244,6 +2342,11 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'context') {
+      if (scenario.contextDelayMs) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, scenario.contextDelayMs),
+        );
+      }
       await json(route, {
         v: 1,
         sessionId,
@@ -1258,6 +2361,26 @@ async function handleDaemonRoute(
         sessionId,
         availableCommands: [],
         availableSkills: [],
+        ...(scenario.supportedCommands ?? {}),
+      });
+      return;
+    }
+    if (action === 'tasks') {
+      await json(route, {
+        v: 1,
+        sessionId,
+        now: Date.now(),
+        tasks: scenario.workflowTasks ?? [],
+      });
+      return;
+    }
+    if (action === 'saved-workflows') {
+      const detail = scenario.savedWorkflowDetails?.[extra];
+      await json(route, {
+        v: 1,
+        sessionId,
+        name: extra,
+        workflow: detail ? { v: 1, sessionId, name: extra, ...detail } : null,
       });
       return;
     }
@@ -1269,6 +2392,60 @@ async function handleDaemonRoute(
       }
       applyScenarioCurrentModel(scenario, modelId);
       await json(route, { sessionId, modelId });
+      return;
+    }
+    if (action === 'config-option') {
+      const configId = readStringField(body, 'configId');
+      const value = readStringField(body, 'value');
+      const persist = getRecordValue(body, 'persist');
+      if (
+        configId !== 'reasoning_effort' ||
+        !value ||
+        (persist !== undefined && typeof persist !== 'boolean')
+      ) {
+        await badRequest(route, 'Invalid config-option request.');
+        return;
+      }
+      const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions
+        : [];
+      const reasoningOption = currentConfigOptions.find(
+        (option) => isRecord(option) && option['id'] === configId,
+      );
+      const allowedValues = isRecord(reasoningOption)
+        ? reasoningOption['options']
+        : undefined;
+      const reasoningMeta = isRecord(reasoningOption)
+        ? getRecordValue(reasoningOption, '_meta')
+        : undefined;
+      const qwenReasoningMeta = isRecord(reasoningMeta)
+        ? getRecordValue(reasoningMeta, 'qwenCode/reasoning')
+        : undefined;
+      const defaultEffort = isRecord(qwenReasoningMeta)
+        ? readStringField(qwenReasoningMeta, 'defaultEffort')
+        : undefined;
+      const selectedValue =
+        value === 'default' && defaultEffort ? defaultEffort : value;
+      if (
+        !Array.isArray(allowedValues) ||
+        ((value !== 'default' || !defaultEffort) &&
+          !allowedValues.some((option) => {
+            return (
+              isRecord(option) &&
+              readStringField(option, 'value') === selectedValue
+            );
+          }))
+      ) {
+        await badRequest(route, 'Unsupported config-option value.');
+        return;
+      }
+      const configOptions = currentConfigOptions.map((option) =>
+        isRecord(option) && option['id'] === configId
+          ? { ...option, currentValue: selectedValue }
+          : option,
+      );
+      scenario.state.configOptions = configOptions;
+      await json(route, { configOptions, persisted: persist === true });
       return;
     }
     if (action === 'approval-mode') {
@@ -1344,21 +2521,80 @@ function sessionEnvelope(
   };
 }
 
+function standaloneOutputDirectory(sessionId: string): string {
+  return `/tmp/qwen-web-shell-standalone/${sessionId}`;
+}
+
+function standaloneSummary(
+  scenario: WebShellDaemonScenario,
+  sessionId: string,
+): DaemonStandaloneSessionSummary {
+  return {
+    sessionId,
+    workspaceCwd: standaloneOutputDirectory(sessionId),
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    createdAt: now,
+    updatedAt: now,
+    displayName: `Standalone ${scenario.standaloneSessions.length + 1}`,
+    clientCount: 1,
+    hasActivePrompt: false,
+    isArchived: false,
+  };
+}
+
+function standaloneSessionEnvelope(
+  scenario: WebShellDaemonScenario,
+  summary: DaemonStandaloneSessionSummary,
+  attached: boolean,
+): DaemonStandaloneSession {
+  return {
+    sessionId: summary.sessionId,
+    workspaceCwd: summary.workspaceCwd,
+    attached,
+    clientId: scenario.clientId,
+    createdAt: summary.createdAt ?? now,
+    hasActivePrompt: false,
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    projectlessOutputDirectory: standaloneOutputDirectory(summary.sessionId),
+    workingDirectory: { state: 'ready' },
+  };
+}
+
+function restoredStandaloneSessionEnvelope(
+  scenario: WebShellDaemonScenario,
+  summary: DaemonStandaloneSessionSummary,
+): DaemonRestoredStandaloneSession {
+  return {
+    ...standaloneSessionEnvelope(scenario, summary, true),
+    state: { ...scenario.state, displayName: summary.displayName },
+    compactedReplay: [],
+    liveJournal: [],
+    lastEventId: 0,
+  };
+}
+
 function restoredSessionEnvelope(
   scenario: WebShellDaemonScenario,
   sessionId: string,
 ): DaemonRestoredSession {
+  const branch =
+    scenario.branch?.sessionId === sessionId ? scenario.branch : undefined;
+  const events = branch?.events ?? scenario.events;
   return {
     sessionId,
     workspaceCwd: scenario.workspaceCwd,
     attached: true,
-    clientId: scenario.clientId,
+    clientId: branch?.clientId ?? scenario.clientId,
     createdAt: now,
     hasActivePrompt: false,
-    state: scenario.state,
-    compactedReplay: scenario.events,
+    state: branch
+      ? { ...scenario.state, displayName: branch.displayName }
+      : scenario.state,
+    compactedReplay: events,
     liveJournal: [],
-    lastEventId: maxEventId(scenario.events),
+    lastEventId: maxEventId(events),
   };
 }
 
@@ -1370,6 +2606,74 @@ function promptIdFor(body: PromptRequest): string {
   const meta = body?._meta;
   if (meta && typeof meta['promptId'] === 'string') return meta['promptId'];
   return 'prompt-e2e';
+}
+
+function reduceMockGoal(
+  snapshot: GoalSnapshotV2,
+  request: GoalControlRequest,
+): GoalSnapshotV2 {
+  const current = snapshot.goal;
+  const timestamp = Date.now();
+  if (request.action === 'clear') {
+    // The daemon attaches the tombstone on clear, and it is what stops a stale
+    // frame resurrecting the goal client-side — without it the e2e clear step
+    // cannot exercise that path at all.
+    return {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+      ...(current
+        ? {
+            clearedGoal: {
+              goalId: current.goalId,
+              revision: current.revision + 1,
+              updatedAt: timestamp,
+            },
+          }
+        : {}),
+    };
+  }
+  if (request.action === 'create' || request.action === 'replace') {
+    return {
+      v: 2,
+      goal: {
+        goalId: `goal-${timestamp}`,
+        revision: 1,
+        objective: request.objective.trim(),
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      activity: 'idle',
+    };
+  }
+  if (!current) return snapshot;
+  const activeTimeMs =
+    current.activeTimeMs +
+    (current.status === 'active'
+      ? Math.max(0, timestamp - current.updatedAt)
+      : 0);
+  return {
+    v: 2,
+    goal: {
+      ...current,
+      revision: current.revision + 1,
+      ...(request.action === 'edit'
+        ? { objective: request.objective.trim() }
+        : {}),
+      ...(request.action === 'pause'
+        ? { status: 'paused' as const }
+        : request.action === 'resume'
+          ? { status: 'active' as const }
+          : {}),
+      activeTimeMs,
+      updatedAt: timestamp,
+    },
+    activity: 'idle',
+  };
 }
 
 function isPromptRequest(body: unknown): body is PromptRequest {
@@ -1399,6 +2703,13 @@ function readStringField(body: unknown, key: string): string | undefined {
     : undefined;
 }
 
+function readStringArrayField(body: unknown, key: string): string[] {
+  const value = getRecordValue(body, key);
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
+
 function nextRevision(revision: string): string {
   const numeric = Number(revision);
   return Number.isSafeInteger(numeric) && numeric >= 0
@@ -1423,17 +2734,7 @@ function isRecord(body: unknown): body is Record<string, unknown> {
 function workspaceMcp(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceMcpStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    initialized: true,
-    discoveryState: 'completed',
-    servers: [],
-    errors: [],
-    clientCount: 0,
-    budgetMode: 'off',
-    budgets: [],
-  };
+  return scenario.mcp;
 }
 
 function workspaceMcpTools(

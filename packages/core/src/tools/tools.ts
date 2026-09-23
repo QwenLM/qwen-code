@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -53,7 +54,7 @@ export interface ToolInvocation<
    * The coreToolScheduler uses this as the *default* permission which may be
    * overridden by PermissionManager rules at L4.
    */
-  getDefaultPermission(): Promise<PermissionDecision>;
+  getDefaultPermission(signal?: AbortSignal): Promise<PermissionDecision>;
 
   /**
    * Whether this invocation must be approved through an explicit host/user
@@ -61,6 +62,23 @@ export interface ToolInvocation<
    * this requirement.
    */
   requiresUserInteraction?(): boolean;
+
+  /**
+   * Parameters that permission rules match against, when they differ from
+   * `params`. Called after {@link getDefaultPermission} resolves, so an
+   * invocation can derive values from work done there, such as the digest of
+   * the file a name resolves to. A derived key must overwrite any value the
+   * model supplied under it: a rule scoped by that key must never match a
+   * value the model chose.
+   */
+  getPermissionMatchParams?(): Record<string, unknown>;
+
+  /**
+   * Whether a host-level allow decision may be confirmed without forwarding
+   * an interaction payload. Tools that collect data through their approval
+   * surface should return false so the host-provided payload is preserved.
+   */
+  canAutoApproveOnAllow?(): boolean;
 
   /**
    * Constructs the confirmation dialog details for this invocation.
@@ -85,6 +103,9 @@ export interface ToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
+
+  /** Release prepared resources when the scheduler finalizes the call. */
+  release?(): Promise<void>;
 }
 
 /**
@@ -113,6 +134,10 @@ export abstract class BaseToolInvocation<
 
   requiresUserInteraction(): boolean {
     return false;
+  }
+
+  canAutoApproveOnAllow(): boolean {
+    return true;
   }
 
   /**
@@ -151,6 +176,62 @@ export abstract class BaseToolInvocation<
  * A type alias for a tool invocation where the specific parameter and result types are not known.
  */
 export type AnyToolInvocation = ToolInvocation<object, ToolResult>;
+
+/** One declared output of a media-policy tool (see
+ * {@link MediaPolicyToolDescriptor}). */
+export interface MediaPolicyToolOutputSpec {
+  /** What the output is: a derived media artifact, a disclosure text, or
+   * a non-media file artifact (e.g. a `role: 'transcript'` UTF-8
+   * text/plain file — policy design §6.2). */
+  kind: 'media' | 'text' | 'file';
+  /** Role label for text/file outputs (e.g. 'disclosure', 'transcript'). */
+  role?: string;
+  /** MIME types the output may carry (media and file outputs). */
+  mimeTypes?: string[];
+  /** Whether a successful run MUST produce this output. */
+  required: boolean;
+  /** Whether the output is a lossy transformation of its input. A lossy
+   * media output obligates a disclosure text alongside it. */
+  lossy?: boolean;
+}
+
+/**
+ * Code-registration fact marking a tool as an omni media-policy tool —
+ * declared by the tool class itself, immutable at runtime, and never
+ * configurable. Its presence is what the scheduler's modelAccess gate,
+ * the declaration surfaces, and the fixed-policy orchestrator key off:
+ * config can never turn an ordinary tool into a policy tool (or the
+ * reverse).
+ */
+export interface MediaPolicyToolDescriptor {
+  kind: 'media_policy';
+  /** Media modalities the tool accepts as input. */
+  inputMediaTypes: Array<'image' | 'audio' | 'video'>;
+  /** Outputs a successful run may/must produce. */
+  outputs: MediaPolicyToolOutputSpec[];
+  /** JSON schema for `omni.processing.policyTools.<name>.settings`. */
+  settingsSchema?: object;
+  /**
+   * Parameter names only the OPERATOR may set — via
+   * `policyTools.<name>.settings` or `modelAccess.defaultArguments` /
+   * `lockedArguments` — never the caller of a gated model/client call.
+   * For endpoint/credential selectors (e.g. a request base URL plus the
+   * NAME of the env var read for its bearer token): a model-controlled
+   * pair would let injected content exfiltrate arbitrary environment
+   * secrets to an attacker host. The modelAccess gate rejects gated calls
+   * that name these keys, and the declaration projection hides them from
+   * the model. Fixed-policy arguments (operator-authored settings.json)
+   * are unaffected.
+   */
+  operatorOnlyParams?: readonly string[];
+  /**
+   * Transform-semantics version, part of the degradation-cache
+   * fingerprint (decision D2). Bump it whenever the tool starts producing
+   * different bytes for the same input and arguments (encoder change,
+   * default pipeline change), so stale cached derivatives are not reused.
+   */
+  version?: string;
+}
 
 /**
  * Interface for a tool builder that validates parameters and creates invocations.
@@ -222,9 +303,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool and invokes it through
+     * {@link ToolNames.TOOL_CALL}, keeping the declaration list stable. Mirrors
+     * the `shouldDefer` field described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**
@@ -246,6 +327,16 @@ export abstract class DeclarativeTool<
       description: this.description,
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  /**
+   * Present iff this tool is an omni media-policy tool. A code-level fact
+   * of the tool class (not configuration): the scheduler's modelAccess
+   * gate, the declaration surfaces, and the fixed-policy orchestrator all
+   * key off it. Default: not a media-policy tool.
+   */
+  get mediaPolicyDescriptor(): MediaPolicyToolDescriptor | undefined {
+    return undefined;
   }
 
   /**
@@ -284,12 +375,15 @@ export abstract class DeclarativeTool<
    *   - undefined: fall back to raw params (only safe when the tool is
    *     known to have no sensitive params)
    *
-   * Default is the empty-string sentinel — fail-closed: a third-party
-   * MCP tool (or any tool that has not opted in) does not leak its raw
-   * parameters (potentially containing API keys, tokens, file contents)
-   * into the classifier LLM prompt. Tools that want their args inspected
-   * by the classifier for safety judgement should override this and
-   * return an object with only the security-relevant fields.
+   * Default is the empty-string sentinel — fail-closed: a tool that has
+   * not opted in does not leak its raw parameters (potentially containing
+   * API keys, tokens, file contents) into the classifier LLM prompt.
+   * Tools that want their args inspected by the classifier for safety
+   * judgement should override this and return an object with only the
+   * security-relevant fields. Note that `DiscoveredMCPTool` overrides
+   * this and forwards a bounded projection of every MCP call's arguments
+   * by default (see `mcp-classifier-input.ts`; opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`).
    */
   toAutoClassifierInput(
     _params: TParams,
@@ -440,20 +534,7 @@ export abstract class BaseDeclarativeTool<
  */
 export type AnyDeclarativeTool = DeclarativeTool<object, ToolResult>;
 
-/**
- * Type guard to check if an object is a Tool.
- * @param obj The object to check.
- * @returns True if the object is a Tool, false otherwise.
- */
-export function isTool(obj: unknown): obj is AnyDeclarativeTool {
-  return (
-    typeof obj === 'object' &&
-    obj !== null &&
-    'name' in obj &&
-    'build' in obj &&
-    typeof (obj as AnyDeclarativeTool).build === 'function'
-  );
-}
+export { isTool } from '../utils/is-tool.js';
 
 export type ToolArtifactKind =
   | 'file'
@@ -464,7 +545,15 @@ export type ToolArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
+
+export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';
+
+export interface ToolResultBoundaryArtifact {
+  state: ToolResultArtifactState;
+  kinds: Array<ToolArtifactKind | 'unknown'>;
+}
 
 export type ToolArtifactStorage =
   | 'workspace'
@@ -503,6 +592,19 @@ export interface ToolResult {
    * later.
    */
   persistedOutputFiles?: string[];
+
+  /**
+   * Internal runtime marker: the producer already sized `llmContent` against
+   * its own declared character budget, whether or not anything was cut. Records
+   * the size decision, where `persistedOutputFiles` records the persistence
+   * one. Set it only on paths that ran that check, never by tool identity: the
+   * scheduler's generic single-result gate stands down for a marked body. On
+   * the success path the per-tool budget still applies, and a timed-out call's
+   * detail is re-bounded at the producer's declared budget; the ordinary
+   * failure path has no per-tool pass, so a producer that marks a body there
+   * is bounding it alone. The aggregate batch budget applies on every path.
+   */
+  outputBudgetApplied?: boolean;
 
   /**
    * Markdown string for user display.
@@ -639,10 +741,14 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
+  executionMode?: 'foreground' | 'background';
+  /** Whether the registered subagent session is available for inspection. */
+  subagentSessionReady?: boolean;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  skills?: string[];
   /** Real-time output-token count during execution, accumulated across subagent rounds. */
   tokenCount?: number;
 
@@ -659,6 +765,7 @@ export interface AgentResultDisplay {
     result?: string;
     resultDisplay?: string;
     responseParts?: Part[];
+    boundaryArtifact?: ToolResultBoundaryArtifact;
     description?: string;
   }>;
 }
@@ -682,6 +789,46 @@ export interface McpToolProgressData {
   total?: number;
   /** Optional human-readable progress message */
   message?: string;
+}
+
+export interface McpAppResourceCsp {
+  connectDomains?: string[];
+  resourceDomains?: string[];
+  frameDomains?: string[];
+  baseUriDomains?: string[];
+}
+
+export interface McpAppResourcePermissions {
+  camera?: Record<string, never>;
+  microphone?: Record<string, never>;
+  geolocation?: Record<string, never>;
+  clipboardWrite?: Record<string, never>;
+}
+
+export interface McpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
+}
+
+/** A completed MCP tool call with an interactive MCP Apps resource. */
+export interface McpAppResultDisplay {
+  type: 'mcp_app';
+  serverName: string;
+  resourceUri: string;
+  html: string;
+  toolResult: McpAppToolResult;
+  toolArguments: Record<string, unknown>;
+  fallbackText: string;
+  csp?: McpAppResourceCsp;
+  permissions?: McpAppResourcePermissions;
 }
 
 /**
@@ -740,16 +887,26 @@ export function isTerminalImageDisplay(
   );
 }
 
+export interface AskUserQuestionResultDisplay {
+  type: 'ask_user_question_answers';
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+}
+
 export type ToolResultDisplay =
+  | ShellResultDisplay
   | string
+  | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
   | AgentResultDisplay
   | TeamResultDisplay
   | TaskListResultDisplay
+  | FindingsResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData
+  | McpAppResultDisplay
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
@@ -774,6 +931,13 @@ export interface TaskListResultDisplay {
 export interface FileDiff {
   fileDiff: string;
   fileName: string;
+  /**
+   * Full (project-relative or absolute) path to the edited file, as passed
+   * to the tool. UI consumers must prefer this over `fileName` when
+   * resolving a clickable/openable location — `fileName` is a basename and
+   * cannot be used to locate files outside the workspace root.
+   */
+  filePath?: string;
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
@@ -797,6 +961,56 @@ export interface DiffStat {
   user_removed_chars: number;
 }
 
+/**
+ * One review finding as the `report_findings` tool hands it to clients.
+ *
+ * Field names and enum spellings deliberately match the `qwen review
+ * findings` artifact (`packages/cli/src/commands/review/findings.ts`) so the model
+ * copies values straight out of the artifact instead of translating them —
+ * a translation layer between two spellings of the same list is where
+ * severities have historically drifted.
+ */
+export interface ReportedFinding {
+  /** The findings artifact's id (`R<round>-<n>` / `D<round>-<n>`), when one exists. */
+  id?: string;
+  severity: 'Critical' | 'Suggestion' | 'Nice to have';
+  /** Verification confidence. Absent on an unverified (low-effort) pass. */
+  confidence?: 'high' | 'low';
+  /** Where the finding came from. */
+  source?: 'review' | 'build' | 'test' | 'probe' | 'lint';
+  file: string;
+  line?: number;
+  /** One sentence stating the defect. */
+  summary: string;
+  /** `summary` compressed to <= 60 characters, for a compact list UI. */
+  shortSummary: string;
+  /** The concrete trigger and wrong outcome. */
+  failureScenario: string;
+  /** Free-form kebab-case tag (`correctness`, `security`, …). */
+  category?: string;
+  /** Which way a Critical fails — see `FINDING_DIRECTIONS`. */
+  direction?: 'certifies-falsely' | 'fails-closed';
+  /** What a Critical is measured against — see `FINDING_BASELINES`. */
+  baseline?: 'regression' | 'new-surface';
+  /** Set only on a re-report after fixes were applied. */
+  outcome?: 'fixed' | 'skipped' | 'no_change_needed';
+  /** The fixer's reason — mainly for `skipped`. */
+  outcomeNote?: string;
+}
+
+export interface FindingsResultDisplay {
+  type: 'findings_list';
+  /** The review effort the findings came from. */
+  level?: 'low' | 'medium' | 'high';
+  findings: ReportedFinding[];
+  /**
+   * Set by history/recording compaction when the retained-display budget
+   * evicted the least severe tail of a larger list: how many findings were
+   * removed. The retained prefix keeps the most severe entries.
+   */
+  omittedFindings?: number;
+}
+
 export interface TodoResultDisplay {
   type: 'todo_list';
   planId?: string;
@@ -806,6 +1020,7 @@ export interface TodoResultDisplay {
     status: 'pending' | 'in_progress' | 'completed';
     blockedBy?: string[];
   }>;
+  unchanged?: boolean;
 }
 
 export interface PlanResultDisplay {
@@ -843,6 +1058,8 @@ export interface ToolEditConfirmationDetails {
 }
 
 export interface ToolConfirmationPayload {
+  /** Execution permission displayed when approving a DAC plan. */
+  expectedPlanExecutionMode?: string;
   // used to override `modifiedProposedContent` for modifiable tools in the
   // inline modify flow
   newContent?: string;
@@ -914,13 +1131,21 @@ export interface ToolInfoConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   prompt: string;
+  /** Display the prompt literally instead of interpreting inline Markdown. */
+  renderPromptAsPlainText?: boolean;
   urls?: string[];
   /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
   permissionRules?: string[];
 }
 
 export interface AutoModeFallbackConfirmation {
-  reason: 'classifier_unavailable';
+  reason:
+    | 'classifier_blocked_retry'
+    | 'classifier_unavailable'
+    | 'consecutive_block'
+    | 'consecutive_unavailable'
+    | 'total_denial'
+    | 'external_write';
   message: string;
 }
 

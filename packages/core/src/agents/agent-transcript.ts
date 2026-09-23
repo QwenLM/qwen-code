@@ -27,6 +27,7 @@ import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
+  type AgentToolOutputUpdateEvent,
   type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
   type AgentStreamTextEvent,
@@ -36,14 +37,25 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
-import type { SandboxConfig } from '../config/config.js';
+import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { Content } from '@google/genai';
+import type { SubagentExecutorSpec } from '../subagents/types.js';
+import type {
+  AgentCompletionStats,
+  BackgroundActivity,
+} from './background-tasks.js';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 const MAX_PENDING_STREAM_BYTES = 64 * 1024;
+// Kept in sync by hand with MAX_RECENT_ACTIVITIES in background-tasks.ts.
+// That module imports patchAgentMeta from this one, so importing the constant
+// back would turn a type-only edge into a runtime import cycle.
+const MAX_PERSISTED_RECENT_ACTIVITIES = 10;
 
 export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -122,8 +134,10 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
-  /** Whether the original launch used temporary worktree isolation. */
-  isolation?: 'worktree';
+  /** Container launches use this legacy field so older readers refuse resume. */
+  isolation?: 'worktree' | 'container';
+  executionBackend?: 'container';
+  workspaceIsolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
@@ -134,10 +148,20 @@ export interface AgentMeta {
    * exclusion; an empty list means deny-all.
    */
   executionAllowedTools?: string[];
+  /**
+   * Launch-time per-agent tool blocklist of a fork, persisted beside
+   * `executionAllowedTools`: the resume path rebuilds the fork's toolConfig
+   * from this sidecar alone, so dropping it would let a backgrounded fork
+   * resume past the blocklist — the only thing bounding a wildcard allowlist
+   * entry such as `mcp__*`. Legacy absence means no blocklist.
+   */
+  disallowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
+  /** External launch provenance; transcript replay cannot restore its session. */
+  executor?: SubagentExecutorSpec['kind'];
   /** UI hint preserved for resumed task rows. */
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */
@@ -154,6 +178,179 @@ export interface AgentMeta {
   model?: string;
   /** Last terminal error, if any. */
   lastError?: string;
+  /** This run belongs to an opted-in Session Workflow revision. */
+  sessionWorkflow?: boolean;
+  /** Terminal execution summary, when the run reached a known terminal state. */
+  stats?: AgentCompletionStats;
+  /** Capped terminal snapshot of the most recent tool activities. */
+  recentActivities?: BackgroundActivity[];
+}
+
+export interface AgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: AgentMeta['status'];
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface AgentTrace {
+  nodes: AgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
+}
+
+const TRACE_WARNING_LIMIT = 20;
+export const MAX_AGENT_TRACE_NODES = 2_000;
+const TRACE_READ_CONCURRENCY = 8;
+
+export async function readAgentTrace(
+  projectDir: string,
+  sessionId: string,
+  rootAgentId?: string,
+): Promise<AgentTrace> {
+  const dir = getSubagentSessionDir(projectDir, sessionId);
+  const warnings: string[] = [];
+  let discovered: string[];
+  try {
+    discovered = (await fs.promises.readdir(dir))
+      .filter((name) => name.endsWith('.meta.json'))
+      .sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { nodes: [], rootAgentIds: [], warnings: [] };
+    }
+    throw error;
+  }
+
+  const fileNames = discovered.slice(0, MAX_AGENT_TRACE_NODES);
+  if (discovered.length > MAX_AGENT_TRACE_NODES) {
+    warnings.push(
+      `Trace contains more than ${MAX_AGENT_TRACE_NODES} metadata files; results were truncated`,
+    );
+  }
+
+  const metas = new Map<string, AgentMeta>();
+  for (
+    let offset = 0;
+    offset < fileNames.length;
+    offset += TRACE_READ_CONCURRENCY
+  ) {
+    const batch = fileNames.slice(offset, offset + TRACE_READ_CONCURRENCY);
+    await Promise.all(
+      batch.map(async (fileName) => {
+        try {
+          const parsed = JSON.parse(
+            await fs.promises.readFile(path.join(dir, fileName), 'utf8'),
+          ) as AgentMeta;
+          if (
+            typeof parsed.agentId !== 'string' ||
+            parsed.agentId.length === 0 ||
+            typeof parsed.agentType !== 'string' ||
+            typeof parsed.description !== 'string' ||
+            typeof parsed.createdAt !== 'string' ||
+            !Number.isFinite(Date.parse(parsed.createdAt)) ||
+            (parsed.parentAgentId !== null &&
+              typeof parsed.parentAgentId !== 'string') ||
+            (parsed.toolUseId !== undefined &&
+              typeof parsed.toolUseId !== 'string') ||
+            (parsed.depth !== undefined && !Number.isFinite(parsed.depth)) ||
+            (parsed.status !== undefined &&
+              ![
+                'running',
+                'paused',
+                'completed',
+                'failed',
+                'cancelled',
+              ].includes(parsed.status)) ||
+            (parsed.lastUpdatedAt !== undefined &&
+              (typeof parsed.lastUpdatedAt !== 'string' ||
+                !Number.isFinite(Date.parse(parsed.lastUpdatedAt)))) ||
+            (parsed.lastError !== undefined &&
+              typeof parsed.lastError !== 'string') ||
+            parsed.parentSessionId !== sessionId ||
+            path.basename(
+              getAgentMetaPath(projectDir, sessionId, parsed.agentId),
+            ) !== fileName
+          ) {
+            throw new Error('invalid agent metadata identity');
+          }
+          metas.set(parsed.agentId, parsed);
+        } catch (error) {
+          if (warnings.length < TRACE_WARNING_LIMIT) {
+            warnings.push(
+              `${fileName}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }),
+    );
+  }
+
+  const nodes = [...metas.values()]
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.agentId.localeCompare(right.agentId),
+    )
+    .map((meta): AgentTraceNode => {
+      let cursor = meta;
+      const lineage: string[] = [];
+      const positions = new Map<string, number>();
+      let lineageState: AgentTraceNode['lineageState'] = 'complete';
+      let cycleRoot: string | undefined;
+      while (cursor.parentAgentId !== null) {
+        const previousPosition = positions.get(cursor.agentId);
+        if (previousPosition !== undefined) {
+          lineageState = 'cycle';
+          cycleRoot = [...lineage.slice(previousPosition)].sort()[0];
+          break;
+        }
+        positions.set(cursor.agentId, lineage.length);
+        lineage.push(cursor.agentId);
+        const parent = metas.get(cursor.parentAgentId);
+        if (!parent) {
+          lineageState = 'orphaned';
+          break;
+        }
+        cursor = parent;
+      }
+      const resolvedRoot =
+        lineageState === 'cycle'
+          ? (cycleRoot ?? cursor.agentId)
+          : cursor.agentId;
+      return {
+        agentId: meta.agentId,
+        agentType: meta.agentType,
+        description: meta.description,
+        parentSessionId: meta.parentSessionId,
+        parentAgentId: meta.parentAgentId,
+        rootAgentId: resolvedRoot,
+        ...(meta.toolUseId ? { toolUseId: meta.toolUseId } : {}),
+        ...(meta.depth !== undefined ? { depth: meta.depth } : {}),
+        ...(meta.status ? { status: meta.status } : {}),
+        createdAt: meta.createdAt,
+        ...(meta.lastUpdatedAt ? { lastUpdatedAt: meta.lastUpdatedAt } : {}),
+        ...(meta.lastError ? { lastError: meta.lastError } : {}),
+        lineageState,
+      };
+    });
+  const filtered = rootAgentId
+    ? nodes.filter((node) => node.rootAgentId === rootAgentId)
+    : nodes;
+  return {
+    nodes: filtered,
+    rootAgentIds: [...new Set(filtered.map((node) => node.rootAgentId))].sort(),
+    warnings,
+  };
 }
 
 export interface AgentPersistedCliFlags {
@@ -208,10 +405,17 @@ export function normalizeResumedAgentDepth(
  * Best-effort — a failed sidecar write must not break the agent launch path.
  */
 export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
+  const tempPath = `${metaPath}.${process.pid}.${randomUUID()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(metaPath), { recursive: true });
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+    fs.writeFileSync(tempPath, JSON.stringify(meta, null, 2), 'utf8');
+    fs.renameSync(tempPath, metaPath);
   } catch (error) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Best-effort cleanup after the write failed.
+    }
     debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
     return;
   }
@@ -237,6 +441,28 @@ export function readAgentMeta(metaPath: string): AgentMeta | undefined {
   }
 }
 
+export async function readAgentMetaAsync(
+  metaPath: string,
+  options?: { throwOnReadError?: boolean },
+): Promise<AgentMeta | undefined> {
+  let contents: string;
+  try {
+    contents = await fs.promises.readFile(metaPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
+      if (options?.throwOnReadError) throw error;
+    }
+    return undefined;
+  }
+  try {
+    return JSON.parse(contents) as AgentMeta;
+  } catch (error) {
+    debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
+    return undefined;
+  }
+}
+
 export function patchAgentMeta(
   metaPath: string,
   updates: Partial<AgentMeta>,
@@ -249,6 +475,53 @@ export function patchAgentMeta(
   };
   writeAgentMeta(metaPath, next);
   return next;
+}
+
+/**
+ * Returns the JSON-safe terminal summary persisted in an agent sidecar.
+ * Legacy sidecars simply omit these optional fields.
+ */
+export function getAgentMetaTerminalSummary(
+  stats?: AgentCompletionStats,
+  recentActivities?: readonly BackgroundActivity[],
+): Pick<AgentMeta, 'stats' | 'recentActivities'> {
+  const candidateStats = stats as unknown as
+    | Record<string, unknown>
+    | undefined;
+  const normalizedStats =
+    candidateStats &&
+    Number.isFinite(candidateStats['totalTokens']) &&
+    Number.isFinite(candidateStats['outputTokens']) &&
+    Number.isFinite(candidateStats['toolUses']) &&
+    Number.isFinite(candidateStats['durationMs'])
+      ? {
+          totalTokens: candidateStats['totalTokens'] as number,
+          outputTokens: candidateStats['outputTokens'] as number,
+          toolUses: candidateStats['toolUses'] as number,
+          durationMs: candidateStats['durationMs'] as number,
+        }
+      : undefined;
+  const normalizedActivities = Array.isArray(recentActivities)
+    ? recentActivities.filter(
+        (activity): activity is BackgroundActivity =>
+          activity !== null &&
+          typeof activity === 'object' &&
+          typeof activity.name === 'string' &&
+          typeof activity.description === 'string' &&
+          Number.isFinite(activity.at),
+      )
+    : undefined;
+
+  return {
+    ...(normalizedStats ? { stats: normalizedStats } : {}),
+    ...(normalizedActivities
+      ? {
+          recentActivities: normalizedActivities
+            .slice(-MAX_PERSISTED_RECENT_ACTIVITIES)
+            .map(({ name, description, at }) => ({ name, description, at })),
+        }
+      : {}),
+  };
 }
 
 export function readLastTranscriptRecordUuidSync(
@@ -324,6 +597,53 @@ export interface AttachJsonlOptions {
    * branch away from any dangling tail produced by an interrupted turn.
    */
   initialParentUuid?: string | null;
+  /**
+   * 1-based attempt number when this attach resumes a transcript after a
+   * failed attempt (2+). Seeds an `agent_retry` system marker at the seam so
+   * the retry is visible on disk. Not implied by `appendToExisting` —
+   * background resume also appends without being a retry.
+   */
+  retryAttempt?: number;
+}
+
+/** Path + options pair for {@link attachJsonlTranscriptWriter}. */
+export interface AgentTranscriptAttachTarget {
+  jsonlPath: string;
+  options: AttachJsonlOptions;
+}
+
+/**
+ * Single owner of the agent-transcript attach contract: the JSONL path plus
+ * the launch metadata shared by every attach site (AgentTool's foreground
+ * and background launches, workflow dispatch, background resume). Each site
+ * layers its extras on top, so a new launch-metadata field added here lands
+ * in every transcript instead of only the sites that happened to be updated.
+ *
+ * The path follows the merged `sessionId` — the live session by default;
+ * background resume overrides it with the persisted parent session.
+ */
+export function buildAgentTranscriptAttach(
+  config: Config,
+  agentId: string,
+  extras?: Partial<AttachJsonlOptions>,
+): AgentTranscriptAttachTarget {
+  const projectRoot = config.getProjectRoot();
+  const options: AttachJsonlOptions = {
+    agentId,
+    sessionId: config.getSessionId(),
+    cwd: projectRoot,
+    version: config.getCliVersion() || 'unknown',
+    gitBranch: getCachedGitBranch(projectRoot),
+    ...extras,
+  };
+  return {
+    jsonlPath: getAgentJsonlPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      options.agentId,
+    ),
+    options,
+  };
 }
 
 export interface AttachJsonlTranscriptResult {
@@ -472,6 +792,28 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
+  const sessionReadiness = new Map<string, boolean>();
+  const recordSessionReadiness = (callId: string, ready: boolean) => {
+    if (sessionReadiness.get(callId) === ready) return;
+    sessionReadiness.set(callId, ready);
+    recordSystem('agent_session_ready', {
+      callId,
+      subagentSessionReady: ready,
+    });
+  };
+
+  const onToolOutputUpdate = (event: AgentToolOutputUpdateEvent) => {
+    const output = event.outputChunk;
+    if (
+      typeof output === 'object' &&
+      output !== null &&
+      'subagentSessionReady' in output &&
+      typeof output.subagentSessionReady === 'boolean'
+    ) {
+      recordSessionReadiness(event.callId, output.subagentSessionReady);
+    }
+  };
+
   const onToolCall = (event: AgentToolCallEvent) => {
     append({
       ...baseFields('assistant'),
@@ -481,13 +823,16 @@ export function attachJsonlTranscriptWriter(
           {
             functionCall: {
               id: event.callId,
-              name: event.name,
-              args: event.args,
+              name: event.modelFacingName ?? event.name,
+              args: event.modelFacingArgs ?? event.args,
             },
           },
         ],
       },
     });
+    if (event.name === ToolNames.AGENT) {
+      recordSessionReadiness(event.callId, false);
+    }
   };
 
   const onToolResponsesFinalized = (
@@ -499,6 +844,12 @@ export function attachJsonlTranscriptWriter(
         message: { role: 'user', parts: response.responseParts },
         toolCallResult: {
           callId: response.callId,
+          ...(sessionReadiness.has(response.callId) &&
+          response.responseParts.some(
+            (part) => part.functionResponse?.response?.['error'],
+          )
+            ? { status: 'error' as const }
+            : {}),
           ...(response.durationMs !== undefined
             ? { durationMs: response.durationMs }
             : {}),
@@ -552,9 +903,14 @@ export function attachJsonlTranscriptWriter(
     });
   }
 
+  if (options.retryAttempt !== undefined) {
+    recordSystem('agent_retry', { attempt: options.retryAttempt });
+  }
+
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
   emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+  emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
   emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
@@ -562,6 +918,7 @@ export function attachJsonlTranscriptWriter(
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
+    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
     emitter.off(
       AgentEventType.TOOL_RESPONSES_FINALIZED,
       onToolResponsesFinalized,
