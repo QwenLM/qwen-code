@@ -212,6 +212,23 @@ describe('resolveThreadStatus', () => {
     expect(result.reason).toContain('agent_unknown');
   });
 
+  it('does not block on an agent reply that woke nobody', () => {
+    // A plain answer from the agent is the normal end of its turn.
+    const result = resolve(
+      thread({
+        messages: [
+          message({
+            sequence: 1,
+            authorKind: 'agent',
+            outcomes: [{ kind: 'skip', reason: 'self_trigger' }],
+          }),
+        ],
+      }),
+    );
+
+    expect(result.status).not.toBe('blocked');
+  });
+
   it('ignores a post that was never an admission', () => {
     const result = resolve(
       thread({ messages: [message({ sequence: 1, outcomes: [] })] }),

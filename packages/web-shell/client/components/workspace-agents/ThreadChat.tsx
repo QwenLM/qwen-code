@@ -294,13 +294,12 @@ export function ThreadChat({
             }),
           ),
         ...thread.runs
+          // Once the run's answer is a post, the post is the record; the live
+          // preview is only for text still being written.
           .filter(
             (run) =>
               run.progress?.outputText &&
-              !(
-                run.closeKind === 'review' &&
-                thread.posts.some((post) => post.sourceRunId === run.id)
-              ),
+              !thread.posts.some((post) => post.sourceRunId === run.id),
           )
           .map(
             (run): Message => ({

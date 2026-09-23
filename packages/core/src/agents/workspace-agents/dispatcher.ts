@@ -472,6 +472,40 @@ function actionFor(state: AgentBodyState): AgentStartAction | undefined {
   }
 }
 
+/**
+ * Posts what an agent said in plain text as its message on the thread.
+ *
+ * A chat model usually just answers. Without this the answer lived only in the
+ * run's progress snapshot: peers could not read it, `thread_read` and a parent
+ * report did not carry it, and the thread looked stuck. Posting goes through
+ * normal admission, so an @mention in the answer wakes that agent. The origin
+ * id makes a retried reconcile post it once.
+ */
+async function postPlainReply(
+  transaction: AgentStoreTransaction,
+  thread: Thread,
+  runId: string,
+): Promise<void> {
+  const run = thread.runs.find((entry) => entry.id === runId);
+  const text = run?.progress?.outputText?.trim();
+  if (
+    !run ||
+    !text ||
+    run.status !== 'completed' ||
+    run.closeKind !== undefined ||
+    thread.messages.some((message) => message.sourceRunId === run.id)
+  ) {
+    return;
+  }
+  await postMessageInTransaction(transaction, thread.id, {
+    from: run.agentId,
+    authorKind: 'agent',
+    text,
+    sourceRunId: run.id,
+    originEventId: `reply_${run.id}_${run.attempts}`,
+  });
+}
+
 async function reconcileInterruptedRuns(
   projectRoot: string,
   port: AgentDispatchPort,
@@ -583,14 +617,15 @@ async function reconcileInterruptedRuns(
         // baseline it was started with has nowhere left to live, and an
         // uncharged run would let a tree spend past its budget silently.
         await chargeRunUsage(projectRoot, port, agent, thread.id, run);
-        await withAgentStoreTransaction(projectRoot, (transaction) =>
-          finishRunInTransaction(transaction, {
+        await withAgentStoreTransaction(projectRoot, async (transaction) => {
+          const finished = await finishRunInTransaction(transaction, {
             threadId: thread.id,
             runId: run.id,
             outcome: { status: 'completed', attempt: run.attempts },
             now,
-          }),
-        );
+          });
+          await postPlainReply(transaction, finished, run.id);
+        });
         records.push({ ...base, kind: 'recovered_terminal' });
         continue;
       }

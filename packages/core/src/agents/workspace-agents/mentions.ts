@@ -18,15 +18,38 @@ import { findAgentByName } from './store.js';
 import type { WorkspaceAgent } from './types.js';
 
 /**
- * A candidate `@token`. The character before `@` must not be a word
- * character, which is what keeps `user@example.com` and `a@b` from reading as
- * mentions of `example` and `b`. Trailing punctuation is left outside the
- * capture so "ask @alice, then @bob." resolves both names. A slash immediately
- * after the token marks a scoped package or repository such as `@scope/name`,
- * not an agent address.
+ * A candidate `@token`. The character before `@` must not be an ASCII word
+ * character or a dot, which is what keeps `user@example.com` and `a@b` from
+ * reading as mentions of `example` and `b` — while Chinese and Japanese, which
+ * put no space before `@`, still address agents ("请@迁移助手看一下").
+ * Trailing punctuation is left outside the capture so "ask @alice, then @bob."
+ * resolves both names. A slash immediately after the token marks a scoped
+ * package or repository such as `@scope/name`, not an agent address.
  */
 const MENTION_PATTERN =
-  /(?<![\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu;
+  /(?<![A-Za-z0-9_.])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu;
+
+/**
+ * The agent a token names. Scripts without spaces run the name into the next
+ * word ("@迁移助手看一下"), so when no name matches the whole token the longest
+ * name it starts with wins — unless what follows is more of an ASCII name,
+ * which keeps "@alice2" from reaching "alice".
+ */
+function agentForToken(
+  agents: readonly WorkspaceAgent[],
+  token: string,
+): WorkspaceAgent | undefined {
+  const exact = findAgentByName(agents, token);
+  if (exact) return exact;
+  const lowered = token.toLowerCase();
+  let best: WorkspaceAgent | undefined;
+  for (const agent of agents) {
+    if (!lowered.startsWith(agent.name.toLowerCase())) continue;
+    if (/^[A-Za-z0-9_-]/.test(token.slice(agent.name.length))) continue;
+    if (!best || agent.name.length > best.name.length) best = agent;
+  }
+  return best;
+}
 
 export interface ParsedMentions {
   /** Agent ids, in first-appearance order, deduplicated. */
@@ -60,7 +83,7 @@ export function parseMentions(
     ) {
       continue;
     }
-    const agent = findAgentByName(agents, name);
+    const agent = agentForToken(agents, name);
     if (!agent) {
       const lowered = name.toLowerCase();
       if (!seenUnknown.has(lowered)) {

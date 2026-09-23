@@ -219,8 +219,13 @@ export function resolveThreadStatus(
     };
   }
 
+  // Only a person's post that reached nobody is a dead end. An agent's reply
+  // that wakes no one is the normal end of its turn.
   const lastMessage = thread.messages[thread.messages.length - 1];
-  if (lastMessage && admissionBookedNothing(lastMessage)) {
+  if (
+    lastMessage?.authorKind === 'human' &&
+    admissionBookedNothing(lastMessage)
+  ) {
     return {
       status: 'blocked',
       reason: `the last post booked no work (${lastMessage.outcomes

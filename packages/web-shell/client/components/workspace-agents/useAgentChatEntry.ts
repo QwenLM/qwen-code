@@ -124,9 +124,11 @@ export function useAgentChatEntry({
   );
   const submit = useCallback<Submit>(
     (text, images, files, commit, metadata) => {
+      // Same rules as core's parseMentions: no ASCII word character before
+      // `@`, so "请@迁移助手" counts and "a@b.dev" does not.
       const mentions = [
         ...text.matchAll(
-          /(?<![\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu,
+          /(?<![A-Za-z0-9_.])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu,
         ),
       ]
         .filter((match) => text[(match.index ?? 0) + match[0].length] !== '/')
@@ -141,9 +143,18 @@ export function useAgentChatEntry({
           const agents = await listAgents();
           // The first agent addressed leads the thread: a follow-up without an
           // @ goes to it, and sub-thread reports wake it.
+          // A name may run into the next word in scripts without spaces
+          // ("@迁移助手看一下"); the longest name the token starts with wins.
           const lead = mentions
-            .map((name) =>
-              agents.find((agent) => agent.name.toLowerCase() === name),
+            .map(
+              (token) =>
+                agents
+                  .filter(
+                    (agent) =>
+                      token.startsWith(agent.name.toLowerCase()) &&
+                      !/^[a-z0-9_-]/.test(token.slice(agent.name.length)),
+                  )
+                  .sort((a, b) => b.name.length - a.name.length)[0],
             )
             .find((agent) => agent !== undefined);
           if (!lead) {

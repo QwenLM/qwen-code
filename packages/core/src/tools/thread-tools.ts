@@ -21,6 +21,7 @@
  * reads. What it returns is still untrusted content.
  */
 
+import { isThreadTerminal } from '../agents/workspace-agents/types.js';
 import type { Config } from '../config/config.js';
 import {
   closeRun,
@@ -398,12 +399,6 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               `Cannot create a sub-thread while thread records are unreadable: ${unreadable.join(', ')}.`,
             );
           }
-          const existing = threads.find(
-            (thread) =>
-              thread.parentThreadId === context.threadId &&
-              thread.title.trim().toLowerCase() === title.toLowerCase(),
-          );
-          if (existing) return { child: existing, reused: true as const };
           const assignee = findAgentByName(
             agents,
             this.params.assignee.replace(/^@/, ''),
@@ -418,6 +413,16 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               `Agent "${assignee.name}" is disabled and cannot take work.`,
             );
           }
+          // A retried call must not duplicate a live hand-off, but a finished
+          // or reassigned sub-thread of the same title is not that hand-off.
+          const existing = threads.find(
+            (thread) =>
+              thread.parentThreadId === context.threadId &&
+              thread.title.trim().toLowerCase() === title.toLowerCase() &&
+              thread.assigneeAgentId === assignee.id &&
+              !isThreadTerminal(thread.status),
+          );
+          if (existing) return { child: existing, reused: true as const };
           const child = await prepareThreadInTransaction(transaction, {
             title,
             ...(this.params.body ? { body: this.params.body } : {}),

@@ -61,4 +61,25 @@ describe('parseMentions', () => {
     ];
     expect(parseMentions('@alice', disabled).ids).toEqual(['ag_alice']);
   });
+
+  it('reads a mention written straight after Chinese text', () => {
+    const roster: WorkspaceAgent[] = [
+      { id: 'ag_move', name: '迁移助手', createdAt: 1 },
+      { id: 'ag_alice', name: 'alice', createdAt: 1 },
+    ];
+    expect(parseMentions('请@迁移助手看一下，再让@alice复核', roster)).toEqual({
+      ids: ['ag_move', 'ag_alice'],
+      unknown: [],
+    });
+  });
+
+  it('does not stretch a name into a longer ASCII word', () => {
+    const roster: WorkspaceAgent[] = [
+      { id: 'ag_alice', name: 'alice', createdAt: 1 },
+    ];
+    expect(parseMentions('@alice2 and mail@alice.dev', roster)).toEqual({
+      ids: [],
+      unknown: ['alice2'],
+    });
+  });
 });

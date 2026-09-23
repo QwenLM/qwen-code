@@ -580,11 +580,17 @@ export async function finishRunInTransaction(
             ...run,
             status: terminalStatus,
             endedAt: now,
-            // A run that stopped without calling a closing tool is recorded as
-            // `unclosed`, never as an implicit success.
+            // A run that stopped without calling a closing tool and without
+            // saying anything is recorded as `unclosed`, never as an implicit
+            // success. One that answered in plain text has replied: the
+            // dispatcher posts that answer to the thread, as a person would
+            // expect from a chat.
             closeKind:
               run.closeKind ??
-              (terminalStatus === 'completed' ? 'unclosed' : undefined),
+              (terminalStatus === 'completed' &&
+              !run.progress?.outputText?.trim()
+                ? 'unclosed'
+                : undefined),
             ...(terminalError ? { error: terminalError } : {}),
             ...(terminalFailureStage
               ? { failureStage: terminalFailureStage }

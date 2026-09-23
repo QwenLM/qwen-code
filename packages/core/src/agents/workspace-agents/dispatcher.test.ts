@@ -377,6 +377,47 @@ describe('dispatchOnce', () => {
     expect(prompt).toContain(thread.id);
   });
 
+  it('posts a plain-text answer as the agent’s message and does not block', async () => {
+    const thread = await seedQueued({ assigneeAgentId: ALICE.id });
+    await writeThread(PROJECT_ROOT, {
+      ...thread,
+      runs: [
+        run({
+          status: 'running',
+          attempts: 1,
+          sessionId: 'se_1',
+          progress: {
+            attempt: 1,
+            sequence: 3,
+            receivedAt: 1,
+            activityAt: 1,
+            stage: 'responding',
+            detail: '',
+            outputText: 'The flake comes from a shared temp dir.',
+          },
+        }),
+      ],
+    });
+
+    await dispatchOnce(PROJECT_ROOT, port({ state: { kind: 'completed' } }));
+    await dispatchOnce(PROJECT_ROOT, port({ state: { kind: 'completed' } }));
+
+    const after = (await readThread(PROJECT_ROOT, thread.id))!;
+    const finished = after.runs.find((entry) => entry.id === 'rn_1')!;
+    expect(finished.status).toBe('completed');
+    expect(finished.closeKind).toBeUndefined();
+    const replies = after.messages.filter(
+      (message) => message.sourceRunId === 'rn_1',
+    );
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      authorKind: 'agent',
+      from: ALICE.id,
+      text: 'The flake comes from a shared temp dir.',
+    });
+    expect(after.status).not.toBe('blocked');
+  });
+
   it('rebooks accepted but unread input after an explicit close', async () => {
     const thread = await seedQueued({ assigneeAgentId: ALICE.id });
     await postMessage(PROJECT_ROOT, thread.id, {
