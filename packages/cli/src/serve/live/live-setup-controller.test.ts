@@ -22,6 +22,7 @@ function createHarness(
     apiKey?: string;
     modelProviders?: Record<string, unknown[]>;
     env?: Record<string, string | undefined>;
+    nativeHost?: boolean;
   } = {},
 ) {
   const initiallyEnabled = options.initiallyEnabled ?? false;
@@ -59,12 +60,14 @@ function createHarness(
     version: '0.1.0',
     protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
   }));
+  const inspectInstalled = vi.fn(async () => undefined);
+  const launch = vi.fn(async () => {});
   const installer = new LiveHostInstaller({
     platform: 'darwin',
     architecture: 'arm64',
-    inspectInstalled: async () => undefined,
+    inspectInstalled,
     installLatest,
-    launch: async () => {},
+    launch,
   });
   const coordinator = new LiveHostCoordinator({
     getProviderReadiness: () =>
@@ -79,6 +82,9 @@ function createHarness(
     setEnabled,
     validateCredential,
     ...(options.env ? { env: options.env } : {}),
+    ...(options.nativeHost !== undefined
+      ? { nativeHost: options.nativeHost }
+      : {}),
   });
   return {
     controller,
@@ -86,6 +92,8 @@ function createHarness(
     validateCredential,
     setEnabled,
     installLatest,
+    inspectInstalled,
+    launch,
     settings: () => settings,
     coordinator,
   };
@@ -477,5 +485,41 @@ describe('LiveSetupController', () => {
     });
     expect(socket.sent.join('')).not.toContain('host.set_shortcut');
     harness.coordinator.dispose();
+  });
+
+  describe('without the native Host', () => {
+    it('neither probes nor installs, and reports why', async () => {
+      const harness = createHarness({ nativeHost: false });
+      const status = await harness.controller.update({
+        enabled: true,
+        apiKey: { operation: 'replace', value: 'realtime-secret' },
+      });
+      await Promise.resolve();
+
+      expect(status).toMatchObject({
+        enabled: true,
+        nativeHost: false,
+        install: { state: 'error', retryable: false },
+      });
+      expect(harness.inspectInstalled).not.toHaveBeenCalled();
+      expect(harness.installLatest).not.toHaveBeenCalled();
+    });
+
+    it.each(['retryInstall', 'launchHost'] as const)(
+      'refuses %s',
+      async (method) => {
+        const harness = createHarness({
+          initiallyEnabled: true,
+          apiKey: 'realtime-secret',
+          nativeHost: false,
+        });
+        await expect(harness.controller[method]()).rejects.toMatchObject({
+          code: 'live_native_host_unavailable',
+          status: 409,
+        });
+        expect(harness.installLatest).not.toHaveBeenCalled();
+        expect(harness.launch).not.toHaveBeenCalled();
+      },
+    );
   });
 });

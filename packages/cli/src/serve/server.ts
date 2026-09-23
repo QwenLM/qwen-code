@@ -342,6 +342,7 @@ import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
+import { resolveLiveNativeHostEnabled } from './live/native-host-enabled.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
 import {
@@ -1053,15 +1054,17 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
-  // Live Voice needs a Web Shell to control it. The audio endpoint is either
-  // the native macOS Host (`/live/host`) or the Web Shell page itself
-  // (`/live/web`), so only the native ingress is platform-bound.
+  // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
+  // Shell page itself (`/live/web`) on every platform; the native macOS Host
+  // (`/live/host`) is opt-in through QWEN_LIVE_NATIVE_HOST=1.
   const liveVoiceSurfaceAvailable =
     opts.serveWebShell !== false &&
     typeof deps.webShellDir === 'string' &&
     acpHttpEnabledAtBoot;
   const liveNativeHostAvailable =
-    liveVoiceSurfaceAvailable && runtimePlatform === 'darwin';
+    liveVoiceSurfaceAvailable &&
+    runtimePlatform === 'darwin' &&
+    resolveLiveNativeHostEnabled(daemonEnvAtBoot);
   const primaryRuntimeTrustAuthoritative =
     deps.workspaceTrustHotReloadAvailable === true ||
     deps.primaryWorkspaceTrusted !== undefined ||
