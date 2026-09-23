@@ -244,6 +244,14 @@ function compareSkillEntries(
  * and emits a stable order. Returns '' when there are no entries; callers decide
  * the empty-state messaging.
  */
+/**
+ * Opening sentence of the block coreToolScheduler adds to a tool result when
+ * reading a file activates a path-gated skill. Shared with
+ * `isSkillListingReminder` so `/context` recognises the block it builds.
+ */
+export const SKILLS_ACTIVATED_OPENER =
+  'The following skill(s) became available via the Skill tool based on the file you just accessed';
+
 export function renderAvailableSkillsBlock(
   entries: AvailableSkillEntry[],
 ): string {

@@ -993,6 +993,41 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(total);
     });
 
+    it('bills a path-activation listing after a rules block under skills (#12235)', async () => {
+      // coreToolScheduler appends this reminder to a tool result; when the tool
+      // returned parts it becomes a standalone text part, with any rules block
+      // first.
+      const activatedEntry =
+        '<skill>\n<name>\nlate-skill\n</name>\n<description>\nActivated by a path\n</description>\n</skill>';
+      const activation = wrapSystemReminder(
+        `Project rules for src/**:\nUse tabs.\n\nThe following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${activatedEntry}\n</available_skills>`,
+      );
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            prelude,
+            conversation[0]!,
+            { role: 'user', parts: [{ text: activation }] },
+            conversation[1]!,
+          ],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(activation),
+      );
+      expect(data.skills).toContainEqual({
+        name: 'late-skill',
+        tokens: estimateContextTextTokens(activatedEntry),
+        loaded: false,
+      });
+      expect(data.breakdown.messages).toBe(300);
+    });
+
     it('bills listing-shaped text from an MCP server as startup context, not skills (#12235)', async () => {
       // Server instructions ride in the prelude as their own reminder and are
       // written by a remote server. Containing `<available_skills>` and a

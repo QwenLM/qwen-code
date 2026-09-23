@@ -185,11 +185,12 @@ function mergeSkillListing(
 /**
  * Skill-listing reminders that landed *after* the startup prelude. A skill
  * enabled mid-session is announced by a tail `<system-reminder>` carrying an
- * `<available_skills>` block (`buildChangedSkillsReminder`), which
- * `getStartupContextLength` never inspects. Those tokens are listing cost, not
- * conversation, so they are measured here and billed with the startup listing
- * under `skills` — otherwise the entry is billed to `messages` while its detail
- * row prints `0`.
+ * `<available_skills>` block (`buildChangedSkillsReminder`, and the
+ * scheduler's path-activation block, which becomes its own text part when a
+ * tool returns parts), which `getStartupContextLength` never inspects. Those
+ * tokens are listing cost, not conversation, so they are measured here and
+ * billed with the startup listing under `skills` — otherwise the entry is
+ * billed to `messages` while its detail row prints `0`.
  *
  * Only core's own listing reminders qualify (`isSkillListingReminder`); other
  * text that mentions `<available_skills>` stays in `messages`. A qualifying

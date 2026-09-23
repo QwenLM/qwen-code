@@ -17,6 +17,7 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
+  SKILLS_ACTIVATED_OPENER,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 
@@ -124,17 +125,29 @@ const SKILLS_ADDED_OPENER =
   'The following skills/commands became available after startup';
 
 /**
- * Whether a history text is one of the skill-listing reminders built below:
- * the session-start snapshot, its "no skills" form, or a mid-session "became
- * available" delta. Recognised by the reminder's own opening sentence rather
- * than by `<available_skills>` appearing anywhere, because MCP server
- * instructions, tool output and ordinary messages can contain that tag too,
- * and `/context` bills whatever this accepts as the skill listing.
+ * Whether a history text is one of the skill-listing reminders core builds:
+ * the session-start snapshot, its "no skills" form, a mid-session "became
+ * available" delta, or the scheduler's path-activation block. Recognised by
+ * the reminder's own opening sentence rather than by `<available_skills>`
+ * appearing anywhere, because MCP server instructions, tool output and
+ * ordinary messages can contain that tag too, and `/context` bills whatever
+ * this accepts as the skill listing.
  */
 export function isSkillListingReminder(text: string): boolean {
-  return [SKILLS_AVAILABLE_OPENER, NO_SKILLS_OPENER, SKILLS_ADDED_OPENER].some(
-    (opener) => text.startsWith(`${SYSTEM_REMINDER_OPEN}\n${opener}`),
-  );
+  const open = `${SYSTEM_REMINDER_OPEN}\n`;
+  if (!text.startsWith(open)) return false;
+  const openers = [
+    SKILLS_AVAILABLE_OPENER,
+    NO_SKILLS_OPENER,
+    SKILLS_ADDED_OPENER,
+    SKILLS_ACTIVATED_OPENER,
+  ];
+  if (openers.some((opener) => text.startsWith(`${open}${opener}`))) {
+    return true;
+  }
+  // The scheduler joins its blocks with a blank line, and a rules block can
+  // precede the activation block inside the same reminder (#12235).
+  return text.includes(`\n\n${SKILLS_ACTIVATED_OPENER}`);
 }
 
 function truncateDeferredToolDescription(description: string): string {
