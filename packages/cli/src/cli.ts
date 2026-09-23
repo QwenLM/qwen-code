@@ -36,7 +36,13 @@ import {
 initStartupProfiler();
 initCpuProfiler();
 
-type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
+type BootstrapRoute =
+  | 'serve'
+  | 'mcp'
+  | 'managed-runtime-worker'
+  | 'help'
+  | 'version'
+  | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
@@ -380,6 +386,9 @@ export function resolveBootstrapRoute(
   if (firstArg === 'mcp') {
     return 'mcp';
   }
+  if (firstArg === 'managed-runtime-worker') {
+    return 'managed-runtime-worker';
+  }
 
   return 'default';
 }
@@ -542,6 +551,17 @@ export async function runCliEntry(
     }
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
+    return;
+  } else if (route === 'managed-runtime-worker') {
+    if (argv.length !== 1) {
+      writeStderrLine('Managed Runtime worker arguments are invalid.');
+      process.exitCode = 1;
+      return;
+    }
+    const { runManagedRuntimeAttestationWorker } = await import(
+      './serve/managed-runtime-attestation-worker.js'
+    );
+    await runManagedRuntimeAttestationWorker();
     return;
   } else if (route === 'help') {
     await printTopLevelHelp();
