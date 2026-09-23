@@ -202,10 +202,11 @@ POST /internal/runtime-broker/v1/executions # compatibility create-and-start
 GET  /internal/runtime-broker/v1/executions/{executionCallId}
 GET  /internal/runtime-broker/v1/executions/{executionCallId}/events
 POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
+POST /internal/runtime-broker/v1/executions/{executionCallId}:resolve
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release
 ```
 
-The Harness uses `executions:prepare` to reserve the durable identity without dispatch, commits that identity in its private `await_runtime` checkpoint, and calls `:start` only after the checkpoint succeeds. GET never starts a `PREPARED` record, while cancellation can settle it without a physical side effect. The original `/executions` create-and-start route remains compatible. The P2 client polls `GET /executions/{executionCallId}`. The `/events` route and its sequence semantics are reserved here and are implemented with the product event store in P3/P4.
+The Harness uses `executions:prepare` to reserve the durable identity without dispatch, commits that identity in its private `await_runtime` checkpoint, and calls `:start` only after the checkpoint succeeds. GET never starts a `PREPARED` record, while cancellation can settle it without a physical side effect. `:resolve` settles an `UNKNOWN` execution with an explicit decision (`confirmed_not_executed` or `accepted_unknown`) so a restarted Harness can close a lost ACK from evidence instead of re-dispatching the tool; resolving a settled execution with the same decision replays its snapshot, a different decision conflicts, and a non-`UNKNOWN` record is rejected. The original `/executions` create-and-start route remains compatible. The P2 client polls `GET /executions/{executionCallId}`. The `/events` route and its sequence semantics are reserved here and are implemented with the product event store in P3/P4.
 
 The qwen client produces a typed discriminated union for the existing Managed Tool v2 operations: manifest, file-history bind/checkpoint/snapshot, begin-turn, prepare, confirmation, confirm, and preflight. Java validates the closed operation-name set; the Managed Runtime remains the field-level payload validator in P2. This is not an arbitrary URL or HTTP-method proxy.
 

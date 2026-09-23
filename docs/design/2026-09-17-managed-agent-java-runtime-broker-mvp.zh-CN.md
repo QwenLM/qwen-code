@@ -201,10 +201,11 @@ POST /internal/runtime-broker/v1/executions # 兼容 create-and-start
 GET  /internal/runtime-broker/v1/executions/{executionCallId}
 GET  /internal/runtime-broker/v1/executions/{executionCallId}/events
 POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
+POST /internal/runtime-broker/v1/executions/{executionCallId}:resolve
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release
 ```
 
-Harness 使用 `executions:prepare` 预留 durable 身份但不派发，把该身份提交到私有 `await_runtime` checkpoint，提交成功后才调用 `:start`。GET 永远不会启动 `PREPARED` 记录，取消则可以在没有物理副作用时直接结算；原 `/executions` create-and-start 路由继续兼容。P2 客户端轮询 `GET /executions/{executionCallId}`。`/events` 路由及其序号语义在此冻结，并在 P3/P4 接入产品事件存储时实现。
+Harness 使用 `executions:prepare` 预留 durable 身份但不派发，把该身份提交到私有 `await_runtime` checkpoint，提交成功后才调用 `:start`。GET 永远不会启动 `PREPARED` 记录，取消则可以在没有物理副作用时直接结算。`:resolve` 用显式决定（`confirmed_not_executed` 或 `accepted_unknown`）结算 `UNKNOWN` 执行，让重启后的 Harness 凭证据关闭丢失的 ACK，而不是重新派发工具；对已结算执行重复同一决定返回原快照，不同决定报冲突，非 `UNKNOWN` 记录被拒绝。原 `/executions` create-and-start 路由继续兼容。P2 客户端轮询 `GET /executions/{executionCallId}`。`/events` 路由及其序号语义在此冻结，并在 P3/P4 接入产品事件存储时实现。
 
 qwen 客户端为现有 Managed Tool v2 操作生成有类型的判别联合：manifest、file-history bind/checkpoint/snapshot、begin-turn、prepare、confirmation、confirm 和 preflight。Java 校验封闭的操作名集合；P2 中字段级 payload 校验仍由 Managed Runtime 完成。它不是任意 URL 或 HTTP 方法代理。
 
