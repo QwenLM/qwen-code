@@ -4221,6 +4221,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // re-register the pre-existing HEAD.
     if (head !== null && head.createdByCommit && head.sha !== preHead) {
       registerSessionCommit(head.sha);
+    } else if (head === null) {
+      // Failing closed is the intent; failing closed *invisibly* is not. The
+      // only other output of this path is a block reason asserting the
+      // commit was not the agent's, and nothing else separates "the reflog
+      // could not answer" (reflogs off, expired, probe timed out) from a
+      // genuine attribution failure. Same shape as the attribution refusal
+      // in `attachCommitAttribution`.
+      debugLogger.warn(
+        `Session commit not registered in ${cwd}: the HEAD reflog could not answer, so a later amend stays blocked.`,
+      );
     }
   }
 

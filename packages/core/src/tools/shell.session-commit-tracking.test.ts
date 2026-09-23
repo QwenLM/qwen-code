@@ -424,6 +424,88 @@ describe.skipIf(process.platform === 'win32')(
       expect(amendVerdict()?.blocked).toBe(true);
     });
 
+    it('registers the commit when a later segment makes the chain exit non-zero', async () => {
+      // Regression ⑧ — pins the *absence* of an exit-code gate at the call
+      // site. `trackSessionCommit`'s docblock argues for that absence (`git
+      // commit -m x && npm test` can land the commit and then fail) and
+      // `:4199-4201` cites it as part of why regression ⑤ reaches the code,
+      // but every other registration-expecting row drives a chain that exits
+      // 0, so nothing fails when a contributor adds the gate. Gating
+      // registration on the commit's own outcome was proposed as a fix
+      // direction on this PR twice, so this is the hardening a reader of that
+      // thread is most likely to apply — and it would pass review on a green
+      // suite while reintroducing #12460's false block for exactly the shape
+      // the docblock endorses.
+      //
+      // The trailing `&& false` is load-bearing twice over: it makes the
+      // chain exit 1 (`bash -c 'true && false'` → 1) while leaving the newest
+      // HEAD reflog entry a `commit:` verb, which is the term under test. A
+      // trailing `git checkout` / `git reset` would also exit non-zero but
+      // collide with ⑥/⑦ and mute the verb mutants.
+      const preHead = headSha();
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+
+      await runShellCommand(
+        'git add feature.txt && git commit -m "feature" && false',
+      );
+
+      expect(headSha()).not.toBe(preHead);
+      expect(
+        execSync('git log -g -1 --format=%gs', {
+          cwd: repoDir,
+          encoding: 'utf-8',
+        }).trim(),
+      ).toMatch(/^commit\b/);
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('registers nothing when the reflog cannot answer, so the amend stays blocked', async () => {
+      // Regression ⑨ — the fail-closed branch itself. `getGitHeadOrigin`
+      // resolves `null` when git cannot say what put HEAD there, and
+      // `trackSessionCommit` then registers nothing. No other row reaches
+      // that branch: every repo above has a readable HEAD reflog. The
+      // plausible refactor — falling back to `getGitHead(cwd)` at a `null`
+      // exit so a reflogs-off repo does not lose the exemption — keeps all of
+      // them green while degrading the criterion to HEAD-movement-only, which
+      // re-opens the fail-open ⑤/⑥/⑦ exist to prevent: a `git pull`
+      // fast-forwarding onto a human commit would register as the agent's own.
+      //
+      // `core.logAllRefUpdates=false` has to be in effect *before* the seed
+      // commit, because git creates `.git/logs/HEAD` on the first logged ref
+      // update and a repo that already has one keeps answering the probe —
+      // the row would then pass through the `head.sha !== preHead` term
+      // instead of the branch it is about. Hence the rebuild of the repo
+      // `beforeEach` already created, at the same path, so the helpers and the
+      // config still point at it. Measured against real git: `.git/logs/HEAD`
+      // is never created, and `git log -g -1 --format='%H%n%gs' HEAD` exits 0
+      // with EMPTY stdout, so the exit taken is `!sha || !subject` and not the
+      // `error` exit: a fallback written only at the `error` exit never runs
+      // for this repo and does not model the refactor.
+      fs.rmSync(repoDir, { recursive: true, force: true });
+      fs.mkdirSync(repoDir, { recursive: true });
+      execSync('git init -q --initial-branch=main', { cwd: repoDir });
+      execSync('git config core.logAllRefUpdates false', { cwd: repoDir });
+      execSync('git config user.email agent@example.com', { cwd: repoDir });
+      execSync('git config user.name Agent', { cwd: repoDir });
+      execSync('git config commit.gpgsign false', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'seed.txt'), 'seed\n');
+      rawGit('add seed.txt');
+      rawGit('commit -q -m "initial commit"');
+      expect(fs.existsSync(path.join(repoDir, '.git', 'logs', 'HEAD'))).toBe(
+        false,
+      );
+
+      const preHead = headSha();
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      await runShellCommand('git add feature.txt && git commit -m "feature"');
+
+      // The commit genuinely landed and HEAD moved, so a movement-only
+      // criterion would register it. Only the unanswerable reflog stops it,
+      // and the cost is a blocked amend rather than a lifted block.
+      expect(headSha()).not.toBe(preHead);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
     it('registers the rewritten HEAD after an amend so amend-of-amend is exempt', async () => {
       // Regression ③: an amend replaces HEAD, so the new SHA has to be
       // registered too — otherwise the second amend in a row is blocked.
