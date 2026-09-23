@@ -3477,6 +3477,7 @@ describe('ExtensionStore', () => {
         transactionId: string,
         backupVersion: string,
         mtimeSeconds: number,
+        blocked = false,
       ) => {
         const backup = path.join(rollbackDir, transactionId);
         await fsp.mkdir(path.join(backup, 'skills'), { recursive: true });
@@ -3495,6 +3496,9 @@ describe('ExtensionStore', () => {
             swapStrategy: 'copy',
             previousGeneration: 0,
             targetGeneration: 1,
+            ...(blocked
+              ? { rollbackBlocked: true, rollbackRetryAt: Date.now() + 3_000 }
+              : {}),
             targetSnapshot,
           }),
         );
@@ -3511,6 +3515,30 @@ describe('ExtensionStore', () => {
       ).toBe('one');
       expect(await fsp.readdir(rollbackDir)).toEqual([]);
       expect(await leftoverJournals()).toEqual([]);
+
+      // The pass that establishes this order also rewrites the journals it
+      // ordered: with both already blocked, it can only mark the older one,
+      // which moves that journal's mtime to the front.
+      await plant('aa-intact-old', 'one', 1_000, true);
+      await plant('zz-torn-new', 'torn', 2_000, true);
+      await store.readSnapshot();
+      expect(
+        (await fsp.stat(path.join(transactionsDir, 'aa-intact-old.json')))
+          .mtimeMs,
+      ).toBeGreaterThan(
+        (await fsp.stat(path.join(transactionsDir, 'zz-torn-new.json')))
+          .mtimeMs,
+      );
+      // Written newest-first, so the rewrite leaves the marking pass's mtime
+      // inversion in place instead of undoing the state under test.
+      await expireJournalWindow(
+        path.join(transactionsDir, 'zz-torn-new.json'),
+        path.join(transactionsDir, 'aa-intact-old.json'),
+      );
+      await store.readSnapshot();
+      expect(
+        await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).toBe('one');
     });
 
     it('updates by copy when an entry changes kind', async () => {
@@ -5106,10 +5134,10 @@ describe('ExtensionStore', () => {
       }
     });
 
-    it('quarantines a journal whose restore fails for a non-lock reason', async () => {
+    it('keeps an owed journal whose restore fails for a non-lock reason and heals it once the fault clears', async () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
       const store = makeStore();
-      await plantStackedPair(store);
+      const { destination } = await plantStackedPair(store);
       const rollbackRoot = path.join(storeDir, 'rollback');
       const internals = store as unknown as {
         copyTree: (
@@ -5119,25 +5147,52 @@ describe('ExtensionStore', () => {
         ) => Promise<void>;
       };
       const copyTree = internals.copyTree.bind(store);
-      vi.spyOn(internals, 'copyTree').mockImplementation(
-        async (source: string, target: string, budget: unknown) => {
-          if (source === path.join(rollbackRoot, 'stack-t2')) {
-            const error = new Error('ENOENT') as NodeJS.ErrnoException;
-            error.code = 'ENOENT';
-            error.path = source;
-            throw error;
-          }
-          return await copyTree(source, target, budget);
-        },
-      );
-      // The first caller sees the raw errno; the doomed journal is quarantined,
-      // so the next caller heals T1 in the same pass.
+      let restoreAttempts = 0;
+      const fault = vi
+        .spyOn(internals, 'copyTree')
+        .mockImplementation(
+          async (source: string, target: string, budget: unknown) => {
+            if (source === path.join(rollbackRoot, 'stack-t2')) {
+              restoreAttempts += 1;
+              const error = new Error('ENOENT') as NodeJS.ErrnoException;
+              error.code = 'ENOENT';
+              error.path = source;
+              throw error;
+            }
+            return await copyTree(source, target, budget);
+          },
+        );
+      // The caller sees the raw errno, and the journal keeps its name: a failed
+      // attempt says nothing about the file, so the owed journal and the
+      // residue only it can reach stay where they are.
       const first: unknown = await store
         .readSnapshot()
         .catch((error: unknown) => error);
       expect((first as NodeJS.ErrnoException).code).toBe('ENOENT');
-      expect(await leftoverJournals()).toEqual([]);
+      expect((await leftoverJournals()).sort()).toEqual([
+        'stack-t1.json',
+        'stack-t2.json',
+      ]);
+      expect(await fsp.stat(path.join(rollbackRoot, 'stack-t2'))).toBeDefined();
+
+      // A later caller keeps reading, and does not repeat the failing restore:
+      // the owed step waits out one window before it is attempted again.
+      await expect(store.readSnapshot()).resolves.toBeDefined();
+      expect(restoreAttempts).toBe(1);
+
+      // Clearing the fault is all a later pass needs to finish the unwind and
+      // reclaim the residue.
+      fault.mockRestore();
+      await expireJournalWindow(
+        path.join(storeDir, 'transactions', 'stack-t1.json'),
+        path.join(storeDir, 'transactions', 'stack-t2.json'),
+      );
       await store.readSnapshot();
+      expect(await leftoverJournals()).toEqual([]);
+      expect(await fsp.readdir(rollbackRoot)).toEqual([]);
+      expect(
+        await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).toBe('one');
     });
 
     it('throws when the marker write fails for an older sibling of a deferred journal', async () => {
@@ -5247,7 +5302,7 @@ describe('ExtensionStore', () => {
       const rollbackRoot = path.join(storeDir, 'rollback');
       const internals = store as unknown as {
         removeTransactionTeardown: (
-          journal: ExtensionTransactionJournal,
+          journal: unknown,
           journalPath: string,
           budget: unknown,
         ) => Promise<void>;

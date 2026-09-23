@@ -99,6 +99,15 @@ interface ExtensionTransactionJournal {
   cleanupPending?: boolean;
   /** Absent means now. Epoch ms before recovery retries the owed step. */
   rollbackRetryAt?: number;
+  /** Set for a rollback mark: true when a holder may let go, false when a fault
+   *  blocked the step, so a refusal never blames a held directory for a fault.
+   *  Absent on journals written before this field, and on cleanup marks. */
+  rollbackHeld?: boolean;
+  /** Ordering key among journals of one generation: epoch ms, stamped once at
+   *  creation and never recomputed, because marking a journal rewrites the
+   *  file's mtime. Absent on journals written before this field, filled in from
+   *  the mtime observed on first read. */
+  orderMs?: number;
   previousGeneration: number;
   targetGeneration: number;
   targetSnapshot: ExtensionStoreSnapshot;
@@ -941,6 +950,7 @@ export class ExtensionStore {
           ? { stagingDirectory: input.stagingDirectory }
           : {}),
         backupDirectory,
+        orderMs: Date.now(),
         previousGeneration: snapshot.generation,
         targetGeneration: targetSnapshot.generation,
         targetSnapshot,
@@ -1742,13 +1752,14 @@ export class ExtensionStore {
   }
 
   /** Pending transactions in replay order, shared by recovery and the commit
-   *  guard: newest transaction first. The key must be one a pass cannot move
-   *  itself - marking a journal rewrites its mtime - so the store-wide
-   *  targetGeneration decides and the read-time mtime only breaks its ties.
-   *  A comparator switching keys on a pairwise property is not a valid
-   *  ordering at all. The live guard cannot stack two rollback-owed journals
-   *  for one destination; this orders the stacks a copied or older-build
-   *  store can still carry on disk. */
+   *  guard: newest transaction first. The ordering key must be one a pass
+   *  cannot move itself - marking a journal rewrites its mtime - so the
+   *  store-wide targetGeneration decides, and journals of one generation fall
+   *  back to the order key stamped when the journal was first seen. A
+   *  comparator switching keys on a pairwise property is not a valid ordering
+   *  at all. The live guard cannot stack two rollback-owed journals for one
+   *  destination; this orders the stacks a copied or older-build store can
+   *  still carry on disk. */
   private async orderedPendingTransactions(
     transactionsDir: string,
   ): Promise<
@@ -1759,7 +1770,7 @@ export class ExtensionStore {
       journalPath: string;
       journal: ExtensionTransactionJournal;
       targetGeneration: number;
-      mtimeMs: number;
+      orderMs: number;
     }> = [];
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
@@ -1768,17 +1779,37 @@ export class ExtensionStore {
       if (!journal) continue;
       const stats = await lstatOrNull(journalPath);
       if (!stats) continue;
+      let orderMs = journal.orderMs;
+      if (orderMs === undefined) {
+        // Stamp once, from the only evidence this store has about which of two
+        // same-generation journals was written later; after that no pass reads
+        // the mtime, so marking cannot reorder. Whole ms, as the schema holds.
+        orderMs = Math.floor(Number(stats.mtimeMs));
+        journal.orderMs = orderMs;
+        try {
+          await atomicWriteJSON(journalPath, journal, {
+            mode: 0o600,
+            forceMode: true,
+            noFollow: true,
+          });
+        } catch (error: unknown) {
+          debugLogger.warn(
+            'extension transaction order key not persisted:',
+            error,
+          );
+        }
+      }
       pending.push({
         journalPath,
         journal,
         targetGeneration: journal.targetGeneration,
-        mtimeMs: Number(stats.mtimeMs),
+        orderMs,
       });
     }
     pending.sort(
       (left, right) =>
         right.targetGeneration - left.targetGeneration ||
-        right.mtimeMs - left.mtimeMs,
+        right.orderMs - left.orderMs,
     );
     return pending;
   }
@@ -1801,7 +1832,7 @@ export class ExtensionStore {
     }
     let firstUnrecoverable: unknown = null;
     for (const journals of groups.values()) {
-      let decided: 'deferred' | 'unrecoverable' | null = null;
+      let decided: 'held' | 'fault' | null = null;
       for (const { journalPath, journal } of journals) {
         if (isTransactionResolved(journal, snapshot)) {
           if (this.retryDue(journal)) {
@@ -1817,41 +1848,40 @@ export class ExtensionStore {
                   journal,
                   journalPath,
                   'cleanup',
-                  error,
+                  'held',
                 );
               }
             }
           }
           continue;
         }
-        if (decided === 'deferred') {
-          // Newer journal owns the restore until its window; older ones wait.
+        if (decided !== null) {
+          // A newer journal of this destination still owes its restore, so this
+          // older one waits, marked under the same reason: applying an older
+          // rollback first would leave the destination below the generation
+          // the newer transaction was moving to.
           if (
             !(await this.recordPendingStep(
               journal,
               journalPath,
               'rollback',
-              lockErrorFor(journal.backupDirectory),
+              decided,
             ))
           ) {
             throw lockErrorFor(journal.backupDirectory);
           }
           continue;
         }
-        if (decided === 'unrecoverable') {
-          // Newer journal was quarantined - this one is now the newest owed step.
-          decided = null;
-        }
         if (journal.rollbackBlocked && !this.retryDue(journal)) {
           if (!(await this.canRetryRollback(journal))) {
             throw this.windowRefusal(journal);
           }
-          decided = 'deferred';
+          decided = journal.rollbackHeld ? 'held' : 'fault';
           continue;
         }
         try {
           if (!(await this.attemptRollback(journal, journalPath, budget))) {
-            decided = 'deferred';
+            decided = 'held';
           }
         } catch (error: unknown) {
           decided = await this.classifyJournal(journal, journalPath, error);
@@ -1862,20 +1892,30 @@ export class ExtensionStore {
     if (firstUnrecoverable !== null) throw firstUnrecoverable;
   }
 
-  /** Classify the journal's fate after `attemptRollback` throws. The
-   *  mark and quarantine booleans are inputs, never silently swallowed. */
+  /** Note why the owed step is blocked after `attemptRollback` throws: 'held'
+   *  when a holder may let go, 'fault' otherwise. No answer removes the journal
+   *  from the scan - only an unparseable file is quarantined, and that is
+   *  decided where the file is read. */
   private async classifyJournal(
     journal: ExtensionTransactionJournal,
     journalPath: string,
     error: unknown,
-  ): Promise<'deferred' | 'unrecoverable'> {
-    if (error instanceof ExtensionDirectoryLockedError) return 'deferred';
+  ): Promise<'held' | 'fault'> {
+    if (error instanceof ExtensionDirectoryLockedError) return 'held';
     if (isDirectoryLockError(error)) throw error;
     // Rollback completed but teardown failed: cleanupPending is on disk and
     // rethrowing keeps the journal as the owner of its residue.
     if (await this.journalCleanupPendingOnDisk(journalPath)) throw error;
-    if (!(await quarantineJournal(journalPath, error))) throw error;
-    return 'unrecoverable';
+    // A failed attempt is evidence about the operation, not about the journal
+    // file: keep it in the scan, where it remains the only owner of the
+    // rollback and staging trees, and record the owed step so a later pass
+    // retries it under the window and a refusal can name it.
+    if (
+      !(await this.recordPendingStep(journal, journalPath, 'rollback', 'fault'))
+    ) {
+      throw error;
+    }
+    return 'fault';
   }
 
   private async journalCleanupPendingOnDisk(
@@ -1890,9 +1930,10 @@ export class ExtensionStore {
   }
 
   /** The refusal for a blocked rollback whose retry could not leave a loadable
-   *  artifact: the held-handle diagnosis only where that errno is honest. */
+   *  artifact: never a held-handle diagnosis for a journal that records a fault;
+   *  one written before that record existed keeps the platform rule. */
   private windowRefusal(journal: ExtensionTransactionJournal): Error {
-    return process.platform === 'win32'
+    return journal.rollbackHeld !== false && process.platform === 'win32'
       ? new ExtensionDirectoryLockedError(journal.destinationDirectory)
       : new ExtensionConflictError(
           `Extension transaction ${journal.transactionId} for ${journal.destinationDirectory} is still unresolved.`,
@@ -1919,7 +1960,12 @@ export class ExtensionStore {
       // Marked before anything decides, so even a rollback that ends in
       // refusal has its window and later passes reject from the window check.
       if (
-        !(await this.recordPendingStep(journal, journalPath, 'rollback', error))
+        !(await this.recordPendingStep(
+          journal,
+          journalPath,
+          'rollback',
+          'held',
+        ))
       ) {
         throw error;
       }
@@ -1973,31 +2019,36 @@ export class ExtensionStore {
     return remainingMs <= 0 || remainingMs > ROLLBACK_RETRY_DELAY_MS;
   }
 
-  /** Persists the step a later operation must retry, so recovery repeats it.
-   *  Returns whether the marker landed: absorbing instead of reporting is
-   *  allowed only on a journal whose own record says so. */
+  /** Persists the step a later operation must retry. Returns whether the marker
+   *  landed. `reason` decides who a later refusal blames; a failed restore waits
+   *  one window either way, since an unclassified errno is no evidence that
+   *  repeating a tree-sized copy is free. */
   private async recordPendingStep(
     journal: ExtensionTransactionJournal,
     journalPath: string,
     pendingStep: 'rollback' | 'cleanup',
-    error: unknown,
+    reason: 'held' | 'fault',
   ): Promise<boolean> {
+    const rollbackBlocked = pendingStep === 'rollback' ? true : undefined;
+    const cleanupPending = pendingStep === 'cleanup' ? true : undefined;
+    const rollbackRetryAt =
+      pendingStep === 'rollback' || reason === 'held'
+        ? Date.now() + ROLLBACK_RETRY_DELAY_MS
+        : undefined;
+    const rollbackHeld =
+      pendingStep === 'rollback' ? reason === 'held' : undefined;
     try {
       await atomicWriteJSON(
         journalPath,
         {
           ...journal,
-          rollbackBlocked: pendingStep === 'rollback' ? true : undefined,
-          cleanupPending: pendingStep === 'cleanup' ? true : undefined,
-          // Only a lock names a holder that may let go; any other errno is
-          // not a hold, so the next operation retries the owed step at once.
-          rollbackRetryAt: isDirectoryLockError(error)
-            ? Date.now() + ROLLBACK_RETRY_DELAY_MS
-            : undefined,
+          rollbackBlocked,
+          cleanupPending,
+          rollbackRetryAt,
+          rollbackHeld,
         },
         { mode: 0o600, forceMode: true, noFollow: true },
       );
-      return true;
     } catch (writeError) {
       debugLogger.warn(
         'extension transaction marker not persisted:',
@@ -2005,6 +2056,13 @@ export class ExtensionStore {
       );
       return false;
     }
+    // Keep the caller's copy in step with disk: the same pass reads these back
+    // when it decides whether an older journal of this destination may proceed.
+    journal.rollbackBlocked = rollbackBlocked;
+    journal.cleanupPending = cleanupPending;
+    journal.rollbackRetryAt = rollbackRetryAt;
+    journal.rollbackHeld = rollbackHeld;
+    return true;
   }
 
   /** A destination with an unresolved transaction must not stack another. */
@@ -2015,7 +2073,7 @@ export class ExtensionStore {
     const snapshot = await this.readSnapshotUnlocked();
     const resolvedDestination = path.resolve(destinationDirectory);
     const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
-    let decided: 'deferred' | 'unrecoverable' | null = null;
+    let decided: 'held' | 'fault' | null = null;
     let deferredJournal: ExtensionTransactionJournal | null = null;
     for (const {
       journalPath,
@@ -2027,25 +2085,22 @@ export class ExtensionStore {
       ) {
         continue;
       }
-      if (decided === 'deferred') {
+      if (decided !== null) {
         if (
           !(await this.recordPendingStep(
             journal,
             journalPath,
             'rollback',
-            lockErrorFor(journal.backupDirectory),
+            decided,
           ))
         ) {
           throw lockErrorFor(journal.backupDirectory);
         }
         continue;
       }
-      if (decided === 'unrecoverable') {
-        decided = null;
-      }
       try {
         if (!(await this.attemptRollback(journal, journalPath, budget))) {
-          decided = 'deferred';
+          decided = 'held';
           deferredJournal = journal;
         }
       } catch (error: unknown) {
@@ -2053,13 +2108,9 @@ export class ExtensionStore {
         throw error;
       }
     }
-    if (decided === 'deferred') {
+    if (decided !== null) {
       // Still blocked after a fresh attempt, so the diagnosis is current.
-      throw process.platform === 'win32'
-        ? new ExtensionDirectoryLockedError(destinationDirectory)
-        : new ExtensionConflictError(
-            `Extension transaction ${deferredJournal!.transactionId} for ${destinationDirectory} is still unresolved.`,
-          );
+      throw this.windowRefusal(deferredJournal!);
     }
   }
 
@@ -2156,6 +2207,11 @@ export class ExtensionStore {
         (journal.rollbackRetryAt !== undefined &&
           (!Number.isSafeInteger(journal.rollbackRetryAt) ||
             (journal.rollbackRetryAt as number) < 0)) ||
+        (journal.rollbackHeld !== undefined &&
+          typeof journal.rollbackHeld !== 'boolean') ||
+        (journal.orderMs !== undefined &&
+          (!Number.isSafeInteger(journal.orderMs) ||
+            (journal.orderMs as number) < 0)) ||
         !Number.isSafeInteger(journal.previousGeneration) ||
         journal.targetGeneration !== journal.previousGeneration + 1
       ) {
@@ -2418,7 +2474,12 @@ export class ExtensionStore {
       // from a backup this call already half-deleted. A marker that cannot
       // land reports instead of leaving the journal unrecorded.
       if (
-        !(await this.recordPendingStep(journal, journalPath, 'cleanup', error))
+        !(await this.recordPendingStep(
+          journal,
+          journalPath,
+          'cleanup',
+          isDirectoryLockError(error) ? 'held' : 'fault',
+        ))
       ) {
         throw error;
       }

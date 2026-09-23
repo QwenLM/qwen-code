@@ -338,7 +338,8 @@ Rejected:
   a transaction whose teardown deletes it (both teardown paths do) - which is why
   no process-wide sweep is needed. A journal that is quarantined rather than
   replayed is the one case that leaves it behind for good; a rollback or a cleanup
-  that a lock error defeats also leaves the backup and any unpublished `.partial`
+  that a lock error or a fault defeats also leaves the backup and any unpublished
+  `.partial`
   on disk, but keeps the journal that owns them, so a later operation removes
   them. While the holder holds, that is one full tree copy per affected
   destination in `rollback/`, uncapped. The rollback and the post-rollback
@@ -361,8 +362,9 @@ Rejected:
   process's working directory is the extension directory itself and the operation
   is an uninstall. That case ends in B's message, which is the intended outcome.
 - `assertRecoveredJournalPaths()` validates journal paths only; the schema check
-  for the four optional fields (`swapStrategy`, `rollbackBlocked`,
-  `cleanupPending`, `rollbackRetryAt`) lives in `readJournalUnlocked`, which must
+  for the six optional fields (`swapStrategy`, `rollbackBlocked`,
+  `cleanupPending`, `rollbackRetryAt`, `rollbackHeld`, `orderMs`) lives in
+  `readJournalUnlocked`, which must
   accept them without loosening any path check. An unrecognised strategy is
   quarantined.
 - Copy and prune must not follow symlinks out of the destination tree - the staging
@@ -442,8 +444,9 @@ the tree behind it intact; a junctioned destination replaced by the restore rath
 than written through; recovery reading its journals through a linked transactions
 root; a copy-mode uninstall restoring the installed tree when its wipe is blocked,
 including a child the wipe had already deleted; a non-lock rollback
-failure still reaching the caller with the journal quarantined so the doomed
-restore does not re-enter on every later operation; an entry whose type changes
+failure still reaching the caller, with the owed step recorded under a window and
+the journal kept, so the doomed restore does not re-enter on every later
+operation; an entry whose type changes
 between versions being reconciled so the copy runs; an interrupted backup's `.partial` tree being removed by
 recovery; the staging tree being gone after a copy swap; quarantining a journal whose strategy is unrecognised; and the pre-existing
 journals without the new fields keeping their current behaviour. What is not
@@ -465,12 +468,15 @@ Acceptance:
 - On Windows, with at least one other interactive session running,
   `qwen extensions update <name>` completes and the new version loads.
 - A swap that cannot complete reports `extension_directory_locked` naming the
-  directory, and the previous version is still installed and loadable. Two states
-  can differ: a copy-mode rollback the same holder defeats may leave stale content,
+  directory, and the previous version is still installed and loadable. Three
+  states can differ: a copy-mode rollback the same holder defeats may leave stale content,
   or an entry it deleted and could not copy back, until a later operation settles
-  the tree; and a rollback whose retry could not produce a loadable artifact stops
+  the tree; a rollback whose retry could not produce a loadable artifact stops
   the caller with the destination unusable, so the extension is not reported as
-  installed and later store reads keep failing until the holder releases (see
+  installed and later store reads keep failing until the holder releases; and a
+  rollback that failed for a fault the store cannot classify keeps its journal and
+  backup, is retried after one window instead of on every operation, and refuses
+  with the unresolved-transaction text rather than a held-directory one (see
   Risks).
 - `npm run build && npm run typecheck` and the `packages/core` unit tests for the
   touched files pass, on both Windows and the Linux lane.
@@ -478,11 +484,13 @@ Acceptance:
   journal markers and their rules (a settled transaction does not block the next
   mutation, a genuinely unresolved one is refused, a rollback whose retry cannot
   produce a loadable artifact stops the caller, and a blocked rollback is retried on
-  a deferred window); newest-first replay on a generation key no pass can move,
-  shared with the commit guard; older journals of a destination whose newer was
-  deferred this pass are not allowed to apply, and a non-lock restore failure
-  quarantines the journal so the doomed restore is not re-attempted on every
-  later operation; lock-classified retries on the
+  a deferred window); newest-first replay on the generation key, tie-broken by an
+  order key stamped once and never recomputed, shared with the commit guard;
+  older journals of a destination whose newer was deferred or faulted this pass
+  are not allowed to apply, and a non-lock restore failure records the owed step
+  under the same window and leaves the journal in the scan, so the doomed restore
+  is not re-attempted on every later operation and its residue keeps its owner;
+  lock-classified retries on the
   removals a rollback and a journal teardown perform, with one allowance per store
   operation; the `.partial` sibling those teardowns remove; and the refusal, with
   the locked-directory text, that a blocked rollback leaves on Windows.
