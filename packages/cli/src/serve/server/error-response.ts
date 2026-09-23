@@ -412,7 +412,26 @@ export function sendBridgeError(
               err.code === 'working_directory_recovery_failed'
             ? 500
             : 409;
-    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
+    if (status === 500) {
+      const safeError = err.creationDiagnostic
+        ? Object.assign(new Error(err.message), {
+            name: err.name,
+            code: err.code,
+            stack: err.stack,
+          })
+        : err;
+      recordExpectedBridgeError(
+        safeError,
+        {
+          ...ctx,
+          sessionId:
+            ctx?.sessionId ??
+            err.creationDiagnostic?.sessionId ??
+            err.sessionId,
+        },
+        daemonLog,
+      );
+    }
     if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,

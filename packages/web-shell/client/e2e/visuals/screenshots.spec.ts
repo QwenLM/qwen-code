@@ -65,6 +65,9 @@ function trajectoryRecordMeta(recordId: string): Record<string, unknown> {
 function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
   const agentCallId = 'call_delegate01';
   const subagentId = `general-purpose-${agentCallId}`;
+  // Recorded start times, in ms from the first request. The second turn opens
+  // over a minute later, which the overview cuts out of its axis.
+  const at = (offset: number) => 1_760_000_000_000 + offset;
   return [
     trajectoryUpdate({
       sessionUpdate: 'user_message_chunk',
@@ -78,6 +81,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 1840,
+          startedAt: at(0),
           status: 'error',
           model: 'qwen3.8-max',
         },
@@ -91,6 +95,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 7823,
+          startedAt: at(2100),
           ttftMs: 3908,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -124,6 +129,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'tool',
           durationMs: 16,
+          startedAt: at(9923),
           callId: 'call_read01',
           toolName: 'read_file',
           toolStatus: 'success',
@@ -152,6 +158,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 4879,
+          startedAt: at(9960),
           ttftMs: 1102,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -168,12 +175,28 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'tool',
           durationMs: 31,
+          startedAt: at(14839),
           callId: 'call_subglob01',
           toolName: 'glob',
           toolStatus: 'success',
           promptId: `${sessionId}#${subagentId}#0`,
         },
         'qwen.session.recordId': 'rec-1-subtool',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 5101,
+          startedAt: at(9939),
+          callId: agentCallId,
+          toolName: 'agent',
+          toolStatus: 'success',
+        },
+        'qwen.session.recordId': 'rec-1-agenttiming',
       },
     }),
     trajectoryUpdate({
@@ -194,6 +217,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 3972,
+          startedAt: at(75_000),
           ttftMs: 1030,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -499,7 +523,23 @@ for (const theme of THEMES) {
       await expect(
         page.locator('[data-testid="trajectory-row-request"]').first(),
       ).toContainText('qwen3.8-max');
+      // The failed request and its retry, the read, the delegation, the
+      // subagent's own request and the second turn. The subagent's glob has
+      // no row in the window, so it has nowhere to be drawn.
+      await expect(page.getByTestId('trajectory-span')).toHaveCount(6);
       await captureScreenshot(page, `trajectory-${theme}`);
+
+      // The same run with a stretch of it selected on the overview.
+      const plot = await page.getByTestId('trajectory-plot').boundingBox();
+      expect(plot).not.toBeNull();
+      const y = plot!.y + 10;
+      await page.mouse.move(plot!.x + plot!.width * 0.3, y);
+      await page.mouse.down();
+      await page.mouse.move(plot!.x + plot!.width * 0.7, y, { steps: 8 });
+      await page.mouse.up();
+      await expect(page.getByTestId('trajectory-range')).toBeVisible();
+      await expect(page.getByTestId('trajectory-range-status')).toBeVisible();
+      await captureScreenshot(page, `trajectory-range-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {
@@ -557,6 +597,41 @@ for (const theme of THEMES) {
         }),
       ).toBeVisible();
       await captureScreenshot(page, `session-overview-details-${theme}`);
+    });
+
+    test('conversation search', async ({ page }, testInfo) => {
+      const events = Array.from({ length: 12 }, (_, index) => [
+        userTextEvent(`Explain synthetic example ${index + 1}.`, {
+          id: index * 2 + 1,
+        }),
+        assistantTextEvent(
+          index === 2
+            ? 'The sample uses **search-marker** to locate an earlier answer.'
+            : `Synthetic answer ${index + 1}: review the example and its expected output.`,
+          { id: index * 2 + 2 },
+        ),
+      ]).flat();
+      const scenario = createWebShellDaemonScenario({ events });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      const search = page.getByRole('button', {
+        name: 'Search this conversation',
+        exact: true,
+      });
+      await expect(search).toBeVisible();
+      await captureScreenshot(page, `conversation-search-entry-${theme}`);
+      await search.click();
+      const dialog = page.getByRole('dialog', {
+        name: 'Search this conversation',
+        exact: true,
+      });
+      await dialog.getByRole('combobox').fill('search-marker');
+      await expect(dialog.locator('mark')).toHaveText('search-marker');
+      await captureScreenshot(page, `conversation-search-dialog-${theme}`);
     });
 
     test(`session transcript`, async ({ page }, testInfo) => {
@@ -924,12 +999,13 @@ for (const theme of THEMES) {
                 envResolvable: true,
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 default: 'allowlist',
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'open', label: 'Open' },
@@ -1030,7 +1106,7 @@ for (const theme of THEMES) {
               config: {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
-                senderPolicy: 'pairing',
+                privatePolicy: 'pairing',
                 groupPolicy: 'disabled',
                 sessionScope: 'user',
               },
@@ -1177,11 +1253,12 @@ for (const theme of THEMES) {
                 ],
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'open', label: 'Open' },
@@ -1653,6 +1730,92 @@ for (const theme of THEMES) {
       await expect(page.getByText('Fast Model', { exact: true })).toBeVisible();
       await expect(page.getByTestId('model-management')).toBeVisible();
       await captureScreenshot(page, `settings-panel-${theme}`);
+    });
+
+    test('settings panel with model management disabled', async ({
+      page,
+    }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      scenario.providers.providers.push({
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: false,
+        models: [
+          {
+            modelId: 'managed-test-model',
+            configurationKey: 'managed-test-key',
+            baseModelId: 'managed-test-model',
+            name: 'Managed Test Model',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({
+            json: {
+              models: [
+                {
+                  key: 'managed-test-key',
+                  authType: 'openai',
+                  modelId: 'managed-test-model',
+                  name: 'Managed Test Model',
+                  purpose: 'chat',
+                  contextWindowSize: 131072,
+                },
+              ],
+            },
+          });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme, [], {
+        allowAdd: false,
+        allowDelete: false,
+      });
+      await openSettingsPanel(page);
+      await page
+        .getByRole('navigation', { name: 'Settings' })
+        .getByRole('button', { name: /^Model/ })
+        .click();
+      const models = page.getByTestId('model-management');
+      await expect(
+        models.getByText('Managed Test Model', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        models.getByText('Qwen Test', { exact: true }),
+      ).toBeVisible();
+      await expect(models.getByText('Current', { exact: true })).toBeVisible();
+      await expect(
+        models.getByRole('button', { name: '+ Add Model', exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        models.getByRole('button', { name: /^Delete / }),
+      ).toHaveCount(0);
+      await expect(
+        models.getByRole('button', {
+          name: 'Set current Managed Test Model',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        models.getByRole('button', {
+          name: 'Edit context window Managed Test Model',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `settings-panel-model-management-disabled-${theme}`,
+      );
     });
 
     test(`settings panel with host exclusions`, async ({ page }, testInfo) => {

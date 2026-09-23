@@ -5,6 +5,7 @@
  */
 
 import type { Response } from 'express';
+import { trace, type Span } from '@opentelemetry/api';
 import { RequestError } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -703,4 +704,59 @@ describe('sendBridgeError session writer errors', () => {
       code,
     });
   });
+});
+
+describe('standalone telemetry fidelity', () => {
+  it.each([false, true])(
+    'preserves stack and exception code for creation=%s',
+    (creation) => {
+      const original = new StandaloneSessionServiceError(
+        creation
+          ? 'standalone_creation_rolled_back'
+          : 'transcript_deletion_failed',
+        '11111111-1111-4111-8111-111111111111',
+        'Safe public failure',
+        true,
+        undefined,
+        { cause: new Error('SECRET_CAUSE') },
+      );
+      original.stack = `${original.name}: ${original.message}\n    at originalThrowSite (service.ts:42:1)`;
+      if (creation)
+        original.creationDiagnostic = {
+          sessionId: original.sessionId!,
+          phase: 'spawn_pre_dispatch',
+          reason: 'unknown',
+          dispatchState: 'not_dispatched',
+          cleanupOutcome: 'rolled_back',
+        };
+      Object.assign(original, { privatePayload: 'SECRET_PAYLOAD' });
+      const recordException = vi.fn();
+      const span = {
+        recordException,
+        setAttributes: vi.fn(),
+        setStatus: vi.fn(),
+      } as unknown as Span;
+      const getSpan = vi.spyOn(trace, 'getSpan').mockReturnValue(span);
+      try {
+        const { response, status } = responseMock();
+        sendBridgeError(response, original);
+        expect(status).toHaveBeenCalledWith(500);
+        expect(recordException).toHaveBeenCalledOnce();
+        const recorded = recordException.mock.calls[0][0] as Error & {
+          code: string;
+        };
+        expect(recorded.stack).toBe(original.stack);
+        expect(recorded.name).toBe(original.name);
+        expect(recorded.code).toBe(original.code);
+        if (creation) {
+          expect(recorded).not.toBe(original);
+          expect(recorded.cause).toBeUndefined();
+          expect(JSON.stringify(recorded)).not.toContain('SECRET_');
+          expect(original.cause).toBeInstanceOf(Error);
+        } else expect(recorded).toBe(original);
+      } finally {
+        getSpan.mockRestore();
+      }
+    },
+  );
 });

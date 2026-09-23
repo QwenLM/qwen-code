@@ -907,6 +907,7 @@ describe('ChannelBase', () => {
 
     it('keeps permission and shared-clear instructions directly usable', async () => {
       const ch = createChannel({
+        operators: ['user1'],
         sessionScope: 'single',
       });
       await ch.handleInbound(envelope({ text: 'start' }));
@@ -1270,6 +1271,77 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['disabled', false],
+      ['open', true],
+      ['allowlist', false],
+      ['pairing', false],
+    ] as const)(
+      'uses explicit privatePolicy=%s instead of deprecated fields',
+      async (privatePolicy, allowed) => {
+        const previous = process.env['QWEN_HOME'];
+        const home = mkdtempSync(join(tmpdir(), 'private-policy-'));
+        process.env['QWEN_HOME'] = home;
+        try {
+          const ch = createChannel({
+            privatePolicy,
+            senderPolicy: 'open',
+            dmPolicy: 'disabled',
+          });
+          await ch.handleInbound(envelope());
+          expect(bridge.prompt).toHaveBeenCalledTimes(allowed ? 1 : 0);
+          expect(
+            new PairingStore('test-chan', '/tmp').listPending(),
+          ).toHaveLength(privatePolicy === 'pairing' ? 1 : 0);
+        } finally {
+          if (previous === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = previous;
+          rmSync(home, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each(['allowlist', 'pairing'] as const)(
+      'admits a listed private user under %s',
+      async (privatePolicy) => {
+        const ch = createChannel({
+          privatePolicy,
+          allowedUsers: ['user1'],
+          dmPolicy: 'disabled',
+        });
+        await ch.handleInbound(envelope());
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(['disabled', 'open', 'allowlist', 'pairing'] as const)(
+      'keeps group access independent of privatePolicy=%s',
+      async (privatePolicy) => {
+        const ch = createChannel({
+          privatePolicy,
+          groupPolicy: 'open',
+          allowedUsers: [],
+        });
+        await ch.handleInbound(
+          envelope({ isGroup: true, isMentioned: true, senderId: 'member' }),
+        );
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('an empty group member list overrides the wildcard list', async () => {
+      const ch = createChannel({
+        privatePolicy: 'open',
+        groupPolicy: 'open',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['user1'] },
+          chat1: { allowedUsers: [] },
+        },
+      });
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: true }));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('rejects sender with allowlist policy', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
@@ -1288,7 +1360,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
-    it('keeps group traffic on senderPolicy when groupSenderPolicy is unset', async () => {
+    it('defaults group senders to open independently of legacy senderPolicy', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['admin'],
@@ -1297,15 +1369,15 @@ describe('ChannelBase', () => {
       await ch.handleInbound(
         envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
       );
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledOnce();
     });
 
-    it('admits any group member with groupSenderPolicy=open', async () => {
+    it('admits any group member with senders=open', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['admin'],
         groupPolicy: 'open',
-        groupSenderPolicy: 'open',
+        groups: { '*': { senders: 'open' } },
       });
       await ch.handleInbound(
         envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
@@ -1317,13 +1389,12 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('gates group members with allowedGroupUsers', async () => {
+    it('gates group members with a per-group allowedUsers list', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['admin'],
         groupPolicy: 'open',
-        groupSenderPolicy: 'allowlist',
-        allowedGroupUsers: ['member1'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['member1'] } },
       });
       await ch.handleInbound(
         envelope({ isGroup: true, isMentioned: true, senderId: 'member1' }),
@@ -1341,13 +1412,96 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('lets one group override the senders default from groups["*"]', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+        groupPolicy: 'open',
+        groups: {
+          '*': { senders: 'open' },
+          ops: { senders: 'allowlist', allowedUsers: ['oncall'] },
+        },
+      });
+      const inGroup = (chatId: string, senderId: string) =>
+        envelope({ chatId, isGroup: true, isMentioned: true, senderId });
+
+      await ch.handleInbound(inGroup('lobby', 'stranger'));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      await ch.handleInbound(inGroup('ops', 'stranger'));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      await ch.handleInbound(inGroup('ops', 'oncall'));
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('resolves senders and allowedUsers field by field', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+        groupPolicy: 'open',
+        groups: {
+          '*': { allowedUsers: ['member1'] },
+          ops: { senders: 'allowlist' },
+        },
+      });
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'ops',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'member1',
+        }),
+      );
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('lets explicit senders narrow an approved pairing group', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-senders-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const store = new PairingStore('test-chan', '/tmp');
+        store.approve(
+          pairingCodeOf(
+            store.createGroupRequest('chat1', 'Team', 'alice', 'Alice'),
+          ),
+        );
+        const approvedGroup = (senderId: string) =>
+          envelope({ isGroup: true, isMentioned: true, senderId });
+
+        const byDefault = createChannel({
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+          groupPolicy: 'pairing',
+        });
+        await byDefault.handleInbound(approvedGroup('stranger'));
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+        const narrowed = createChannel({
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+          groupPolicy: 'pairing',
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        });
+        await narrowed.handleInbound(approvedGroup('stranger'));
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        await narrowed.handleInbound(approvedGroup('alice'));
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
     it('logs the axis in the preflight rejection reason for group sender gates', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['stranger'],
         groupPolicy: 'open',
-        groupSenderPolicy: 'allowlist',
-        allowedGroupUsers: ['member1'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['member1'] } },
       });
       const writeSpy = vi
         .spyOn(process.stderr, 'write')
@@ -1757,6 +1911,7 @@ describe('ChannelBase', () => {
           },
         );
         const ch = createChannel({
+          operators: ['alice', 'bob'],
           sessionScope,
           dispatchMode,
           groupPolicy: 'open',
@@ -2796,6 +2951,7 @@ describe('ChannelBase', () => {
 
     it('rejects card-presented denial from another shared-session user', async () => {
       const ch = createChannel({
+        operators: ['owner-1', 'other-user'],
         groupPolicy: 'open',
         sessionScope: 'single',
       });
@@ -3056,6 +3212,7 @@ describe('ChannelBase', () => {
 
     it('does not answer permission requests from another thread', async () => {
       const ch = createChannel({
+        operators: ['alice'],
         groupPolicy: 'open',
         sessionScope: 'thread',
       });
@@ -3252,6 +3409,7 @@ describe('ChannelBase', () => {
 
     it('gates shared-session permission responses to authorized senders', async () => {
       const ch = createChannel({
+        operators: ['boss'],
         allowedUsers: ['boss'],
         groupPolicy: 'open',
         sessionScope: 'thread',
@@ -3299,7 +3457,7 @@ describe('ChannelBase', () => {
       const ch = createChannel({
         senderPolicy: 'pairing',
         groupPolicy: 'open',
-        groupSenderPolicy: 'open',
+        groups: { '*': { senders: 'open' } },
         sessionScope: 'chat_thread',
       });
       const sessionId = await startSession(ch, {
@@ -3337,6 +3495,188 @@ describe('ChannelBase', () => {
       );
 
       expect(bridge.discardSession).not.toHaveBeenCalled();
+    });
+
+    describe('shared-session operators', () => {
+      const group = {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        threadId: 'thread-1',
+      };
+
+      async function approveAs(
+        ch: TestChannel,
+        senderId: string,
+        requestId: string,
+      ): Promise<boolean> {
+        const before = respondToPermissionMock().mock.calls.length;
+        await ch.handleInbound(
+          envelope({ ...group, senderId, text: `/approve ${requestId}` }),
+        );
+        return respondToPermissionMock().mock.calls.length > before;
+      }
+
+      it('does not infer group operators from privately paired users', async () => {
+        const previousQwenHome = process.env['QWEN_HOME'];
+        process.env['QWEN_HOME'] = mkdtempSync(
+          join(tmpdir(), 'qwen-operators-'),
+        );
+        try {
+          const store = new PairingStore('test-chan', '/tmp');
+          store.approve(pairingCodeOf(store.createRequest('admin', 'Admin')));
+          const ch = createChannel({
+            senderPolicy: 'pairing',
+            groupPolicy: 'open',
+            groups: { '*': { senders: 'open' } },
+            sessionScope: 'chat_thread',
+          });
+          const sessionId = await startSession(ch, {
+            ...group,
+            senderId: 'member',
+          });
+          emitPermission(sessionId, 'req-1');
+
+          expect(await approveAs(ch, 'member', 'req-1')).toBe(false);
+          expect(await approveAs(ch, 'admin', 'req-1')).toBe(false);
+        } finally {
+          if (previousQwenHome === undefined) {
+            delete process.env['QWEN_HOME'];
+          } else {
+            process.env['QWEN_HOME'] = previousQwenHome;
+          }
+        }
+      });
+
+      it('does not grant operator access just because both axes are open', async () => {
+        const ch = createChannel({
+          senderPolicy: 'open',
+          groupPolicy: 'open',
+          groups: { '*': { senders: 'open' } },
+          sessionScope: 'chat_thread',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'stranger', 'req-1')).toBe(false);
+      });
+
+      it('does not infer operators from the group allowlist', async () => {
+        const ch = createChannel({
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+          groupPolicy: 'open',
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['bob'] } },
+          sessionScope: 'chat_thread',
+        });
+        const sessionId = await startSession(ch, { ...group, senderId: 'bob' });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'bob', 'req-1')).toBe(false);
+      });
+
+      it('does not infer operators from group pairing approval', async () => {
+        const previousQwenHome = process.env['QWEN_HOME'];
+        const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-operators-'));
+        process.env['QWEN_HOME'] = qwenHome;
+        try {
+          const store = new PairingStore('test-chan', '/tmp');
+          store.approve(
+            pairingCodeOf(
+              store.createGroupRequest('group1', 'Team', 'alice', 'Alice'),
+            ),
+          );
+          const ch = createChannel({
+            senderPolicy: 'pairing',
+            groupPolicy: 'pairing',
+            sessionScope: 'chat_thread',
+          });
+          const sessionId = await startSession(ch, {
+            ...group,
+            senderId: 'member',
+          });
+          emitPermission(sessionId, 'req-1');
+
+          expect(await approveAs(ch, 'member', 'req-1')).toBe(false);
+        } finally {
+          if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = previousQwenHome;
+          rmSync(qwenHome, { recursive: true, force: true });
+        }
+      });
+
+      it('requires explicit operators in a shared personal conversation', async () => {
+        const ch = createChannel({
+          senderPolicy: 'open',
+          groupPolicy: 'open',
+          groups: {
+            '*': { senders: 'allowlist', allowedUsers: ['someone-else'] },
+          },
+          sessionScope: 'chat_thread',
+        });
+        (
+          ch as unknown as { isPersonalConversation(): boolean }
+        ).isPersonalConversation = () => true;
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'alice', 'req-1')).toBe(false);
+      });
+
+      it('lets an explicit operators list override allowedUsers', async () => {
+        const ch = createChannel({
+          allowedUsers: ['boss', 'carol'],
+          operators: ['carol'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'boss',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'boss', 'req-1')).toBe(false);
+        expect(ch.sent.at(-1)?.text).toContain('Only authorized members');
+        expect(await approveAs(ch, 'carol', 'req-1')).toBe(true);
+      });
+
+      it('treats an empty operators list as no operators, not as unrestricted', async () => {
+        const ch = createChannel({
+          senderPolicy: 'open',
+          operators: [],
+          groupPolicy: 'open',
+          sessionScope: 'chat_thread',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'alice', 'req-1')).toBe(false);
+      });
+
+      it('leaves sessions that are not shared to their own sender', async () => {
+        const ch = createChannel({
+          operators: [],
+          groupPolicy: 'open',
+          sessionScope: 'user',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'alice', 'req-1')).toBe(true);
+      });
     });
 
     it('uses ACP option kinds for approval and denial', async () => {
@@ -3878,7 +4218,13 @@ describe('ChannelBase', () => {
           allowedUsers: ['allowed'],
           groupPolicy: 'open',
           groupHistoryLimit: 10,
-          groups: { '*': { requireMention: true } },
+          groups: {
+            '*': {
+              requireMention: true,
+              senders: 'allowlist',
+              allowedUsers: ['allowed'],
+            },
+          },
         },
         { groupHistoryPath: groupHistoryPath() },
       );
@@ -4352,6 +4698,7 @@ describe('ChannelBase', () => {
       const historyPath = groupHistoryPath();
       const ch = createChannel(
         {
+          operators: ['user1'],
           groupPolicy: 'open',
           groupHistoryLimit: 10,
           sessionScope: 'single',
@@ -8383,7 +8730,13 @@ describe('ChannelBase', () => {
           senderPolicy: 'allowlist',
           allowedUsers: ['alice'],
           groupPolicy: 'open',
-          groups: { '*': { requireMention: true } },
+          groups: {
+            '*': {
+              requireMention: true,
+              senders: 'allowlist',
+              allowedUsers: ['alice'],
+            },
+          },
         },
         { channelMemory, memoryIntentClassifier },
       );
@@ -10389,7 +10742,7 @@ describe('ChannelBase', () => {
     it('/loop add rejects single-scope sessions', async () => {
       const createLoop = vi.fn();
       const ch = createChannel(
-        { sessionScope: 'single' },
+        { operators: ['user1'], sessionScope: 'single' },
         {
           loopController: {
             create: createLoop,
@@ -10842,6 +11195,91 @@ describe('ChannelBase', () => {
       await strangerPrompt;
     });
 
+    it('channel loop tools refuse a group-axis caller that /loop refuses', async () => {
+      let finishPrompt: (() => void) | undefined;
+      const createForTarget = vi.fn().mockResolvedValue({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '* * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'owner',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      } satisfies ChannelLoop);
+      const ch = createChannel(
+        {
+          senderPolicy: 'pairing',
+          groupPolicy: 'open',
+          groups: { '*': { senders: 'open' } },
+          sessionScope: 'chat_thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+      vi.mocked(bridge.prompt).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = () => resolve('agent response');
+          }),
+      );
+      const strangerPrompt = ch.handleInbound(
+        envelope({
+          senderId: 'stranger',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot create a loop',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+
+      finishPrompt?.();
+      await strangerPrompt;
+    });
+
     it('channel loop tools use the active shared-session caller target', async () => {
       let finishPrompt: (() => void) | undefined;
       const job: ChannelLoop = {
@@ -10868,6 +11306,7 @@ describe('ChannelBase', () => {
       const disable = vi.fn().mockResolvedValue(true);
       const ch = createChannel(
         {
+          operators: ['owner', 'admin'],
           allowedUsers: ['owner', 'admin'],
           groupPolicy: 'open',
           sessionScope: 'thread',
@@ -10969,7 +11408,7 @@ describe('ChannelBase', () => {
       };
       const createForTarget = vi.fn().mockResolvedValue(created);
       const ch = createChannel(
-        { groupPolicy: 'open', sessionScope: 'thread' },
+        { operators: ['user1'], groupPolicy: 'open', sessionScope: 'thread' },
         {
           loopController: {
             create: vi.fn(),
@@ -10981,7 +11420,14 @@ describe('ChannelBase', () => {
         },
       );
       ch.proactiveSupported = true;
-      await ch.handleInbound(
+      let finishPrompt!: (value: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const running = ch.handleInbound(
         envelope({
           chatId: 'group1',
           isGroup: true,
@@ -10990,6 +11436,7 @@ describe('ChannelBase', () => {
         }),
       );
 
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
       const handler = (
         bridge as unknown as {
           getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
@@ -11010,6 +11457,8 @@ describe('ChannelBase', () => {
         10,
       );
       expect(result).toBe('Loop job-1: */1 * * * *');
+      finishPrompt('done');
+      await running;
     });
 
     it('channel loop tool lists and cancels loops for the current session target', async () => {
@@ -12032,6 +12481,7 @@ describe('ChannelBase', () => {
       // non-member must be gated like /who. Mutation check: dropping the gate lets
       // the rando read 'Session: active' / 'Access: open'.
       const ch = createChannel({
+        operators: ['boss'],
         sessionScope: 'thread',
         groupPolicy: 'open',
         senderPolicy: 'open',
@@ -12076,7 +12526,11 @@ describe('ChannelBase', () => {
     });
 
     it('/clear in a group asks for confirmation and does not clear', async () => {
-      const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
+      const ch = createChannel({
+        operators: ['user1'],
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+      });
       const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
       await ch.handleInbound({ ...g, text: 'hello' }); // establish shared session
       ch.sent = [];
@@ -12088,7 +12542,11 @@ describe('ChannelBase', () => {
     });
 
     it('/clear confirm in a group clears the shared session', async () => {
-      const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
+      const ch = createChannel({
+        operators: ['user1'],
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+      });
       const g = envelope({
         isGroup: true,
         isMentioned: true,
@@ -12110,6 +12568,7 @@ describe('ChannelBase', () => {
       // drops .toLowerCase().
       for (const arg of ['Confirm', 'CONFIRM']) {
         const ch = createChannel({
+          operators: ['user1'],
           sessionScope: 'thread',
           groupPolicy: 'open',
         });
@@ -12143,6 +12602,7 @@ describe('ChannelBase', () => {
 
     it('/clear in a chat_thread group asks for confirmation (shared session)', async () => {
       const ch = createChannel({
+        operators: ['user1'],
         sessionScope: 'chat_thread',
         groupPolicy: 'open',
       });
@@ -12163,6 +12623,7 @@ describe('ChannelBase', () => {
 
     it('/clear in a shared group is restricted to authorized senders', async () => {
       const ch = createChannel({
+        operators: ['boss'],
         sessionScope: 'thread',
         groupPolicy: 'open',
         senderPolicy: 'open',
@@ -12202,6 +12663,7 @@ describe('ChannelBase', () => {
         .mockImplementation(() => true);
       try {
         const ch = createChannel({
+          operators: ['alice'],
           sessionScope: 'thread',
           groupPolicy: 'open',
         });
@@ -12260,6 +12722,7 @@ describe('ChannelBase', () => {
       // is even more shared than `thread`. A bare /clear from any member must NOT
       // wipe it directly — it has to pass the same confirm + allowedUsers gate.
       const ch = createChannel({
+        operators: ['boss'],
         sessionScope: 'single',
         groupPolicy: 'open',
         senderPolicy: 'open',
@@ -12304,6 +12767,7 @@ describe('ChannelBase', () => {
       // (isGroup:false) could bare-/clear the channel-wide session ungated. The
       // gate must fire here even though no group is involved.
       const ch = createChannel({
+        operators: ['boss'],
         sessionScope: 'single',
         senderPolicy: 'open',
         allowedUsers: ['boss'],
@@ -12357,6 +12821,7 @@ describe('ChannelBase', () => {
 
     it('/who reports workspace + shared scope without creating a session', async () => {
       const ch = createChannel({
+        operators: ['user1'],
         sessionScope: 'thread',
         groupPolicy: 'open',
         cwd: '/home/alice/work',
@@ -12379,7 +12844,11 @@ describe('ChannelBase', () => {
     });
 
     it('/who reports an active session and does not create one', async () => {
-      const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
+      const ch = createChannel({
+        operators: ['user1'],
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+      });
       const g = envelope({
         isGroup: true,
         isMentioned: true,
@@ -12421,7 +12890,11 @@ describe('ChannelBase', () => {
       // /who must report the channel-wide blast radius rather than understate it as
       // "shared by this group". Mutation check: the pre-fix ternary printed the
       // group note here.
-      const ch = createChannel({ sessionScope: 'single', groupPolicy: 'open' });
+      const ch = createChannel({
+        operators: ['user1'],
+        sessionScope: 'single',
+        groupPolicy: 'open',
+      });
       await ch.handleInbound(
         envelope({
           isGroup: true,
@@ -12436,7 +12909,10 @@ describe('ChannelBase', () => {
     });
 
     it('/who in a single-scope DM also reports shared channel-wide', async () => {
-      const ch = createChannel({ sessionScope: 'single' });
+      const ch = createChannel({
+        operators: ['user1'],
+        sessionScope: 'single',
+      });
       await ch.handleInbound(envelope({ text: '/who' }));
       const text = ch.sent[0]!.text;
       expect(text).toContain('shared channel-wide');
@@ -12445,6 +12921,7 @@ describe('ChannelBase', () => {
 
     it('/who in a shared group is restricted to authorized senders', async () => {
       const ch = createChannel({
+        operators: ['boss'],
         sessionScope: 'thread',
         groupPolicy: 'open',
         senderPolicy: 'open',
@@ -12758,7 +13235,10 @@ describe('ChannelBase', () => {
         },
       );
 
-      const ch = createChannel({ sessionScope: 'single' });
+      const ch = createChannel({
+        operators: ['alice', 'bob'],
+        sessionScope: 'single',
+      });
       ch.enableCancelCommand();
       const prompt = ch.handleInbound(
         envelope({ senderId: 'alice', chatId: 'chat-a', text: 'long task' }),
@@ -12890,6 +13370,7 @@ describe('ChannelBase', () => {
       );
 
       const ch = createChannel({
+        operators: ['boss'],
         sessionScope: 'thread',
         groupPolicy: 'open',
         senderPolicy: 'open',
@@ -18070,7 +18551,10 @@ describe('ChannelBase', () => {
     });
 
     it('delivers the answer to the asker chat when the session spans chats', async () => {
-      const ch = createChannel({ sessionScope: 'single' });
+      const ch = createChannel({
+        operators: ['alice', 'bob'],
+        sessionScope: 'single',
+      });
 
       await ch.handleInbound(
         envelope({ senderId: 'alice', chatId: 'chat-a', text: 'main task' }),
@@ -18829,6 +19313,7 @@ describe('ChannelBase', () => {
       );
 
       const ch = createChannel({
+        operators: ['boss', 'mod'],
         sessionScope: 'thread',
         groupPolicy: 'open',
         allowedUsers: ['boss', 'mod'],
@@ -19225,6 +19710,7 @@ describe('ChannelBase', () => {
         });
 
       const ch = createChannel({
+        operators: ['alice', 'bob'],
         sessionScope: 'thread',
         groupPolicy: 'open',
         groups: { '*': { dispatchMode: 'followup' } },
@@ -19296,6 +19782,7 @@ describe('ChannelBase', () => {
 
       try {
         const ch = createChannel({
+          operators: ['alice', 'bob'],
           sessionScope: 'thread',
           groupPolicy: 'open',
           groups: { '*': { dispatchMode: 'followup' } },
@@ -19428,6 +19915,7 @@ describe('ChannelBase', () => {
 
       try {
         const ch = createChannel({
+          operators: ['alice', 'bob'],
           sessionScope: 'thread',
           groupPolicy: 'open',
           groups: { '*': { dispatchMode: 'followup' } },
@@ -19506,6 +19994,7 @@ describe('ChannelBase', () => {
 
       try {
         const ch = createChannel({
+          operators: ['alice', 'bob'],
           sessionScope: 'thread',
           groupPolicy: 'open',
           groups: { '*': { dispatchMode: 'followup' } },
@@ -21021,6 +21510,7 @@ describe('ChannelBase', () => {
         )
         .mockResolvedValueOnce('loop response');
       const ch = createChannel({
+        operators: ['alice'],
         sessionScope: 'thread',
         groupPolicy: 'open',
       });
@@ -22029,6 +22519,7 @@ describe('ChannelBase', () => {
         )
         .mockImplementationOnce(() => new Promise<string>(() => undefined));
       const ch = createChannel({
+        operators: ['alice'],
         sessionScope: 'thread',
         groupPolicy: 'open',
       });
@@ -22939,8 +23430,7 @@ describe('ChannelBase', () => {
           senderPolicy: 'allowlist',
           allowedUsers: ['owner'],
           groupPolicy: 'open',
-          groupSenderPolicy: 'allowlist',
-          allowedGroupUsers: ['alice'],
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
         },
         {
           loopController: {

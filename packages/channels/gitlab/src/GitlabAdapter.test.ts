@@ -231,22 +231,31 @@ describe('GitlabChannel', () => {
       ch.disconnect();
     });
 
-    it('normalizes allowedGroupUsers to lowercase for the group sender gate', async () => {
+    it('normalizes per-group allowedUsers to lowercase for the group sender gate', async () => {
       const config = makeConfig({
-        groupSenderPolicy: 'allowlist',
-        allowedGroupUsers: ['Alice'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['Alice'] } },
       });
       const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
       await ch.connect();
 
       const groupGate = (
         ch as unknown as {
-          groupSenderGate?: { isAllowed: (senderId: string) => boolean };
+          senderGateFor(target: { isGroup: boolean; chatId: string }): {
+            isAllowed: (senderId: string) => boolean;
+          };
         }
-      ).groupSenderGate;
-      expect(groupGate?.isAllowed('alice')).toBe(true);
-      expect(groupGate?.isAllowed('bob')).toBe(false);
-      expect(ch.config.allowedGroupUsers).toEqual(['alice']);
+      ).senderGateFor({ isGroup: true, chatId: 'owner/repo' });
+      expect(groupGate.isAllowed('alice')).toBe(true);
+      expect(groupGate.isAllowed('bob')).toBe(false);
+      expect(ch.config.groups['*']?.allowedUsers).toEqual(['alice']);
+      ch.disconnect();
+    });
+
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+      expect(ch.config.operators).toEqual(['alice']);
       ch.disconnect();
     });
 

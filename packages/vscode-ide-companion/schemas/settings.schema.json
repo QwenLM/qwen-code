@@ -4332,7 +4332,7 @@
               "default": "qwen3.5-omni-plus-realtime"
             },
             "endpoint": {
-              "description": "Advanced override for the DashScope Realtime WebSocket endpoint.",
+              "description": "Base URL of the DashScope Realtime service, such as https://dashscope.aliyuncs.com/compatible-mode/v1; a Realtime WebSocket URL is also accepted.",
               "type": "string",
               "default": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
             },
