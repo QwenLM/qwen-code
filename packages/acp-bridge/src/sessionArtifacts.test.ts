@@ -7166,9 +7166,15 @@ describe('SessionArtifactStore', () => {
       warnings: [],
     });
 
-    // No 'skipped artifact restore' warning, no rollback — the legacy
-    // record is dropped quietly, live artifact is preserved.
-    expect(warnings).toEqual([]);
+    // No `skipped artifact restore` warning, no rollback — the legacy
+    // record is dropped quietly, live artifact is preserved. The
+    // all-legacy path emits a distinct, non-`RESTORE_FAILED` warning
+    // so control-plane callers can tell the snapshot contributed
+    // nothing; it deliberately does not start with `skipped ` so the
+    // completeness check does not fire.
+    expect(warnings).toEqual([
+      '1 snapshot records were all legacy published file:// drops; live state preserved without a restore attempt',
+    ]);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         {
@@ -7199,6 +7205,63 @@ describe('SessionArtifactStore', () => {
       { trustedPublisher: true },
     );
     const artifactId = changes[0]!.artifactId;
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
+  // Issue #12389 R1-2: a workspace→published upgrade path would re-merge
+  // the record and pick `restorable` over the coerced `ephemeral`. The
+  // coercion must mark `retentionExplicit` so the merge preserves the
+  // ephemeral choice.
+  it('keeps coerced ephemeral retention when re-upserted with restorable', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-coerced-merge-survives',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    // First write: tool-produced published file:// record. My coercion
+    // makes retention 'ephemeral' AND marks it explicit so a future
+    // merge cannot upgrade it to 'restorable'.
+    const first = await store.upsertMany(
+      [
+        {
+          title: 'Local page',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          url: 'file:///Users/example/.qwen/artifacts/merge-survive-1/index.html',
+        },
+      ],
+      { trustedPublisher: true },
+    );
+    const artifactId = first.changes[0]!.artifactId;
+    // Second write: same identity (url), explicit retention='restorable'.
+    // Before the R1-2 fix, mergeRetention would upgrade ephemeral →
+    // restorable here because the original coercion left retentionExplicit
+    // unset. After the fix, the explicit-ephemeral branch wins and
+    // retention stays 'ephemeral'.
+    await store.upsertMany(
+      [
+        {
+          title: 'Local page',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          url: 'file:///Users/example/.qwen/artifacts/merge-survive-1/index.html',
+          retention: 'restorable',
+        },
+      ],
+      { trustedPublisher: true },
+    );
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         {

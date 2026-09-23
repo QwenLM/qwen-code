@@ -943,12 +943,18 @@ export class SessionArtifactStore {
         restoredCount === 0
       ) {
         // Every snapshot record was a legacy published file:// drop — no
-        // real restore was attempted. Preserve previous state silently
-        // (no `RESTORE_FAILED` warning: those legacy records were
-        // expected and were already journaled before write-time
-        // coercion landed).
+        // real restore was attempted. Preserve previous state. Emit a
+        // distinct, non-`RESTORE_FAILED` warning so control-plane callers
+        // that key off `isArtifactRestoreFailureWarning` still see that
+        // the snapshot contributed nothing; the prefix deliberately
+        // avoids `skipped ` so it does not trip the completeness check.
         this.restoreState(previousState);
-        return [...baselineWarnings];
+        const allLegacyWarnings = [
+          ...baselineWarnings,
+          `${snapshot.artifacts.length} snapshot records were all legacy published file:// drops; live state preserved without a restore attempt`,
+        ];
+        this.setLastRestoreWarnings(allLegacyWarnings);
+        return allLegacyWarnings;
       }
       if (
         previousState.artifacts.size > 0 &&
@@ -1742,12 +1748,14 @@ export class SessionArtifactStore {
     let retention = normalizeRetention(input.retention, {
       persistenceAvailable: this.persistence !== undefined,
     });
+    let retentionCoercedToEphemeral = false;
     // Local file:// published pages (non-snapshot) must not be persisted:
     // restore-time trust rules treat them as untrusted, so storing them
     // as `restorable` produces a dead record whose only effect is to pile
     // up `skipped artifact restore: …` warnings on every load. Coerce to
     // `ephemeral` up front; the snapshot path stays restorable via
-    // `getWebPreviewSnapshotId`.
+    // `getWebPreviewSnapshotId`. Mark the result as `retentionExplicit`
+    // so the workspace→published merge path doesn't upgrade it again.
     if (
       retention !== 'ephemeral' &&
       storage === 'published' &&
@@ -1764,6 +1772,7 @@ export class SessionArtifactStore {
       }) === undefined
     ) {
       retention = 'ephemeral';
+      retentionCoercedToEphemeral = true;
     }
     const workspaceStatus = workspacePath
       ? options.workspaceAccess === 'metadata-only'
@@ -1808,7 +1817,8 @@ export class SessionArtifactStore {
       id,
       identityKey,
       receivedSeq,
-      retentionExplicit: input.retention !== undefined,
+      retentionExplicit:
+        input.retention !== undefined || retentionCoercedToEphemeral,
       retentionSource: source,
       trustedPublisher,
       kind,
