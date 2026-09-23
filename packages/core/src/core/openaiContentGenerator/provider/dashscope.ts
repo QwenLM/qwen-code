@@ -26,6 +26,7 @@ import { getEffectiveReasoning } from '../../reasoning-overrides.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { IMAGE_REATTACHMENT_START } from '../../../services/image-payload-references.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
@@ -805,7 +806,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const stableBlock =
       reattachBlockCount > 0 && lastIndex >= 0
         ? this.lastStableBlock(messages, reattachBlockCount)
-        : { messageIndex: lastIndex, excludeTail: 0 };
+        : this.findConversationCacheBreakpoint(messages);
 
     const updatedMessages =
       messages.length === 0
@@ -847,6 +848,43 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages: updatedMessages,
       tools: updatedTools,
     };
+  }
+
+  /**
+   * Fallback anchor for callers that do not report the reattach region
+   * size: find the marker the converter copied onto the reattach
+   * introduction block and anchor on the message before it. The whole
+   * introduction message is skipped because a per-block marker can still
+   * cache the message that carries it.
+   */
+  private findConversationCacheBreakpoint(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): { messageIndex: number; excludeTail: number } | undefined {
+    for (const [messageIndex, message] of messages.entries()) {
+      if (!Array.isArray(message.content)) continue;
+      const reattachmentIndex = message.content.findIndex(
+        (part) => IMAGE_REATTACHMENT_START in part,
+      );
+      if (reattachmentIndex < 0) continue;
+
+      // Reattached images move on the next request. Exclude their entire
+      // message because a content-block marker may cache the whole message.
+      for (
+        let previousIndex = messageIndex - 1;
+        previousIndex >= 0;
+        previousIndex--
+      ) {
+        const content = messages[previousIndex].content;
+        if (
+          typeof content === 'string' ||
+          (Array.isArray(content) && content.length > 0)
+        ) {
+          return { messageIndex: previousIndex, excludeTail: 0 };
+        }
+      }
+      return undefined;
+    }
+    return { messageIndex: messages.length - 1, excludeTail: 0 };
   }
 
   /**
