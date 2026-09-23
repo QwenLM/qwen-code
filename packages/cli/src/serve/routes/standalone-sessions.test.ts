@@ -9,7 +9,6 @@ import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { summarizeReplay } from '@qwen-code/acp-bridge';
 import {
   StandaloneSessionServiceError,
   type ListStandaloneSessionsOptions,
@@ -724,6 +723,103 @@ describe('standalone session routes', () => {
     expect(service.getTranscriptPage).not.toHaveBeenCalled();
   });
 
+  it('rejects a bare transcript snapshot without an anchor', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?snapshot=snap-1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('forwards a cursor-only transcript read to the service', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?cursor=cur-1`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      cursor: 'cur-1',
+    });
+  });
+
+  it('forwards a beforeRecordId-only transcript read to the service', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?beforeRecordId=rec-1`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      beforeRecordId: 'rec-1',
+    });
+  });
+
+  it('returns the full transcript page envelope and disables caching', async () => {
+    const { app, service } = createHarness();
+    const page = {
+      v: 1 as const,
+      sessionId,
+      events: [
+        {
+          v: 1 as const,
+          type: 'session_update' as const,
+          data: { update: { kind: 'x' } },
+        },
+      ],
+      hasMore: true,
+      nextCursor: 'next-cursor',
+      partial: true,
+      replayError: 'boom',
+      targetRecordId: 'rec-9',
+      hasOlder: true,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-02T00:00:00.000Z',
+    };
+    service.getTranscriptPage.mockResolvedValueOnce(page as never);
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-9&snapshot=snap-1`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual(page);
+  });
+
+  it('round-trips a transcript cursor into the next request', async () => {
+    const { app, service } = createHarness();
+    service.getTranscriptPage.mockResolvedValueOnce({
+      v: 1 as const,
+      sessionId,
+      events: [],
+      hasMore: true,
+      nextCursor: 'next-cursor',
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-02T00:00:00.000Z',
+    } as never);
+
+    const first = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-1&snapshot=snap-1`,
+    );
+    expect(first.status).toBe(200);
+    const nextCursor = first.body.nextCursor as string;
+
+    const second = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?cursor=${nextCursor}`,
+    );
+    expect(second.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenNthCalledWith(2, sessionId, {
+      cursor: 'next-cursor',
+    });
+  });
+
   it('rejects an invalid standalone transcript compactedReplayMode', async () => {
     const { app, service } = createHarness();
 
@@ -738,15 +834,25 @@ describe('standalone session routes', () => {
 
   it('projects compactedReplayMode=summary onto the response events', async () => {
     const { app, service } = createHarness();
+    // An in-progress tool-call frame carrying shellProgress metadata is a
+    // fixed point of neither the drop rule nor the strip rule: the summary
+    // replay drops it, so the projected response carries no events. Asserting
+    // the concrete projected shape (not `summarizeReplay(events)`) means a
+    // revert of the route's summary branch to `page.events` flips this red.
     const events = [
       {
         v: 1 as const,
         type: 'session_update' as const,
-        data: { update: { kind: 'unknown' } },
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            status: 'in_progress',
+            _meta: { shellProgress: { chunks: ['x'] } },
+          },
+        },
       },
-    ] as unknown as Awaited<
-      ReturnType<typeof service.getTranscriptPage>
-    >['events'];
+    ] as never;
     service.getTranscriptPage.mockResolvedValueOnce({
       v: 1 as const,
       sessionId,
@@ -761,7 +867,7 @@ describe('standalone session routes', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(response.body.events).toEqual(summarizeReplay(events));
+    expect(response.body.events).toEqual([]);
   });
 
   it('rejects unknown query keys on the transcript route', async () => {

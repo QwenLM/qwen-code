@@ -92,6 +92,24 @@ import {
 
 const debugLogger = createDebugLogger('STANDALONE_SESSION_SERVICE');
 
+function getLivePromptState(
+  runtime: WorkspaceRuntime,
+  sessionId: string,
+): { live: boolean; activePrompt: boolean } {
+  try {
+    return {
+      live: true,
+      activePrompt:
+        runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
+    };
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return { live: false, activePrompt: false };
+    }
+    throw error;
+  }
+}
+
 export type StandaloneSessionServiceErrorCode =
   | 'invalid_request'
   | 'standalone_session_not_found'
@@ -906,7 +924,12 @@ export class StandaloneSessionService {
           // recorder first — the bridge-backed path this route replaces
           // does exactly that (a bare read can momentarily omit the
           // just-completed turn because record writes are fire-and-forget).
-          if (options.snapshot === undefined) {
+          // The barrier is gated on bridge liveness, like the
+          // workspace-qualified route: a cold-but-persisted session has no
+          // pending recorder writes, and flushing would spawn an ACP child
+          // for a read-only navigation GET.
+          const promptStateBeforeRead = getLivePromptState(runtime, sessionId);
+          if (options.snapshot === undefined && promptStateBeforeRead.live) {
             try {
               await runtime.bridge.flushSessionTranscript?.(sessionId);
             } catch (error) {
@@ -942,9 +965,21 @@ export class StandaloneSessionService {
           sessionId,
         );
         return runWithWorkspaceRuntimeStorage(runtime, async () => {
+          // Sample the live-prompt state before the read. The backward
+          // live-flush barrier only applies to a session that is live in
+          // the bridge — a cold-but-persisted session has no pending
+          // recorder writes, and flushing would spawn an ACP child for a
+          // read-only navigation GET. Dangling-call finalization is gated
+          // on the samples taken before AND after the read, exactly like
+          // the workspace-qualified and ACP reference implementations: a
+          // prompt still in flight may own the tail's tool calls, and
+          // finalizing them would fabricate a failure update for a call
+          // that is still running (issue #9704).
+          const promptStateBeforeRead = getLivePromptState(runtime, sessionId);
           if (
             options.cursor === undefined &&
-            options.direction === 'backward'
+            options.direction === 'backward' &&
+            promptStateBeforeRead.live
           ) {
             try {
               await runtime.bridge.flushSessionTranscript?.(sessionId);
@@ -952,29 +987,6 @@ export class StandaloneSessionService {
               if (!(error instanceof SessionNotFoundError)) throw error;
             }
           }
-          // Gate dangling-call finalization on the live-prompt state sampled
-          // before AND after the read, exactly like the workspace-qualified
-          // and ACP reference implementations: a prompt still in flight may
-          // own the tail's tool calls, and finalizing them would fabricate a
-          // failure update for a call that is still running (issue #9704).
-          const getLivePromptState = (): {
-            live: boolean;
-            activePrompt: boolean;
-          } => {
-            try {
-              return {
-                live: true,
-                activePrompt:
-                  runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
-              };
-            } catch (error) {
-              if (error instanceof SessionNotFoundError) {
-                return { live: false, activePrompt: false };
-              }
-              throw error;
-            }
-          };
-          const promptStateBeforeRead = getLivePromptState();
           const page = await new SessionTranscriptReader(
             runtime.workspaceCwd,
             undefined,
@@ -983,7 +995,10 @@ export class StandaloneSessionService {
             ...options,
             maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
           });
-          const activePromptAfterRead = getLivePromptState().activePrompt;
+          const activePromptAfterRead = getLivePromptState(
+            runtime,
+            sessionId,
+          ).activePrompt;
           const replay = await replayTranscriptRecordPage({
             sessionId,
             page,

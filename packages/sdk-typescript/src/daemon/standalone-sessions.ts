@@ -514,16 +514,20 @@ export function parseStandaloneTurnIndexPage(
 ): DaemonSessionTurnIndexPage {
   const page = asRecord(value, route);
   requireString(page, 'snapshot', route);
-  if (!Array.isArray(page['turns'])) {
+  const turns = page['turns'];
+  if (
+    !Array.isArray(turns) ||
+    turns.some((turn) => typeof turn !== 'object' || turn === null)
+  ) {
     throw new DaemonStandaloneProtocolError(route, 'expected turns[]');
   }
   if (
-    page['totalTurns'] !== undefined &&
-    typeof page['totalTurns'] !== 'number'
+    typeof page['totalTurns'] !== 'number' ||
+    typeof page['start'] !== 'number'
   ) {
     throw new DaemonStandaloneProtocolError(
       route,
-      'expected totalTurns number',
+      'expected totalTurns/start numbers',
     );
   }
   requireSessionId(page, route, expectedSessionId);
@@ -536,7 +540,11 @@ export function parseStandaloneTranscriptPage(
   expectedSessionId?: string,
 ): DaemonSessionTranscriptPage {
   const page = asRecord(value, route);
-  if (!Array.isArray(page['events'])) {
+  const events = page['events'];
+  if (
+    !Array.isArray(events) ||
+    events.some((event) => typeof event !== 'object' || event === null)
+  ) {
     throw new DaemonStandaloneProtocolError(route, 'expected events[]');
   }
   if (typeof page['hasMore'] !== 'boolean') {

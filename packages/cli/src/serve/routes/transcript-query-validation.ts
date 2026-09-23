@@ -6,18 +6,8 @@
 
 // Shared query/body validation and response serialization for the
 // workspace-qualified (`session.ts`) and standalone (`standalone-sessions.ts`)
-// transcript routes. These helpers were previously duplicated byte-for-byte
-// between the two route files and already drifted once (the standalone copy
-// silently dropped `direction` and `compactedReplayMode` parsing), so both
-// route families now import from this single module.
-//
-// Chosen cap for one serialized transcript response, kept proportional to
-// the core expanded-page ceiling so the two cannot drift arbitrarily. This
-// is not a derived guarantee: a single aggregated record can exceed any
-// page budget (the reader always takes at least one record so pagination
-// cannot dead-end), and replayed SessionUpdate objects are not a fixed
-// multiple of their source records. A page a route cannot serialize
-// returns transcript_page_too_large for that anchor.
+// transcript routes; both route families import from this single module so
+// the two cannot drift.
 
 import {
   SESSION_TRANSCRIPT_MAX_LIMIT,
@@ -26,6 +16,13 @@ import {
 } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import type { Response } from 'express';
 
+// Chosen cap for one serialized transcript response, kept proportional to
+// the core expanded-page ceiling so the two cannot drift arbitrarily. This
+// is not a derived guarantee: a single aggregated record can exceed any
+// page budget (the reader always takes at least one record so pagination
+// cannot dead-end), and replayed SessionUpdate objects are not a fixed
+// multiple of their source records. A page a route cannot serialize
+// returns transcript_page_too_large for that anchor.
 export const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
   2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
 export const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
@@ -198,6 +195,32 @@ export function workspaceTranscriptCursorExceedsLimit(
   maxBytes = WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
 ): boolean {
   return Buffer.byteLength(cursor) > maxBytes;
+}
+
+export function isConflictingTranscriptAnchorCombination(query: {
+  direction: 'backward' | undefined;
+  cursor: string | undefined;
+  beforeRecordId: string | undefined;
+  atRecordId: string | undefined;
+  snapshot: string | undefined;
+}): boolean {
+  const { direction, cursor, beforeRecordId, atRecordId, snapshot } = query;
+  return (
+    (direction !== undefined &&
+      (cursor !== undefined ||
+        beforeRecordId !== undefined ||
+        atRecordId !== undefined ||
+        snapshot !== undefined)) ||
+    (cursor !== undefined &&
+      (beforeRecordId !== undefined ||
+        atRecordId !== undefined ||
+        snapshot !== undefined)) ||
+    (atRecordId !== undefined &&
+      (beforeRecordId !== undefined || snapshot === undefined)) ||
+    (snapshot !== undefined &&
+      atRecordId === undefined &&
+      beforeRecordId === undefined)
+  );
 }
 
 export const workspaceTranscriptCursorExceedsLimitForTesting =

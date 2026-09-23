@@ -261,6 +261,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(Public.STANDALONE_SESSION_OPTIONS_CAPABILITY).toBe(
       'standalone_session_options_v1',
     );
+    expect(Public.STANDALONE_SESSION_TRANSCRIPT_CAPABILITY).toBe(
+      'standalone_session_transcript_v1',
+    );
     expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
     expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
     expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');

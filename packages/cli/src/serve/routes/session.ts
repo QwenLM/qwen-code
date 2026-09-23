@@ -82,6 +82,7 @@ import express, {
 } from 'express';
 import {
   WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
+  isConflictingTranscriptAnchorCombination,
   parseReplayMode,
   parseTranscriptCursorQuery,
   parseTranscriptDirectionQuery,
@@ -5415,20 +5416,13 @@ export function registerSessionRoutes(
     const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
     if (snapshot === null) return;
     if (
-      (direction !== undefined &&
-        (cursor !== undefined ||
-          beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (cursor !== undefined &&
-        (beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (atRecordId !== undefined &&
-        (beforeRecordId !== undefined || snapshot === undefined)) ||
-      (snapshot !== undefined &&
-        atRecordId === undefined &&
-        beforeRecordId === undefined)
+      isConflictingTranscriptAnchorCombination({
+        direction,
+        cursor,
+        beforeRecordId,
+        atRecordId,
+        snapshot,
+      })
     ) {
       res.status(400).json({
         error: 'Invalid transcript cursor and anchor combination',
@@ -5539,20 +5533,13 @@ export function registerSessionRoutes(
     const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
     if (snapshot === null) return;
     if (
-      (direction !== undefined &&
-        (cursor !== undefined ||
-          beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (cursor !== undefined &&
-        (beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (atRecordId !== undefined &&
-        (beforeRecordId !== undefined || snapshot === undefined)) ||
-      (snapshot !== undefined &&
-        atRecordId === undefined &&
-        beforeRecordId === undefined)
+      isConflictingTranscriptAnchorCombination({
+        direction,
+        cursor,
+        beforeRecordId,
+        atRecordId,
+        snapshot,
+      })
     ) {
       res.status(400).json({
         error: 'Invalid transcript cursor and anchor combination',

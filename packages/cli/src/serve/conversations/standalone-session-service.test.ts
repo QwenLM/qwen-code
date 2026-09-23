@@ -25,7 +25,7 @@ import {
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { ConversationRuntimeOwnershipError } from './conversation-runtime-errors.js';
@@ -45,6 +45,27 @@ const { listWorkspaceSessionsForResponse } = vi.hoisted(() => ({
 
 vi.mock('../server/session-list.js', () => ({
   listWorkspaceSessionsForResponse,
+}));
+
+const {
+  SessionTranscriptReaderMock,
+  replayTranscriptRecordPageMock,
+} = vi.hoisted(() => ({
+  // The service constructs `new SessionTranscriptReader(...)` directly, so
+  // the read surface is stubbed at the class boundary to pin the
+  // flush/finalize gating without touching the JSONL reader internals.
+  SessionTranscriptReaderMock: vi.fn(),
+  replayTranscriptRecordPageMock: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return { ...actual, SessionTranscriptReader: SessionTranscriptReaderMock };
+});
+
+vi.mock('../../acp-integration/session/history-replay-page.js', () => ({
+  replayTranscriptRecordPage: replayTranscriptRecordPageMock,
 }));
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -85,6 +106,7 @@ interface Harness {
       | 'detachClient'
       | 'deleteSessionAttachments'
       | 'markSessionCatalogChanged'
+      | 'flushSessionTranscript'
     >]: ReturnType<typeof vi.fn>;
   };
   reservation: { release: ReturnType<typeof vi.fn> };
@@ -171,6 +193,7 @@ function createHarness(): Harness {
     detachClient: vi.fn(async () => undefined),
     deleteSessionAttachments: vi.fn(async () => undefined),
     markSessionCatalogChanged: vi.fn(),
+    flushSessionTranscript: vi.fn(async () => undefined),
   };
   const getWorkspaceProvidersStatus = vi.fn(async () => ({
     v: 1 as const,
@@ -3917,5 +3940,189 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
     expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
     expect(harness.reservation.release).not.toHaveBeenCalled();
+  });
+
+  describe('getTurnIndexPage / getTranscriptPage', () => {
+    const liveSummary = (
+      hasActivePrompt: boolean,
+    ): BridgeSessionSummary => ({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt,
+    });
+
+    const fakeTurnIndexPage = {
+      v: 1 as const,
+      sessionId,
+      snapshot: 'snap-1',
+      totalTurns: 0,
+      start: 0,
+      turns: [],
+    };
+
+    const fakeReadPage = {
+      events: [],
+      hasMore: false,
+      direction: 'backward' as const,
+      targetRecordId: undefined,
+      hasOlder: false,
+    };
+
+    const fakeReplay = {
+      updates: [],
+      nextCursor: undefined,
+      hasMore: false,
+      startTime: undefined,
+      lastUpdated: undefined,
+      partial: undefined,
+      replayError: undefined,
+    };
+
+    beforeEach(() => {
+      SessionTranscriptReaderMock.mockReset();
+      replayTranscriptRecordPageMock.mockReset();
+      replayTranscriptRecordPageMock.mockResolvedValue(fakeReplay);
+    });
+
+    it('does not flush for a cold turn-index read (R1-3)', async () => {
+      mockActiveStandalone();
+      const harness = createHarness();
+      const readTurnIndexPage = vi
+        .fn()
+        .mockResolvedValue(fakeTurnIndexPage);
+      SessionTranscriptReaderMock.mockImplementation(
+        () =>
+          ({ readTurnIndexPage }) as never,
+      );
+
+      await harness.service.getTurnIndexPage(sessionId);
+
+      expect(harness.bridge.flushSessionTranscript).not.toHaveBeenCalled();
+      expect(readTurnIndexPage).toHaveBeenCalledWith(sessionId, {});
+    });
+
+    it('flushes once for a live snapshot-less turn-index read', async () => {
+      mockActiveStandalone();
+      const harness = createHarness();
+      harness.bridge.getSessionSummary.mockReturnValue(liveSummary(false));
+      const readTurnIndexPage = vi
+        .fn()
+        .mockResolvedValue(fakeTurnIndexPage);
+      SessionTranscriptReaderMock.mockImplementation(
+        () =>
+          ({ readTurnIndexPage }) as never,
+      );
+
+      await harness.service.getTurnIndexPage(sessionId);
+
+      expect(harness.bridge.flushSessionTranscript).toHaveBeenCalledTimes(1);
+      expect(harness.bridge.flushSessionTranscript).toHaveBeenCalledWith(
+        sessionId,
+      );
+    });
+
+    it('does not flush a turn-index read that carries a snapshot', async () => {
+      mockActiveStandalone();
+      const harness = createHarness();
+      harness.bridge.getSessionSummary.mockReturnValue(liveSummary(false));
+      const readTurnIndexPage = vi
+        .fn()
+        .mockResolvedValue(fakeTurnIndexPage);
+      SessionTranscriptReaderMock.mockImplementation(
+        () =>
+          ({ readTurnIndexPage }) as never,
+      );
+
+      await harness.service.getTurnIndexPage(sessionId, {
+        snapshot: 'snap-1',
+      });
+
+      expect(harness.bridge.flushSessionTranscript).not.toHaveBeenCalled();
+    });
+
+    it('does not flush a cold backward transcript read (R1-3)', async () => {
+      mockActiveStandalone();
+      const harness = createHarness();
+      const readPage = vi.fn().mockResolvedValue(fakeReadPage);
+      SessionTranscriptReaderMock.mockImplementation(
+        () =>
+          ({ readPage }) as never,
+      );
+
+      await harness.service.getTranscriptPage(sessionId, {
+        direction: 'backward',
+      });
+
+      expect(harness.bridge.flushSessionTranscript).not.toHaveBeenCalled();
+      expect(readPage).toHaveBeenCalled();
+    });
+
+    it('flushes a live backward transcript read with no cursor', async () => {
+      mockActiveStandalone();
+      const harness = createHarness();
+      harness.bridge.getSessionSummary.mockReturnValue(liveSummary(false));
+      const readPage = vi.fn().mockResolvedValue(fakeReadPage);
+      SessionTranscriptReaderMock.mockImplementation(
+        () =>
+          ({ readPage }) as never,
+      );
+
+      await harness.service.getTranscriptPage(sessionId, {
+        direction: 'backward',
+      });
+
+      expect(harness.bridge.flushSessionTranscript).toHaveBeenCalledTimes(1);
+      expect(harness.bridge.flushSessionTranscript).toHaveBeenCalledWith(
+        sessionId,
+      );
+    });
+
+    it('finalizes dangling calls only when no prompt is active (#9704)', async () => {
+      mockActiveStandalone();
+      const harness = createHarness();
+      harness.bridge.getSessionSummary.mockReturnValue(liveSummary(true));
+      const readPage = vi.fn().mockResolvedValue(fakeReadPage);
+      SessionTranscriptReaderMock.mockImplementation(
+        () =>
+          ({ readPage }) as never,
+      );
+
+      await harness.service.getTranscriptPage(sessionId, {
+        direction: 'backward',
+      });
+
+      expect(replayTranscriptRecordPageMock).toHaveBeenCalledTimes(1);
+      const [callArg] = replayTranscriptRecordPageMock.mock.calls[0]!;
+      expect(callArg.finalizeDangling).toBe(false);
+
+      // Removing the active-prompt gate reverts finalizeDangling to true,
+      // fabricating a failure update for a call that is still running.
+      replayTranscriptRecordPageMock.mockClear();
+      harness.bridge.getSessionSummary.mockReturnValue(liveSummary(false));
+      await harness.service.getTranscriptPage(sessionId, {
+        direction: 'backward',
+      });
+      const [idleArg] = replayTranscriptRecordPageMock.mock.calls[0]!;
+      expect(idleArg.finalizeDangling).toBe(true);
+    });
+
+    it('fails closed with standalone_session_conflict when the deletion journal holds the id', async () => {
+      mockActiveStandalone();
+      const harness = createHarness();
+      harness.deletionJournal.hasRecord.mockResolvedValueOnce(true);
+
+      await expect(
+        harness.service.getTranscriptPage(sessionId, {
+          direction: 'backward',
+        }),
+      ).rejects.toMatchObject({
+        code: 'standalone_session_conflict',
+        retryable: true,
+      });
+      expect(harness.bridge.flushSessionTranscript).not.toHaveBeenCalled();
+    });
   });
 });
