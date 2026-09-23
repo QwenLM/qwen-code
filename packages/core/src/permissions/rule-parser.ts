@@ -12,6 +12,7 @@ import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   normalizeMcpToolName,
+  normalizeToolNameForProvider,
   sanitizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
@@ -1567,6 +1568,54 @@ export function matchesDomainPattern(
 // MCP tool wildcard matching
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** The `_<hash>` that {@link normalizeToolNameForProvider} appends (7 base36). */
+const PROVIDER_NAME_HASH_SUFFIX = /_[0-9a-z]{7}$/;
+
+/** Length of that suffix: the separator plus the 7-character hash. */
+const PROVIDER_NAME_HASH_LENGTH = 8;
+
+/**
+ * Whether `registeredName` is the provider normalization of some raw MCP name
+ * that starts with `rawPrefix`.
+ *
+ * Provider normalization is lossy — every character outside `[A-Za-z0-9_-]`
+ * becomes `_` — and it is not invertible, so a legacy pattern cannot be
+ * reduced to a registered name without also matching a *different* server's
+ * tools (#10199). It is, however, verifiable: rebuild the candidate raw name
+ * from the registered one and require its normalization to be exactly the
+ * registered name. A registered name that never needed normalization carries
+ * no hash suffix and can therefore never be verified, which is what keeps a
+ * rule for the server `foo.bar` off the differently-registered server
+ * `foo_bar`.
+ *
+ * Returns false for prefixes that are already provider-safe (the caller's
+ * literal comparison decides those) and for names whose sanitized form was
+ * truncated, where the raw tail is unrecoverable. Both fall back to "no
+ * match", i.e. the tool asks for confirmation instead of being authorized.
+ */
+function isNormalizedFromRawPrefix(
+  registeredName: string,
+  rawPrefix: string,
+): boolean {
+  const sanitizedPrefix = sanitizeToolNameForProvider(rawPrefix);
+  if (
+    sanitizedPrefix === rawPrefix ||
+    !registeredName.startsWith(sanitizedPrefix)
+  ) {
+    return false;
+  }
+
+  const tail = registeredName.slice(sanitizedPrefix.length);
+  if (!PROVIDER_NAME_HASH_SUFFIX.test(tail)) {
+    return false;
+  }
+
+  const rawTail = tail.slice(0, tail.length - PROVIDER_NAME_HASH_LENGTH);
+  return (
+    normalizeToolNameForProvider(`${rawPrefix}${rawTail}`) === registeredName
+  );
+}
+
 /**
  * Match an MCP tool name against a pattern that may contain wildcards.
  *
@@ -1574,8 +1623,22 @@ export function matchesDomainPattern(
  *   "mcp__puppeteer" matches any tool provided by the puppeteer server
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
+ *
+ * `toolName` is the registered provider-safe name and `rawToolName` the
+ * pre-normalization `mcp__<server>__<tool>` spelling when the caller knows it.
+ * Server and wildcard prefixes are compared *literally* against those
+ * spellings and, for legacy unsafe spellings, verified against the registered
+ * name's hash — never reduced through `sanitizeToolNameForProvider`, which
+ * cannot tell the server `foo.bar` from the server `foo_bar`. A pattern that
+ * neither matches literally nor verifies does not match at all, so the tool
+ * falls back to `ask` rather than being authorized by a rule for another
+ * server.
  */
-export function matchesMcpPattern(pattern: string, toolName: string): boolean {
+export function matchesMcpPattern(
+  pattern: string,
+  toolName: string,
+  rawToolName?: string,
+): boolean {
   if (pattern === toolName) {
     return true;
   }
@@ -1590,12 +1653,25 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
+  // Spellings a prefix pattern may match literally: the registered name (what
+  // the model and the UI show, so rules copied from there keep working) plus
+  // the raw identity when it is known.
+  const spellings =
+    rawToolName === undefined || rawToolName === toolName
+      ? [toolName]
+      : [toolName, rawToolName];
+  const matchesPrefixLiterally = (prefix: string): boolean =>
+    spellings.some((spelling) => spelling.startsWith(prefix));
+
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
-    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
+    const prefix = pattern.slice(0, -1);
+    return (
+      matchesPrefixLiterally(prefix) ||
+      isNormalizedFromRawPrefix(toolName, prefix)
+    );
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
@@ -1605,11 +1681,13 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
   if (
     patternParts.length === 2 &&
     toolParts.length >= 3 &&
-    patternParts[0] === toolParts[0] &&
-    sanitizeToolNameForProvider(patternParts[1]) ===
-      sanitizeToolNameForProvider(toolParts[1])
+    patternParts[0] === toolParts[0]
   ) {
-    return true;
+    const serverPrefix = `${pattern}__`;
+    return (
+      matchesPrefixLiterally(serverPrefix) ||
+      isNormalizedFromRawPrefix(toolName, serverPrefix)
+    );
   }
 
   return false;
@@ -1699,8 +1777,16 @@ export function matchesRule(
       (toolAliases ?? []).some(
         (alias) => rule.toolName === resolveToolName(alias),
       );
+    // An MCP tool whose registered name needed normalization advertises its
+    // pre-normalization `mcp__<server>__<tool>` spelling as a permission alias.
+    // The alias that normalizes to exactly this registered name *is* that raw
+    // identity, and it is the only spelling a legacy server or wildcard rule
+    // can be compared against without a lossy reduction (#10199).
+    const rawMcpToolName = (toolAliases ?? []).find(
+      (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,
+    );
     const matchesMcpName =
-      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
+      matchesMcpPattern(rule.toolName, canonicalCtxToolName, rawMcpToolName) ||
       matchesLegacyExactName;
     if (!matchesMcpName) {
       return false;
