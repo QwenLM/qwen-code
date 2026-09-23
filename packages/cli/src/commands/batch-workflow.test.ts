@@ -318,6 +318,75 @@ describe('runPlan', () => {
   });
 });
 
+describe('provider-side rejection', () => {
+  const rejected = (id: string, inputFileId: string): BatchJob =>
+    jobOf(id, 'failed', {
+      input_file_id: inputFileId,
+      errors: {
+        data: [
+          {
+            code: 'model_not_found',
+            message: 'The model does not support batch',
+          },
+        ],
+      },
+    });
+
+  it('names the job-level reason when a whole batch is rejected', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    const taskId = taskIdOf(h);
+    h.jobs.set('batch-1', rejected('batch-1', 'file-in-1'));
+
+    const summary = await collectTask(h.deps, taskId);
+
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual(['failed', 'failed']);
+    expect(task.items[0].lastError).toMatch(
+      /^batch failed: model_not_found The model does not support batch/,
+    );
+    expect(h.out.join('\n')).toMatch(/provider error: model_not_found/);
+    expect(summary).toMatchObject({
+      taskId,
+      settled: 1,
+      delivered: [],
+      awaiting: 0,
+      jobErrors: ['model_not_found The model does not support batch'],
+    });
+  });
+
+  it('reports a rejection during validation right after run', async () => {
+    const h = (harness = setup());
+    h.api.createBatch.mockImplementationOnce(
+      async (_ep: unknown, inputFileId: string) => {
+        h.jobs.set('batch-1', rejected('batch-1', inputFileId));
+        return jobOf('batch-1', 'validating', { input_file_id: inputFileId });
+      },
+    );
+    await runPlan(h.deps, h.planPath);
+    expect(h.err.join('\n')).toMatch(
+      /rejected batch-1 during validation: model_not_found/,
+    );
+    expect(h.sleeps).toEqual([5_000]);
+  });
+
+  it('stays quiet when validation passes', async () => {
+    const h = (harness = setup());
+    h.api.createBatch.mockImplementationOnce(
+      async (_ep: unknown, inputFileId: string) => {
+        h.jobs.set(
+          'batch-1',
+          jobOf('batch-1', 'in_progress', { input_file_id: inputFileId }),
+        );
+        return jobOf('batch-1', 'validating', { input_file_id: inputFileId });
+      },
+    );
+    await runPlan(h.deps, h.planPath);
+    expect(h.err.join('\n')).not.toMatch(/rejected/);
+    expect(h.sleeps).toEqual([5_000]);
+  });
+});
+
 describe('collectTask', () => {
   it('reports a running batch and downloads nothing without --wait', async () => {
     const h = (harness = setup());
@@ -356,7 +425,9 @@ describe('collectTask', () => {
     const downloads = h.api.downloadFile.mock.calls.length;
     const deletes = h.api.deleteFile.mock.calls.length;
     const polls = h.api.getBatch.mock.calls.length;
-    await collectTask(h.deps, taskId); // re-collect: pure replay
+    const replay = await collectTask(h.deps, taskId); // re-collect: pure replay
+    // Nothing new happened, so an auto-collect notice would be empty.
+    expect(replay).toMatchObject({ settled: 0, delivered: [] });
     expect(h.api.downloadFile.mock.calls.length).toBe(downloads);
     expect(h.api.deleteFile.mock.calls.length).toBe(deletes);
     // A collected batch is never asked about again (the provider may have

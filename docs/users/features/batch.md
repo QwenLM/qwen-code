@@ -195,10 +195,25 @@ qwen batch run .qwen/batch/plans/<slug>.json
 # collect later with: qwen batch collect translate-docs-20260923103000
 ```
 
-`run` returns immediately — the provider works for tens of minutes to hours.
-Nothing polls a model while you wait. Later — from any directory, and inside
-a session with the `!` prefix (e.g. `!qwen batch collect <task-id>`) so no
-model turn is spent:
+`run` returns immediately — the provider works for seconds to hours,
+mostly queueing. Nothing polls a model while you wait, and **you do not need
+to collect by hand**: while an interactive session is open in the project,
+Qwen Code checks the task's batch over HTTP (backing off from one to five
+minutes), collects it when it finishes, writes the results and posts one
+notice — what was delivered, what failed and the retry command. A task that
+finishes while no session is open is collected the next time you start
+`qwen` in that project. Failed items are never retried automatically, since
+a retry bills again. `general.batchAutoCollect` switches this to `"notify"`
+(only say a task is ready) or `"off"`. Headless runs (`qwen -p`),
+`qwen serve` and IDE/ACP clients do not auto-collect.
+
+A `run` also waits out the provider's few-second validation: a batch rejected
+outright (for example, a model without Batch support) is reported
+immediately with the provider's reason instead of surfacing hours later.
+
+The commands stay available — from any directory, and inside a session with
+the `!` prefix (e.g. `!qwen batch collect <task-id>`) so no model turn is
+spent:
 
 ```bash
 qwen batch collect <task-id> [--wait]   # validate + write target files
@@ -213,7 +228,8 @@ qwen batch cancel --task <task-id>       # partial results are still billed
 `collect` reports each item as **delivered** (written to its target),
 **held** (the source changed after submission, or the target already exists
 with different content — resolve and re-run collect, no new request is made),
-or **failed** (truncated, empty, provider error — `retry` resubmits just
+or **failed** (truncated, empty, provider error — a batch rejected as a
+whole names the provider's job-level reason — `retry` resubmits just
 these; truncated items only when `--max-output-tokens` raises the limit,
 since resending them unchanged would fail and bill again). Re-running `collect` is always safe: results are parsed from the
 local record, delivered items are never redone, and repeated collects never

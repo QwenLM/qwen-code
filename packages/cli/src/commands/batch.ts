@@ -67,6 +67,10 @@ export interface BatchJob {
   input_file_id?: string;
   output_file_id?: string;
   error_file_id?: string;
+  /** Job-level failures (validation, unsupported model, …). */
+  errors?: {
+    data?: Array<{ code?: string; message?: string; line?: number | null }>;
+  };
 }
 
 /**

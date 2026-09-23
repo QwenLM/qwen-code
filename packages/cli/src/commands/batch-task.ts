@@ -167,6 +167,9 @@ export interface TaskAttempt {
   remoteCleaned?: boolean;
   /** Output limit this attempt ran with when a retry raised it. */
   maxOutputTokens?: number;
+  /** Terminal provider status and job-level errors, recorded at collect. */
+  finalStatus?: string;
+  jobErrors?: string[];
   /** Settled, downloaded and cleaned up: later collects only re-read the
    * local files and never ask the provider about this batch again. */
   collected?: boolean;

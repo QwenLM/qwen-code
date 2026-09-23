@@ -118,6 +118,15 @@
           "type": "boolean",
           "default": true
         },
+        "batchAutoCollect": {
+          "description": "What an interactive session does with this project's /batch-api tasks: \"deliver\" collects each one when its batch finishes (also at startup) and writes the results, \"notify\" only says it is ready to collect, \"off\" does neither. Polls the provider over HTTP; never calls the model and never retries failed items. Options: deliver, notify, off",
+          "enum": [
+            "deliver",
+            "notify",
+            "off"
+          ],
+          "default": "deliver"
+        },
         "showSessionRecap": {
           "description": "Auto-show a one-line \"where you left off\" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.",
           "type": "boolean",

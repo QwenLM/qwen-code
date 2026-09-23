@@ -11,6 +11,14 @@ allowedTools:
 
 # /batch-api — Agent-prepared Batch API workflow
 
+**Hard rule for this whole skill:** if any `qwen batch …` command fails, or
+the task turns out to be unsuitable, report what happened in a few lines and
+stop. Never fall back to doing the transform yourself in this session — the
+user chose the half-price asynchronous path explicitly, and silently doing
+the work at full realtime price is exactly what they opted out of. Offering
+it as a choice ("I can do this realtime instead, at full price") is fine;
+doing it without being asked is not.
+
 The user explicitly chose **async batch mode** by typing `/batch-api`. This mode
 trades latency for price: the provider bills Batch requests at 50% of the
 realtime list price (with no context-cache benefit), and a job takes tens of
@@ -34,8 +42,10 @@ It proves the credentials, endpoint and Batch route work and shows the model,
 thinking mode and output limit a run would freeze from the user's current
 settings — without a billed request. If it fails (for example Qwen OAuth,
 which has no Batch route), relay its message and stop: do not read files or
-draft a plan the executor cannot submit. Pass its `note:` lines on to the
-user.
+draft a plan the executor cannot submit. If the shell reports an unknown
+command or unknown argument, the `qwen` it reached is an older install
+without these subcommands — say so (the session's CLI is not on PATH as
+`qwen`) and stop. Pass its `note:` lines on to the user.
 
 ## 1. Decide suitability honestly — this is your main job
 
@@ -125,21 +135,26 @@ Run exactly this with the shell tool:
 
 Then report to the user, verbatim from the command output: the task id, item
 count, the frozen model/thinking/output-limit line, the cost estimate, and
-the collect command. If the command fails, relay
-its error and fix the plan (or stop) — never work around the executor by
-hand-crafting requests or calling the API directly.
+any `[batch]` warning (a batch rejected during validation is reported here —
+relay it and stop). If the command fails, relay its error; fix the plan only
+when the error is about the plan itself, otherwise stop — never work around
+the executor by hand-crafting requests, calling the API directly, or doing
+the transform yourself.
 
 ## 5. Collecting later
 
-Tell the user:
+Do not poll or wait for the batch yourself — never run `collect --wait` or
+loop on status. Tell the user:
 
-- Everything below is a plain command that needs no model: typed with the
-  `!` prefix in this session (for example `!qwen batch collect <task-id>`)
-  it runs without spending a model turn, and it works from any directory.
-- Check progress or collect results any time with
-  `qwen batch collect <task-id>` (add `--wait` to poll until it settles).
-  If they ask you to do it instead, run it for them — but mention the `!`
-  form costs nothing.
+- While this session stays open, Qwen Code collects the task automatically
+  when the batch finishes and posts a one-line notice: results written,
+  failures and how to retry. A task that finishes while no session is open
+  is collected the next time they start `qwen` in this project. (The
+  `general.batchAutoCollect` setting can switch this to notify-only or off.)
+- To check or collect by hand, everything below is a plain command that needs
+  no model: typed with the `!` prefix (for example
+  `!qwen batch collect <task-id>`) it runs without spending a model turn, and
+  it works from any directory.
 - Failed items can be resubmitted after the underlying problem is fixed:
   `qwen batch retry <task-id>`. Items truncated at the output limit are
   skipped unless a larger limit is given:

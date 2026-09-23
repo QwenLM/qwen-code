@@ -549,6 +549,21 @@ const SETTINGS_SCHEMA = {
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
+      batchAutoCollect: {
+        type: 'enum',
+        label: 'Batch Auto Collect',
+        category: 'General',
+        requiresRestart: true,
+        default: 'deliver',
+        description:
+          'What an interactive session does with this project\'s /batch-api tasks: "deliver" collects each one when its batch finishes (also at startup) and writes the results, "notify" only says it is ready to collect, "off" does neither. Polls the provider over HTTP; never calls the model and never retries failed items.',
+        showInDialog: false,
+        options: [
+          { value: 'deliver', label: 'Collect and deliver' },
+          { value: 'notify', label: 'Notify only' },
+          { value: 'off', label: 'Off' },
+        ],
+      },
       showSessionRecap: {
         type: 'boolean',
         label: 'Show Session Recap',

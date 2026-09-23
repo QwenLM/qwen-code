@@ -33,6 +33,7 @@ const mockGetIdeClientInstance = vi.hoisted(() =>
 );
 const mockInitializeTelemetry = vi.hoisted(() => vi.fn());
 const mockStartBackgroundHousekeeping = vi.hoisted(() => vi.fn());
+const mockStartBatchAutoCollect = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({
@@ -97,6 +98,15 @@ vi.mock('../services/housekeeping/scheduler.js', () => ({
     mockStartBackgroundHousekeeping(...args),
 }));
 
+vi.mock('../commands/batch-auto-collect.js', () => ({
+  startBatchAutoCollect: (...args: unknown[]) =>
+    mockStartBatchAutoCollect(...args),
+}));
+
+vi.mock('../commands/batch.js', () => ({
+  resolveEndpoint: () => ({ apiKey: 'k', baseUrl: 'http://b', model: 'm' }),
+}));
+
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     getModelsConfig: () => ({
@@ -105,6 +115,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     }),
     getProxy: () => 'http://proxy.example',
     getProjectRoot: () => '/repo',
+    getWorkingDir: () => '/repo',
     getIdeMode: () => true,
     isInteractive: () => true,
     ...overrides,
@@ -718,6 +729,45 @@ describe('startupPrefetch', () => {
     await vi.dynamicImportSettled();
 
     expect(mockStartBackgroundHousekeeping).not.toHaveBeenCalled();
+  });
+
+  it('starts batch auto-collect for interactive sessions, delivering by default', async () => {
+    startPostRenderPrefetches(makeConfig(), makeSettings());
+
+    await vi.dynamicImportSettled();
+
+    expect(mockStartBatchAutoCollect).toHaveBeenCalledTimes(1);
+    const options = mockStartBatchAutoCollect.mock.calls[0][0] as {
+      projectRoot: string;
+      mode: string;
+      notify: (message: string) => void;
+    };
+    expect(options).toMatchObject({ projectRoot: '/repo', mode: 'deliver' });
+    // Notices go through the update-notice channel, deferred while streaming.
+    options.notify('Batch task t: 2 result(s) delivered.');
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
+      message: 'Batch task t: 2 result(s) delivered.',
+    });
+  });
+
+  it('honors general.batchAutoCollect and skips non-interactive sessions', async () => {
+    startPostRenderPrefetches(makeConfig(), {
+      merged: { general: { batchAutoCollect: 'off' } },
+    } as LoadedSettings);
+    startPostRenderPrefetches(
+      makeConfig({ isInteractive: () => false } as Partial<Config>),
+      makeSettings(),
+    );
+    await vi.dynamicImportSettled();
+    expect(mockStartBatchAutoCollect).not.toHaveBeenCalled();
+
+    startPostRenderPrefetches(makeConfig(), {
+      merged: { general: { batchAutoCollect: 'notify' } },
+    } as LoadedSettings);
+    await vi.dynamicImportSettled();
+    expect(mockStartBatchAutoCollect).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'notify' }),
+    );
   });
 
   it('starts post-render prefetch only once per config', async () => {

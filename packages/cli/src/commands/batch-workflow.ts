@@ -338,7 +338,7 @@ async function submitAttempt(
   attempt: TaskAttempt,
   store: BatchTaskStore,
   preassembled?: AttemptAssembly,
-): Promise<void> {
+): Promise<BatchJob | undefined> {
   const api = deps.api ?? liveApi;
   attempt.submitState = 'intent';
   store.save(task);
@@ -379,6 +379,7 @@ async function submitAttempt(
     refreshTaskStatus(task);
     store.save(task);
     deps.out(`batch job: ${job.id}`);
+    return job;
   } catch (error) {
     const status = (error as BatchApiError | undefined)?.status;
     // 408 is a timeout, not a refusal: the create may still have landed.
@@ -417,6 +418,50 @@ async function submitAttempt(
     deps.err(
       `[batch] run \`qwen batch collect ${task.id}\` to reconcile before doing anything else.`,
     );
+    return undefined;
+  }
+}
+
+// DashScope validates a new batch for a few seconds before queueing it; a
+// batch it cannot run at all (e.g. a model without Batch support) fails
+// there with job-level errors and no per-line output.
+const VALIDATION_POLL_MS = 5_000;
+const VALIDATION_POLLS = 6;
+
+/**
+ * Wait out the validation window (~30s at most) so a batch the provider
+ * rejects outright is reported now, not hours later by collect. Quiet when
+ * the batch moves on normally; a failed poll is not an error.
+ */
+async function reportEarlyRejection(
+  deps: WorkflowDeps,
+  taskId: string,
+  created: BatchJob | undefined,
+): Promise<void> {
+  if (!created || created.status !== 'validating') return;
+  const api = deps.api ?? liveApi;
+  const sleep = deps.sleep ?? realSleep;
+  for (let poll = 0; poll < VALIDATION_POLLS; poll++) {
+    await sleep(VALIDATION_POLL_MS);
+    let job: BatchJob;
+    try {
+      job = await api.getBatch(deps.ep, created.id);
+    } catch {
+      return;
+    }
+    if (job.status === 'failed') {
+      const errors = jobErrorsOf(job);
+      deps.err(
+        `[batch] the provider rejected ${job.id} during validation` +
+          `${errors.length > 0 ? `: ${errors.join('; ')}` : ''}. Nothing was generated or billed.`,
+      );
+      deps.err(
+        `[batch] fix the cause (for example, a model without Batch support) before retrying; ` +
+          `\`qwen batch collect ${taskId}\` records the failure on the task.`,
+      );
+      return;
+    }
+    if (job.status !== 'validating') return;
   }
 }
 
@@ -502,9 +547,10 @@ export async function runPlan(
     deps.err(`[batch] note: ${note}`);
   }
   deps.out(cost.text);
-  await store.withLock(task.id, () =>
+  const job = await store.withLock(task.id, () =>
     submitAttempt(deps, task, attempt, store, assembly),
   );
+  await reportEarlyRejection(deps, task.id, job);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
 }
 
@@ -575,6 +621,25 @@ const usageOfBody = (
   return { promptTokens: prompt, completionTokens: completion };
 };
 
+/**
+ * The provider's job-level errors, one line each. A batch rejected as a
+ * whole (unsupported model, invalid file) has no per-line output, so these
+ * are the only explanation of why every item failed.
+ */
+export function jobErrorsOf(job: BatchJob): string[] {
+  return (job.errors?.data ?? [])
+    .slice(0, 5)
+    .map((error) =>
+      [
+        error.code,
+        error.message,
+        typeof error.line === 'number' ? `(line ${error.line})` : undefined,
+      ]
+        .filter(Boolean)
+        .join(' '),
+    );
+}
+
 /** Poll until settled or the collect-wide `deadline` (epoch ms) passes —
  * one --timeout covers every open batch, not each of them in turn. */
 async function waitForSettled(
@@ -599,13 +664,28 @@ async function waitForSettled(
   }
 }
 
+/** What one collect changed, for callers that report it (auto-collect). */
+export interface CollectSummary {
+  taskId: string;
+  /** Batches that settled and were collected by this call. */
+  settled: number;
+  /** Items delivered by this call. */
+  delivered: TaskItem[];
+  /** Current held / failed items, and items still awaiting a batch. */
+  held: TaskItem[];
+  failed: TaskItem[];
+  awaiting: number;
+  /** Job-level provider errors of the batches settled by this call. */
+  jobErrors: string[];
+}
+
 export async function collectTask(
   deps: WorkflowDeps,
   taskId: string,
   options: CollectOptions = {},
-): Promise<void> {
+): Promise<CollectSummary> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
-  await store.withLock(taskId, () =>
+  return store.withLock(taskId, () =>
     collectLocked(deps, store, taskId, options),
   );
 }
@@ -615,10 +695,17 @@ async function collectLocked(
   store: BatchTaskStore,
   taskId: string,
   options: CollectOptions,
-): Promise<void> {
+): Promise<CollectSummary> {
   const api = deps.api ?? liveApi;
   const task = store.load(taskId);
   assertSameEndpoint(task, deps.ep);
+  const deliveredBefore = new Set(
+    task.items
+      .filter((item) => item.state === 'delivered')
+      .map((item) => item.id),
+  );
+  let settledNow = 0;
+  const settledErrors: string[] = [];
   const deadline = Date.now() + (options.timeoutSeconds ?? 3600) * 1000;
 
   for (const attempt of task.attempts) {
@@ -656,6 +743,13 @@ async function collectLocked(
         }
         job = await waitForSettled(deps, batchId, deadline);
       }
+    }
+
+    if (job) {
+      attempt.finalStatus = job.status;
+      const errors = jobErrorsOf(job);
+      if (errors.length > 0) attempt.jobErrors = errors;
+      settledErrors.push(...errors);
     }
 
     const attemptDir = store.attemptDir(task.id, attempt.attempt);
@@ -775,7 +869,13 @@ async function collectLocked(
       const item = task.items.find((candidate) => candidate.id === itemId);
       if (item && item.state === 'submitted' && ownedBy(item, attempt)) {
         item.state = 'failed';
-        item.lastError = 'no result line for this request in the settled batch';
+        // A batch rejected as a whole leaves no per-line output: name the
+        // provider's reason instead of a bare "no result line".
+        item.lastError = attempt.jobErrors?.length
+          ? `batch ${attempt.finalStatus ?? 'failed'}: ${attempt.jobErrors[0]}`
+          : attempt.finalStatus && attempt.finalStatus !== 'completed'
+            ? `batch ${attempt.finalStatus} before this request produced a result`
+            : 'no result line for this request in the settled batch';
       }
     }
     attempt.usage =
@@ -811,6 +911,7 @@ async function collectLocked(
     }
     if (job) {
       attempt.collected = true;
+      settledNow += 1;
       store.save(task);
     }
   }
@@ -829,6 +930,9 @@ async function collectLocked(
   }
   for (const item of failed) {
     deps.out(`  failed: ${item.id} — ${item.lastError}`);
+  }
+  for (const error of settledErrors) {
+    deps.out(`  provider error: ${error}`);
   }
   const total = {
     promptTokens: 0,
@@ -860,6 +964,15 @@ async function collectLocked(
       `resolve the held conflicts above, then re-run: qwen batch collect ${task.id}`,
     );
   }
+  return {
+    taskId: task.id,
+    settled: settledNow,
+    delivered: delivered.filter((item) => !deliveredBefore.has(item.id)),
+    held,
+    failed,
+    awaiting: running.length,
+    jobErrors: settledErrors,
+  };
 }
 
 export interface RetryOptions {
@@ -982,7 +1095,8 @@ async function retryLocked(
     `retrying ${retryItems.length} item(s) as attempt ${attemptNumber}` +
       `${newLimit === undefined ? '' : ` with max output ${newLimit} tokens`}: ${cost.text}`,
   );
-  await submitAttempt(deps, task, attempt, store);
+  const job = await submitAttempt(deps, task, attempt, store);
+  await reportEarlyRejection(deps, task.id, job);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
 }
 

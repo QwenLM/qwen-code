@@ -87,6 +87,33 @@ The skill makes the model do the semantic work only:
 reused, delivered items are never redone, and held items are re-attempted
 (after the user resolves a conflict) without any new paid request.
 
+### Automatic collection (interactive sessions)
+
+Collection is mechanical, so the user never has to run it. An interactive
+session starts a collector after first render (`batch-auto-collect.ts`,
+wired in `startPostRenderPrefetches`): it scans the local task records for
+open tasks of this project, polls each task's batch over HTTP with a
+per-task backoff (1 → 5 minutes), and runs the same `collectTask` when a
+batch settles. The first pass runs at startup, which collects tasks that
+finished while no session was open. What changed is posted as one info
+notice through the existing update-notice channel, which holds notices
+while a response streams. Guarantees:
+
+- **No model call, no retry.** Waiting and collecting cost only HTTP;
+  failed items are listed with the retry command, never resubmitted.
+- **Same safety as a manual collect** — the task lock, idempotency,
+  no-overwrite delivery, held items — because it is the same function.
+- **Quiet on what it cannot collect**: no Batch credentials disables it for
+  the session; a task pinned to another endpoint/key is left for the user.
+- `general.batchAutoCollect`: `deliver` (default), `notify` (say "ready",
+  write nothing) or `off`. Headless, `serve`, ACP and web-shell have no
+  model-free notice channel and do not auto-collect.
+
+`run` (and `retry`) also wait out the provider's validation window (≤ 30s,
+only when create returns `validating`): a batch rejected as a whole is
+reported with its job-level errors immediately, and `collect` records those
+errors as each item's failure reason instead of a bare "no result line".
+
 ## 3. Architecture
 
 ```text
