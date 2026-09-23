@@ -1,8 +1,9 @@
 # 验证：远程会话经 launchd 中继使用本地桌面机（本轮：macOS）
 
 > 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`（§6 列出了本文要回答的未验证项）；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
-> 本文所有“预期”都来自读代码，**代码没有在任何机器上构建、测试或运行过**。
-> 需要：一台 Mac（Chrome，最好再有 Safari）；一台能从 Mac 用 SSH 连到的 Linux 开发机。两边都要能构建本 PR。
+> 状态（2026-09-23）：作者在自己的 Mac 上用 Node 22 跑过全量 build、typecheck 和定向单元测试，CI 全绿；**端到端流程没有在任何机器上跑过**，本文所有“预期”都来自读代码。
+> 需要：一台 Mac（Chrome，最好再有 Safari），Node 22；一台能从 Mac 用 SSH 连到的 Linux 开发机。两边都要能构建本 PR。
+> 出了问题先看文末的 **F. 排查手册**。
 
 ## 0. 准备
 
@@ -10,9 +11,11 @@
 
 ```bash
 git fetch https://github.com/yiliang114/qwen-code docs/remote-computer-use-plan
-git checkout FETCH_HEAD
-npm ci && npm run build && npm run bundle
+git checkout -B docs/remote-computer-use-plan FETCH_HEAD
+corepack pnpm install --frozen-lockfile && npm run build && npm run bundle
 ```
+
+仓库已经从 npm 迁到 pnpm（`package-lock.json` 已删除），不要用 `npm ci`。脚本仍然用 `npm run` 执行。
 
 Mac 上把中继打成 tarball（`@qwen-code/node-repl-mcp` 还没发布包含本改动的版本）：
 
@@ -84,6 +87,12 @@ Mac：`ssh -N -L 4170:127.0.0.1:<端口> devbox`，然后在 Chrome 打开 `http
 
    记录：模型是否执行了 bootstrap（`qwen mcp add … node-repl` 或 `npm install @qwen-code/cua-sdk`，出现就拒绝并记录）；`getPlatform()` 是否返回 `macos`；读参考文档走的是哪条路；macOS 的授权提示弹给了谁（预期是 `node`）；授权后是否需要重新连接；任务是否完成；3 次 `node_repl` 调用的耗时。
 
+   **取消（2026-09-23 的修复，必须验证）**：再让模型跑一个持续操作屏幕的单元，例如：
+
+   > 用 computer use 在备忘录里每隔一秒输入一个数字，从 1 输入到 60，放在同一个 node_repl 单元里完成，yield_time_ms 设为 60000。
+
+   数字开始出现后，在 Web Shell 里点停止。预期：几秒内桌面上不再出现新数字（中继把 `notifications/cancelled` 改写 id 后转发，node_repl 中止单元）。记录停止后又多出了几个数字。如果一直输到 60，说明取消没有到达桌面，按 F.6 排查。
+
 4. 让模型截一张全屏图（`app.getState({ includeScreenshot: true })`）。记录是成功还是得到“above the … byte limit”错误；注明屏幕分辨率。
 5. 在同一 workspace 的另一个会话里打开面板。预期：In use by another session。
 6. 回到原会话点 **Disconnect**。预期：状态回到 Not connected；再让模型调用 `node_repl` 时得到明确错误；`pgrep -fl desktop-relay` 无输出。
@@ -117,6 +126,35 @@ node packages/node-repl/dist/index.js desktop-relay uninstall --purge
 lsof -nP -iTCP:47821 -sTCP:LISTEN   # 预期：无输出
 ```
 
+## F. 排查手册
+
+先定位是哪一段断了：浏览器 → 本机端口（launchd）→ relay 进程 → 远端 daemon → node_repl → macOS 授权。
+
+**常用观察点**
+
+```bash
+cat ~/.qwen/desktop-relay/agent.log                                  # relay 进程的 stderr（launchd 写入）
+cat ~/.qwen/desktop-relay/active.json                                # 当前/上一次连接的状态记录（不含 token）
+node packages/node-repl/dist/index.js desktop-relay status
+launchctl print gui/$(id -u)/com.qwencode.desktop-relay | grep -iE 'state|last exit|runs|path'
+pgrep -fl 'desktop-relay agent'                                      # 连接存在时应有一个进程
+log show --last 5m --predicate 'process == "osascript"' | tail -20  # 确认框/通知
+```
+
+| #   | 现象                                                       | 先查                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 面板显示 Not set up                                        | 在 Mac 终端执行 B.1 的 `curl`。`curl` 正常而浏览器失败，是浏览器拦截：看开发者工具的 Console 和 Network 里 `127.0.0.1:47821/status` 的错误；Chrome 检查站点设置里的“本地网络访问”权限；Safari 记录具体报错（混合内容或 CORS）。`curl` 也失败，看 #2。                                                                                                                                                                        |
+| 2   | `curl` 连接被拒绝或卡住                                    | `lsof -nP -iTCP:47821 -sTCP:LISTEN` 没有输出：launchd 没有注册，重新 install 并看 `launchctl bootstrap` 的报错。有监听但连接立刻断开：看 `agent.log` 和 `launchctl print` 里的 last exit code，常见原因是 plist 里的 node 路径失效（nvm 切换或删除了该版本，重新 install 即可）。有监听但卡住：说明 `net.Socket({ fd: 0 })` 在 inetd 模式下有问题，用 #8 的方法绕开 launchd 对比。                                           |
+| 3   | `/connect` 之后没有对话框                                  | 在终端直接执行 `osascript -e 'display dialog "test"'`：终端里能弹出，而 relay 弹不出，说明是 LaunchAgent 的会话问题，记下 `agent.log` 和 `log show` 的输出。对话框在其他窗口后面也算问题，一并记录。                                                                                                                                                                                                                         |
+| 4   | 允许后一直停在 Connecting / Registering，或显示 failed     | `active.json` 的 `message` 字段写着原因。`unsupported-daemon` 或注册被拒：确认远端 daemon 启动时带了 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`（main 上默认关闭）。鉴权失败：检查 token。`register_failed` 且带 `already_registered`：同一会话已有旧注册，重启会话后再试。远端 daemon 日志里搜 `mcp_register`。                                                                                                                      |
+| 5   | 已连接，但模型没用 `desktop-node-repl`，或去执行 bootstrap | 在会话里让模型列出可用工具，看有没有 `mcp__desktop-node-repl__*`。没有：注册没成功，回到 #4。有但没用：记录模型读到的 skill 内容，这是 `SKILL.md` 的问题，不是中继的问题。                                                                                                                                                                                                                                                   |
+| 6   | 点停止后桌面还在动                                         | 在远端 daemon 上打开 MCP 调试日志，确认 `notifications/cancelled` 有没有通过 `mcp_message` 发出。发出了但桌面没停：中继发现同一 id 有多个待处理请求而把它丢掉了（见 `mcp-child-relay.ts` 的 `soleRelayId`），记录当时有几个会话连着这个中继。                                                                                                                                                                                |
+| 7   | 截图或操作报授权错误                                       | 系统设置 → 隐私与安全性 → 辅助功能 / 屏幕录制，找名为 `node` 的条目（路径应是 install 时打印的那个）。改授权后要断开再连接一次。要从头重测授权流程：`tccutil reset ScreenCapture` 和 `tccutil reset Accessibility`（会清掉所有应用的这两项授权，先告知 Mac 的主人）。                                                                                                                                                        |
+| 8   | 怀疑是 launchd 的问题                                      | 绕开 launchd 对比：`launchctl bootout gui/$(id -u)/com.qwencode.desktop-relay`，然后 `brew install socat` 并执行 `socat TCP-LISTEN:47821,bind=127.0.0.1,reuseaddr,fork EXEC:"$(which node) $HOME/.qwen/desktop-relay/node_modules/@qwen-code/node-repl-mcp/dist/index.js desktop-relay agent --home $HOME/.qwen/desktop-relay"`，重跑 B 节。socat 下正常而 launchd 下不正常，就说明问题在 launchd 这一层。测完重新 install。 |
+| 9   | 报 “above the … byte limit”                                | 截图超过了 daemon 10 MB 的帧上限。记录屏幕分辨率和截图参数；这是已知限制，还没有自动压缩。                                                                                                                                                                                                                                                                                                                                   |
+
+修了代码之后：在 Mac 上重新 `npm run build` 并 `npm pack`，然后重新 install（`--package` 指向新 tarball），否则 launchd 拉起的还是 `~/.qwen/desktop-relay` 里的旧版本。
+
 ## 需要回报的内容
 
 写进同一目录下的 `results.md`，推到 PR #11799 的分支（追加提交，不要 force-push），再在 PR 里留一条评论。
@@ -128,6 +166,7 @@ lsof -nP -iTCP:47821 -sTCP:LISTEN   # 预期：无输出
 | B：五个请求的结果和耗时；对话框表现；`agent.log` 的报错            |      |
 | C.1–2：各状态是否按预期出现；Chrome 是否弹出本地网络权限提示       |      |
 | C.3：是否 bootstrap；授权记在谁名下；任务结果；三次调用耗时        |      |
+| C.3 取消：点停止后又多出了几个数字；桌面停下来用了多久             |      |
 | C.4：截图结果与分辨率                                              |      |
 | C.5–7：其他会话、断开、daemon 重启时的表现                         |      |
 | C.8：Safari 的差异                                                 |      |
@@ -142,3 +181,4 @@ lsof -nP -iTCP:47821 -sTCP:LISTEN   # 预期：无输出
 3. 方案 §6 第 3 点：Chrome 和 Safari 允许安全页面访问 `http://127.0.0.1:47821`（C.1、C.8）。
 4. 方案 §6 第 4 点：授权记在 `node` 名下（C.3）。
 5. 方案 §6 第 5 点：模型不执行 bootstrap；截图不超过帧上限（C.3、C.4）。
+6. 在 Web Shell 里停止对话，能中止桌面上正在运行的 node_repl 单元（C.3 取消）。

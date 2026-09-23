@@ -1,19 +1,22 @@
 # 交接：远程 Qwen Code 使用本地桌面机（PR #11799）
 
 > 写给接手的 session 或 agent。按顺序阅读：本文 → 方案 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md` → 真机验证说明 `docs/verification/remote-computer-use/README.md`。
-> 状态（2026-09-19，第五次修订）：**代码已实现并推到本 PR**。全量 build、typecheck，以及桌面 relay、computer-use skill 和 Web Shell 的定向单元测试已通过；真机行为仍要按验证说明跑。
+> 状态（2026-09-23，第六次修订）：**代码已实现，CI 全绿，与 main 无冲突**。作者的 Mac 上跑过全量 build、typecheck 和定向单元测试；**端到端流程还没在任何机器上跑过**，这是现在唯一的阻塞项。
+>
+> 如果你是在另一台 Mac 上接手的 agent：直接从 §5 开始，按验证说明跑。
 
 ## 1. 现在在哪
 
-- PR：https://github.com/QwenLM/qwen-code/pull/11799（草稿；base `main`；head `yiliang114:docs/remote-computer-use-plan`）。分支先合并了 `origin/main` @ `87437db784`，实现提交在它之上。
+- PR：https://github.com/QwenLM/qwen-code/pull/11799（草稿；base `main`；head `yiliang114:docs/remote-computer-use-plan`）。最近一次合并的是 `origin/main` @ `b9840886b8`（2026-09-23），唯一冲突是 `package-lock.json`：main 迁到 pnpm 后删了它，分支也跟着删掉。
 - 改动：
   - `packages/node-repl/src/desktop-relay/`：桌面侧中继（安装、launchd、连接处理、反向通道客户端、多客户端复用、确认框）和单元测试；
   - `packages/node-repl/src/index.ts`：`desktop-relay` 参数动态加载上面的模块；
-  - `packages/node-repl/package.json`、`package-lock.json`：新增 `ws` 和 `@types/ws`（根目录已有同版本，锁文件只加了两行依赖声明）；
+  - `packages/node-repl/package.json`、`pnpm-lock.yaml`：新增 `ws` 和 `@types/ws`（工作区已有同版本）；
   - `packages/web-shell/client/desktop-relay/`、`components/DesktopRelayControl.tsx`：“使用这台电脑”入口和测试；侧边栏底部新增 `desktopRelay` 项；中英文文案；
   - `packages/core/src/skills/bundled/computer-use/SKILL.md`：Web 路径优先使用独立的 `desktop-node-repl` server，平台参考文档由远端 skill 主机读取；
   - 文档：`docs/users/features/computer-use.md` 新增一节；`packages/node-repl/README.md` 新增 Desktop relay 一节；本目录下的方案、交接和验证说明。
 - 2026-09-19 修订关闭了五个代码问题：client MCP 与 settings 中的 `node-repl` 同名冲突、多客户端取消消息串线、SDK pin 漂移、`uninstall --purge --home` 可递归删除任意目录，以及交互侧文案被打进只读 transcript 后超过 bundle 上限。
+- 2026-09-23 修订（`12ebef1ca1`）：中继原来丢弃所有 `notifications/cancelled`，但 node_repl 靠它中止正在运行的单元，结果用户停止对话后桌面还在被操作。现在只要恰好一个待处理请求用这个 id，就改写 id 后转发。验证说明 C.3 加了对应的检查。
 - 用户原始诉求：远程 Linux 开发机（无图形界面）上的 Qwen Code，能通过 computer use 操作用户面前那台有图形界面的机器。
 
 ## 2. 用户的工作约定（必须遵守）
@@ -22,8 +25,8 @@
 - **不要 force-push 已开的 PR。** 需要修改时追加提交；落后 main 时合并 main，不要 rebase。
 - **提交信息和 PR 描述里不加 claude.ai/code 会话链接，不发布 Artifact。** 报告写成 `docs/plans/*.md`，验证说明写成 `docs/verification/<topic>/README.md`，都要推到 PR 分支上。
 - **不要拆太碎。** 相关改动放进同一个 PR。
-- **在用户的开发服务器（`/root/workspace/qwen-code` 所在机器）上，不要跑 build、typecheck 或测试**：内存小，出过 OOM。需要真实运行的验证，写成说明交给别的机器；判断有没有改坏别处，看 CI。
-- **不要从本地工作区取文件来提交。** 用 `git show origin/main:<path>` 取内容，再用临时 index 构造提交（配方见 §6）。
+- **在用户的开发服务器（`/root/workspace/qwen-code` 所在的 Linux 机器）上，不要跑 build、typecheck 或测试**：内存小，出过 OOM。需要真实运行的验证，写成说明交给别的机器；判断有没有改坏别处，看 CI。**在接手验证的 Mac 上没有这个限制**，build、测试、打包都应该跑。
+- **在开发服务器上不要从本地工作区取文件来提交**：那里的检出通常落后 main 上百个提交，还有用户未提交的改动。用 `git show origin/main:<path>` 取内容，再用临时 index 构造提交（配方见 §6）。在新机器上干净检出本分支的话，正常 `git commit` 就行。
 - **提交前跑 prettier 的 experimental-cli**：`node node_modules/.bin/prettier --experimental-cli --config-path .prettierrc.json --check <file>`。
 - PR 描述：英文正文，外加 `<details>` 里的完整中文翻译。提交信息遵循 Conventional Commits。
 - 和用户沟通：不要把一堆选项丢给用户挑，给出一个推荐和理由；不要用“伴侣”这个词（用户会理解成要额外装的 app）。
@@ -40,14 +43,24 @@
 1. 这个 PR 何时从草稿转为 ready；是否要把实现和方案拆成两个 PR。
 2. 侧边栏的“使用这台电脑”是否默认显示（现在默认显示，桌面端外壳默认隐藏）。
 3. 何时发布包含本改动的 `@qwen-code/node-repl-mcp` 版本（发布前 Web Shell 里显示的安装命令装不到中继）。
+4. 授权记在 `node` 名下：官方 node 用 Node.js 的签名，TCC 按签名识别，所以给它屏幕录制和辅助功能，等于这台 Mac 上所有 node 脚本都拿到了这两项权限（复制 node 换个路径也没用）。二选一：接受并在用户文档里写明；或者以后做一个单独签名的 helper。
+5. 反向通道在 main 上默认关闭，远端 daemon 要带 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1` 启动。是只写进文档，还是推动默认打开。
 
 ## 5. 下一步
 
-1. 看 2026-09-19 修订后的 CI；本地 Node 22 已通过全量 build 和 typecheck，以及桌面 relay 44 项测试、computer-use skill 7 项测试和 Web Shell 14 项测试。
-2. 真机验证：按 `docs/verification/remote-computer-use/README.md` 执行，结果写到同目录的 `results.md` 推到本分支。重点是方案 §6 列出的未验证项。
-3. 根据验证结果修订；Linux 桌面（systemd socket 激活）和 Windows 的安装方式放到后续。
+1. **真机验证（阻塞项）**：按 `docs/verification/remote-computer-use/README.md` 执行，卡住时查该文 F 节的排查手册。结果写到同目录的 `results.md`，追加提交推到本分支，并在 PR 里留一条评论。
+   - 先跑 A、B 两节：只需要这台 Mac，最快能判断 launchd 这一层能不能用。
+   - 最可能不通的是 C.1 和 C.8：浏览器能不能从安全页面访问 `http://127.0.0.1:47821`。
+   - C.3 的取消检查是这次新加的，一定要跑。
+2. 验证中发现的代码问题可以直接在 Mac 上修：改完跑相关的 `packages/node-repl/src/desktop-relay/*.test.ts` 和 `packages/web-shell` 里的 DesktopRelay 测试，用 `--experimental-cli` 跑 prettier，追加提交（不要 force-push）。
+3. 把 §4 的第 4、5 项连同验证结果一起交给用户决定。
+4. 后续：Linux 桌面（systemd socket 激活）和 Windows 的安装方式；截图超过 10 MB 帧上限时自动压缩。
+
+**和 SSH workspace（#12255，已合入 main）的关系，不要当成替代方案重新提出**：那个方案里 `qwen serve` 跑在本地，远端只放代码；用户要的是 daemon 在远端，所以它不满足需求。而且它在 SSH 会话里清空了 `mcpServers`，也禁用了 skills，node-repl 在那里本来就用不了。
 
 ## 6. 操作配方
+
+以下配方用于开发服务器（工作区不干净、检出落后 main）。在新机器上干净检出本分支时，正常的 `git merge origin/main`、`git commit`、`git push`（不带 `--force`）就够了。
 
 - 读 main：先 `git fetch origin main`，之后一律用 `git show origin/main:<path>` 和 `git grep <pattern> origin/main -- <paths>`。
 - remote：`origin` 是 `QwenLM/qwen-code`，`fork` 是 `yiliang114/qwen-code`；`gh` 已登录 `yiliang114`。
