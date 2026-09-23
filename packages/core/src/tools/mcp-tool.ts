@@ -966,7 +966,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Whether the omni funnel will take this result's media BY REFERENCE.
+   * Whether the omni funnel takes over this result's media.
    *
    * `CoreToolScheduler` runs `processToolResultOmniMedia` over the parts this
    * tool returns, converting inline base64 into `oss://` fileData under omni's
@@ -975,6 +975,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * path — its decoder's source cap and its request-size budget — so leaving
    * them armed here replaces an image omni could have delivered with a text
    * placeholder.
+   *
+   * A part the funnel DECLINES to upload does not escape bounding either: the
+   * funnel puts every image it keeps inline through this pipeline's own visual
+   * budget and trailing inline clamp (`boundDeclinedInlineImage`), so exempting
+   * the clamps here never strands source-resolution bytes on the inline path.
+   * This gate is per-config while the funnel's upload decision is per-part;
+   * that is sound only because of the funnel-side bound.
    *
    * Same rule and same gate shape as the 100 MB source cap in `fileUtils`:
    * cheap `isOmniEnabled()` BEFORE the dynamic import, so a non-omni session
@@ -1363,13 +1370,14 @@ const MCP_MEDIA_REMEDY =
  * to tell configured MCP servers apart in a bounding failure, since these bytes
  * have no file path to label them with.
  *
- * `omniDeliveryActive` reports that the omni funnel will convert this result's
- * media into `oss://` fileData and upload it BY REFERENCE, under ceilings far
- * above either limit below. Both withholding clamps exist to protect the inline
- * path, so both are exempted together — dropping only the pre-decode one would
- * merely move the placeholder: the renderer rejects >100 MiB with
- * `source_too_large`, the catch forwards the part unchanged, and the trailing
- * inline clamp withholds it anyway.
+ * `omniDeliveryActive` reports that the omni funnel takes over this result's
+ * media: it uploads what it accepts as `oss://` fileData BY REFERENCE, under
+ * ceilings far above either limit below, and it bounds every image it DECLINES
+ * to upload with this same pipeline before leaving it inline. Both withholding
+ * clamps exist to protect the inline path, so both are exempted together —
+ * dropping only the pre-decode one would merely move the placeholder: the
+ * renderer rejects >100 MiB with `source_too_large`, the catch forwards the
+ * part unchanged, and the trailing inline clamp withholds it anyway.
  */
 async function boundInlineImageParts(
   parts: Part[],
@@ -1409,7 +1417,9 @@ async function boundInlineImageParts(
     const { mimeType, data } = inline;
     // This cap protects the overview DECODER, so — exactly as in `fileUtils` —
     // it only applies when the bytes will actually reach it. Under omni
-    // delivery they are uploaded by reference and never decoded here.
+    // delivery this pipeline is not the one that decides their fate: the funnel
+    // either uploads them by reference or bounds them itself before leaving
+    // them inline.
     if (!omniDeliveryActive) {
       // The gate above also admits untyped resource blobs, whose real format is
       // only known once the renderer sniffs them. This guard runs before that,
@@ -1484,8 +1494,10 @@ async function boundInlineImageParts(
     }
     // Only what ends up being an image is subject to the inline limit: an
     // untyped blob the renderer could not decode is forwarded exactly as the
-    // server sent it. Under omni delivery neither is — the inline ceiling is
-    // the inline path's request-size budget, and omni uploads by reference.
+    // server sent it. Under omni delivery neither runs here — the inline
+    // ceiling is the inline path's request-size budget, and the funnel owns
+    // both decisions for these bytes, applying the same two bounds to any
+    // image it keeps inline.
     boundedParts.push(
       isImagePart(boundedPart) && !omniDeliveryActive
         ? clampToInlineLimit(boundedPart)
