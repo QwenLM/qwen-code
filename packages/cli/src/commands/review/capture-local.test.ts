@@ -11,7 +11,14 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seedParseArgs } from './lib/test-utils.js';
@@ -23,6 +30,21 @@ import {
 } from './lib/deadline.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
+// The flag ruling, overridable so a test can make it fail the way a bug would
+// (a non-TypeError) — the handler must not mistake that for a usage error.
+// Null means the real `validateDeadlineFlag`.
+const validateOverride = vi.hoisted(() => ({
+  impl: null as null | (() => void),
+}));
+vi.mock('./lib/deadline.js', async (orig) => {
+  const actual = await orig<Record<string, unknown>>();
+  const real = actual['validateDeadlineFlag'] as (...args: unknown[]) => void;
+  return {
+    ...actual,
+    validateDeadlineFlag: (...args: unknown[]) =>
+      validateOverride.impl !== null ? validateOverride.impl() : real(...args),
+  };
+});
 const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
 const visibilityMock = vi.hoisted(() => vi.fn((): string[] | null => []));
 vi.mock('../../config/settings.js', async (orig) => ({
@@ -161,7 +183,14 @@ describe('capture-local (command boundary)', () => {
     expect(plan.chunks.length).toBeGreaterThan(0);
     expect(plan.untrackedFiles).toEqual(['src/pay.ts']);
     expect(existsSync(plan.diffPathAbsolute)).toBe(true);
-    expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
+    const writtenDiff = readFileSync(plan.diffPathAbsolute, 'utf8');
+    expect(writtenDiff).toBe(DIFF);
+    // The identity must digest the SAME bytes the plan was built from: this
+    // command carries its diff as `diffBytes`, and any other string passed at
+    // the call site would stay type-correct while naming nothing.
+    expect(plan.selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(writtenDiff, 'utf8').digest('hex'),
+    );
   });
 
   it('creates the output directory the caller chose', () => {
@@ -497,18 +526,103 @@ describe('capture-local — the --deadline flag the handler records', () => {
     expect(captureMock).not.toHaveBeenCalled();
     expect(existsSync(out)).toBe(false);
   });
+});
 
-  it('anything else the capture throws exits 1 with the same one-line shape', () => {
-    // The contract plan-diff already keeps: a usage error is exit 2, any
-    // other failure exit 1, neither an uncaught crash banner.
+describe('capture-local — the handler’s error contract', () => {
+  it('an --out that names a directory is a usage error — exit 2, one line, ruled before the tree is captured', () => {
+    // The check its siblings make before any work. Without it the capture
+    // and hashing ran to completion before the plan write failed with
+    // EISDIR (one line, exit 1).
+    captureMock.mockClear();
+    const existing = join(dir, 'plans');
+    mkdirSync(existing);
+    for (const out of [existing, join(dir, 'not-yet') + '/']) {
+      process.exitCode = undefined;
+      errs = [];
+      expect(() => run(out)).not.toThrow();
+      expect(process.exitCode).toBe(2);
+      const line = errs.join('');
+      expect(line).toMatch(
+        /^capture-local: --out names a directory, not a file: /,
+      );
+      expect(line).not.toContain('    at ');
+    }
+    // A repeated --out arrives as an array: the same one-line shape, with a
+    // message that names the mistake instead of a `.trim` crash.
+    process.exitCode = undefined;
+    errs = [];
+    expect(() => run(['a.json', 'b.json'] as unknown as string)).not.toThrow();
+    expect(process.exitCode).toBe(2);
+    expect(errs.join('')).toMatch(
+      /^capture-local: --out must be given once, as a file path\n?$/,
+    );
+    expect(captureMock).not.toHaveBeenCalled();
+    process.exitCode = undefined;
+  });
+
+  it('an internal fault prints one line and exits 1 — and its stack after it under --debug', () => {
+    // plan-diff's contract for the default output: one line for the
+    // operator. The stack says where the fault happened, for whoever has to
+    // find it, and follows the line only when debug output is asked for.
+    const out = join(dir, 'boom.json');
     captureMock.mockImplementation(() => {
       throw new Error('git is not installed');
     });
     process.exitCode = undefined;
     errs = [];
-    expect(() => run(join(dir, 'boom.json'))).not.toThrow();
+    expect(() => run(out)).not.toThrow();
     expect(process.exitCode).toBe(1);
-    expect(errs.join('')).toContain('capture-local: git is not installed');
+    expect(errs.join('')).toContain('capture-local: git is not installed\n');
+    expect(errs.join('')).not.toContain('    at ');
+
+    process.exitCode = undefined;
+    errs = [];
+    expect(() => run(out, { debug: true })).not.toThrow();
+    expect(process.exitCode).toBe(1);
+    expect(errs.join('')).toMatch(
+      /capture-local: git is not installed\nError: git is not installed\n\s+at /,
+    );
+
+    // Only the flag: debug variables in the environment (set for other
+    // tools, or by the dev launcher) leave the operator's one line alone.
+    vi.stubEnv('DEBUG', '1');
+    vi.stubEnv('QWEN_DEBUG', '1');
+    vi.stubEnv('NODE_ENV', 'development');
+    try {
+      process.exitCode = undefined;
+      errs = [];
+      run(out);
+      expect(process.exitCode).toBe(1);
+      expect(errs.join('')).toContain('capture-local: git is not installed\n');
+      expect(errs.join('')).not.toContain('    at ');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(existsSync(out)).toBe(false);
+    process.exitCode = undefined;
+  });
+
+  it('a ruling that fails with anything but a usage error exits 1, still before the capture', () => {
+    // The ruling's TypeErrors are usage errors (exit 2, above). Anything
+    // else out of it is a fault in the ruling: exit 1, and the tree is still
+    // never captured on the way out.
+    const out = join(dir, 'ruling.json');
+    captureMock.mockClear();
+    validateOverride.impl = () => {
+      throw new Error('environment unreadable');
+    };
+    try {
+      process.exitCode = undefined;
+      errs = [];
+      expect(() => run(out, { deadline: '120' })).not.toThrow();
+      expect(process.exitCode).toBe(1);
+      expect(errs.join('')).toContain(
+        'capture-local: environment unreadable\n',
+      );
+      expect(captureMock).not.toHaveBeenCalled();
+    } finally {
+      validateOverride.impl = null;
+    }
     process.exitCode = undefined;
   });
 });

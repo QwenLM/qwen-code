@@ -11,6 +11,7 @@ import {
 import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { GoalApprovalContent } from './GoalApprovalContent';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
@@ -20,6 +21,9 @@ import {
   type SessionContentGenerator,
 } from './AssistantMessage';
 import styles from './ToolApproval.module.css';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { DiffView } from './tools/DiffView';
+import { useWebShellCustomization } from '../../customization';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
@@ -235,6 +239,7 @@ export function ToolApproval({
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
+  const isGoal = request.toolName === 'propose_goal';
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
   const hasPlanExecutionMode =
     isExitPlanApproval && planExecutionMode !== undefined;
@@ -271,6 +276,10 @@ export function ToolApproval({
       if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
     }
     return (option: PermissionRequest['options'][number]) => {
+      if (isGoal && keyCount.get(getOptionI18nKey(option) ?? '') === 1) {
+        if (option.kind === 'allow_once') return t('approval.goal.confirm');
+        if (option.kind === 'reject_once') return t('approval.goal.reject');
+      }
       if (hasPlanExecutionMode && option.id === 'restore_previous') {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
@@ -299,12 +308,23 @@ export function ToolApproval({
     };
   }, [
     displayOptions,
+    isGoal,
     showsPlanWorkflow,
     hasPlanExecutionMode,
     planExecutionMode,
     t,
   ]);
   const [selected, setSelected] = useState(safeDefaultIndex);
+  const [submissionState, setSubmissionState] = useState<{
+    requestId: string;
+    status: 'pending' | 'failed';
+  } | null>(null);
+  const submitting =
+    submissionState?.requestId === request.id &&
+    submissionState.status === 'pending';
+  const submissionFailed =
+    submissionState?.requestId === request.id &&
+    submissionState.status === 'failed';
   const requestRef = useRef(request);
   requestRef.current = request;
   const selectedRef = useRef(selected);
@@ -326,6 +346,7 @@ export function ToolApproval({
   // request the user already answered.
   useEffect(() => {
     submittedRef.current = false;
+    setSubmissionState(null);
     selectedRef.current = safeDefaultIndexRef.current;
     setSelected(safeDefaultIndexRef.current);
   }, [request.id]);
@@ -333,13 +354,18 @@ export function ToolApproval({
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
-  const toolName = showsPlanWorkflow
-    ? t('workflow.planReview.title')
-    : localizeToolDisplayName(rawToolName, t);
-  const descriptionText = showsPlanWorkflow
-    ? undefined
-    : getDescriptionText(request);
+  const toolName = isGoal
+    ? t('approval.goal.title')
+    : showsPlanWorkflow
+      ? t('workflow.planReview.title')
+      : localizeToolDisplayName(rawToolName, t);
+  const descriptionText =
+    showsPlanWorkflow || isGoal ? undefined : getDescriptionText(request);
   const contentText = extractContentText(request);
+  const goalObjective =
+    typeof request.rawInput?.objective === 'string'
+      ? request.rawInput.objective
+      : '';
   const showsContent = Boolean(
     contentText && (request.contentIsInput || contentText !== request.title),
   );
@@ -349,21 +375,26 @@ export function ToolApproval({
       if (disabled || submittedRef.current) return;
       submittedRef.current = true;
       const requestId = requestRef.current.id;
-      const submission = onConfirm(requestId, optionId);
-      if (submission) {
-        void submission.catch(() => {
-          // Re-arm only if the rejected submission still belongs to the
-          // current request. This instance is reused across successive
-          // requests (no key at the mount sites), and a submission can
-          // reject late (up to the action timeout); a stale rejection would
-          // otherwise disarm the successor's double-submit guard mid-flight.
-          if (requestRef.current.id === requestId) {
-            submittedRef.current = false;
+      if (isGoal) {
+        setSubmissionState({ requestId, status: 'pending' });
+      }
+      const onFailure = () => {
+        // A late rejection must not re-arm a newer request's submission.
+        if (requestRef.current.id === requestId) {
+          submittedRef.current = false;
+          if (isGoal) {
+            setSubmissionState({ requestId, status: 'failed' });
           }
-        });
+        }
+      };
+      try {
+        const submission = onConfirm(requestId, optionId);
+        if (submission) void submission.catch(onFailure);
+      } catch {
+        onFailure();
       }
     },
-    [onConfirm, disabled],
+    [onConfirm, disabled, isGoal],
   );
 
   const focusOption = useCallback((index: number) => {
@@ -476,27 +507,65 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
+  const diffs = useMemo(
+    () =>
+      hostOwnsEditDiffPreview
+        ? []
+        : request.content
+            .filter((block) => block.type === 'diff')
+            .map((block) => {
+              const oldText = block.oldText ?? '';
+              const newText = block.newText ?? '';
+              // Approval cards render into an [role=alertdialog] and stay
+              // synchronous — a giant edit here freezes the panel and makes
+              // the deletion/addition rows unreadable at a glance. Gate on
+              // the raw payload before running the LCS; the transcript
+              // completed-edit view calls buildUnifiedDiff directly and
+              // keeps its previous coarse rendering.
+              const OMITTED =
+                ' Diff omitted because it is too large to display safely.';
+              const tooManyChars = oldText.length + newText.length > 100_000;
+              const oldLines = oldText ? oldText.split('\n').length : 0;
+              const newLines = newText ? newText.split('\n').length : 0;
+              const tooManyLines = oldLines + newLines > 1_000;
+              return {
+                path: block.path,
+                diff:
+                  tooManyChars || tooManyLines
+                    ? OMITTED
+                    : buildUnifiedDiff(oldText, newText),
+              };
+            }),
+    [request.content, hostOwnsEditDiffPreview],
+  );
   const command = getCommandFromRawInput(request);
-  const showsCommandBlock = Boolean((isExec && command) || showsContent);
-  const questionText = showsPlanWorkflow
-    ? t('workflow.planReview.question')
-    : isAgent
-      ? t('approval.launchAgentQuestion')
-      : isExec
-        ? t('approval.execQuestion', { tool: toolName })
-        : t('approval.changeQuestion');
+  const showsCommandBlock =
+    !isGoal && Boolean((isExec && command) || showsContent);
+  const questionText = isGoal
+    ? t('approval.goal.hint')
+    : showsPlanWorkflow
+      ? t('workflow.planReview.question')
+      : isAgent
+        ? t('approval.launchAgentQuestion')
+        : isExec
+          ? t('approval.execQuestion', { tool: toolName })
+          : t('approval.changeQuestion');
 
   return (
     <div
       ref={panelRef}
-      className={
-        variant === 'floating'
-          ? `${styles.approval} ${styles.floating}${
-              isExitPlanApproval ? ` ${styles.floatingWorkflow}` : ''
-            }`
-          : styles.approval
-      }
+      className={[
+        styles.approval,
+        variant === 'floating' && styles.floating,
+        variant === 'floating' && isExitPlanApproval && styles.floatingWorkflow,
+        isGoal && styles.goalApproval,
+      ]
+        .filter(Boolean)
+        .join(' ')}
       data-web-shell-permission-panel
+      data-web-shell-goal-approval={isGoal || undefined}
+      aria-busy={isGoal ? submitting : undefined}
       role="alertdialog"
       aria-labelledby={headingId}
       // Expose the question, the tool description, and the command/content to
@@ -507,7 +576,7 @@ export function ToolApproval({
       aria-describedby={[
         questionId,
         descriptionText ? descId : null,
-        showsCommandBlock ? commandId : null,
+        showsCommandBlock || isGoal ? commandId : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -528,7 +597,14 @@ export function ToolApproval({
         </div>
       )}
 
-      {isExec && command ? (
+      {isGoal ? (
+        <GoalApprovalContent
+          key={request.id}
+          id={commandId}
+          objective={goalObjective}
+          content={contentText || (goalObjective ? '' : request.title || '')}
+        />
+      ) : isExec && command ? (
         <div className={styles.code}>
           <pre className={styles.codeBlock} id={commandId} title={command}>
             {command}
@@ -545,6 +621,21 @@ export function ToolApproval({
           {contentText}
         </pre>
       ) : null}
+
+      {diffs.length > 0 && (
+        // `data-plan-interactive` is the existing Escape-exempt opt-out the
+        // panel's handleKeyDown already recognises: it lets Arrow/j/k/Home/End
+        // reach the focused diff row for native scroll instead of moving the
+        // approval selection, while Escape still bubbles up and rejects.
+        <div className={styles.content} data-plan-interactive>
+          {diffs.map((block, index) => (
+            <div key={index}>
+              <div>{block.path}</div>
+              <DiffView diff={block.diff} />
+            </div>
+          ))}
+        </div>
+      )}
 
       {showsPlanWorkflow && (
         <div className={styles.workflow}>
@@ -564,9 +655,24 @@ export function ToolApproval({
         </div>
       )}
 
-      <div className={styles.question} id={questionId}>
+      <div
+        className={isGoal ? styles.goalHint : styles.question}
+        id={questionId}
+      >
         {questionText}
       </div>
+
+      {isGoal && (
+        <div className={styles.goalFeedback}>
+          {submissionFailed ? (
+            <span role="alert">{t('approval.goal.failed')}</span>
+          ) : (
+            <span role="status">
+              {submitting ? t('approval.goal.pending') : ''}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* radiogroup semantics — the approval choice is single-select. No label
           on the group: the alertdialog already exposes the question via
@@ -587,7 +693,7 @@ export function ToolApproval({
                 isSelected ? styles.optionActive : ''
               }`}
               data-web-shell-permission-option
-              disabled={disabled}
+              disabled={disabled || (isGoal && submitting)}
               data-option-id={option.id}
               tabIndex={isSelected ? 0 : -1}
               role="radio"

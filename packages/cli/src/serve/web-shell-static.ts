@@ -9,7 +9,11 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import { isDocumentNavigation } from './web-shell-preauth.js';
+import {
+  isDocumentNavigation,
+  WEB_SHELL_PWA_ASSETS,
+  WEB_SHELL_PAGE_PATHS,
+} from './web-shell-preauth.js';
 export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
@@ -19,19 +23,21 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
- * (`connect-src 'self'`). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
+ * (`connect-src 'self'` plus the validated `?daemon=` origin from
+ * `remoteDaemonConnectOrigins`; the client asks before connecting to an origin
+ * it has not used). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
  * still block clickjacking. Tightening `script-src` (drop `'unsafe-inline'`
  * via a hash, externalise the inline patch) is a follow-up, not a blocker for
  * a loopback-default local tool.
  */
 const WEB_SHELL_CSP_DIRECTIVES = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
+  // Export previews embed SRI-verified assets as data URLs; child frames stay offline.
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data:",
+  "style-src 'self' 'unsafe-inline' data:",
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
   "media-src 'self' data:",
-  "connect-src 'self'",
   "worker-src 'self' blob:",
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
@@ -59,13 +65,72 @@ export function buildWebShellPermissionsPolicy(): string {
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
+  connectOrigins: readonly string[] = [],
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
   // PDF attachments use blob URLs; live previews pin their own child source.
   const frameSrc = 'frame-src http: https: blob:';
-  return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
+  const connectSrc = [
+    "connect-src 'self'",
+    ...connectOrigins,
+    'https://unpkg.com/@qwen-code/',
+  ].join(' ');
+  return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
+}
+
+/**
+ * The `?daemon=` value read with the client's parser instead of `req.query`.
+ *
+ * Hardening against a configuration dependency, not a fix for a live defect.
+ * Express 5 defaults `query parser` to `'simple'` (Node's `querystring`) and
+ * nothing in this repo ever sets it, so `req.query['daemon']` never saw the
+ * bracket folding `qs` produces and the previous read agreed with the client on
+ * every shape a browser can send. Under `'extended'` it did not: `qs` folds
+ * `?daemon[]=x` into `{ daemon: ['x'] }`, a key the client's
+ * `URLSearchParams.get('daemon')` never reports, so taking `raw[0]` granted
+ * `connect-src` for an origin the client never parsed — and for
+ * `?daemon[]=A&daemon=B` it granted A while the client connected to B, leaving
+ * the client's own target CSP-blocked. Measured over 38 query strings against
+ * real sockets: 18 divergences under `extended`, 0 under `simple`, 0 after this
+ * change under either. Reading the raw query with the client's own parser drops
+ * the dependency on that setting altogether.
+ */
+export function requestedDaemonParam(originalUrl: string): string | null {
+  const queryStart = originalUrl.indexOf('?');
+  return new URLSearchParams(
+    queryStart === -1 ? '' : originalUrl.slice(queryStart + 1),
+  ).get('daemon');
+}
+
+export function remoteDaemonConnectOrigins(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      !/^[a-z0-9._\-[\]:]+$/iu.test(url.hostname)
+    ) {
+      return [];
+    }
+    // A bracketed IPv6 host is not a valid CSP host-source (CSP3 host-part
+    // excludes '[', ']' and ':'), so emitting it produces a directive the
+    // browser drops. The client gate rejects a remote bracketed target for
+    // the same reason; when the page itself is served from that origin,
+    // 'self' already covers the connection.
+    if (url.hostname.startsWith('[')) return [];
+    const websocket = new URL(url.origin);
+    websocket.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return [url.origin, websocket.origin];
+  } catch {
+    return [];
+  }
 }
 
 /** Default (no-framing) Web Shell CSP. */
@@ -92,8 +157,11 @@ function createSendIndex(
   frameAncestors: readonly string[] = [],
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  return (_req: Request, res: Response): void => {
-    const csp = buildWebShellCsp(frameAncestors);
+  return (req: Request, res: Response): void => {
+    const csp = buildWebShellCsp(
+      frameAncestors,
+      remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
+    );
     res
       .status(200)
       .set('Content-Security-Policy', csp)
@@ -126,10 +194,9 @@ function createSendIndex(
       { cacheControl: false, dotfiles: 'allow' },
       (err) => {
         if (!err) return;
-        // Only 5xx path in the serve app that would otherwise emit nothing —
-        // log it so an operator can see why the shell stopped loading
-        // (EACCES/ESTALE on a network mount, a perms change, a partial
-        // deploy).
+        // Log filesystem failures so an operator can see why the shell stopped
+        // loading (EACCES/ESTALE on a network mount, a permissions change, or
+        // a partial deploy).
         writeStderrLine(
           `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -155,8 +222,11 @@ function createSendIndex(
  *
  *  - `GET /assets/*` — hashed, immutable build chunks (long-cache).
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
- *  - `GET /session/:id` document navigations — the HTML shell, so a browser
+ *  - `GET /session/:id` and exact page paths in `WEB_SHELL_PAGE_PATHS`
+ *    document navigations — the HTML shell, so a browser
  *    refresh can load before the front-end adds its bearer header.
+ *  - `GET /manifest.webmanifest` and `GET /sw.js` — public PWA metadata and
+ *    the origin-scoped worker, revalidated on every request.
  *
  * `GET /mcp-app-sandbox` is a separate pre-auth route mounted by
  * `mountMcpAppSandbox` (the iframe proxy, not the shell HTML).
@@ -176,8 +246,18 @@ export function mountWebShellAssets(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
       index: false,
-      immutable: true,
-      maxAge: '1y',
+      maxAge: 0,
+      setHeaders(res, filePath) {
+        const fileName = path.basename(filePath);
+        // Vite content hashes are the only safe basis for immutable caching.
+        // Future unhashed assets therefore revalidate by default instead of
+        // silently inheriting a one-year lifetime.
+        const contentAddressed = /-[a-zA-Z0-9_-]{8,}\.[^.]+$/u.test(fileName);
+        res.setHeader(
+          'Cache-Control',
+          contentAddressed ? 'public, max-age=31536000, immutable' : 'no-cache',
+        );
+      },
     }),
   );
   // A request still under /assets here is a missing chunk (e.g. a stale hashed
@@ -197,10 +277,50 @@ export function mountWebShellAssets(
     res.status(404).type('text/plain').send('Not found');
   });
   app.get('/', (req: Request, res: Response) => sendIndex(req, res));
-  app.get('/session/:id', (req: Request, res: Response, next: NextFunction) => {
-    if (!isDocumentNavigation(req)) return next();
-    sendIndex(req, res);
-  });
+  app.get(
+    [...WEB_SHELL_PAGE_PATHS, '/session/:id'],
+    (req: Request, res: Response, next: NextFunction) => {
+      if (!isDocumentNavigation(req)) return next();
+      sendIndex(req, res);
+    },
+  );
+  // Process-global public PWA files carry no daemon credentials or workspace data.
+  for (const {
+    route,
+    contentType,
+    serviceWorkerAllowed,
+  } of WEB_SHELL_PWA_ASSETS) {
+    app.get(route, (_req: Request, res: Response) => {
+      res
+        .set('Content-Type', contentType)
+        .set('Cache-Control', 'no-cache')
+        .set('X-Content-Type-Options', 'nosniff');
+      if (serviceWorkerAllowed) res.set('Service-Worker-Allowed', '/');
+      res.sendFile(
+        path.join(webShellDir, route.slice(1)),
+        { cacheControl: false, dotfiles: 'allow' },
+        (err) => {
+          if (!err) return;
+          if (res.headersSent) {
+            res.end();
+            return;
+          }
+          const status = 'status' in err && err.status === 404 ? 404 : 500;
+          if (status === 500) {
+            writeStderrLine(
+              `qwen serve: Web Shell asset send failed (${route}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          res
+            .status(status)
+            .type('text/plain')
+            .send(
+              status === 404 ? 'Not found' : 'Failed to load Web Shell asset',
+            );
+        },
+      );
+    });
+  }
 }
 
 /**
@@ -213,11 +333,11 @@ export function mountWebShellAssets(
  * attacker-controlled `Accept: text/html` to an authed route (e.g.
  * `/capabilities`, `/health` on a non-loopback bind) hits that route's real
  * response / 401, not this shell. Because real routes run first, no per-path
- * denylist is needed. The one exception is exact `/session/:id` document
+ * denylist is needed. The exceptions are exact page and `/session/:id` document
  * navigations, which `mountWebShellAssets` claims BEFORE auth so a browser
  * refresh can load the shell. That stays safe because the route matches a
- * single path segment only, serves only document navigations, and there is no
- * `GET /session/:id` API route for it to shadow — API subpaths like
+ * exact page or single session path segment, serves only document navigations,
+ * and never claims JSON API fetches (including `/goals`). API subpaths like
  * `/session/:id/status` still hit `bearerAuth`.
  *
  * Only GET/HEAD document navigations are claimed; API fetches send

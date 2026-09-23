@@ -22,6 +22,9 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  GroupConfig,
+  GroupSenderPolicy,
+  PrivatePolicy,
   ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
@@ -37,6 +40,7 @@ import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
+import { resolvePrivatePolicy } from './private-policy.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
@@ -71,6 +75,7 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
@@ -459,6 +464,7 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
+  protected readonly privatePolicy: PrivatePolicy;
   protected router: SessionRouter;
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
@@ -607,6 +613,24 @@ export abstract class ChannelBase {
       return;
     }
     await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected getBackgroundResponseSourceLabel(
+    sessionId: string,
+  ): string | undefined {
+    const target = this.router.getTarget(sessionId);
+    const presentation = this.namedSessions?.presentation(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      !this.router.isSessionLive(sessionId) ||
+      !presentation ||
+      presentation.status !== 'open' ||
+      !this.sameTaskOwner(target, presentation.target)
+    ) {
+      return undefined;
+    }
+    return this.createSourceLabel(presentation, target);
   }
 
   protected async resolveBackgroundResponseDelivery(
@@ -1366,6 +1390,7 @@ export abstract class ChannelBase {
   ) {
     this.name = name;
     this.config = config;
+    this.privatePolicy = resolvePrivatePolicy(config);
     this.bridge = bridge;
     this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
@@ -1390,7 +1415,7 @@ export abstract class ChannelBase {
     // Scoped by the channel's workspace cwd: two workspaces reusing the same
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
+      this.privatePolicy === 'pairing' || config.groupPolicy === 'pairing'
         ? new PairingStore(name, config.cwd)
         : undefined;
     this.groupGate = new GroupGate(
@@ -1398,9 +1423,11 @@ export abstract class ChannelBase {
       config.groups,
       pairingStore,
     );
-    this.dmGate = new DmGate(config.dmPolicy);
+    this.dmGate = new DmGate(
+      this.privatePolicy === 'disabled' ? 'disabled' : 'open',
+    );
     this.gate = new SenderGate(
-      config.senderPolicy,
+      this.privatePolicy,
       config.allowedUsers,
       pairingStore,
     );
@@ -1424,6 +1451,7 @@ export abstract class ChannelBase {
         filePath: join(options.stateDir, 'named-sessions.json'),
         router: this.router,
         isBusy: (sessionId) => this.isNamedSessionBusy(sessionId),
+        onSessionRetiring: (sessionId) => this.onSessionRetiring(sessionId),
       });
     }
 
@@ -2790,9 +2818,13 @@ export abstract class ChannelBase {
         if (
           !cancelSucceeded ||
           active.deliveryStarted ||
-          (turnEnded && !active.cancelled)
+          (turnEnded && !active.cancelled && !active.cancellationEmitted)
         ) {
           return false;
+        }
+        if (turnEnded) {
+          this.emitTaskCancellation(active, sessionId, reason);
+          return true;
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
@@ -3987,7 +4019,6 @@ export abstract class ChannelBase {
           const result = await namedSessions.close(owner, parts[0]!);
           if (closing) {
             this.cancelBtw(closing.sessionId);
-            this.onSessionRetiring(closing.sessionId);
           }
           await this.sendThreadMessage(
             envelope.chatId,
@@ -4112,7 +4143,9 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
-          if (id !== retiringSessionId) this.onSessionRetiring(id);
+          if (!this.namedSessions && id !== retiringSessionId) {
+            this.onSessionRetiring(id);
+          }
           this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
@@ -4236,7 +4269,7 @@ export abstract class ChannelBase {
     };
 
     // For a shared session, clearing it affects everyone who shares it: restrict
-    // it to authorized senders (config.allowedUsers, when set) and require an
+    // it to the session's operators (see isSharedSessionOperator) and require an
     // explicit "confirm". DMs on per-user/thread scope and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
@@ -4437,7 +4470,10 @@ export abstract class ChannelBase {
             envelope.chatId,
             envelope.threadId,
           );
-      const policy = this.config.senderPolicy;
+      const policy =
+        envelope.isGroup && !this.isPersonalConversation(envelope)
+          ? this.groupSendersFor(envelope)
+          : this.privatePolicy;
       const lines = [
         `Session: ${hasSession ? 'active' : 'none'}`,
         `Access: ${policy}`,
@@ -4915,9 +4951,7 @@ export abstract class ChannelBase {
     return (
       this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
-        ? true
-        : this.gate.isAllowed(normalizedTarget.senderId)) &&
+      this.senderGateFor(envelope).isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -5796,34 +5830,34 @@ export abstract class ChannelBase {
   }
 
   /**
-   * Whether `envelope.senderId` may act on the resolved session's destructive or
-   * workspace-leaking commands (/clear, /who). A SHARED session with a non-empty
-   * allowedUsers list is restricted to those members; a per-user session, or one
-   * with no allowlist, is unrestricted. Shared verbatim by /clear and /who so the
-   * gate can't drift; each caller sends its own rejection wording.
+   * Whether `envelope.senderId` may operate the resolved session: answer its
+   * permission prompts, steer it, or run /cancel, /clear, /who, /status, /loop
+   * and /btw. Shared verbatim by every such command so the gate can't drift;
+   * each caller sends its own rejection wording.
    */
   private isAuthorizedForSharedSession(envelope: Envelope): boolean {
-    return this.isAuthorizedForSharedSessionTarget(envelope);
-  }
-
-  private isAuthorizedForSharedSessionTarget(target: {
-    isGroup?: boolean;
-    senderId: string;
-  }): boolean {
-    if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    return authorized.length === 0 || authorized.includes(target.senderId);
+    return this.isSharedSessionOperator(envelope, envelope.senderId);
   }
 
   private isAuthorizedForSharedSessionToolCall(
     target: SessionTarget,
     sessionId: string,
   ): boolean {
+    return this.isSharedSessionOperator(
+      target,
+      this.activePrompts.get(sessionId)?.senderId,
+    );
+  }
+
+  private isSharedSessionOperator(
+    target: { isGroup?: boolean; chatId: string },
+    senderId: string | undefined,
+  ): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    if (authorized.length === 0) return true;
-    const senderId = this.activePrompts.get(sessionId)?.senderId;
-    return senderId !== undefined && authorized.includes(senderId);
+    return (
+      senderId !== undefined &&
+      this.config.operators?.includes(senderId) === true
+    );
   }
 
   private toolCallerName(sessionId: string, target: SessionTarget): string {
@@ -6024,10 +6058,7 @@ export abstract class ChannelBase {
     // text.
     if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (
-      this.config.groupPolicy !== 'pairing' &&
-      !this.gate.isAllowed(senderId)
-    ) {
+    if (!this.senderGateFor(envelope).isAllowed(senderId)) {
       return;
     }
 
@@ -6109,6 +6140,7 @@ export abstract class ChannelBase {
   }
 
   private prependGroupHistoryContext(
+    envelope: Envelope,
     promptText: string,
     entries: GroupHistoryEntry[],
   ): string {
@@ -6116,10 +6148,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines =
-      this.config.groupPolicy === 'pairing'
-        ? entries
-        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+    const senderGate = this.senderGateFor(envelope);
+    const lines = entries.filter((entry) =>
+      senderGate.isAllowed(entry.senderId),
+    );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6134,6 +6166,51 @@ export abstract class ChannelBase {
     });
 
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
+  }
+
+  protected senderGateFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): SenderGate {
+    if (target.isGroup !== true || this.isPersonalConversation(target)) {
+      return this.gate;
+    }
+    const senders = this.groupSendersFor(target);
+    return new SenderGate(
+      senders,
+      senders === 'allowlist' ? this.groupAllowedUsersFor(target.chatId) : [],
+    );
+  }
+
+  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+    return (
+      this.groupConfigFor(target.chatId)?.senders ??
+      this.groupConfigFor('*')?.senders ??
+      'open'
+    );
+  }
+
+  /**
+   * Whether a group-shaped conversation acts on behalf of one person, such as
+   * a document comment thread or a task. Its sender follows `privatePolicy`
+   * like a direct message, and `groups` does not apply; its
+   * group shape still decides routing, memory, and presentation.
+   */
+  protected isPersonalConversation(_target: { chatId: string }): boolean {
+    return false;
+  }
+
+  private groupAllowedUsersFor(chatId: string): string[] {
+    return (
+      this.groupConfigFor(chatId)?.allowedUsers ??
+      this.groupConfigFor('*')?.allowedUsers ??
+      []
+    );
+  }
+
+  private groupConfigFor(key: string): GroupConfig | undefined {
+    const groups = this.config.groups;
+    return Object.hasOwn(groups, key) ? groups[key] : undefined;
   }
 
   protected preflightInbound(
@@ -6183,21 +6260,19 @@ export abstract class ChannelBase {
       return false;
     }
 
-    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
-      this.markPreflighted(envelope);
-      return true;
-    }
+    const senderGate = this.senderGateFor(envelope);
 
     if (
       options.deferPairingRequests === true &&
-      this.config.senderPolicy === 'pairing' &&
-      !this.gate.isAllowed(envelope.senderId)
+      senderGate === this.gate &&
+      this.privatePolicy === 'pairing' &&
+      !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
       return true;
     }
 
-    const result = this.gate.check(envelope.senderId, envelope.senderName);
+    const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
@@ -6217,7 +6292,9 @@ export abstract class ChannelBase {
             return false;
           });
       }
-      this.logPreflightRejected('sender_denied');
+      this.logPreflightRejected(
+        senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+      );
       return false;
     }
 
@@ -6873,11 +6950,11 @@ export abstract class ChannelBase {
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
-    const groupCfg = envelope.isGroup
-      ? this.config.groups[envelope.chatId] || this.config.groups['*']
+    const groupMode = envelope.isGroup
+      ? (this.groupConfigFor(envelope.chatId)?.dispatchMode ??
+        this.groupConfigFor('*')?.dispatchMode)
       : undefined;
-    const mode: DispatchMode =
-      groupCfg?.dispatchMode || this.config.dispatchMode || 'steer';
+    const mode: DispatchMode = groupMode ?? this.config.dispatchMode ?? 'steer';
 
     const active = this.activePrompts.get(sessionId);
 
@@ -7111,6 +7188,7 @@ export abstract class ChannelBase {
         ? []
         : this.drainPendingGroupHistory(envelope);
       let promptToSend = this.prependGroupHistoryContext(
+        envelope,
         promptText,
         groupHistoryEntries,
       );
@@ -7218,8 +7296,17 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
 
+      let taskResultPartial = false;
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
+          ...(this.config.outputMode === 'per_task'
+            ? {
+                outputMode: 'per_task' as const,
+                onTaskResult: ({ partial }: { partial: boolean }) => {
+                  taskResultPartial = partial;
+                },
+              }
+            : {}),
           ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
@@ -7237,6 +7324,7 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
           const segment = this.ensureOutputSegment(sessionId, promptState);
+          if (segment && taskResultPartial) segment.partial = true;
           await this.onResponseComplete(
             envelope.chatId,
             response,
@@ -7270,13 +7358,23 @@ export abstract class ChannelBase {
           });
         }
       } catch (err) {
+        const runtimeCancelled =
+          !promptState.deliveryStarted &&
+          err instanceof ChannelPromptCancelledError;
         // Mirror the try path: once delivery started, a late-settling cancel
         // must not suppress the failed emit (the /cancel handler declines to
         // emit its own terminal once deliveryStarted is set).
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
+          if (runtimeCancelled) {
+            this.emitTaskCancellation(
+              promptState,
+              sessionId,
+              'runtime_cancelled',
+            );
+          }
         }
-        if (!promptState.cancelled) {
+        if (!promptState.cancelled && !runtimeCancelled) {
           releaseHeldChunks();
           const segment = this.closeOutputSegment(sessionId, promptState);
           void this.notifyOutputSegmentEnd(
@@ -7303,7 +7401,7 @@ export abstract class ChannelBase {
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
-        if (promptState.cancelled) {
+        if (promptState.cancelled || runtimeCancelled) {
           return;
         }
         if (sourceLabel) {

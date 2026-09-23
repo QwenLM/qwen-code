@@ -9,6 +9,13 @@ on:
       source:
         required: true
         type: 'string'
+      # Deliberately not required. This workflow is also a reusable callee, so
+      # github.event_name here is always workflow_call and can never observe the
+      # release that triggered the chain; the caller states it instead. Omitting
+      # the input means "not following a release", the safe default.
+      follows_release:
+        default: false
+        type: 'boolean'
     secrets:
       ALIYUN_OSS_ACCESS_KEY_ID:
         required: true
@@ -35,7 +42,7 @@ concurrency:
 jobs:
   sync:
     name: 'Mirror Qwen Code Desktop to Aliyun OSS'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.ref == 'refs/heads/main' || inputs.follows_release) }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 90
     environment:

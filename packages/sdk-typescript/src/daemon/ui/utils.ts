@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonTranscriptTimingMeta } from './types.js';
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -12,6 +14,73 @@ export function getString(value: unknown, key: string): string | undefined {
   if (!isRecord(value)) return undefined;
   const entry = value[key];
   return typeof entry === 'string' ? entry : undefined;
+}
+
+function getFiniteNumber(
+  value: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const entry = value[key];
+  return typeof entry === 'number' && Number.isFinite(entry)
+    ? entry
+    : undefined;
+}
+
+/**
+ * Read the recorded timing off a session update, or `undefined` when the
+ * update is not a timing frame.
+ *
+ * Paged transcript replay emits these as empty-text `agent_message_chunk`
+ * frames, which every other reader normalizes away; this is the accessor for
+ * readers that want them. The shape is validated here because the frames
+ * arrive off the wire.
+ */
+export function extractTranscriptTiming(
+  update: unknown,
+): DaemonTranscriptTimingMeta | undefined {
+  if (!isRecord(update)) return undefined;
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const timing = meta && isRecord(meta['timing']) ? meta['timing'] : undefined;
+  if (!timing) return undefined;
+  const kind = timing['kind'];
+  if (kind !== 'request' && kind !== 'tool') return undefined;
+  const durationMs = getFiniteNumber(timing, 'durationMs');
+  if (durationMs === undefined || durationMs < 0) return undefined;
+
+  // A tool frame carries a start only when the session recorded one; the
+  // producer never derives it, so a present value is a measurement.
+  const startedAt = getFiniteNumber(timing, 'startedAt');
+  const ttftMs = getFiniteNumber(timing, 'ttftMs');
+  const status = timing['status'];
+  const toolStatus = timing['toolStatus'];
+  const carriedStrings: Record<string, string> = {};
+  const stringKeys =
+    kind === 'tool'
+      ? ['responseId', 'promptId', 'subagentId', 'callId', 'toolName']
+      : ['responseId', 'promptId', 'subagentId', 'model'];
+  for (const key of stringKeys) {
+    const value = getString(timing, key);
+    if (value !== undefined) carriedStrings[key] = value;
+  }
+
+  return {
+    kind,
+    durationMs,
+    ...carriedStrings,
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    ...(kind === 'request' && ttftMs !== undefined && ttftMs >= 0
+      ? { ttftMs }
+      : {}),
+    ...(kind === 'request' && (status === 'ok' || status === 'error')
+      ? { status }
+      : {}),
+    ...(kind === 'tool' &&
+    (toolStatus === 'success' ||
+      toolStatus === 'error' ||
+      toolStatus === 'cancelled')
+      ? { toolStatus }
+      : {}),
+  };
 }
 
 export function getFirstString(

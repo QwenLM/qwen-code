@@ -588,6 +588,38 @@ describe('composer tag input annotations', () => {
     ).toEqual([{ type: 'text', text: 'list @.qwen/ files' }]);
   });
 
+  it('skips non-object annotation entries from untrusted metadata', () => {
+    const content = 'open @one';
+    expect(
+      splitComposerTagContentByAnnotations(content, [
+        null,
+        referenceAnnotation(content, '@one', {
+          id: 'file:@one',
+          kind: 'file',
+          value: 'one',
+          serialized: '@one',
+        }),
+        undefined,
+      ] as unknown as DaemonInputAnnotation[]),
+    ).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@one',
+          kind: 'file',
+          value: 'one',
+          serialized: '@one',
+        },
+      },
+    ]);
+    expect(
+      splitComposerTagContentByAnnotations(content, [
+        null,
+      ] as unknown as DaemonInputAnnotation[]),
+    ).toEqual([{ type: 'text', text: 'open @one' }]);
+  });
+
   it('skips overlapping annotations', () => {
     expect(
       splitComposerTagContentByAnnotations('open @one @two', [

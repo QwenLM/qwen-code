@@ -13,14 +13,15 @@
  */
 
 import type { HistoryItem } from '../model/streaming-model.js';
-import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
+import type {
+  GoalSnapshotLike,
+  OpenTuiStreamEvent,
+  SubagentSummary,
+} from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
+import type { GoalLegacyCardData } from '../utils/goal-card-view.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
-import { goalCheckpointHealthLine } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { ArenaAgentCardData, CompressionProps } from '../types.js';
-import { ICON } from '../constants.js';
-import { formatDuration } from '../utils/formatters.js';
-import { formatTokenCount } from '../statusLinePresets.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
@@ -30,6 +31,10 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
   confirm?: ToolConfirmState;
+  /** The scheduler reports the call as 'scheduled' — approved, but not
+   * started because the batch still holds another approval. ink reads the
+   * same status and draws its pending glyph instead of the executing one. */
+  queued?: boolean;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -43,6 +48,9 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
     totalLines?: number;
     totalBytes?: number;
   };
+  /** Structured subagent summary: the card renders ink's three coloured runs
+   * (SubagentScrollbackSummary parity) instead of the flattened output. */
+  subagentSummary?: SubagentSummary;
   /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
    * under the result): tells the user their image/prompt left the machine
    * via the vision model. */
@@ -170,16 +178,20 @@ export type LiveGoalItem = {
 };
 
 /** Fields of an ink goal_status history item (kind form). */
-export type LiveGoalLegacyData = {
-  kind: string;
-  condition: string;
-  iterations?: number;
-  durationMs?: number;
-  lastReason?: string;
+export type LiveGoalLegacyData = GoalLegacyCardData;
+
+export type LiveAssistantItem = Extract<HistoryItem, { kind: 'assistant' }> & {
+  /** When the block opened: the record's own time on a resume replay, the fold
+   * time live. Rendered by `output.showTimestamps`. */
+  timestamp?: number;
 };
 
 export type LiveHistoryItem =
-  | Exclude<HistoryItem, { kind: 'tool' } | { kind: 'thinking' }>
+  | Exclude<
+      HistoryItem,
+      { kind: 'tool' } | { kind: 'thinking' } | { kind: 'assistant' }
+    >
+  | LiveAssistantItem
   | LiveThinkingItem
   | LiveToolItem
   | LiveImageItem
@@ -269,6 +281,7 @@ export function foldLiveEvent(
           id: nid('as'),
           text: ev.delta,
           streaming: true,
+          timestamp: ev.timestamp ?? Date.now(),
         });
       }
       return items;
@@ -319,15 +332,22 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
+        const structured = ev.type === 'tool-result' ? ev : undefined;
         // Both events carry the whole display, so the card replaces rather than
-        // accumulates — appending would paint the streamed snapshot twice.
+        // accumulates — appending would paint the streamed snapshot twice. The
+        // structured payloads replace for the same reason, and clearing them
+        // matters: ToolCardBody prefers them over the text unconditionally, so
+        // a shell run that streams ANSI and then trips binary detection would
+        // otherwise freeze on the stale grid and never show the plain-text
+        // notice that replaced it.
         const next: LiveToolItem = {
           ...t,
           output: ev.type === 'tool-output' ? ev.output : ev.display,
+          diff: structured?.diff,
+          todos: structured?.todos,
+          ansi: structured?.ansi,
+          subagentSummary: structured?.subagentSummary,
         };
-        if (ev.type === 'tool-result' && ev.diff) next.diff = ev.diff;
-        if (ev.type === 'tool-result' && ev.todos) next.todos = ev.todos;
-        if (ev.type === 'tool-result' && ev.ansi) next.ansi = ev.ansi;
         if (ev.type === 'tool-result' && ev.visionBridgeNotice) {
           next.visionBridgeNotice = ev.visionBridgeNotice;
         }
@@ -380,6 +400,14 @@ export function foldLiveEvent(
       }
       return items;
     }
+    case 'tool-queued': {
+      const i = findToolIndex(items, ev.id);
+      if (i >= 0) {
+        const t = items[i] as LiveToolItem;
+        items[i] = { ...t, queued: ev.queued };
+      }
+      return items;
+    }
     case 'task-start':
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
@@ -389,7 +417,6 @@ export function foldLiveEvent(
         name: ev.name,
         description: ev.description,
         progress: [],
-        done: false,
       });
       return items;
     case 'task-progress': {
@@ -401,15 +428,11 @@ export function foldLiveEvent(
       return items;
     }
     case 'task-end': {
+      // ink drops the roster row the moment a subagent turns terminal; the
+      // tool card's own one-line summary is the only record left, so keeping
+      // this card would print the same stats twice.
       const i = items.findIndex((it) => it.kind === 'task' && it.id === ev.id);
-      if (i >= 0 && items[i].kind === 'task') {
-        const t = items[i] as Extract<HistoryItem, { kind: 'task' }>;
-        items[i] = {
-          ...t,
-          done: true,
-          stats: `${ev.tools} tools · ${ev.seconds}s · ${ev.tokens} tokens`,
-        };
-      }
+      if (i >= 0) items.splice(i, 1);
       return items;
     }
     case 'image': {
@@ -637,199 +660,10 @@ export function settleOpenTools(
   return changed ? items : prev;
 }
 
-/** Semantic palette slot of a goal card; the backend maps it to theme colors. */
-export type GoalCardColor =
-  | 'secondary'
-  | 'accent'
-  | 'warning'
-  | 'error'
-  | 'success';
-
-/** Render-ready view of a v2 goal_state card (ink GoalStateCard). */
-export type GoalCardView =
-  | { state: 'hidden' }
-  | { state: 'cleared' }
-  | {
-      state: 'card';
-      icon: string;
-      color: GoalCardColor;
-      title: string;
-      subtitle: string | null;
-      objective: string;
-      reason?: string;
-      /** Checkpoint health, when goalCheckpointHealthVisible shows it. */
-      checkpoint?: string;
-    };
-
-/** Computes the GoalStateCard view (icon/title/subtitle/objective/reason)
- * from a v2 snapshot, pure so every lifecycle state is unit-testable. */
-export function describeGoalCard(
-  snapshot: GoalSnapshotLike | undefined,
-  cause?: string,
-): GoalCardView {
-  const goal = snapshot?.goal ?? null;
-  if (!goal) {
-    return cause === 'clear' ? { state: 'cleared' } : { state: 'hidden' };
-  }
-  const activity = snapshot?.activity;
-  let lifecycle: {
-    icon: string;
-    color: GoalCardColor;
-    title: string;
-  } | null;
-  switch (goal.status ?? 'active') {
-    case 'active':
-      if (activity === 'verifying') {
-        lifecycle = {
-          icon: ICON.CIRCLE_EMPTY,
-          color: 'secondary',
-          title: 'Goal checking',
-        };
-      } else {
-        lifecycle = {
-          icon: ICON.BULLSEYE,
-          color: 'accent',
-          title: activity === 'running' ? 'Goal running' : 'Goal active',
-        };
-      }
-      break;
-    case 'paused':
-      lifecycle = { icon: '!', color: 'warning', title: 'Goal paused' };
-      break;
-    case 'blocked':
-      lifecycle = { icon: ICON.CROSS, color: 'error', title: 'Goal blocked' };
-      break;
-    case 'usage_limited':
-      lifecycle = { icon: '!', color: 'warning', title: 'Goal usage limited' };
-      break;
-    case 'complete':
-      lifecycle = {
-        icon: ICON.CHECK,
-        color: 'success',
-        title: 'Goal complete',
-      };
-      break;
-    default:
-      lifecycle = null;
-  }
-  if (!lifecycle) return { state: 'hidden' };
-  const stats: string[] = [];
-  const turnCount = goal.turnCount ?? 0;
-  if (turnCount > 0)
-    stats.push(`${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`);
-  const activeTimeMs = goal.activeTimeMs ?? 0;
-  if (activeTimeMs > 0)
-    stats.push(formatDuration(activeTimeMs, { hideTrailingZeros: true }));
-  const tokensUsed = goal.tokensUsed ?? 0;
-  if (tokensUsed > 0) {
-    const used = formatTokenCount(tokensUsed);
-    stats.push(
-      goal.tokenBudget === undefined
-        ? `${used} tokens`
-        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
-    );
-  }
-  const reason =
-    (goal.status ?? 'active') !== 'active' || activity === 'verifying'
-      ? goal.lastReason?.trim()
-      : undefined;
-  // Checkpoint health, worded by core like the ink card's; transcript-view
-  // sanitizes the line when it renders it, so no cleaner is passed here.
-  const checkpointLine = goalCheckpointHealthLine(goal);
-  const checkpoint =
-    checkpointLine === undefined ? undefined : `Checkpoint: ${checkpointLine}`;
-  return {
-    state: 'card',
-    icon: lifecycle.icon,
-    color: lifecycle.color,
-    title: lifecycle.title,
-    subtitle: stats.length > 0 ? stats.join(' · ') : null,
-    objective: goal.objective ?? '',
-    reason,
-    ...(checkpoint ? { checkpoint } : {}),
-  };
-}
-
-/** Render-ready view of a legacy goal_status card (ink kind form). */
-export type LegacyGoalCardView =
-  | {
-      state: 'checking';
-      title: string;
-      condition: string;
-      judgeReason?: string;
-    }
-  | {
-      state: 'card';
-      icon: string;
-      color: GoalCardColor;
-      title: string;
-      subtitle: string | null;
-      condition: string;
-      lastCheck?: string;
-    }
-  | { state: 'hidden' };
-
-/** Computes the legacy goal card view from a goal_status item's fields,
- * pure so every kind is unit-testable. */
-export function describeLegacyGoalCard(
-  legacy: LiveGoalLegacyData,
-): LegacyGoalCardView {
-  const reason = legacy.lastReason?.trim();
-  if (legacy.kind === 'checking') {
-    return {
-      state: 'checking',
-      title: `Goal check${
-        legacy.iterations && legacy.iterations > 0
-          ? ` · turn ${legacy.iterations}`
-          : ''
-      } · not yet met`,
-      condition: legacy.condition,
-      judgeReason: reason,
-    };
-  }
-  const titleByKind: Record<
-    string,
-    { icon: string; color: GoalCardColor; title: string }
-  > = {
-    set: { icon: ICON.BULLSEYE, color: 'accent', title: 'Goal set' },
-    achieved: { icon: ICON.CHECK, color: 'success', title: 'Goal achieved' },
-    cleared: {
-      icon: ICON.CIRCLE_EMPTY,
-      color: 'secondary',
-      title: 'Goal cleared',
-    },
-    failed: {
-      icon: ICON.CROSS,
-      color: 'error',
-      title: 'Goal could not be achieved',
-    },
-    aborted: { icon: '!', color: 'warning', title: 'Goal aborted' },
-    paused: { icon: '!', color: 'warning', title: 'Goal paused' },
-  };
-  const card = titleByKind[legacy.kind];
-  if (!card) return { state: 'hidden' };
-  const stats: string[] = [];
-  if (legacy.iterations && legacy.iterations > 0) {
-    stats.push(
-      `${legacy.iterations} ${legacy.iterations === 1 ? 'turn' : 'turns'}`,
-    );
-  }
-  if (typeof legacy.durationMs === 'number') {
-    stats.push(formatDuration(legacy.durationMs, { hideTrailingZeros: true }));
-  }
-  const lastCheck =
-    legacy.kind === 'achieved' ||
-    legacy.kind === 'aborted' ||
-    legacy.kind === 'failed'
-      ? reason
-      : undefined;
-  return {
-    state: 'card',
-    icon: card.icon,
-    color: card.color,
-    title: card.title,
-    subtitle: stats.length > 0 ? stats.join(' · ') : null,
-    condition: legacy.condition,
-    lastCheck,
-  };
-}
+export {
+  describeGoalCard,
+  describeLegacyGoalCard,
+  type GoalCardColor,
+  type GoalCardView,
+  type LegacyGoalCardView,
+} from '../utils/goal-card-view.js';

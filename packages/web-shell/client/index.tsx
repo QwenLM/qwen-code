@@ -1,4 +1,6 @@
 import { type ReactNode } from 'react';
+import type { WebShellUrlNavigationOptions } from './navigation';
+export type { WebShellUrlNavigationOptions, WebShellPage } from './navigation';
 import {
   DaemonWorkspaceProvider,
   type DaemonProductSessionContext,
@@ -18,6 +20,12 @@ export * from './daemon-react-sdk';
 export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
+  /**
+   * Opt in to URL routing. Explicit initial session target props override the
+   * URL; later target prop changes replace it. Stop host history writes when
+   * enabled. Omit to keep host-owned navigation. basePath defaults to root.
+   */
+  urlNavigation?: WebShellUrlNavigationOptions;
   /** Connect browser notifications with optional branding and an initial preference (off by default). */
   browserNotifications?: WebShellBrowserNotificationsOptions;
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -104,6 +112,7 @@ export function WebShell(props: WebShellProps) {
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
   const {
     browserNotifications,
+    urlNavigation,
     baseUrl,
     token,
     sessionId,
@@ -120,6 +129,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
   const shell = (
     <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
       <WorkspaceSessionProvider
+        urlNavigation={urlNavigation}
         sessionId={sessionId}
         workspaceId={workspaceId}
         workspaceCwd={workspaceCwd}
@@ -244,7 +254,17 @@ export type {
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
+  WebShellFootnote,
+  WebShellSource,
+  WebShellSourceReference,
+  WebShellSourceIconResolver,
+  WebShellFootnoteIconResolver,
+  WebShellFootnotePreviewInfo,
+  WebShellFootnotePreviewHandle,
+  WebShellFootnotePreviewMount,
   WebShellAssistantMessageInfo,
+  WebShellAssistantTurnOutcome,
+  WebShellAssistantTurnSettledEvent,
   WebShellAssistantTurnFooterRenderInfo,
   ArtifactImageRenderer,
   WebShellArtifactCustomization,
@@ -261,6 +281,11 @@ export type {
   WebShellSessionArtifactsChangeReason,
   WebShellModelInfo,
   WebShellSkillInfo,
+  WebShellAssistantFeedbackInfo,
+  WebShellAssistantFeedbackOptions,
+  WebShellAssistantFeedbackRating,
+  WebShellAssistantFeedbackUserMessage,
+  AssistantFeedbackHandler,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
@@ -289,3 +314,9 @@ export type {
   EchartsRuntime,
   EchartsRuntimeLoader,
 } from './components/messages/MarkdownChartRenderer';
+
+export { WEB_SHELL_SETTING_ITEM_IDS } from './settings';
+export type {
+  WebShellSettingItemId,
+  WebShellSettingsOptions,
+} from './settings';

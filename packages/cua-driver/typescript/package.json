@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/cua-sdk",
-  "version": "0.20.6",
+  "version": "0.20.11",
   "description": "Typed CUA Driver SDK and Computer Use API for Node.js",
   "type": "module",
   "license": "MIT",
@@ -43,8 +43,6 @@
     "computer-use/index.d.ts",
     "computer-use/README.md",
     "computer-use/SKILL.md",
-    "computer-use/references/macos.md",
-    "computer-use/references/windows-linux.md",
     "scripts/install-native.mjs",
     "LICENSE.md",
     "NOTICE.md",

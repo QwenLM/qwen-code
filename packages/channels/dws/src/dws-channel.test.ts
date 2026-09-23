@@ -2453,7 +2453,10 @@ describe('DwsChannel', () => {
         groupHistoryLimit: 5,
         groups: {
           '*': { requireMention: false },
-          'conversation-shadowed': { dispatchMode: 'followup' },
+          'conversation-shadowed': {
+            dispatchMode: 'followup',
+            requireMention: true,
+          },
         },
       }),
       'filtered-group-history-dws',
@@ -2502,7 +2505,10 @@ describe('DwsChannel', () => {
         groupHistoryLimit: 5,
         groups: {
           '*': { requireMention: false },
-          'conversation-shadowed': { dispatchMode: 'followup' },
+          'conversation-shadowed': {
+            dispatchMode: 'followup',
+            requireMention: true,
+          },
         },
       }),
       'ambient-group-history-dws',
@@ -3079,6 +3085,52 @@ describe('DwsChannel', () => {
       commentKey,
       'the code is 42',
     );
+  });
+
+  it('keeps a document thread on the direct-message axis when groups set senders', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({
+        senderPolicy: 'open',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['someone-else'] },
+        },
+      }),
+    );
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-1',
+        documentMentionCard('doc-1'),
+      ),
+    );
+    const access = channel as unknown as {
+      gate: unknown;
+      senderGateFor(target: { isGroup: boolean; chatId: string }): unknown;
+      isAuthorizedForSharedSession(envelope: Envelope): boolean;
+    };
+    const author = (chatId: string): Envelope => ({
+      channelName: 'test-dws',
+      senderId: 'open-alice',
+      senderName: 'Alice',
+      chatId,
+      text: 'follow-up',
+      isGroup: true,
+      isMentioned: true,
+      isReplyToBot: false,
+    });
+
+    expect(access.senderGateFor({ isGroup: true, chatId: 'doc-1' })).toBe(
+      access.gate,
+    );
+    expect(access.isAuthorizedForSharedSession(author('doc-1'))).toBe(false);
+    // An ordinary group with the same config still follows `groups`.
+    expect(access.senderGateFor({ isGroup: true, chatId: 'group-1' })).not.toBe(
+      access.gate,
+    );
+    expect(access.isAuthorizedForSharedSession(author('group-1'))).toBe(false);
   });
 
   it('extracts a document request when CJK text precedes the mention', async () => {
@@ -4010,6 +4062,7 @@ describe('DwsChannel', () => {
         client,
         makeConfig({
           dispatchMode,
+          operators: ['open-alice'],
           ...(sourceLabel === 'ordinary group message'
             ? { groups: { '*': { requireMention: false } } }
             : {}),
@@ -4074,7 +4127,7 @@ describe('DwsChannel', () => {
     },
   );
 
-  it('matches ChannelBase exact-group dispatch precedence', async () => {
+  it('inherits wildcard dispatch mode through an empty exact-group config', async () => {
     const client = new FakeDwsClient();
     const { channel, bridge } = await readyPolicyChannel(
       client,
@@ -4110,12 +4163,13 @@ describe('DwsChannel', () => {
     );
 
     try {
-      await secondDelivery;
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds()).toContain('exact-second'),
+      );
       expect(bridge.prompt).toHaveBeenCalledOnce();
-      expect(channel.pendingMessageIds()).not.toContain('exact-second');
     } finally {
       releaseFirst('first response');
-      await firstDelivery;
+      await Promise.all([firstDelivery, secondDelivery]);
     }
 
     await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
@@ -4124,7 +4178,10 @@ describe('DwsChannel', () => {
 
   it('routes a slash command after the leading bot mention to /btw', async () => {
     const client = new FakeDwsClient();
-    const { bridge } = await readyPolicyChannel(client);
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ operators: ['open-alice'] }),
+    );
     const btw = vi.fn().mockResolvedValue({
       sessionId: 'session-1',
       answer: 'Today is September 3, 2026.',
@@ -4159,7 +4216,10 @@ describe('DwsChannel', () => {
 
   it('routes a bare slash command after the leading bot mention', async () => {
     const client = new FakeDwsClient();
-    const { bridge } = await readyPolicyChannel(client);
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ operators: ['open-alice'] }),
+    );
     bridge.btw = vi.fn();
 
     await client.emit(
@@ -4399,7 +4459,10 @@ describe('DwsChannel', () => {
 
   it('routes a slash command whose argument holds an email address', async () => {
     const client = new FakeDwsClient();
-    const { bridge } = await readyPolicyChannel(client);
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ operators: ['open-alice'] }),
+    );
     const btw = vi.fn().mockResolvedValue({
       sessionId: 'session-1',
       answer: 'queued',
@@ -5536,7 +5599,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const { channel, bridge } = await readyPolicyChannel(
       client,
-      makeConfig({ endReaction: '赞' }),
+      makeConfig({ endReaction: '赞', operators: ['open-alice'] }),
     );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
@@ -5572,7 +5635,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const { channel, bridge } = await readyPolicyChannel(
       client,
-      makeConfig({ endReaction: '赞' }),
+      makeConfig({ endReaction: '赞', operators: ['open-alice'] }),
     );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
@@ -5674,7 +5737,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(
       client,
-      makeConfig({ endReaction: '赞' }),
+      makeConfig({ endReaction: '赞', operators: ['open-alice'] }),
     );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
@@ -6773,15 +6836,16 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('requires both group and sender allowlists before dispatching', async () => {
+  it('requires both group and group member allowlists before dispatching', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(
       client,
       makeConfig({
         groupPolicy: 'allowlist',
-        groups: { 'cid-allowed': {} },
-        senderPolicy: 'allowlist',
-        allowedUsers: ['open-bob'],
+        groups: {
+          'cid-allowed': { senders: 'allowlist', allowedUsers: ['open-bob'] },
+        },
+        privatePolicy: 'disabled',
       }),
     );
 
@@ -8557,8 +8621,9 @@ describe('DwsChannel', () => {
       const first = await readyPolicyChannel(
         firstClient,
         makeConfig({
-          senderPolicy: 'allowlist',
-          allowedUsers: ['open-alice'],
+          groups: {
+            '*': { senders: 'allowlist', allowedUsers: ['open-alice'] },
+          },
         }),
         name,
       );
@@ -8573,7 +8638,9 @@ describe('DwsChannel', () => {
       const restartedClient = new FakeDwsClient();
       const restarted = await readyPolicyChannel(
         restartedClient,
-        makeConfig({ senderPolicy: 'allowlist', allowedUsers: [] }),
+        makeConfig({
+          groups: { '*': { senders: 'allowlist', allowedUsers: [] } },
+        }),
         name,
       );
       expect(restarted.channel.pendingImDeliveries()).toHaveLength(1);
@@ -8593,7 +8660,9 @@ describe('DwsChannel', () => {
       restarted.channel.disconnect();
       const final = await readyPolicyChannel(
         new FakeDwsClient(),
-        makeConfig({ senderPolicy: 'allowlist', allowedUsers: [] }),
+        makeConfig({
+          groups: { '*': { senders: 'allowlist', allowedUsers: [] } },
+        }),
         name,
       );
       expect(final.channel.pendingImDeliveries()).toEqual([]);
@@ -8603,7 +8672,7 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('keeps the sender-gate exemption for approved paired groups', async () => {
+  it('keeps private permissions independent of approved paired groups', async () => {
     const name = 'paired-group-delivery-dws';
     const config = makeConfig({
       groupPolicy: 'pairing',

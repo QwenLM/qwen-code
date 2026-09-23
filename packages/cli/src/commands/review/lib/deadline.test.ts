@@ -1354,6 +1354,27 @@ describe('parseDeadlineOption — the flag grammar', () => {
 });
 
 describe('captureDeadline — what a capture records, and whether the clock is explicit', () => {
+  it('prices the default wall by size — a fix-audit posture does not move it (#10136)', () => {
+    // The posture flips the topology and the round cap (lib/budget.ts), not
+    // the size the wall is keyed on: `sizeTier` never reads it.
+    const posture = {
+      since: 'a'.repeat(40),
+      effective: true,
+      posture: 'critical',
+      scope: { anchor: 'a'.repeat(40), deltaFiles: ['x.ts'], interaction: [] },
+    };
+    expect(
+      captureDeadline({}, undefined, {
+        srcDiffLines: 120,
+        diffLines: 400,
+        incremental: posture,
+      }).fields,
+    ).toEqual({
+      deadlineSeconds: DEFAULT_DEADLINE_SECONDS.small,
+      deadlineSource: 'default',
+    });
+  });
+
   const SMALL = { srcDiffLines: 100, diffLines: 100 };
   const LARGE = { srcDiffLines: 900, diffLines: 900 };
   const HUGE = { srcDiffLines: 5000, diffLines: 5000 };
@@ -2163,5 +2184,124 @@ describe('the gates read a plan-recorded wall, with the reserve the wall implies
     expect(verifyBudgetExhausted({}, NOW_MS, past.path)?.remainingSeconds).toBe(
       -30,
     );
+  });
+});
+
+describe('a gap between two admissions is charged twice — the tolerance the docs quote', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** A default plan for `tier` captured `elapsedSeconds` before now, with
+   * round stamps at the given offsets (seconds after capture). */
+  function planAt(
+    tier: 'small' | 'large' | 'huge',
+    elapsedSeconds: number,
+    stamps: Array<[number, number]>,
+  ): string {
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-gap-'));
+    dirs.push(dir);
+    const p = join(dir, 'plan.json');
+    const capturedMs = NOW_MS - elapsedSeconds * 1000;
+    writeFileSync(
+      p,
+      JSON.stringify({
+        deadlineSeconds: DEFAULT_DEADLINE_SECONDS[tier],
+        deadlineSource: 'default',
+      }),
+    );
+    backdatePlan(p, capturedMs);
+    for (const [round, offset] of stamps) {
+      stampRound(p, round, capturedMs + offset * 1000);
+    }
+    return p;
+  }
+
+  // The wall is elapsed time, pauses included, and the next round is priced
+  // at the costliest admission-to-admission span — so a gap spends the wall
+  // AND, while it is the costliest span, becomes the next round's price.
+  // Rounds 1 and 2 launch together (the convergence pair), so the pause an
+  // operator takes falls between the pair and round 3. With the pair
+  // admitted at capture, a gap g leaves W − g and the gate needs
+  // reserve + g: round 3 is refused once g passes (W − reserve) / 2. The
+  // user docs' Review Deadline table, DESIGN.md and the flag's help quote
+  // these figures as CEILINGS; the two cases after this pin why.
+  it.each([
+    ['small', 200],
+    ['large', 320],
+    ['huge', 440],
+  ] as const)(
+    'the %s default wall allows at most %i minutes of pause after a first audit pair launched at capture, and not a second more',
+    (tier, minutes) => {
+      const wall = DEFAULT_DEADLINE_SECONDS[tier];
+      const reserve = planReserveSeconds(wall);
+      // A third of every default wall exceeds the cap: 80 minutes on all three.
+      expect(reserve).toBe(DEFAULT_RESERVE_SECONDS);
+      const tolerated = (wall - reserve) / 2;
+      expect(tolerated).toBe(minutes * 60);
+
+      const ruling = (gap: number) => {
+        // The builder stamps the pair's two members seconds apart; the same
+        // instant here, so the figure is exact.
+        const p = planAt(tier, gap, [
+          [1, 0],
+          [2, 0],
+        ]);
+        const price = expectedAdmissionSeconds(p, 3, 1, {}, NOW_MS);
+        expect(price).toBe(gap);
+        return reverseAuditBudgetExhausted({}, price, NOW_MS, p);
+      };
+      expect(ruling(tolerated)).toBeNull();
+      expect(ruling(tolerated + 1)).toEqual({
+        remainingSeconds: wall - tolerated - 1,
+        reserveSeconds: reserve,
+        expectedRoundSeconds: tolerated + 1,
+      });
+    },
+  );
+
+  it('every minute before the pair launches takes half a minute off the ceiling', () => {
+    // The pair admitted 30 minutes after capture (Step 3's fan-out and its
+    // verification come first): a gap g from it leaves W − 1800 − g, so
+    // round 3 is refused once g passes (W − reserve − 1800) / 2 = 11 100 s,
+    // fifteen minutes under the quoted 3 h 20 min.
+    const ruling = (gap: number) => {
+      const p = planAt('small', 1800 + gap, [
+        [1, 1800],
+        [2, 1800],
+      ]);
+      const price = expectedAdmissionSeconds(p, 3, 1, {}, NOW_MS);
+      expect(price).toBe(gap);
+      return reverseAuditBudgetExhausted({}, price, NOW_MS, p);
+    };
+    expect(ruling(11_100)).toBeNull();
+    expect(ruling(11_101)).not.toBeNull();
+    expect(ruling(12_000)).not.toBeNull();
+  });
+
+  it('an earlier round that ran longer lowers a later gap’s tolerance below half — the gate prices the costliest span, not the newest', () => {
+    // The pair at capture, round 3 admitted 9 000 s later: 19 800 s were
+    // left at round 3's admission, 15 000 s of them above the reserve, so
+    // half is 7 500 s. Round 4 is priced at the 9 000 s span, not at the
+    // gap, so it is refused once W − 9 000 − g < reserve + 9 000, i.e. past
+    // g = 6 000 s — while a newest-span pricing would have admitted 7 500 s.
+    const ruling = (gap: number) => {
+      const p = planAt('small', 9000 + gap, [
+        [1, 0],
+        [2, 0],
+        [3, 9000],
+      ]);
+      const price = expectedAdmissionSeconds(p, 4, 1, {}, NOW_MS);
+      expect(price).toBe(9000);
+      return reverseAuditBudgetExhausted({}, price, NOW_MS, p);
+    };
+    expect(ruling(6000)).toBeNull();
+    expect(ruling(6001)).toEqual({
+      remainingSeconds: DEFAULT_DEADLINE_SECONDS.small - 9000 - 6001,
+      reserveSeconds: DEFAULT_RESERVE_SECONDS,
+      expectedRoundSeconds: 9000,
+    });
+    expect(ruling(7500)).not.toBeNull();
   });
 });

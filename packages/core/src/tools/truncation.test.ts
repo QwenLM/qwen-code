@@ -473,6 +473,37 @@ describe('truncateAndSaveToFile', () => {
 });
 
 describe('persistAndTruncateToolResult', () => {
+  it.each([false, true])(
+    'keeps container output in its shared store (fallback=%s)',
+    async (fallback) => {
+      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+      if (fallback)
+        vi.mocked(fs.writeFile).mockRejectedValueOnce(new Error('primary'));
+      const config = {
+        getExecutionEnvironment: () => ({ outputDirectory: '/shared-output' }),
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
+        getTruncateToolOutputThreshold: () => 100,
+        getTruncateToolOutputLines: () => 100,
+        storage: {
+          getToolResultsDir: () => '/host-private',
+          getProjectTempDir: () => '/host-fallback',
+        },
+      } as unknown as Config;
+      const result = await persistAndTruncateToolResult(
+        'container-output',
+        'glob',
+        'x'.repeat(10_000),
+        config,
+      );
+      expect(path.dirname(result.outputFile!)).toBe(
+        path.normalize('/shared-output'),
+      );
+      expect(result.content).not.toContain('/host-');
+    },
+  );
+
   it('returns and accounts for the fallback file after the primary write fails', async () => {
     const trackToolResultBytes = vi.fn();
     vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('primary'));
