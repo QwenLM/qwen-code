@@ -41,6 +41,61 @@ import {
   recordResume,
 } from './lib/run-ledger.js';
 
+// Lets a test pose as a volume whose 64-bit file ids exceed the JS
+// safe-integer range (NTFS — #12574). While armed, each DISTINCT file (by
+// real dev/ino) is assigned a sequential id on top of 2^60, so any two
+// distinct ids land in the SAME double-rounding bucket (double spacing at
+// 2^60 is 256) while staying exact as bigints. The pose is reported as a
+// bigint when the caller asks for `{ bigint: true }`, and as the rounded
+// double a number-backed `Stats` would carry — so a comparator that stats
+// without the flag sees two distinct files as one (fail-open), and the
+// guard under test only fires if it asked for the exact id.
+const bigInodeVolume = vi.hoisted(() => ({
+  armed: false,
+  ids: new Map<string, bigint>(),
+  next: 1n,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  // Forward the stat options through (precedent:
+  // review/lib/same-file.test.ts): production stats with `{ bigint: true }`,
+  // and a mock that dropped the options bag would hand back a number-backed
+  // `Stats` — posing the unsafe-rounding case even when the code under test
+  // asked for the exact id, and letting the bigint cases below pass without
+  // exercising the path they name.
+  const statSync = ((filePath: string, options?: { bigint?: boolean }) => {
+    const bigint = options?.bigint === true;
+    const stats = actual.statSync(String(filePath), { bigint });
+    if (bigInodeVolume.armed) {
+      const real = actual.statSync(String(filePath), { bigint: true });
+      const key = `${real.dev}:${real.ino}`;
+      let pose = bigInodeVolume.ids.get(key);
+      if (pose === undefined) {
+        pose = 2n ** 60n + bigInodeVolume.next++;
+        bigInodeVolume.ids.set(key, pose);
+      }
+      (stats as unknown as { ino: number | bigint }).ino = bigint
+        ? pose
+        : Number(pose);
+    }
+    return stats;
+  }) as typeof actual.statSync;
+  return { ...actual, statSync, default: { ...actual, statSync } };
+});
+
+function armBigInodeVolume(): void {
+  bigInodeVolume.armed = true;
+  bigInodeVolume.ids.clear();
+  bigInodeVolume.next = 1n;
+}
+
+function disarmBigInodeVolume(): void {
+  bigInodeVolume.armed = false;
+  bigInodeVolume.ids.clear();
+  bigInodeVolume.next = 1n;
+}
+
 const tempRoots: string[] = [];
 
 function temp(): string {
@@ -1382,6 +1437,48 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
     }
   });
 
+  it('aborts on a rename-replacement whose inode shares a double-rounding bucket (#12574)', () => {
+    // On a volume whose file ids exceed 2^53 (NTFS), a number-backed
+    // `Stats.ino` rounds at the JS boundary: 2^60+1 and 2^60+2 are the SAME
+    // double. The compare-and-refuse guard then sees a replacement as the
+    // same file, and this run writes contents derived from the OLD plan
+    // under the NEW run's epoch — the fail-open the guard exists to
+    // prevent. The pose assigns each distinct file a sequential id above
+    // 2^60; only a `{ bigint: true }` comparison keeps them apart.
+    armBigInodeVolume();
+    try {
+      const root = mkdtempSync(join(tmpdir(), 'repo-context-bucket-'));
+      try {
+        const worktree = join(root, 'wt');
+        mkdirSync(worktree, { recursive: true });
+        const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+        const before = statSync(planPath);
+        const racer: RepositoryContextProvider = {
+          provide() {
+            // Replace the FILE (new inode in the same double bucket), then
+            // put the old mtime back — the mtime disjunct stays silent.
+            const tmp = join(root, 'swap.json');
+            writeFileSync(tmp, readFileSync(planPath, 'utf8'));
+            rmSync(planPath);
+            renameSync(tmp, planPath);
+            utimesSync(planPath, before.atime, before.mtime);
+            return null;
+          },
+        };
+        expect(() =>
+          runRepoContext(
+            { plan: planPath, worktree, out: join(root, 'ctx.json') },
+            [racer],
+          ),
+        ).toThrow(/changed while repository context was being computed/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    } finally {
+      disarmBigInodeVolume();
+    }
+  });
+
   it('aborts when the plan changed while providers were running', () => {
     // The plan path is shared per PR and providers take real time: a
     // concurrent capture can replace the file mid-computation, and this run
@@ -1492,11 +1589,11 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
     // under the old epoch — never the new plan under a new one. The
     // separate write-then-restore pair had exactly that instant, and the
     // skip-when-identical retry guard made it permanent.
-    const anchor = statSync(plan);
+    const anchor = statSync(plan, { bigint: true });
     commitPlanPreservingEpoch(plan, '{"new":true}', anchor);
     expect(readFileSync(plan, 'utf8')).toBe('{"new":true}');
     expect(
-      Math.abs(statSync(plan).mtimeMs - anchor.mtimeMs),
+      Math.abs(statSync(plan).mtimeMs - Number(anchor.mtimeMs)),
     ).toBeLessThanOrEqual(1);
     expect(readdirSync(root).filter((n) => n.includes('enrich-tmp'))).toEqual(
       [],
@@ -1508,7 +1605,7 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
     // concurrent capture landing inside it was silently overwritten with
     // stale derived contents under the OTHER run's epoch. Identity is
     // re-checked against the anchor immediately before the rename.
-    const anchor = statSync(plan);
+    const anchor = statSync(plan, { bigint: true });
     writeFileSync(plan, '{"captured":"by-another-run"}');
     expect(() =>
       commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
@@ -1520,7 +1617,7 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
   });
 
   it('refuses when the inode moved even if the mtime was forged back', () => {
-    const anchor = statSync(plan);
+    const anchor = statSync(plan, { bigint: true });
     // The imposter is created WHILE the original still exists, then renamed
     // over it — so its inode is guaranteed distinct. A delete-then-create
     // fixture is not: ext4 recycles a just-freed inode number immediately,
@@ -1530,9 +1627,40 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
     writeFileSync(imposter, '{"captured":"by-another-run"}');
     renameSync(imposter, plan);
     // Forge the anchor's mtime onto the imposter: the inode still differs.
-    utimesSync(plan, anchor.atimeMs / 1000, anchor.mtimeMs / 1000);
+    utimesSync(
+      plan,
+      Number(anchor.atimeMs) / 1000,
+      Number(anchor.mtimeMs) / 1000,
+    );
     expect(() =>
       commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
     ).toThrow(/changed while repository context was being committed/);
+  });
+
+  it('refuses when the replacement inode shares a double-rounding bucket (#12574)', () => {
+    // Same fail-open, second guard: `now.ino !== anchor.ino` compared two
+    // doubles, so a capture whose file id rounds into the anchor's bucket
+    // passed the fence and `renameSync` overwrote another run's capture
+    // with stale contents.
+    armBigInodeVolume();
+    try {
+      const anchor = statSync(plan, { bigint: true });
+      const imposter = join(root, 'imposter.json');
+      writeFileSync(imposter, '{"captured":"by-another-run"}');
+      renameSync(imposter, plan);
+      // Forge the anchor's mtime onto the imposter: only the inode
+      // disjunct can catch the swap, and both ids are in one bucket.
+      utimesSync(
+        plan,
+        Number(anchor.atimeMs) / 1000,
+        Number(anchor.mtimeMs) / 1000,
+      );
+      expect(() =>
+        commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
+      ).toThrow(/changed while repository context was being committed/);
+      expect(readFileSync(plan, 'utf8')).toBe('{"captured":"by-another-run"}');
+    } finally {
+      disarmBigInodeVolume();
+    }
   });
 });
