@@ -362,11 +362,16 @@ async function claimOne(
       : {}),
     ...(checkpoint.sourceRunId ? { sourceRunId: checkpoint.sourceRunId } : {}),
     ...(checkpoint.startMode ? { startMode: checkpoint.startMode } : {}),
+    // Every checkpoint format has recorded the run's args, so one carrying
+    // neither them nor `argsOmitted` is a run that had none -- which a
+    // checkpoint written before `argsRecorded` existed could not say for
+    // itself. Without this the claimed run reads as "args unknown", and a
+    // retry of a run that never had args is refused for want of them.
     ...(checkpoint.argsOmitted
       ? { argsOmitted: true as const }
       : {
           ...(checkpoint.args !== undefined ? { args: checkpoint.args } : {}),
-          ...(checkpoint.argsRecorded ? { argsRecorded: true as const } : {}),
+          argsRecorded: true as const,
         }),
     meta: checkpoint.meta,
     status: 'failed',

@@ -7,7 +7,9 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { keepManifestLayout } from './keep-manifest-layout.js';
 import { INDEPENDENT_PACKAGES } from './release-packages.mjs';
+import { getWorkspacePackageJsonPaths } from './workspaces.js';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -34,6 +36,19 @@ if (!versionType) {
   process.exit(1);
 }
 
+// `pnpm version` re-sorts every manifest it rewrites; snapshot them so the
+// bump below can be reduced to a version change (see keep-manifest-layout.js).
+// Enumerate with the workspace globs rather than `git ls-files`: like the
+// `--no-git-checks` flags below, this script must not require a git work tree.
+const { workspaces } = readJson('package.json');
+const snapshotPaths = [
+  'package.json',
+  ...getWorkspacePackageJsonPaths(process.cwd(), workspaces),
+];
+const originalManifests = new Map(
+  snapshotPaths.map((file) => [file, readFileSync(file, 'utf-8')]),
+);
+
 // Resolve patch/minor/etc. once, then align all release workspaces to it.
 run(
   `corepack pnpm version ${versionType} --no-git-tag-version --allow-same-version --no-git-checks`,
@@ -41,8 +56,15 @@ run(
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
 run(
-  `corepack pnpm -r ${INDEPENDENT_PACKAGES.map((name) => `--filter='!${name}'`).join(' ')} version ${newVersion} --no-git-tag-version --allow-same-version --no-git-checks`,
+  `corepack pnpm -r ${INDEPENDENT_PACKAGES.map((name) => `--filter="!${name}"`).join(' ')} version ${newVersion} --no-git-tag-version --allow-same-version --no-git-checks`,
 );
+
+for (const [file, original] of originalManifests) {
+  const updated = readFileSync(file, 'utf-8');
+  if (updated !== original) {
+    writeFileSync(file, keepManifestLayout(original, updated));
+  }
+}
 
 // 5. Keep the published Mem0 Extension manifest aligned with its package.
 const mem0ManifestPath = resolve(

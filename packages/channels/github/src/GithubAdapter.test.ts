@@ -1061,6 +1061,36 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
+    it('normalizes allowedGroupUsers to lowercase for the group sender gate', async () => {
+      const config = makeConfig({
+        groupSenderPolicy: 'allowlist',
+        allowedGroupUsers: ['Alice'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+
+      const groupGate = (
+        channel as unknown as {
+          groupSenderGate?: { isAllowed: (senderId: string) => boolean };
+        }
+      ).groupSenderGate;
+      expect(groupGate?.isAllowed('alice')).toBe(true);
+      expect(groupGate?.isAllowed('bob')).toBe(false);
+      expect(config.allowedGroupUsers).toEqual(['alice']);
+      channel.disconnect();
+    });
+
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+
+      expect(config.operators).toEqual(['alice']);
+      channel.disconnect();
+    });
+
     it('rejects an allowlist containing only the authenticated GitHub account', async () => {
       const config = makeConfig({
         senderPolicy: 'allowlist',

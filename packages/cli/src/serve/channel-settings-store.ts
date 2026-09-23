@@ -144,6 +144,7 @@ function assertSharedField(
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
+    groupSenderPolicy: new Set(['inherit', 'open', 'allowlist']),
     sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
   };
@@ -159,7 +160,11 @@ function assertSharedField(
     }
     return true;
   }
-  if (key === 'allowedUsers') {
+  if (
+    key === 'allowedUsers' ||
+    key === 'allowedGroupUsers' ||
+    key === 'operators'
+  ) {
     if (
       !Array.isArray(value) ||
       value.some((item) => typeof item !== 'string')

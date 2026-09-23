@@ -99,6 +99,16 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     );
     this.config.allowedUsers = allowed;
     this.gate.replaceAllowedUsers(allowed);
+    if (this.config.allowedGroupUsers) {
+      const allowedGroup = this.config.allowedGroupUsers.map((u) =>
+        u.toLowerCase(),
+      );
+      this.config.allowedGroupUsers = allowedGroup;
+      this.groupSenderGate?.replaceAllowedUsers(allowedGroup);
+    }
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
 
     this.startPollLoop();
   }

@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/web-templates",
   "private": true,
-  "version": "0.24.2",
+  "version": "0.24.4",
   "description": "Web templates bundled as embeddable JS/CSS strings",
   "repository": {
     "type": "git",
@@ -23,7 +23,6 @@
   "files": [
     "dist"
   ],
-  "dependencies": {},
   "devDependencies": {
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@qwen-code/web-shell": "file:../web-shell",

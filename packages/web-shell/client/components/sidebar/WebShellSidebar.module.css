@@ -6,7 +6,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: calc(12px + var(--web-shell-desktop-titlebar-height, 0px)) 12px 12px;
   overflow: hidden;
   background: var(--sidebar-background);
   border-right: 1px solid var(--sidebar-border);
