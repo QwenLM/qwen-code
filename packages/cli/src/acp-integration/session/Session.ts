@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
@@ -100,6 +101,9 @@ import {
   Kind,
   ToolNames,
   ToolErrorType,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
   firePermissionRequestHook,
@@ -272,6 +276,7 @@ import {
   type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -349,10 +354,6 @@ import {
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../../ui/utils/restoreGoal.js';
-import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
 } from '../../ui/commands/types.js';
@@ -411,11 +412,19 @@ import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
-import { MessageEmitter } from './emitters/MessageEmitter.js';
-import type { HistoryItemGoalStatus } from '../../ui/types.js';
+import {
+  buildGoalStatusUpdate,
+  MessageEmitter,
+} from './emitters/MessageEmitter.js';
+import type {
+  ContextCompressionMeta,
+  ContextCompressionNotice,
+} from '../../ui/types.js';
 import {
   goalPublicationKey,
+  legacyGoalSupersession,
   renderPreparedGoalUpdate,
+  unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
@@ -495,6 +504,27 @@ function readDaemonAttachmentReferences(
     });
   }
   return references;
+}
+const MAX_DAEMON_INPUT_ANNOTATIONS = 256;
+function readDaemonInputAnnotations(
+  value: unknown,
+): Array<Record<string, unknown>> | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_DAEMON_INPUT_ANNOTATIONS
+  ) {
+    return undefined;
+  }
+  // Elements are persisted verbatim and replayed into every later load;
+  // drop non-object entries so one malformed element cannot poison renders.
+  // An all-invalid array must collapse to `undefined`, not `[]` — a truthy
+  // empty array would still force a `systemPayload` below.
+  const annotations = (value as unknown[]).filter(
+    (item): item is Record<string, unknown> =>
+      !!item && typeof item === 'object' && !Array.isArray(item),
+  );
+  return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
@@ -717,6 +747,7 @@ type PendingToolResultRecord = {
   sequence: number;
   callId: string;
   toolName: string;
+  toolArgs: Record<string, unknown>;
   responseParts: Part[];
   persistedOutputFiles?: string[];
   policyToolName?: string;
@@ -733,7 +764,7 @@ type PendingToolResultRecord = {
 
 type QueueToolResultRecord = (
   fc: FunctionCall,
-  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
+  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence' | 'toolArgs'>,
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -1830,11 +1861,12 @@ function collectMcpServerMentionRefs(
  * every call fails with JSON-RPC -32601.
  *
  * Applies the same registration-status check as that gate. Disabled tools stay
- * out of the registry; permission-deferred tools stay behind ToolSearch instead
- * of being revealed by this late registration path. Being session-scoped, the
- * tool is absent from the workspace tools inventory the daemon serves from its
- * bootstrap registry — that panel lists workspace tools, and a daemon-only tool
- * that exists per session is deliberately not one.
+ * out of the registry; permission-deferred tools stay behind ToolSearch +
+ * ToolCall instead of being revealed by this late registration path. Being
+ * session-scoped, the tool is absent from the workspace tools inventory the
+ * daemon serves from its bootstrap registry — that panel lists workspace
+ * tools, and a daemon-only tool that exists per session is deliberately not
+ * one.
  */
 export async function registerCreateSubSessionTool(
   config: Config,
@@ -2489,21 +2521,20 @@ export class Session implements SessionContext {
    *
    * Goal recovery runs from the `Config` constructor, long before this
    * Session exists, so `restore()`'s correction broadcast reaches zero
-   * listeners — and replay streams the pre-migration records, emitting the
-   * legacy `set` card. Clients that derive the live goal from goal cards
-   * (both web-shell and the daemon provider do) are therefore left showing a
-   * goal as running when the migrated goal is `paused` and nothing drives
-   * it; only a second reload self-corrected. Republishing here puts the
-   * authoritative state *after* the replayed card, which is the ordering
-   * that matters. `#publishGoalState` de-duplicates on `(cause, snapshot)`,
-   * so this is a no-op when the subscription already delivered it.
+   * listeners, and replay streams the transcript's records as they were
+   * written. Republishing here puts the authoritative state *after* the
+   * replayed cards, which is the ordering that matters. `#publishGoalState`
+   * de-duplicates on `(cause, snapshot)`, so this is a no-op when the
+   * subscription already delivered it.
    *
-   * When recovery failed outright — a malformed or future-schema
-   * `goal_state` record makes `recoverGoalFromRecords` return `unsupported`
-   * — there is no state to publish and no in-session command can correct the
-   * stream, because a degraded `/goal` answers without a cause. That case
-   * gets the same trailing `cleared` card the replay-time
-   * `supersedeUnrestorableGoal` used to emit.
+   * Two cases publish a trailing `cleared` card instead of state. When
+   * recovery failed outright (a malformed or future-schema `goal_state`
+   * record makes `recoverGoalFromRecords` return `unsupported`) there is no
+   * state to publish and no in-session command can correct the stream,
+   * because a degraded `/goal` answers without a cause. When nothing was
+   * recovered and the replay ended on a running card a build before #7895
+   * wrote, the card would otherwise be the last word on a Goal nothing
+   * drives; see `legacyGoalSupersession` for when that applies.
    */
   async publishRecoveredGoalState(
     replayedRecords?: readonly ChatRecord[],
@@ -2518,9 +2549,44 @@ export class Session implements SessionContext {
       return;
     }
     const cause = runtime.getRecoveryCause?.();
-    // Nothing was recovered, so the replay already told the whole story.
-    if (!cause) return;
+    if (!cause) {
+      const status = legacyGoalSupersession(
+        runtime.getSnapshot(),
+        replayedRecords,
+      );
+      if (status) await this.messageEmitter.emitGoalStatus(status);
+      return;
+    }
     await this.#queueGoalState(runtime.getSnapshot(), cause);
+  }
+
+  /**
+   * The trailing `cleared` card a live replay appends when the page ends on
+   * a running card a build before #7895 wrote and this session drives no
+   * Goal. Empty otherwise; see `legacyGoalSupersession`.
+   *
+   * Reads the runtime as it is rather than waiting for it: a live session's
+   * Goal is already published, and a restore still pending behind the
+   * session writer cannot recover anything from a page that ends on a
+   * legacy card.
+   */
+  renderLegacyGoalSupersession(
+    replayedRecords: readonly ChatRecord[],
+  ): SessionUpdate[] {
+    if (this.disposed || this.closing) return [];
+    let runtime;
+    try {
+      runtime = this.config.getGoalRuntime();
+    } catch (error) {
+      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+      return [];
+    }
+    if (runtime.getRecoveryCause?.()) return [];
+    const status = legacyGoalSupersession(
+      runtime.getSnapshot(),
+      replayedRecords,
+    );
+    return status ? [buildGoalStatusUpdate(status)] : [];
   }
 
   async renderRecoveredGoalUpdates(
@@ -2566,8 +2632,8 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Emit a trailing `cleared` card for an active legacy goal the runtime
-   * refused to recover.
+   * Emit a trailing `cleared` card for an active goal whose saved state the
+   * runtime could not read.
    *
    * Emitted, not recorded: the transcript keeps its `set` card, so a later
    * resume that can recover the goal still finds it.
@@ -2575,32 +2641,9 @@ export class Session implements SessionContext {
   async #supersedeUnrestorableGoal(
     replayedRecords?: readonly ChatRecord[],
   ): Promise<void> {
-    const status = this.#unrestorableGoalStatus(replayedRecords);
+    const status = unrestorableGoalStatus(replayedRecords);
     if (!status) return;
     await this.messageEmitter.emitGoalStatus(status);
-  }
-
-  /**
-   * The `cleared` card for an active legacy goal the runtime refused to
-   * recover, or `undefined` when there is nothing to supersede. Shared by the
-   * streaming and rendering recovery paths so they cannot drift.
-   */
-  #unrestorableGoalStatus(
-    replayedRecords?: readonly ChatRecord[],
-  ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
-    if (!replayedRecords?.length) return undefined;
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(replayedRecords),
-    );
-    if (!active) return undefined;
-    return {
-      kind: 'cleared',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-      lastReason:
-        'Goal not restored: its saved state could not be read, so this session is not driving it.',
-    };
   }
 
   async #publishGoalState(
@@ -5509,13 +5552,28 @@ export class Session implements SessionContext {
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
     const recoveryPlan = this.#getRecoveryPlan(false);
-    // A prompt (or an earlier continuation) is still in flight: there is no
-    // settled turn to continue. Reject rather than abort the live turn.
+    // A turn is still in flight, so there is no settled turn to continue.
+    // `pendingPrompt` alone misses the automatic turns: notification and cron
+    // turns run their own streaming loop under `notificationAbortController` /
+    // `cronAbortController` and never install it. Accepting there is not
+    // neutral — the bridge drives an accepted continuation through normal
+    // prompt admission, which aborts both controllers, so the recovery button
+    // would kill a healthy running turn.
+    //
+    // `closing` is checked alongside rather than by adopting `isTurnIdle()`:
+    // no `#hasActiveTurn()` member is set while a close gate is held
+    // (`beginClose()` / `dispose()`), yet `assertCanStartTurn()` rejects on it
+    // first — so accepting there is the same round trip this guard exists to
+    // prevent, just failing later. `isTurnIdle()` would also require
+    // `channelTaskCaptures.size === 0`, which `assertCanStartTurn()` does NOT
+    // reject, so taking it wholesale would suppress recovery while a channel
+    // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
       canContinue:
         recoveryPlan?.canContinue === true &&
-        !(this.pendingPrompt && !this.pendingPrompt.signal.aborted),
+        !this.closing &&
+        !this.#hasActiveTurn(),
     };
   }
 
@@ -5537,6 +5595,34 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
     const recovery = this.getRecoveryStatus();
+    if (!recovery.canContinue && recovery.kind !== 'clean') {
+      // Name the veto that fired. `canContinue` collapses `closing` plus the
+      // ten `#hasActiveTurn()` members into one boolean and the only UI
+      // consumer renders nothing for it, so without this a leaked flag —
+      // recovery disabled for the rest of the session — is indistinguishable
+      // from a healthy automatic turn in flight. Logged here rather than in
+      // `getRecoveryStatus()` to stay off the per-poll
+      // `buildSessionContextStatus` path, and gated on a non-clean kind so
+      // the ordinary "nothing to continue" no-op stays quiet.
+      debugLogger.debug('[Session] recovery canContinue vetoed', {
+        kind: recovery.kind,
+        closing: this.closing,
+        pendingPrompt: Boolean(this.pendingPrompt),
+        pendingPromptCompletion: Boolean(this.pendingPromptCompletion),
+        historyMutation: this.historyMutationActive,
+        notification: Boolean(
+          this.notificationProcessing ||
+            this.notificationAbortController ||
+            this.notificationCompletion,
+        ),
+        cron: Boolean(
+          this.cronProcessing ||
+            this.cronAbortController ||
+            this.cronCompletion,
+        ),
+        goal: this.goalProcessing,
+      });
+    }
     return {
       accepted: recovery.canContinue,
       interruption:
@@ -5860,6 +5946,9 @@ export class Session implements SessionContext {
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
+            const inputAnnotations = readDaemonInputAnnotations(
+              promptMetadata?.[DAEMON_INPUT_ANNOTATIONS_META_KEY],
+            );
             const declaredSubmission =
               promptMetadata?.[DAEMON_SUBMITTED_PROMPT_META_KEY];
             const submittedPrompt =
@@ -6019,11 +6108,13 @@ export class Session implements SessionContext {
                 promptText,
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
+                  inputAnnotations ||
                   attachmentReferences ||
                   resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
+                      ...(inputAnnotations ? { inputAnnotations } : {}),
                       ...(attachmentReferences ? { attachmentReferences } : {}),
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
@@ -6112,8 +6203,12 @@ export class Session implements SessionContext {
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined
-                    ? { displayText: promptDisplayText, hookContext: '' }
+                  promptDisplayText !== undefined || inputAnnotations
+                    ? {
+                        displayText: promptDisplayText ?? promptText,
+                        hookContext: '',
+                        ...(inputAnnotations ? { inputAnnotations } : {}),
+                      }
                     : undefined,
                   daemonPromptId,
                 );
@@ -12111,6 +12206,7 @@ export class Session implements SessionContext {
           : pendingToolResultRecords;
       target.push({
         ...record,
+        toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
       });
@@ -12146,7 +12242,10 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        const goalProvenance = ambientGoalToolResultProvenance(record.toolName);
+        const goalProvenance = ambientGoalToolResultProvenance(
+          record.toolName,
+          record.toolArgs,
+        );
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
           {
@@ -12850,6 +12949,7 @@ export class Session implements SessionContext {
     finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
+    const modelFacingToolName = fc.name ?? 'unknown_tool';
     let args = (fc.args ?? {}) as Record<string, unknown>;
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
@@ -12917,6 +13017,15 @@ export class Session implements SessionContext {
       errorType: ToolErrorType | undefined,
     ) => {
       const durationMs = Date.now() - startTime;
+      const modelFacingError =
+        status === 'cancelled' && modelFacingToolName === ToolNames.TOOL_CALL
+          ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${error.message}`
+          : status === 'error' &&
+              modelFacingToolName === ToolNames.TOOL_CALL &&
+              toolName === ToolNames.TOOL_CALL &&
+              !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
+            ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
+            : error.message;
       try {
         logToolCall(this.config, {
           'event.name': 'tool_call',
@@ -12955,8 +13064,8 @@ export class Session implements SessionContext {
         {
           functionResponse: {
             id: callId,
-            name: toolName,
-            response: { error: error.message },
+            name: modelFacingToolName,
+            response: { error: modelFacingError },
           },
         },
       ];
@@ -12970,6 +13079,7 @@ export class Session implements SessionContext {
         errorType: ToolErrorType | undefined;
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
+        invalidToolParamsName?: string;
         stopAfterPermissionCancel?: boolean;
         skipPersistence?: boolean;
         settledMetadata?: {
@@ -13062,7 +13172,7 @@ export class Session implements SessionContext {
           this.config,
           promptId,
           toolLoopState,
-          toolName,
+          opts.invalidToolParamsName ?? toolName,
           error,
         );
       return {
@@ -13109,7 +13219,7 @@ export class Session implements SessionContext {
       );
     }
 
-    const toolName = fc.name;
+    let toolName = fc.name;
     if (
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
       !isCodeModeToolCallAllowed(toolName, codeModeContext?.source ?? 'model')
@@ -13127,7 +13237,63 @@ export class Session implements SessionContext {
       );
     }
     const toolRegistry = this.config.getToolRegistry();
-    const tool = toolRegistry.getTool(toolName);
+    const pm = this.config.getPermissionManager?.();
+    let tool = toolRegistry.getTool(toolName);
+
+    if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
+      let bridgeEnabled = true;
+      try {
+        bridgeEnabled = !pm || (await pm.isToolEnabled(ToolNames.TOOL_CALL));
+      } catch (error) {
+        const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
+        if (enablementCancellation) return enablementCancellation;
+        return earlyErrorResponse(
+          error instanceof Error ? error : new Error(String(error)),
+          toolName,
+          {
+            status: 'error',
+            errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+            executionStatus: 'not_started',
+          },
+        );
+      }
+      const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
+      if (enablementCancellation) return enablementCancellation;
+      if (!bridgeEnabled) {
+        return earlyErrorResponse(
+          new Error(`Tool "${toolName}" is disabled.`),
+          toolName,
+          {
+            status: 'error',
+            errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+          },
+        );
+      }
+      const resolution = await resolveDeferredToolCall(toolRegistry, args, {
+        // Thread the real configured depth so the ACP frontend applies the
+        // same depth-gated AgentTool re-admission as the terminal scheduler
+        // and tool_search — the exclusion contract must be consistent across
+        // all three frontends (wenshao triage follow-up). Omitting it would
+        // fail closed, not open, but the corner case should agree everywhere.
+        maxSubagentDepth: this.config.getMaxSubagentDepth(),
+      });
+      const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
+      if (bridgeCancellation) return bridgeCancellation;
+      if ('error' in resolution) {
+        return earlyErrorResponse(resolution.error, toolName, {
+          status: 'error',
+          errorType: resolution.errorType,
+          executionStatus: 'not_started',
+          recordInvalidToolParams:
+            resolution.errorType === ToolErrorType.INVALID_TOOL_PARAMS,
+          invalidToolParamsName: resolution.targetName,
+        });
+      }
+      toolName = resolution.tool.name;
+      args = resolution.arguments;
+      tool = resolution.tool;
+    }
 
     if (!tool) {
       const optInToolMessage = await getOptInToolNotFoundMessage(
@@ -13208,7 +13374,6 @@ export class Session implements SessionContext {
           tool as LiveTaskTool,
         );
         const isTrustedLiveSpeakToUserTool = tool === this.liveSpeakToUserTool;
-        const pm = this.config.getPermissionManager?.();
         const isTrustedLiveTool =
           isTrustedLiveScreenContextTool ||
           isTrustedLiveTaskTool ||
@@ -13404,6 +13569,7 @@ export class Session implements SessionContext {
                   invocation,
                   policyToolName,
                   toolParams,
+                  activeToolAbortSignal,
                 );
           const permissionFlowCancellation =
             cancelBeforeExecutionIfAborted(toolName);
@@ -14776,11 +14942,11 @@ export class Session implements SessionContext {
               ],
               values: () => [
                 ...toolResultPartDiagnosticValues(toolResult.llmContent),
-                ...(typeof toolResult.returnDisplay === 'string'
+                ...(shellResultText(toolResult.returnDisplay) !== undefined
                   ? [
                       {
                         representation: 'display' as const,
-                        value: toolResult.returnDisplay,
+                        value: shellResultText(toolResult.returnDisplay)!,
                       },
                     ]
                   : []),
@@ -14810,20 +14976,20 @@ export class Session implements SessionContext {
           // Create response parts first (needed for emitResult and recordToolResult)
           let responseParts = aborted
             ? convertToFunctionErrorResponse(
-                toolName,
+                modelFacingToolName,
                 callId,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
               )
             : toolResult.error
               ? convertToFunctionErrorResponse(
-                  toolName,
+                  modelFacingToolName,
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
                 )
               : convertToFunctionResponse(
-                  toolName,
+                  modelFacingToolName,
                   callId,
                   toolResult.llmContent,
                 );
@@ -15046,7 +15212,7 @@ export class Session implements SessionContext {
           ) {
             status = 'cancelled';
             responseParts = convertToFunctionErrorResponse(
-              toolName,
+              modelFacingToolName,
               callId,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
@@ -15364,7 +15530,11 @@ export class Session implements SessionContext {
         // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
         // so Zed's Markdown renderer preserves the line structure.
         const rendered = (result.content || '').replace(/\n/g, '  \n');
-        await this.messageEmitter.emitSlashCommandOutput(rendered);
+        await this.messageEmitter.emitSlashCommandOutput(
+          rendered,
+          undefined,
+          result.artifacts,
+        );
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
@@ -15375,7 +15545,13 @@ export class Session implements SessionContext {
             .map((b) => (b.type === 'text' ? b.text : ''))
             .join(' '),
           outputHistoryItems: [
-            { type: 'assistant', text: result.content || '' },
+            {
+              type: 'assistant',
+              text: result.content || '',
+              ...(result.artifacts?.length
+                ? { sessionArtifacts: result.artifacts }
+                : {}),
+            },
           ],
         });
         return null;
@@ -15385,27 +15561,81 @@ export class Session implements SessionContext {
         // Command returns multiple messages via async generator (ACP-preferred)
         // Stream all messages to the client as agent message chunks.
         const chunks: string[] = [];
+        // The invocation note rides its own `_meta` key: the reducer folds this
+        // turn's text frames into one block and spreads `_meta` key by key, so a
+        // note sharing `contextCompression` would be overwritten by the result
+        // that follows. Its own key survives the fold, and a client that reads it
+        // renders the note as a row beside the compression it belongs to.
+        const standalone: Array<{
+          text: string;
+          contextCompressionNotice: ContextCompressionNotice;
+        }> = [];
+        let contextCompression: ContextCompressionMeta | undefined;
         for await (const msg of result.messages) {
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          const content = msg.content || '';
+          const notice = msg.contextCompressionNotice;
           await this.messageEmitter.emitSlashCommandOutput(
-            (msg.content || '').replace(/\n/g, '  \n'),
+            content.replace(/\n/g, '  \n'),
+            undefined,
+            undefined,
+            notice
+              ? { contextCompressionNotice: notice }
+              : msg.contextCompression
+                ? { contextCompression: msg.contextCompression }
+                : undefined,
           );
-          chunks.push(msg.content || '');
+          if (notice) {
+            // Recorded with a trailing newline so a replay's folded block still
+            // reads as two lines.
+            standalone.push({
+              text: `${content}\n`,
+              contextCompressionNotice: notice,
+            });
+            continue;
+          }
+          chunks.push(content);
+          // Both terminal phases are recorded: replay then rebuilds the row the
+          // live turn showed instead of falling back to the English sentence.
+          if (
+            msg.contextCompression?.phase === 'done' ||
+            msg.contextCompression?.phase === 'noop'
+          ) {
+            contextCompression = msg.contextCompression;
+          }
         }
         // Write a system/slash_command record for history replay (same reason as
         // 'message' case — system records are invisible to model history).
-        if (chunks.length > 0) {
+        // Standalone frames are recorded as their own items so replay rebuilds
+        // the same rows the live turn showed.
+        const outputHistoryItems: Array<Record<string, unknown>> = [
+          ...standalone.map((frame) => ({
+            type: 'assistant',
+            text: frame.text,
+            contextCompressionNotice: frame.contextCompressionNotice,
+          })),
+          ...(chunks.length > 0
+            ? [
+                {
+                  type: 'assistant',
+                  text: chunks.join('\n'),
+                  // Replayed alongside the joined text so a restarted session
+                  // re-renders the same localized line the live turn showed.
+                  ...(contextCompression ? { contextCompression } : {}),
+                },
+              ]
+            : []),
+        ];
+        if (outputHistoryItems.length > 0) {
           recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt
               .filter((b) => b.type === 'text')
               .map((b) => (b.type === 'text' ? b.text : ''))
               .join(' '),
-            outputHistoryItems: [
-              { type: 'assistant', text: chunks.join('\n') },
-            ],
+            outputHistoryItems,
           });
         }
 
@@ -15415,11 +15645,9 @@ export class Session implements SessionContext {
 
       case 'unsupported': {
         if (result.originalType === 'unsupported_action') {
-          throw new RequestError(
-            -32004,
-            'This action is not supported in this standalone session.',
-            { errorKind: 'unsupported_action' },
-          );
+          throw new RequestError(-32004, result.reason, {
+            errorKind: 'unsupported_action',
+          });
         }
         // Command returned an unsupported result type
         const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;
@@ -15470,6 +15698,7 @@ export class Session implements SessionContext {
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
+    const sshWorkspace = Boolean(this.config.getExecutionEnvironment?.());
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
@@ -15490,6 +15719,7 @@ export class Session implements SessionContext {
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
+          if (sshWorkspace) return { text: part.text };
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
@@ -15540,6 +15770,9 @@ export class Session implements SessionContext {
             },
           });
         case 'resource_link': {
+          if (sshWorkspace && part.uri.startsWith(FILE_URI_SCHEME)) {
+            return { text: `@${part.uri.slice(FILE_URI_SCHEME.length)}` };
+          }
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
               fileData: {

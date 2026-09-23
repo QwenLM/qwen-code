@@ -140,8 +140,19 @@ const { mockPreloadContentGenerator } = vi.hoisted(() => ({
   mockPreloadContentGenerator: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { mockListWorkflowSnapshots } = vi.hoisted(() => ({
-  mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
+const { mockListWorkflowSnapshots, mockClaimInterruptedWorkflowRuns } =
+  vi.hoisted(() => ({
+    mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
+    mockClaimInterruptedWorkflowRuns: vi.fn().mockResolvedValue([]),
+  }));
+const {
+  mockReadWorkflowSnapshot,
+  mockReadWorkflowCheckpoint,
+  mockClaimInterruptedWorkflowRun,
+} = vi.hoisted(() => ({
+  mockReadWorkflowSnapshot: vi.fn().mockResolvedValue(undefined),
+  mockReadWorkflowCheckpoint: vi.fn().mockResolvedValue(undefined),
+  mockClaimInterruptedWorkflowRun: vi.fn().mockResolvedValue(undefined),
 }));
 const { mockListSavedWorkflows } = vi.hoisted(() => ({
   mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
@@ -400,6 +411,22 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).extractAndStripMeta,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
+  claimInterruptedWorkflowRuns: mockClaimInterruptedWorkflowRuns,
+  claimInterruptedWorkflowRun: mockClaimInterruptedWorkflowRun,
+  readWorkflowSnapshot: mockReadWorkflowSnapshot,
+  readWorkflowCheckpoint: mockReadWorkflowCheckpoint,
+  isWorkflowRunId: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isWorkflowRunId,
+  snapshotArgsUnavailable: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).snapshotArgsUnavailable,
+  WorkflowJournalUnavailableError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).WorkflowJournalUnavailableError,
+  WorkflowCheckpointUnwritableError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).WorkflowCheckpointUnwritableError,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
   withDaemonSpan: mockWithDaemonSpan,
@@ -1178,13 +1205,17 @@ import {
   GoalInvalidTransitionError,
   sessionIdContext,
   uiTelemetryService,
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
   type Config,
   type GoalSnapshotV2,
+  type WorkflowSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  LOAD_REPLAY_MAX_UPDATES,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
@@ -1450,6 +1481,17 @@ describe('runAcpAgent shutdown cleanup', () => {
   afterAll(() => {
     processOnSpy.mockRestore();
     processOffSpy.mockRestore();
+  });
+
+  it('rejects a tool sandbox before ACP initialization or transport setup', async () => {
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ network: 'closed' });
+    await expect(
+      runAcpAgent(mockConfig, mockSettings, mockArgv),
+    ).rejects.toThrow('does not support ACP sessions');
+    expect(mockConfig.initialize).not.toHaveBeenCalled();
+    expect(ndJsonStream).not.toHaveBeenCalled();
   });
 
   it('starts telemetry only after a matching successful initialize response is sent', async () => {
@@ -2397,6 +2439,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     | {
         captureHistorySnapshot: ReturnType<typeof vi.fn>;
         emitGoalStatus: ReturnType<typeof vi.fn>;
+        renderLegacyGoalSupersession: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
@@ -5231,6 +5274,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
           dispose: vi.fn(),
           emitGoalStatus: vi.fn(),
+          renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
           captureHistorySnapshot: vi
             .fn()
             .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
@@ -7164,6 +7208,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('rejects SSH workspace relocation and local runtime mutations before dispatch', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const relocateWorkingDirectory = vi.fn();
+    Object.assign(innerConfig, {
+      getExecutionEnvironment: vi.fn().mockReturnValue({}),
+      relocateWorkingDirectory,
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: '/nonexistent-ssh-local-target',
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd, {
+          sessionId,
+          name: 'unsafe',
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      Object.assign(mockConfig, {
+        getExecutionEnvironment: vi.fn().mockReturnValue({}),
+      });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize, {}),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      await expect(
+        agent.extMethod('qwen/settings/setCoreValue', {
+          path: 'hooks',
+          value: {},
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('serializes a working-directory change and hard-suspends Todo Stop Guard', async () => {
@@ -9739,7 +9825,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('lists workspace hooks from the registry with their stored config and state', async () => {
+  it('lists workspace hooks from the registry with their stored config and state, without subagent entries', async () => {
     const getAllSessionHooks = vi.fn().mockReturnValue([
       {
         hookId: 'session-hook-1',
@@ -9756,6 +9842,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getBareMode: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('workspace-session'),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue({
         getAllHooks: () => [
           {
@@ -9775,6 +9862,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             eventName: 'Stop',
             source: 'session',
             agentScope: 'agent-1',
+            enabled: true,
+            config: {
+              type: 'http',
+              url: 'https://hooks.example.com/agent-stop',
+            },
+          },
+          {
+            eventName: 'Stop',
+            source: 'project',
             enabled: true,
             config: {
               type: 'http',
@@ -9831,7 +9927,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             headers: { 'X-Team': 'core' },
             once: true,
           },
-          source: 'session',
+          source: 'project',
           enabled: true,
         },
       ],
@@ -13241,6 +13337,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         runSavedArgs: true,
         runScript: true,
         nameOnly: false,
+        retryHistorical: true,
       },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
@@ -13448,6 +13545,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(2);
+    // A run the previous process left unfinished becomes history before the
+    // session first reads it.
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledOnce();
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledWith(innerConfig);
+    expect(
+      mockClaimInterruptedWorkflowRuns.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockListWorkflowSnapshots.mock.invocationCallOrder[0]!);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -16656,6 +16760,543 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  // After a daemon restart the registry is empty and a run exists only as its
+  // snapshot. `retry` and `rerun` used to answer `{changed: false}` for it, the
+  // same shape as an unknown run id, so the host could not restart a run the
+  // restart had interrupted.
+  describe('retry and rerun of a run restored from history', () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const runId = 'wf_1234abcd';
+    const historical = (overrides: Record<string, unknown> = {}) => ({
+      runId,
+      status: 'failed',
+      workflowName: 'deep-review',
+      script: 'return await agent(args.prompt)',
+      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      args: { prompt: 'finish the review' },
+      argsRecorded: true,
+      sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      meta: null,
+      phases: [],
+      agentsDispatched: 2,
+      agentsCompleted: 1,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+      error:
+        'interrupted: the process running this workflow exited before it finished',
+      ...overrides,
+    });
+
+    async function startDaemon(
+      options: {
+        execute?: (runs: Array<{ runId: string; status: string }>) => unknown;
+      } = {},
+    ) {
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+      const runs: Array<{ runId: string; status: string }> = [];
+      const registry = {
+        get: vi.fn((id: string) => runs.find((run) => run.runId === id)),
+        getHandle: vi.fn(() => undefined),
+        isStarting: vi.fn(() => false),
+        setLineage: vi.fn(),
+      };
+      const execute = vi.fn(async () => {
+        if (options.execute) return options.execute(runs);
+        const [params] = buildSessionOwnedBackground.mock.calls.at(-1)!;
+        const resumed = params['resumeFromRunId'];
+        const started = {
+          runId: typeof resumed === 'string' ? resumed : 'wf_5678efab',
+          status: 'running',
+        };
+        runs.push(started);
+        return { llmContent: 'started', workflowRunId: started.runId };
+      });
+      const buildSessionOwnedBackground = vi.fn(
+        (_params: Record<string, unknown>, _name?: string) => ({ execute }),
+      );
+      Object.assign(innerConfig, {
+        getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getTool: vi.fn((name: string) =>
+            name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
+          ),
+        }),
+      });
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const act = (action: 'retry' | 'rerun', taskId = runId) =>
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+          sessionId,
+          taskId,
+          action,
+        });
+      const stop = async () => {
+        mockConnectionState.resolve();
+        await agentPromise;
+      };
+      return {
+        agent,
+        innerConfig,
+        registry,
+        runs,
+        execute,
+        buildSessionOwnedBackground,
+        act,
+        stop,
+      };
+    }
+
+    const actualSdk = () =>
+      vi.importActual<typeof import('@agentclientprotocol/sdk')>(
+        '@agentclientprotocol/sdk',
+      );
+
+    afterEach(() => {
+      mockReadWorkflowSnapshot.mockReset().mockResolvedValue(undefined);
+      mockReadWorkflowCheckpoint.mockReset().mockResolvedValue(undefined);
+      mockClaimInterruptedWorkflowRun.mockReset().mockResolvedValue(undefined);
+    });
+
+    it('retries a failed run from its snapshot, resuming its journal under the same run id', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        {
+          scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+          args: { prompt: 'finish the review' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          resumeFromRunId: runId,
+        },
+        'deep-review',
+      );
+      expect(daemon.execute).toHaveBeenCalledOnce();
+      // The interrupted attempt is claimed first, so the snapshot read is
+      // the one that attempt left, not an older one.
+      expect(mockClaimInterruptedWorkflowRun).toHaveBeenCalledWith(
+        daemon.innerConfig,
+        runId,
+      );
+      expect(
+        mockClaimInterruptedWorkflowRun.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockReadWorkflowSnapshot.mock.invocationCallOrder[0]!);
+      await daemon.stop();
+    });
+
+    it('reruns a finished run from its snapshot under a new run id', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(
+        historical({ status: 'completed' }),
+      );
+
+      await expect(daemon.act('rerun')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+        taskId: 'wf_5678efab',
+      });
+
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        {
+          scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+          args: { prompt: 'finish the review' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
+        'deep-review',
+      );
+      expect(daemon.registry.setLineage).toHaveBeenCalledWith(
+        'wf_5678efab',
+        runId,
+        'rerun',
+      );
+      await daemon.stop();
+    });
+
+    it('runs the snapshot script when the script path can no longer be read', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      mockResolveSavedWorkflowScript.mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        {
+          script: 'return await agent(args.prompt)',
+          args: { prompt: 'finish the review' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          resumeFromRunId: runId,
+        },
+        undefined,
+      );
+      await daemon.stop();
+    });
+
+    // A run that had no args says so, so it restarts; the journal's key
+    // chain is rooted in the same hash either way.
+    it('restarts a run recorded as having no args', async () => {
+      const daemon = await startDaemon();
+      const noArgs = historical();
+      delete (noArgs as { args?: unknown }).args;
+      mockReadWorkflowSnapshot.mockResolvedValue(noArgs);
+
+      await expect(daemon.act('retry')).resolves.toMatchObject({
+        changed: true,
+      });
+
+      const [params] = daemon.buildSessionOwnedBackground.mock.calls[0]!;
+      expect(params['args']).toBeUndefined();
+      await daemon.stop();
+    });
+
+    // Before args were kept, "no args field" and "the run had none" look the
+    // same. Starting such a run with none would replay nothing and
+    // re-dispatch every agent while the script read `args` as undefined.
+    it('refuses a snapshot written before args were kept, saying its history cannot name them', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon();
+      const legacy = historical();
+      delete (legacy as { args?: unknown }).args;
+      delete (legacy as { argsRecorded?: true }).argsRecorded;
+      mockReadWorkflowSnapshot.mockResolvedValue(legacy);
+
+      for (const action of ['retry', 'rerun'] as const) {
+        vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+          sdk.RequestError.invalidParams,
+        );
+        await expect(daemon.act(action)).rejects.toMatchObject({
+          code: -32602,
+          data: { errorKind: 'workflow_args_unavailable' },
+          message: expect.stringContaining('cannot say what they were'),
+        });
+      }
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('refuses both actions with a named error when the snapshot could not keep the args', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon();
+      const omitted = historical({ argsOmitted: true });
+      delete (omitted as { args?: unknown }).args;
+      mockReadWorkflowSnapshot.mockResolvedValue(omitted);
+
+      for (const action of ['retry', 'rerun'] as const) {
+        vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+          sdk.RequestError.invalidParams,
+        );
+        await expect(daemon.act(action)).rejects.toMatchObject({
+          code: -32602,
+          data: { errorKind: 'workflow_args_unavailable' },
+          message: expect.stringContaining('args too large to keep'),
+        });
+      }
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    // This end of the contract: the refusal is `snapshotArgsUnavailable` and
+    // nothing else. The other end -- that the projection puts the same
+    // predicate on the wire as `argsUnavailable` -- is pinned in
+    // `tasksSnapshot.test.ts` against the same exported function, because
+    // this file's core mock lists its exports one by one and cannot import
+    // the projection. Either end drifting fails its own suite.
+    it.each([
+      ['kept its args', {}, false],
+      ['recorded that it had none', { args: undefined }, false],
+      ['could not keep its args', { argsOmitted: true, args: undefined }, true],
+      [
+        'predates kept args',
+        { argsRecorded: undefined, args: undefined },
+        true,
+      ],
+    ])(
+      'refuses a retry of a run that %s exactly when the predicate says its args are gone',
+      async (_case, fields, refused) => {
+        const sdk = await actualSdk();
+        const daemon = await startDaemon();
+        const snapshot = historical(fields);
+        for (const [key, value] of Object.entries(fields)) {
+          if (value === undefined) {
+            delete (snapshot as Record<string, unknown>)[key];
+          }
+        }
+        mockReadWorkflowSnapshot.mockResolvedValue(snapshot);
+
+        const { snapshotArgsUnavailable } = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core')
+        >('@qwen-code/qwen-code-core');
+        expect(
+          snapshotArgsUnavailable(
+            snapshot as Pick<
+              WorkflowSnapshot,
+              'args' | 'argsOmitted' | 'argsRecorded'
+            >,
+          ) !== undefined,
+        ).toBe(refused);
+
+        if (refused) {
+          // Only the refusing rows build a RequestError; installed for the
+          // others it would survive into whatever runs next.
+          vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+            sdk.RequestError.invalidParams,
+          );
+          await expect(daemon.act('retry')).rejects.toMatchObject({
+            data: { errorKind: 'workflow_args_unavailable' },
+          });
+          expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+        } else {
+          await expect(daemon.act('retry')).resolves.toMatchObject({
+            changed: true,
+          });
+        }
+        await daemon.stop();
+      },
+    );
+
+    it('retries only a failed run, and reruns any finished one', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(
+        historical({ status: 'completed' }),
+      );
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: false,
+        status: 'completed',
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+
+      await expect(daemon.act('rerun')).resolves.toMatchObject({
+        changed: true,
+      });
+      await daemon.stop();
+    });
+
+    // A checkpoint outlives the claim when its writer cannot be seen to
+    // exit: another machine, or a pid a live process has reused. The refusal
+    // has to say so — the run is otherwise indistinguishable from an unknown
+    // id, and the way forward is a rerun.
+    it('names the process a checkpoint records when it refuses a retry, and still allows a rerun', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: 4242,
+        hostname: 'builder-07',
+      });
+
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_run_live_elsewhere' },
+        message: expect.stringContaining('host builder-07, pid 4242'),
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+
+      // A rerun takes a new run id, so the live run's journal is not at risk.
+      await expect(daemon.act('rerun')).resolves.toMatchObject({
+        changed: true,
+      });
+      await daemon.stop();
+    });
+
+    // The entry check runs before the claim's await; the run can register
+    // in that window, and a second runner under its id would share its
+    // journal.
+    it('does not start a retry for a run that registered while the claim ran', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      mockClaimInterruptedWorkflowRun.mockImplementationOnce(async () => {
+        daemon.runs.push({ runId, status: 'running' });
+        return undefined;
+      });
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: false,
+        status: 'running',
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    // A rerun cannot corrupt a live run — it takes a new id — but starting a
+    // second full copy of work already in flight is not what the button
+    // means, and the live path refuses it because a live entry is not
+    // terminal.
+    it.each(['retry', 'rerun'] as const)(
+      'does not %s a run this session is already starting',
+      async (action) => {
+        const daemon = await startDaemon();
+        mockReadWorkflowSnapshot.mockResolvedValue(historical());
+        daemon.registry.isStarting.mockReturnValue(true);
+
+        await expect(daemon.act(action)).resolves.toEqual({ changed: false });
+        expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+        await daemon.stop();
+      },
+    );
+
+    it.each(['retry', 'rerun'] as const)(
+      'does not %s a run this session still holds a handle for',
+      async (action) => {
+        const daemon = await startDaemon();
+        mockReadWorkflowSnapshot.mockResolvedValue(historical());
+        daemon.registry.getHandle.mockReturnValue({
+          runId,
+        } as unknown as ReturnType<typeof daemon.registry.getHandle>);
+
+        await expect(daemon.act(action)).resolves.toEqual({ changed: false });
+        expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+        await daemon.stop();
+      },
+    );
+
+    it('does not retry a run a sibling session is running', async () => {
+      const siblingId = 'bbbbbbbb-2222-2222-2222-222222222222';
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      // Session B, created second, is running the run; the session that
+      // asks has only its history.
+      vi.mocked(loadCliConfig).mockResolvedValue({
+        ...makeInnerConfig(),
+        getSessionId: vi.fn().mockReturnValue(siblingId),
+        isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+        getWorkflowRunRegistry: vi.fn().mockReturnValue({
+          get: vi.fn((id: string) =>
+            id === runId ? { runId, status: 'running' } : undefined,
+          ),
+          getHandle: vi.fn().mockReturnValue(undefined),
+        }),
+      } as unknown as Config);
+      await daemon.agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
+      // A rerun would start a second full copy of the run the sibling has.
+      await expect(daemon.act('rerun')).resolves.toEqual({ changed: false });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('reads nothing from disk for a task id that is not a run id', async () => {
+      const daemon = await startDaemon();
+
+      for (const taskId of ['../../etc/passwd', 'wf_1234abcd/../x', 'wf_ZZ']) {
+        for (const action of ['retry', 'rerun'] as const) {
+          await expect(daemon.act(action, taskId)).resolves.toEqual({
+            changed: false,
+          });
+        }
+      }
+      expect(mockClaimInterruptedWorkflowRun).not.toHaveBeenCalled();
+      expect(mockReadWorkflowSnapshot).not.toHaveBeenCalled();
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('answers a retry with no journal to resume with a named error the host can act on', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon({
+        execute: async () => {
+          throw new WorkflowJournalUnavailableError(
+            runId,
+            'missing',
+            `No journal found for workflow run ${runId}, so there is nothing to resume.`,
+          );
+        },
+      });
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_journal_unavailable' },
+        message: expect.stringContaining(
+          'rerun it to start it from the beginning',
+        ),
+      });
+      await daemon.stop();
+    });
+
+    // The record that keeps a second runner off this journal is what failed,
+    // so nothing started -- and that is the run's state, not a daemon fault.
+    it('answers a retry that could not be recorded with a named error the host can act on', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon({
+        execute: async () => {
+          throw new WorkflowCheckpointUnwritableError(runId);
+        },
+      });
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_not_recorded' },
+        message: expect.stringContaining('Nothing was started; try again.'),
+      });
+      await daemon.stop();
+    });
+
+    it('starts one retry when two arrive for the same run at once', async () => {
+      const daemon = await startDaemon();
+      let releaseRead: (() => void) | undefined;
+      mockReadWorkflowSnapshot.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseRead = () => resolve(historical());
+          }),
+      );
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+
+      const first = daemon.act('retry');
+      await vi.waitFor(() => expect(releaseRead).toBeDefined());
+      // The first retry holds the run's lock while it reads.
+      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
+      releaseRead!();
+      await expect(first).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+      // Once the run is registered, a later retry sees it and does not
+      // start it again.
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: false,
+        status: 'running',
+      });
+      expect(daemon.execute).toHaveBeenCalledOnce();
+      await daemon.stop();
+    });
   });
 
   it('reports a retry cancelled in its starting window as unchanged', async () => {
@@ -26497,6 +27138,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         replayHistory: ReturnType<typeof vi.fn>;
         primeTurnFromHistory: ReturnType<typeof vi.fn>;
         publishRecoveredGoalState: ReturnType<typeof vi.fn>;
+        renderLegacyGoalSupersession: ReturnType<typeof vi.fn>;
         primeRecoveredGoalPublication: ReturnType<typeof vi.fn>;
         primeTurnState: ReturnType<typeof vi.fn>;
         cumulativeUsage: {
@@ -26910,6 +27552,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           ),
         primeTurnFromHistory: vi.fn(opts.primeTurnFromHistoryImpl),
         publishRecoveredGoalState: vi.fn().mockResolvedValue(undefined),
+        renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
         primeRecoveredGoalPublication: vi.fn(),
         primeTurnState: vi.fn(opts.primeTurnStateImpl),
         cumulativeUsage: {
@@ -28211,6 +28854,94 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('delivers the recovered Goal state as live updates when the cold bulk page is full', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    // A Goal recovered from a goal_state record: the client must get this
+    // whatever the page can carry, or it shows no Goal while the runtime
+    // drives one.
+    const goalUpdate = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalState: { v: 2, activity: 'idle' },
+        goalStatus: { kind: 'set', condition: 'ship the thing' },
+      },
+    };
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [goalUpdate],
+    });
+    const replayUpdate = { sessionUpdate: 'agent_message_chunk' };
+    const { agent, agentPromise } = await spawnAgent();
+
+    // A page already at the update limit ships without the card rather
+    // than failing the load over it, as a live load does.
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        for (let index = 0; index < LOAD_REPLAY_MAX_UPDATES; index += 1) {
+          await context.sendUpdate(replayUpdate);
+        }
+      },
+    );
+    const full = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 50,
+      },
+    })) as { _meta?: Record<string, { updates: unknown[] }> };
+    const fullUpdates = full._meta?.['qwen.session.loadReplay']?.updates ?? [];
+    expect(fullUpdates).toHaveLength(LOAD_REPLAY_MAX_UPDATES);
+    expect(fullUpdates.at(-1)).toEqual(replayUpdate);
+    expect(mockRenderPreparedGoalUpdate).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      expect.not.objectContaining({ partialReplay: true }),
+    );
+    expect(lastSessionMock?.sendUpdate).toHaveBeenCalledExactlyOnceWith(
+      goalUpdate,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('tells the Goal renderer when a cold bulk replay page is partial', async () => {
+    // The page did not end where the transcript does, so a card that
+    // supersedes the page's last card must not be rendered.
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [],
+    });
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        await context.sendUpdate({ sessionUpdate: 'agent_message_chunk' });
+        throw new Error('replay boom');
+      },
+    );
+    const { agent, agentPromise } = await spawnAgent();
+
+    const partial = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    })) as { _meta?: Record<string, { partial?: boolean }> };
+
+    expect(partial._meta?.['qwen.session.loadReplay']?.partial).toBe(true);
+    expect(mockRenderPreparedGoalUpdate).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Function),
+      expect.objectContaining({ partialReplay: true }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('streams the unrestorable Goal correction after cold history replay', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     const goalUpdate = {
@@ -28361,6 +29092,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       isTurnIdle: vi.fn().mockReturnValue(true),
       sendUpdate: vi.fn().mockResolvedValue(undefined),
       clearActiveTodoPlanRevision: vi.fn(),
+      renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
     };
     const { agent, agentPromise } = await spawnAgent();
     (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
@@ -28556,108 +29288,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       [],
       { goalBootstrap: bootstrap },
     );
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('keeps a cold legacy Goal bootstrap inside visible history', async () => {
-    const recentRecords = [
-      { uuid: 'u2', role: 'user', parts: [{ text: 'latest' }] },
-      { uuid: 'a2', role: 'model', parts: [{ text: 'answer' }] },
-    ];
-    const visibleGoalRecord = {
-      uuid: 'visible-goal',
-      type: 'system',
-      subtype: 'slash_command',
-      systemPayload: {
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'visible goal',
-            iterations: 0,
-            setAt: 123,
-          },
-        ],
-      },
-    };
-    const hiddenGoalRecord = {
-      uuid: 'hidden-goal',
-      type: 'system',
-      subtype: 'slash_command',
-      systemPayload: {
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'hidden inherited goal',
-            iterations: 0,
-          },
-        ],
-      },
-    };
-    const innerConfig = bindRestoreMocks({
-      sessionExists: true,
-      resumedConversation: { messages: recentRecords },
-    });
-    innerConfig.getSessionService().readRestoreProjection.mockResolvedValue({
-      sessionId: 'persisted-1',
-      filePath: '/tmp/session.jsonl',
-      startTime: '2026-07-16T00:00:00.000Z',
-      lastUpdated: '2026-07-16T00:00:02.000Z',
-      runtime: {
-        apiHistory: [],
-        uiTelemetryEvents: [],
-        recording: {
-          lastCompletedUuid: 'a2',
-          turnParentUuids: [],
-        },
-        goalRecords: [visibleGoalRecord, hiddenGoalRecord],
-        goalRecoverySourceUuid: 'hidden-goal',
-        initialTurn: 0,
-        backgroundNotificationTaskIds: [],
-      },
-      replay: {
-        records: recentRecords,
-        gaps: [],
-        hasMore: true,
-        anchorRecordId: 'u2',
-        goalRecoverySourceUuid: 'visible-goal',
-        goalBootstrapRecords: [visibleGoalRecord],
-      },
-    });
-    let replayOptions: unknown;
-    mockHistoryReplay.mockImplementation(
-      async (_context, _history, _gaps, options) => {
-        replayOptions = options;
-      },
-    );
-    const { agent, agentPromise } = await spawnAgent();
-
-    await agent.loadSession({
-      cwd: '/tmp',
-      sessionId: 'persisted-1',
-      mcpServers: [],
-      _meta: {
-        'qwen.session.loadReplayMode': 'bulk',
-        'qwen.session.loadReplayPageSize': 2,
-        'qwen.session.loadReplayHideInherited': true,
-      },
-    });
-
-    expect(replayOptions).toEqual({
-      goalBootstrap: {
-        goalStatus: {
-          kind: 'set',
-          condition: 'visible goal',
-          iterations: 0,
-          setAt: 123,
-        },
-      },
-    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -29621,14 +30251,15 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('bootstraps a live recent page from an older legacy Goal record', async () => {
-    const recentRecords = [
-      { uuid: 'u2', role: 'user', parts: [{ text: 'latest' }] },
-      { uuid: 'a2', role: 'model', parts: [{ text: 'answer' }] },
-    ];
+  it('live load appends the legacy Goal supersession after the replayed page', async () => {
+    // A daemon session that resumed a pre-#7895 transcript drives no Goal.
+    // A client refreshing against it replays the page, which ends on the
+    // old running card; the card that supersedes it must follow the page
+    // in both the streamed and the bulk delivery.
+    const initialMessages = [{ role: 'user', parts: [{ text: 'first' }] }];
     bindRestoreMocks({
       sessionExists: true,
-      resumedConversation: { messages: recentRecords },
+      resumedConversation: { messages: initialMessages },
     });
     const { agent, agentPromise } = await spawnAgent();
     await agent.loadSession({
@@ -29637,65 +30268,128 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       mcpServers: [],
     });
     const firstSession = lastSessionMock!;
-    const legacyGoalRecord = {
-      uuid: 'goal',
-      type: 'system',
-      subtype: 'slash_command',
-      systemPayload: {
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'keep the live goal visible',
-            iterations: 0,
-          },
-        ],
+    const supersession = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalStatus: { kind: 'cleared', condition: 'old goal', iterations: 1 },
       },
     };
-    firstSession
-      .getConfig()
-      .getSessionService()
-      .readLiveRestoreProjection.mockResolvedValue({
-        sessionId: 'persisted-1',
-        startTime: '2026-07-16T00:00:00.000Z',
-        lastUpdated: '2026-07-16T00:00:02.000Z',
-        replay: {
-          records: recentRecords,
-          gaps: [],
-          hasMore: true,
-          anchorRecordId: 'u2',
-        },
-        goalRecords: [legacyGoalRecord],
-        goalRecoverySourceUuid: 'goal',
-      });
-    let replayOptions: unknown;
-    mockHistoryReplay.mockImplementation(
-      async (_context, _history, _gaps, options) => {
-        replayOptions = options;
-      },
-    );
+    firstSession.renderLegacyGoalSupersession.mockReturnValue([supersession]);
+    const replayUpdate = { sessionUpdate: 'agent_message_chunk' };
+    mockHistoryReplay.mockImplementation(async (context) => {
+      await context.sendUpdate(replayUpdate);
+    });
 
     await agent.loadSession({
       cwd: '/tmp',
       sessionId: 'persisted-1',
       mcpServers: [],
+    });
+    expect(firstSession.renderLegacyGoalSupersession).toHaveBeenCalledWith(
+      initialMessages,
+    );
+    expect(
+      firstSession.sendUpdate.mock.calls.map(([update]) => update),
+    ).toEqual([replayUpdate, supersession]);
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    })) as LoadSessionResponse & {
+      _meta?: Record<string, { updates: unknown[] }>;
+    };
+    expect(response._meta?.['qwen.session.loadReplay']?.updates).toEqual([
+      replayUpdate,
+      supersession,
+    ]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('live load keeps the legacy Goal supersession off a partial replay and a full page, and survives it failing', async () => {
+    const initialMessages = [{ role: 'user', parts: [{ text: 'first' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: initialMessages },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock!;
+    const supersession = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalStatus: { kind: 'cleared', condition: 'old goal', iterations: 1 },
+      },
+    };
+    firstSession.renderLegacyGoalSupersession.mockReturnValue([supersession]);
+    const replayUpdate = { sessionUpdate: 'agent_message_chunk' };
+
+    // A partial replay: the page did not end where the transcript does, so
+    // the card that supersedes its last record has nothing to supersede.
+    mockHistoryReplay.mockImplementation(async (context) => {
+      await context.sendUpdate(replayUpdate);
+      throw new Error('replay boom');
+    });
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).rejects.toThrow('replay boom');
+    expect(firstSession.renderLegacyGoalSupersession).not.toHaveBeenCalled();
+    expect(
+      firstSession.sendUpdate.mock.calls.map(([update]) => update),
+    ).toEqual([replayUpdate]);
+
+    // A page already at the update limit ships without the card rather
+    // than failing the load over it.
+    mockHistoryReplay.mockImplementation(async (context) => {
+      for (let index = 0; index < LOAD_REPLAY_MAX_UPDATES; index += 1) {
+        await context.sendUpdate(replayUpdate);
+      }
+    });
+    const full = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
       _meta: {
         'qwen.session.loadReplayMode': 'bulk',
-        'qwen.session.loadReplayPageSize': 2,
+        'qwen.session.loadReplayPageSize': 50,
       },
-    });
+    })) as LoadSessionResponse & {
+      _meta?: Record<string, { updates: unknown[] }>;
+    };
+    expect(firstSession.renderLegacyGoalSupersession).toHaveBeenCalledTimes(1);
+    const fullUpdates = full._meta?.['qwen.session.loadReplay']?.updates ?? [];
+    expect(fullUpdates).toHaveLength(LOAD_REPLAY_MAX_UPDATES);
+    expect(fullUpdates.at(-1)).toBe(replayUpdate);
 
-    expect(replayOptions).toEqual({
-      finalizeDangling: true,
-      goalBootstrap: {
-        goalStatus: {
-          kind: 'set',
-          condition: 'keep the live goal visible',
-          iterations: 0,
-        },
-      },
+    // The card is presentation: failing to render it is not a failed load.
+    firstSession.renderLegacyGoalSupersession.mockImplementation(() => {
+      throw new Error('runtime gone');
     });
+    firstSession.sendUpdate.mockClear();
+    mockHistoryReplay.mockImplementation(async (context) => {
+      await context.sendUpdate(replayUpdate);
+    });
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    expect(
+      firstSession.sendUpdate.mock.calls.map(([update]) => update),
+    ).toEqual([replayUpdate]);
 
     mockConnectionState.resolve();
     await agentPromise;

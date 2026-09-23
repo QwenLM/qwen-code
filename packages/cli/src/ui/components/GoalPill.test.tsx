@@ -127,27 +127,6 @@ describe('GoalPill', () => {
     unmount();
   });
 
-  it('keeps the plain labels on a record an earlier build left a stall streak on', () => {
-    vi.setSystemTime(NOW);
-    // Goals no longer run evidence checkpoints, so the two fields can only
-    // come from a record an earlier build wrote, and they are not drawn.
-    const quiet = renderPill({
-      snapshot: snapshot('active', 'running', {
-        checkpointStalls: 2,
-        lastCheckpointFailure: 'Error: provider failed',
-      }),
-    });
-    expect(quiet.lastFrame()).not.toContain('checkpoint');
-    expect(quiet.lastFrame()).toContain('/goal active');
-    quiet.unmount();
-
-    const checking = renderPill({
-      snapshot: snapshot('active', 'verifying', { checkpointStalls: 1 }),
-    });
-    expect(checking.lastFrame()).toContain('/goal checking');
-    checking.unmount();
-  });
-
   it('adds the current active span to persisted active time', () => {
     vi.setSystemTime(NOW);
     const { lastFrame, unmount } = renderPill({

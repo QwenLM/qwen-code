@@ -137,6 +137,7 @@ export {
   estimateDaemonTranscriptBlockBytes,
   extractContentPart,
   extractServerTimestamp,
+  extractTranscriptTiming,
   formatBlockTimestamp,
   getOutputText as getDaemonUiOutputText,
   getSessionUpdatePayload,
@@ -202,7 +203,9 @@ export type {
   DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  DaemonTranscriptTimingMeta,
   DaemonTranscriptTruncationDetail,
+  DaemonTurnUsage,
   DaemonUiAssistantDoneEvent,
   DaemonUiAuthDeviceFlowAuthorizedEvent,
   DaemonUiAuthDeviceFlowCancelledEvent,
@@ -539,6 +542,7 @@ export type {
   DaemonDiffHunk,
   DaemonGitLogEntry,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitFileStat,
   DaemonGitCommitDetail,
   DaemonGitBranchInfo,
@@ -558,6 +562,13 @@ export type {
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceRemovalActivity,
   DaemonWorkspaceRemovalResult,
+  DaemonRuntimeStopRequest,
+  DaemonRuntimeStopSession,
+  DaemonRuntimeStopResult,
+  DaemonRuntimeStopSnapshot,
+  DaemonRuntimeStopOption,
+  DaemonRuntimeStopOptions,
+  DaemonWorkspaceRuntimeStopResult,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
   DaemonBrand,
@@ -644,6 +655,11 @@ export type {
   DaemonSessionGroupUpdate,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionListView,
   DaemonSessionSearchMatch,
   DaemonSessionSearchOptions,
@@ -860,3 +876,6 @@ export type {
 
 export { parseDaemonBackgroundTurn } from './types.js';
 export type { DaemonBackgroundTurn } from './types.js';
+
+export { isShellResultDisplay } from './shellResult.js';
+export type { ShellResultDisplay } from './shellResult.js';

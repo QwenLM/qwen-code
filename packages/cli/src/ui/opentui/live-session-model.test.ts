@@ -15,6 +15,7 @@ import {
   describeGoalCard,
   describeLegacyGoalCard,
   foldLiveEvent,
+  type LiveAssistantItem,
   type LiveHistoryItem,
   type LiveToolItem,
 } from './live-session-model.js';
@@ -167,6 +168,41 @@ describe('foldLiveEvent tool-queued (approved but not started)', () => {
       type: 'tool-queued',
       id: 'tool1',
       queued: true,
+    });
+    expect(items).toHaveLength(1);
+  });
+});
+
+describe('foldLiveEvent task card (subagent roster parity)', () => {
+  const started = foldLiveEvent([assistant('hi')], {
+    type: 'task-start',
+    id: 's1',
+    name: 'researcher',
+    description: 'bench frames',
+  });
+
+  it('opens a card and appends progress lines', () => {
+    const items = foldLiveEvent(started, {
+      type: 'task-progress',
+      id: 's1',
+      line: '↳ grep',
+    });
+    expect(items[1]).toMatchObject({
+      kind: 'task',
+      name: 'researcher',
+      progress: ['↳ grep'],
+    });
+  });
+
+  it('drops the card once the subagent settles', () => {
+    const items = foldLiveEvent(started, { type: 'task-end', id: 's1' });
+    expect(items).toEqual([{ ...assistant('hi'), streaming: false }]);
+  });
+
+  it('ignores task-end for a card that is not there', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'task-end',
+      id: 'ghost',
     });
     expect(items).toHaveLength(1);
   });
@@ -780,26 +816,6 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     activity = 'idle',
   ): GoalSnapshotLike => ({ goal, activity }) as GoalSnapshotLike;
 
-  it('has no checkpoint line, whatever an earlier build left on the record', () => {
-    const view = describeGoalCard(
-      snap({
-        objective: 'o',
-        status: 'usage_limited',
-        lastReason: 'Three evidence checkpoints stalled.',
-        limitKind: 'checkpoint_request',
-        checkpointStalls: 3,
-        lastCheckpointFailure: 'Error: provider failed',
-      }),
-    );
-
-    expect(view).toMatchObject({
-      state: 'card',
-      reason: 'Three evidence checkpoints stalled.',
-    });
-    expect(view).not.toHaveProperty('checkpoint');
-    expect(JSON.stringify(view)).not.toContain('provider failed');
-  });
-
   it('renders every lifecycle state', () => {
     expect(
       describeGoalCard(snap({ objective: 'o', status: 'active' })),
@@ -1021,5 +1037,46 @@ describe('describeLegacyGoalCard (ink kind form)', () => {
         lastReason: 'nope',
       }),
     ).toMatchObject({ lastCheck: undefined });
+  });
+});
+
+describe('foldLiveEvent assistant timestamps (#76)', () => {
+  const stampOf = (items: readonly LiveHistoryItem[]): number | undefined =>
+    (items[0] as LiveAssistantItem).timestamp;
+
+  it('opens the block at the replayed record time', () => {
+    const items = foldLiveEvent([], {
+      type: 'text',
+      delta: 'hi',
+      timestamp: 1_700_000_000_000,
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'hi',
+      timestamp: 1_700_000_000_000,
+    });
+  });
+
+  it('keeps the opening stamp as later deltas append to the same block', () => {
+    let items = foldLiveEvent([], {
+      type: 'text',
+      delta: 'a',
+      timestamp: 1_700_000_000_000,
+    });
+    items = foldLiveEvent(items, {
+      type: 'text',
+      delta: 'b',
+      timestamp: 1_800_000_000_000,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ text: 'ab' });
+    expect(stampOf(items)).toBe(1_700_000_000_000);
+  });
+
+  it('falls back to the fold time for a live delta', () => {
+    const before = Date.now();
+    const items = foldLiveEvent([], { type: 'text', delta: 'live' });
+    expect(stampOf(items)).toBeGreaterThanOrEqual(before);
+    expect(stampOf(items)).toBeLessThanOrEqual(Date.now());
   });
 });

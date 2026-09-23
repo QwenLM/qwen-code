@@ -39,6 +39,7 @@ export interface ProcessAttachmentOptions {
 
 export interface TrackedChildProcess {
   readonly exited: Promise<AcpChannelExitInfo | undefined>;
+  readonly registryReleased: Promise<void>;
   terminate(): Promise<void>;
   killSync(): void;
 }
@@ -160,6 +161,10 @@ export class ProcessRegistry {
 }
 
 class TrackedChild implements TrackedChildProcess {
+  private resolveRegistryReleased!: () => void;
+  readonly registryReleased = new Promise<void>((resolve) => {
+    this.resolveRegistryReleased = resolve;
+  });
   readonly exited: Promise<AcpChannelExitInfo | undefined>;
   private readonly knownGroups = new Set<number>();
   private cleanupProofError: Error | undefined;
@@ -302,6 +307,7 @@ class TrackedChild implements TrackedChildProcess {
     this.released = true;
     if (this.releasePollTimer) clearTimeout(this.releasePollTimer);
     this.onRelease();
+    this.resolveRegistryReleased();
   }
 
   private killDirectChildSync(): void {

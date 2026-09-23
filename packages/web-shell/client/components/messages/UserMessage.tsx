@@ -627,7 +627,7 @@ export function ReadonlyComposerTag({
       : undefined;
   return (
     <span
-      className={`${styles.messageTag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}${
+      className={`${styles.messageTag}${
         clickable ? ` ${styles.messageTagClickable}` : ''
       }`}
       role={clickable ? 'button' : undefined}

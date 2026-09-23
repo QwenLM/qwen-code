@@ -368,6 +368,35 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
 | `settings`             | `WebShellSettingsOptions`             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
 
+### Workspace 会话创建超时
+
+Workspace 创建由 SDK 分别约束能力查询和创建请求，WebShell 另设 75 秒的
+兜底总超时，覆盖常见的单次能力预检与创建两个默认 30 秒请求，并留出 15 秒余量。冷缓存或缓存过期时，
+能力查询 20 秒、创建请求 15 秒可以在约 35 秒后成功，无需调整配置。
+此规则也适用于已有会话时创建新会话；SDK standalone 创建保持原有超时行为。
+并发能力刷新可能取代原预检并延长请求链；即使每个请求都未超过自身截止时间，
+创建动作仍可能先触及 75 秒上限。
+
+| 配置／机制                  | 默认值     | 作用与边界                                                           |
+| --------------------------- | ---------- | -------------------------------------------------------------------- |
+| WebShell workspace 创建动作 | `75000` ms | 兜底限制不响应 SDK 取消信号的传输；超时后成功返回的会话会被 detach。 |
+| `onSessionCreated` 回调     | `30000` ms | 创建完成后才开始计时的独立宿主回调限制；没有公开的超时配置属性。     |
+
+WebShell Provider 不透传 SDK 的
+[`fetchTimeoutMs`](../../docs/developers/daemon/13-sdk-daemon-client.md#configuration)，
+能力预检和创建请求使用 SDK 默认请求预算；提高 daemon 的初始化超时不会提高这两类请求的 SDK 超时。
+load/resume 使用独立预算；服务端优先级、客户端覆盖顺序、能力缓存前提和缺失时的回退值见
+[restore 超时契约](../../docs/design/2026-08-07-safe-session-restore-timeout.md#timeout-contract)，
+SDK 和 WebShell 的 restore 余量见
+[serve 协议文档](../../docs/developers/qwen-serve-protocol.md#capabilities)。
+
+SDK `query()` 的 `timeout.controlRequest` 等参数属于
+子进程接口，不控制 daemon HTTP 请求。兜底超时限制 WebShell 的等待时间，不保证
+底层传输立即取消；迟到结果仍按原有机制清理。其他动作、会话清理和回调仍使用各自的超时。
+
+daemon 参数的完整含义和配置方式见
+[daemon 配置文档](../../docs/developers/daemon/17-configuration.md)。
+
 ### WebShell
 
 | 属性                       | 类型                                                                                                                                  | 说明                                                                                                                                           |
@@ -384,6 +413,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `onBrandResolved`          | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon |
 | `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                             |
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
+| `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
 | `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
@@ -536,13 +566,30 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 />
 ```
 
-`WebShellSettingsOptions.excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。新增的上游设置默认仍然可见；未知的运行时 ID 会被忽略。
+也可以只开放少量条目，未列出的设置（包括上游新增设置）默认隐藏：
 
-前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control` 和 `builtin:model-management`。隐藏普通 Model 字段时，模型列表与选择仍然可用；如需隐藏模型管理块，需显式排除 `builtin:model-management`。浏览器通知与聊天宽度相互独立。既有的能力限制仍然适用。
+```tsx
+<WebShellWithProviders
+  settings={{
+    includeItems: ['setting:language', 'builtin:chat-width'],
+  }}
+/>
+```
 
-不传 `settings`、不传 `excludeItems` 或传入空列表，都会保持现有呈现。排除在两个设置作用域（工作区与用户）中都生效。被排空的分类会消失，分类导航回退到可用分类；排除全部条目则显示现有的空状态。从设置面板打开的选择器会在其来源条目被排除时关闭。
+`WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
-**呈现限制不是访问控制。** 排除不会改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供白名单、作用域策略、字段覆盖或条目级深链。
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+
+- 未传 `includeItems` 时保持现有展示逻辑，仅应用 `excludeItems`；新增的上游设置默认仍然可见。
+- `includeItems: []` 隐藏全部原生设置条目；它与未传入白名单不同。
+- 同时传入两个列表时，排除优先：仅展示白名单中且未被排除的条目。
+- 不传 `settings`、传入 `{}` 或仅传 `excludeItems: []` 时，保持默认呈现。
+
+过滤在工作区与用户两个作用域中都生效。被排空的分类会消失，分类导航回退到可用分类；全部隐藏则显示现有空状态。从设置面板打开的选择器会在来源条目不再可见时关闭，包括动态修改白名单的情况。
+
+**呈现限制不是访问控制。** 白名单与排除列表只影响原生设置页展示，不启用或关闭底层功能，不改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供作用域策略、字段覆盖或条目级深链。
+
+设计与验证范围见 [English](../../docs/design/web-shell-settings-allowlists.md) / [简体中文](../../docs/design/web-shell-settings-allowlists.zh-CN.md)。
 
 ## Markdown 图表接入
 

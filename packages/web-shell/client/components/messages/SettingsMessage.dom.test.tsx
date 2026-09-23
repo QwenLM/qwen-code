@@ -218,6 +218,7 @@ function renderPanel(
     modelManagement: ModelManagementProps;
     initialCategory: string;
     presentation: WebShellSettingsOptions;
+    connections: ReactNode;
   }> = {},
 ): HTMLElement {
   return render(
@@ -233,6 +234,7 @@ function renderPanel(
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagement={overrides.modelManagement}
+        connections={overrides.connections}
       />
     </I18nProvider>,
   );
@@ -335,6 +337,21 @@ describe('SettingsMessage initialCategory', () => {
     );
 
     expect(activeCategoryButton(container).textContent).toContain('General');
+  });
+
+  it('renders browser-local connections without workspace scope tabs', () => {
+    const container = renderPanel(makeState([boolSetting()], vi.fn()), {
+      initialCategory: 'Connections',
+      connections: <div data-testid="connections-panel">connections</div>,
+    });
+
+    expect(activeCategoryButton(container).textContent).toContain(
+      'Connections',
+    );
+    expect(
+      container.querySelector('[data-testid="connections-panel"]'),
+    ).not.toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
   });
 
   it('does not force the deep-linked category again after a manual switch', async () => {
@@ -823,6 +840,97 @@ describe('SettingsMessage user-scope editing', () => {
     );
   });
 
+  it('allows only selected rows in both scopes and falls back from a hidden category', () => {
+    const state = makeState(
+      [boolSetting(), subDialogSetting(), themeSetting()],
+      vi.fn(),
+    );
+    const baseline = renderPanel(state, { initialCategory: 'General' });
+    expect(baseline.textContent).toContain('Test Flag');
+    const container = renderPanel(state, {
+      initialCategory: 'General',
+      modelManagement: makeModelManagement(),
+      presentation: { includeItems: ['setting:fast-model'] },
+    });
+    const check = () => {
+      expect(container.querySelectorAll('nav button')).toHaveLength(1);
+      expect(
+        container.querySelector('[aria-current="page"]')?.textContent,
+      ).toContain('Model');
+      expect(container.textContent).toContain('Fast Model');
+      expect(container.textContent).not.toContain('Test Flag');
+      expect(container.textContent).not.toContain('Theme');
+      expect(
+        container.querySelector('[data-testid="model-management"]'),
+      ).toBeNull();
+    };
+    check();
+    clickUserTab(container);
+    check();
+  });
+
+  it.each([
+    { includeItems: [] },
+    {
+      includeItems: ['setting:fast-model'],
+      excludeItems: ['setting:fast-model'],
+    },
+  ] satisfies WebShellSettingsOptions[])(
+    'shows the existing empty state in both scopes for %j',
+    (presentation) => {
+      const container = renderPanel(
+        makeState([boolSetting(), subDialogSetting()], vi.fn()),
+        {
+          modelManagement: makeModelManagement(),
+          presentation,
+        },
+      );
+      for (const userScope of [false, true]) {
+        if (userScope) clickUserTab(container);
+        expect(container.querySelectorAll('nav button')).toHaveLength(0);
+        expect(container.querySelector('[data-slot="empty"]')).toBeTruthy();
+        expect(container.textContent).not.toContain('Test Flag');
+        expect(container.textContent).not.toContain('Fast Model');
+      }
+    },
+  );
+
+  it('allows a builtin without showing its sibling or ordinary settings', () => {
+    browserNotificationsStub.current = {
+      enabled: true,
+      permission: 'granted',
+      pending: false,
+      persistent: true,
+      error: false,
+      setEnabled: vi.fn(async () => {}),
+      refreshPermission: vi.fn(),
+      syncLanguage: vi.fn(),
+    };
+    const state = makeState([themeSetting()], vi.fn());
+    const baseline = renderPanel(state);
+    expect(baseline.textContent).toContain('Browser task notifications');
+    const container = renderPanel(state, {
+      presentation: { includeItems: ['builtin:chat-width'] },
+    });
+    for (const userScope of [false, true]) {
+      if (userScope) clickUserTab(container);
+      expect(container.querySelectorAll('nav button')).toHaveLength(1);
+      expect(container.textContent).toContain('Chat width');
+      expect(container.textContent).not.toContain('Theme');
+      expect(container.textContent).not.toContain('Browser task notifications');
+    }
+  });
+
+  it('does not enable unsupported Live setup when allowlisted', () => {
+    const setup = { ...liveSetup(false), supported: false };
+    const container = renderPanel(makeState([], vi.fn(), setup), {
+      presentation: { includeItems: ['builtin:live-setup'] },
+    });
+    expect(container.querySelectorAll('nav button')).toHaveLength(0);
+    expect(container.querySelector('[data-slot="empty"]')).toBeTruthy();
+    expect(setup.update).not.toHaveBeenCalled();
+  });
+
   it('preserves default content and counts for an empty exclusion list', () => {
     const state = makeState([subDialogSetting()], vi.fn());
     const options = { modelManagement: makeModelManagement() };
@@ -965,4 +1073,39 @@ describe('SettingsMessage user-scope editing', () => {
       }
     },
   );
+
+  it('filters the connections block by builtin:connections alone', () => {
+    const connections = <div data-testid="connections-panel">connections</div>;
+    const state = () => makeState([boolSetting()], vi.fn());
+
+    const excluded = renderPanel(state(), {
+      initialCategory: 'Connections',
+      connections,
+      presentation: { excludeItems: ['builtin:connections'] },
+    });
+    expect(
+      excluded.querySelector('[data-testid="connections-panel"]'),
+    ).toBeNull();
+    expect(excluded.querySelector('nav')?.textContent ?? '').not.toContain(
+      'Connections',
+    );
+
+    const included = renderPanel(state(), {
+      initialCategory: 'Connections',
+      connections,
+      presentation: { includeItems: ['builtin:connections'] },
+    });
+    expect(
+      included.querySelector('[data-testid="connections-panel"]'),
+    ).not.toBeNull();
+
+    const siblingExcluded = renderPanel(state(), {
+      initialCategory: 'Connections',
+      connections,
+      presentation: { excludeItems: ['builtin:model-management'] },
+    });
+    expect(
+      siblingExcluded.querySelector('[data-testid="connections-panel"]'),
+    ).not.toBeNull();
+  });
 });
