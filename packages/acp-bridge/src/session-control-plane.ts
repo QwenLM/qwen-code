@@ -154,6 +154,7 @@ import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -1215,9 +1216,11 @@ function parseWorkspaceMemoryDreamResult(
 function pickUserInputEchoMeta(meta: unknown): Record<string, unknown> {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
   const inputAnnotations = (meta as Record<string, unknown>)[
-    'inputAnnotations'
+    DAEMON_INPUT_ANNOTATIONS_META_KEY
   ];
-  return Array.isArray(inputAnnotations) ? { inputAnnotations } : {};
+  return Array.isArray(inputAnnotations)
+    ? { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations }
+    : {};
 }
 
 /**
@@ -4879,7 +4882,6 @@ export function createSessionControlPlane(
       if (entry.sourceType) {
         sourcePersisted = await persistSessionSource(
           entry,
-          entry.sessionId,
           daemonOwnedStandaloneCreation,
         );
       }
@@ -6406,9 +6408,9 @@ export function createSessionControlPlane(
 
   async function persistSessionSource(
     entry: SessionEntry,
-    logContext: string,
     daemonOwnedStandaloneCreation = false,
   ): Promise<boolean> {
+    let reason = 'unknown';
     try {
       const sourceResult = await Promise.race([
         withTimeout(
@@ -6427,18 +6429,39 @@ export function createSessionControlPlane(
         ),
         getTransportClosedReject(entry),
       ]);
-      return (
-        (sourceResult as { persisted?: boolean } | undefined)?.persisted ===
-        true
-      );
+      const acknowledgement = sourceResult as
+        | { persisted?: unknown; reason?: unknown }
+        | undefined;
+      if (acknowledgement?.persisted === true) return true;
+      reason =
+        acknowledgement?.persisted !== false
+          ? 'invalid_ack'
+          : acknowledgement.reason === undefined
+            ? 'negative_ack'
+            : acknowledgement.reason === 'recording_unavailable' ||
+                acknowledgement.reason === 'write_not_confirmed'
+              ? acknowledgement.reason
+              : 'unknown';
     } catch (err) {
-      writeStderrLine(
-        `qwen serve: source metadata for ${logContext} was not persisted ` +
-          `(${err instanceof Error ? err.message : String(err)}) — the source is live-only ` +
-          `until restart (reported to the caller via sourcePersisted=false)`,
-      );
-      return false;
+      reason =
+        err instanceof BridgeTimeoutError
+          ? 'rpc_timeout'
+          : err instanceof BridgeChannelClosedError
+            ? 'transport_closed'
+            : 'rpc_rejected';
     }
+    const message = `qwen serve: source_persistence_failed sessionId=${entry.sessionId} reason=${reason} sourcePersisted=false`;
+    try {
+      opts.onDiagnosticLine?.(message, 'warn');
+    } catch {
+      /* Best effort. */
+    }
+    try {
+      writeStderrLine(message);
+    } catch {
+      /* Best effort. */
+    }
+    return false;
   }
 
   async function applyRestoreSourceIfMissing(
@@ -6455,10 +6478,7 @@ export function createSessionControlPlane(
       delete entry.sourceId;
     }
     markSessionCatalogChanged();
-    return await persistSessionSource(
-      entry,
-      `${entry.sessionId} during session restore`,
-    );
+    return await persistSessionSource(entry);
   }
 
   const prepareStandaloneArtifactWorkspace = async (
@@ -8202,11 +8222,7 @@ export function createSessionControlPlane(
         );
       }
       const sourcePersisted = entry.sourceType
-        ? await persistSessionSource(
-            entry,
-            `${entry.sessionId} during session restore`,
-            daemonOwnedStandaloneRestore,
-          )
+        ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
         : undefined;
       try {
         assertAttachableSessionEntry(req.sessionId, entry);

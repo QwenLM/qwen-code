@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -893,6 +894,7 @@ export interface AskUserQuestionResultDisplay {
 }
 
 export type ToolResultDisplay =
+  | ShellResultDisplay
   | string
   | AskUserQuestionResultDisplay
   | FileDiff

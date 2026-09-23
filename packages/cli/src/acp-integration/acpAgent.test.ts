@@ -1483,6 +1483,17 @@ describe('runAcpAgent shutdown cleanup', () => {
     processOffSpy.mockRestore();
   });
 
+  it('rejects a tool sandbox before ACP initialization or transport setup', async () => {
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ network: 'closed' });
+    await expect(
+      runAcpAgent(mockConfig, mockSettings, mockArgv),
+    ).rejects.toThrow('does not support ACP sessions');
+    expect(mockConfig.initialize).not.toHaveBeenCalled();
+    expect(ndJsonStream).not.toHaveBeenCalled();
+  });
+
   it('starts telemetry only after a matching successful initialize response is sent', async () => {
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
     await vi.waitFor(() => expect(ndJsonStream).toHaveBeenCalledOnce());
@@ -7208,6 +7219,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects SSH workspace relocation and local runtime mutations before dispatch', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const relocateWorkingDirectory = vi.fn();
+    Object.assign(innerConfig, {
+      getExecutionEnvironment: vi.fn().mockReturnValue({}),
+      relocateWorkingDirectory,
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: '/nonexistent-ssh-local-target',
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd, {
+          sessionId,
+          name: 'unsafe',
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      Object.assign(mockConfig, {
+        getExecutionEnvironment: vi.fn().mockReturnValue({}),
+      });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize, {}),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      await expect(
+        agent.extMethod('qwen/settings/setCoreValue', {
+          path: 'hooks',
+          value: {},
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('serializes a working-directory change and hard-suspends Todo Stop Guard', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const targetDir = await fs.mkdtemp(
@@ -8631,6 +8684,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([false, true])(
+    'classifies an unconfirmed source write with recording available=%s',
+    async (available) => {
+      const sessionId = 'session-A';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getChatRecordingService = vi
+        .fn()
+        .mockReturnValue(
+          available
+            ? { recordSessionSource: vi.fn().mockResolvedValue(false) }
+            : undefined,
+        );
+      const { agent, agentPromise } = await bootAcpAgent();
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+          sessionId,
+          sourceType: 'scheduled_task',
+        }),
+      ).resolves.toEqual({
+        sessionId,
+        sourceType: 'scheduled_task',
+        persisted: false,
+        reason: available ? 'write_not_confirmed' : 'recording_unavailable',
+      });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('enables the dedicated screen tool for a compatible Live source', async () => {
     const sessionId = 'session-A';

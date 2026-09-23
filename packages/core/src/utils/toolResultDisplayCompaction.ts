@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay, mapShellResultText } from './shell-result.js';
 import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
@@ -648,6 +649,12 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
   resultDisplay: T,
   purpose: CompactionPurpose,
 ): T {
+  if (isShellResultDisplay(resultDisplay)) {
+    return mapShellResultText(resultDisplay, (value) =>
+      compactString(value, purpose),
+    ) as T;
+  }
+
   if (typeof resultDisplay === 'string') {
     return compactString(resultDisplay, purpose) as T;
   }

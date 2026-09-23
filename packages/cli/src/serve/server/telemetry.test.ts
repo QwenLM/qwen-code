@@ -996,6 +996,38 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it.each(['/sessions/catalog', '/sessions/catalog/', '/SESSIONS/CATALOG'])(
+    'records batch catalog metrics without attributing %s to primary',
+    (path) => {
+      const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
+      const recordRequest = vi.fn();
+      const res = mockRes(200);
+      const req = mockReq('POST', path);
+      expect(resolveDaemonTelemetryRoute(req)).toEqual({
+        route: 'POST /sessions/catalog',
+        attribution: 'handler_resolved',
+      });
+
+      daemonTelemetryMiddleware(resolveWorkspaceCwd, recordRequest)(
+        req,
+        res,
+        vi.fn() as unknown as NextFunction,
+      );
+      res.emit('finish');
+
+      expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 200);
+      expect(coreMocks.recordDaemonHttpRequest).toHaveBeenCalledWith(
+        expect.any(Number),
+        'POST /sessions/catalog',
+        200,
+        undefined,
+      );
+      expect(resolveWorkspaceCwd).not.toHaveBeenCalled();
+      expect(coreMocks.hashDaemonWorkspace).not.toHaveBeenCalled();
+      expect(coreMocks.spanSetAttribute).not.toHaveBeenCalled();
+    },
+  );
+
   it('omits workspace hash when a dynamic target is never resolved', () => {
     const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
     const mw = daemonTelemetryMiddleware(resolveWorkspaceCwd);
