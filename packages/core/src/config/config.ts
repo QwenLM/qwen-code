@@ -335,7 +335,10 @@ import {
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from '../memory/paths.js';
-import { registerMemoryChangedListener } from '../memory/memory-file-change.js';
+import {
+  memoryChangedNoticeFromHookInput,
+  registerMemoryChangedListener,
+} from '../memory/memory-file-change.js';
 import {
   type AutoMemoryIndexRead,
   readAutoMemoryIndexWithStats,
@@ -4127,6 +4130,14 @@ export class Config {
                   signal,
                 );
                 break;
+              case 'MemoryChanged': {
+                const notice = memoryChangedNoticeFromHookInput(input);
+                result = notice
+                  ? (await hookSystem.fireMemoryChangedEvent(notice, signal))
+                      .finalOutput
+                  : undefined;
+                break;
+              }
               case 'InstructionsLoaded':
                 result = await hookSystem.fireInstructionsLoadedEvent(
                   (input['file_path'] as string) || '',
@@ -7049,6 +7060,8 @@ export class Config {
         await (earlyWriterClose ?? closeWriter());
       }
       this.chatRecordingFailureListeners.clear();
+      this.unregisterMemoryChanged?.();
+      this.unregisterMemoryChanged = undefined;
       if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }

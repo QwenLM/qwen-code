@@ -54,7 +54,7 @@
 }
 ```
 
-只有这次开关才带 `enabled`。省略 `operation` 和 `memory_scope`。记忆对话框写的是工作区设置，事件里的 `workspace` 是该项目根目录。`qwen/settings/setMemory` 写的是用户设置；`enableManagedAutoMemory` 真的变化时，用这次请求的工作区发事件。开关没有相对路径，所以每个 `MemoryChanged` hook 都会收到。只关心文档的 hook 应忽略带 `enabled` 的事件。
+只有这次开关才带 `enabled`。省略 `operation` 和 `memory_scope`。记忆对话框写的是工作区设置，事件里的 `workspace` 是该项目根目录。`qwen/settings/setMemory` 写的是用户设置；`enableManagedAutoMemory` 真的变化时，用这次请求的工作区发事件。开关没有相对路径，所以每个 `MemoryChanged` hook 都会收到。只关心文档的 hook 应忽略带 `enabled` 的事件。直接改 settings 文件不会发这个事件。只有记忆对话框和 `qwen/settings/setMemory` 会发。
 
 基础 hook 输入仍有 `session_id` 和 `cwd`。`cwd` 是工作目录，不是工作区。
 

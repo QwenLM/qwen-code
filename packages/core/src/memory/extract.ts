@@ -226,11 +226,13 @@ export async function runAutoMemoryExtract(params: {
           rebuildManagedAutoMemoryIndex(params.projectRoot)
         : Promise.resolve();
     const userRebuild = agentResult.touchedUserScope
-      ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
-          debugLogger.warn(
-            `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
-          );
-        })
+      ? rebuildUserAutoMemoryIndex(params.projectRoot).catch(
+          (error: unknown) => {
+            debugLogger.warn(
+              `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+            );
+          },
+        )
       : Promise.resolve();
     await Promise.all([projectRebuild, userRebuild]);
     await refreshMemoryInstruction(params.config, {

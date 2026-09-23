@@ -54,7 +54,7 @@ Add a post-write, non-blocking hook event, `MemoryChanged`. The change is alread
 }
 ```
 
-`enabled` is present only for this toggle. `operation` and `memory_scope` are omitted. The Memory dialog writes the workspace setting and emits with that project root. `qwen/settings/setMemory` writes the user setting and emits with the request workspace when `enableManagedAutoMemory` actually changes. The toggle has no relative path, so every `MemoryChanged` hook receives it. A hook that only cares about documents ignores events where `enabled` is present.
+`enabled` is present only for this toggle. `operation` and `memory_scope` are omitted. The Memory dialog writes the workspace setting and emits with that project root. `qwen/settings/setMemory` writes the user setting and emits with the request workspace when `enableManagedAutoMemory` actually changes. The toggle has no relative path, so every `MemoryChanged` hook receives it. A hook that only cares about documents ignores events where `enabled` is present. Editing the settings file on disk does not emit this event. Only the Memory dialog and `qwen/settings/setMemory` do.
 
 The base hook input still carries `session_id` and `cwd`. `cwd` is the working directory, not the workspace.
 

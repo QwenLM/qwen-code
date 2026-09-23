@@ -242,7 +242,11 @@ export async function rebuildManagedAutoMemoryIndex(
     readAutoMemoryMetadata(projectRoot),
   ]);
   const content = buildManagedAutoMemoryIndex(docs, metadata);
-  await writeMemoryIndex(projectRoot, getAutoMemoryIndexPath(projectRoot), content);
+  await writeMemoryIndex(
+    projectRoot,
+    getAutoMemoryIndexPath(projectRoot),
+    content,
+  );
   return content;
 }
 
@@ -251,10 +255,12 @@ export async function rebuildManagedAutoMemoryIndex(
  * Mirrors {@link rebuildManagedAutoMemoryIndex} but uses the global root
  * and skips metadata (user memory has no per-project state file).
  */
-export async function rebuildUserAutoMemoryIndex(): Promise<string> {
+export async function rebuildUserAutoMemoryIndex(
+  projectRoot: string,
+): Promise<string> {
   const docs = await scanUserAutoMemoryTopicDocuments();
   const content = buildManagedAutoMemoryIndex(docs);
-  await writeMemoryIndex('', getUserAutoMemoryIndexPath(), content);
+  await writeMemoryIndex(projectRoot, getUserAutoMemoryIndexPath(), content);
   return content;
 }
 
@@ -353,7 +359,10 @@ async function writeMemoryIndex(
   content: string,
   options: { noFollow?: boolean } = {},
 ): Promise<void> {
-  const existed = existsSync(indexPath);
+  const existing = await fs.readFile(indexPath, 'utf-8').catch(() => null);
+  if (existing === content) {
+    return;
+  }
   await atomicWriteFile(indexPath, content, {
     encoding: 'utf-8',
     ...(options.noFollow ? { noFollow: true } : {}),
@@ -361,6 +370,6 @@ async function writeMemoryIndex(
   await notifyMemoryFileChange(
     indexPath,
     projectRoot,
-    existed ? 'update' : 'create',
+    existing === null ? 'create' : 'update',
   );
 }

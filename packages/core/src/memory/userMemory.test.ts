@@ -26,6 +26,10 @@ import {
 } from './store.js';
 import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import { rebuildUserAutoMemoryIndex } from './indexer.js';
+import {
+  registerMemoryChangedListener,
+  type MemoryChangedNotice,
+} from './memory-file-change.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
 
 describe('user-level auto-memory', () => {
@@ -219,7 +223,20 @@ describe('user-level auto-memory', () => {
         'Skip end-of-turn summaries.',
       );
 
-      const index = await rebuildUserAutoMemoryIndex();
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+        seen.push(change);
+      });
+      let index: string;
+      try {
+        index = await rebuildUserAutoMemoryIndex(projectRoot);
+        const afterFirst = seen.length;
+        expect(afterFirst).toBeGreaterThan(0);
+        await rebuildUserAutoMemoryIndex(projectRoot);
+        expect(seen).toHaveLength(afterFirst);
+      } finally {
+        unregister();
+      }
 
       expect(index).toContain('user/role.md');
       expect(index).toContain('feedback/terse.md');

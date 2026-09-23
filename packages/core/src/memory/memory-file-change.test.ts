@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   describeMemoryFileChange,
+  memoryChangedNoticeFromHookInput,
   notifyMemoryEnabledChange,
   notifyMemoryFileChange,
   registerMemoryChangedListener,
@@ -246,5 +247,76 @@ describe('memory file change hook', () => {
       unregister();
     }
     expect(seen).toEqual([]);
+  });
+
+  it('does not route an empty project root to a registered workspace', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        '',
+        'update',
+      );
+    } finally {
+      unregister();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('stops delivery after the listener is unregistered', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    unregister();
+    const again = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        projectRoot,
+        'update',
+      );
+    } finally {
+      again();
+    }
+    expect(seen).toHaveLength(1);
+  });
+
+  it('rebuilds a document notice and a toggle from hook input', () => {
+    expect(
+      memoryChangedNoticeFromHookInput({
+        paths: ['/memories/user/role.md'],
+        relative_paths: ['user/role.md'],
+        memory_scope: 'user',
+        operation: 'update',
+      }),
+    ).toEqual({
+      scope: 'user',
+      operation: 'update',
+      paths: ['/memories/user/role.md'],
+      relativePaths: ['user/role.md'],
+    });
+    expect(
+      memoryChangedNoticeFromHookInput({
+        paths: [],
+        workspace: '/repo',
+        enabled: false,
+      }),
+    ).toEqual({
+      paths: [],
+      relativePaths: [],
+      workspace: '/repo',
+      enabled: false,
+    });
+    expect(
+      memoryChangedNoticeFromHookInput({ operation: 'nope' }),
+    ).toBeUndefined();
   });
 });

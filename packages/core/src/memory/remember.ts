@@ -271,7 +271,9 @@ export async function runManagedRememberByAgent(params: {
       ...(params.scope !== 'user'
         ? [rebuildManagedAutoMemoryIndex(params.projectRoot)]
         : []),
-      ...(params.scope !== 'project' ? [rebuildUserAutoMemoryIndex()] : []),
+      ...(params.scope !== 'project'
+        ? [rebuildUserAutoMemoryIndex(params.projectRoot)]
+        : []),
     ]).catch((rebuildErr: unknown) => {
       debugLogger.error('Memory index rebuild failed:', rebuildErr);
     });
@@ -314,11 +316,13 @@ export async function runManagedRememberByAgent(params: {
         : Promise.resolve(),
       writtenScopes.includes('user')
         ? params.scope === 'user'
-          ? rebuildUserAutoMemoryIndex()
-          : rebuildUserAutoMemoryIndex().catch((err: unknown) => {
-              // Automatic scope selection keeps user memory best-effort.
-              debugLogger.error('User memory index rebuild failed:', err);
-            })
+          ? rebuildUserAutoMemoryIndex(params.projectRoot)
+          : rebuildUserAutoMemoryIndex(params.projectRoot).catch(
+              (err: unknown) => {
+                // Automatic scope selection keeps user memory best-effort.
+                debugLogger.error('User memory index rebuild failed:', err);
+              },
+            )
         : Promise.resolve(),
     ]);
   if (escapeError !== undefined) {

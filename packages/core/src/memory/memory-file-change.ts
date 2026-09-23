@@ -198,6 +198,69 @@ export async function notifyMemoryFileChange(
  * Notify listeners after managed auto-memory is enabled or disabled.
  * The setting write has already landed. `paths` is empty.
  */
+const MEMORY_SCOPES: readonly MemoryChangedScope[] = [
+  'user',
+  'project',
+  'team',
+];
+const MEMORY_OPERATIONS: readonly MemoryChangedOperation[] = [
+  'create',
+  'update',
+  'delete',
+];
+
+function isMemoryScope(value: unknown): value is MemoryChangedScope {
+  return (
+    typeof value === 'string' &&
+    (MEMORY_SCOPES as readonly string[]).includes(value)
+  );
+}
+
+function isMemoryOperation(value: unknown): value is MemoryChangedOperation {
+  return (
+    typeof value === 'string' &&
+    (MEMORY_OPERATIONS as readonly string[]).includes(value)
+  );
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
+
+/**
+ * Rebuild a notice from a hook bus payload. Returns undefined when the
+ * payload is not a document change or an on/off toggle.
+ */
+export function memoryChangedNoticeFromHookInput(
+  input: Record<string, unknown>,
+): MemoryChangedNotice | undefined {
+  if (typeof input['enabled'] === 'boolean') {
+    return {
+      paths: [],
+      relativePaths: [],
+      workspace:
+        typeof input['workspace'] === 'string' ? input['workspace'] : '',
+      enabled: input['enabled'],
+    };
+  }
+  if (
+    !isMemoryScope(input['memory_scope']) ||
+    !isMemoryOperation(input['operation'])
+  ) {
+    return undefined;
+  }
+  const workspace = input['workspace'];
+  return {
+    scope: input['memory_scope'],
+    operation: input['operation'],
+    paths: stringList(input['paths']),
+    relativePaths: stringList(input['relative_paths']),
+    ...(typeof workspace === 'string' ? { workspace } : {}),
+  };
+}
+
 export async function notifyMemoryEnabledChange(
   workspace: string,
   enabled: boolean,

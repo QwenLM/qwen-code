@@ -135,7 +135,7 @@ async function rebuildWrittenMemoryIndexes(
         })
       : Promise.resolve(),
     wroteUserMemory
-      ? rebuildUserAutoMemoryIndex().catch((err: unknown) => {
+      ? rebuildUserAutoMemoryIndex(projectRoot).catch((err: unknown) => {
           debugLogger.warn(
             `${logPrefix(options)}rebuildUserAutoMemoryIndex failed: ${err}`,
           );

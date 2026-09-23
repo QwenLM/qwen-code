@@ -639,7 +639,7 @@ export async function forgetManagedAutoMemoryMatches(
   if (touchedScopes.has('user')) {
     try {
       options.abortSignal?.throwIfAborted();
-      await rebuildUserAutoMemoryIndex();
+      await rebuildUserAutoMemoryIndex(projectRoot);
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(
