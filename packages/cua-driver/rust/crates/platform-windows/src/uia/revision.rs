@@ -11,7 +11,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomationElement};
 
-use super::{format_revision_body, UiaBackend, UiaNode, UiaTreeResult};
+use super::{format_app_revision_body, format_revision_body, UiaBackend, UiaNode, UiaTreeResult};
 
 const RETAINED_REVISIONS: usize = 8;
 const MAX_LINEAGES: usize = 64;
@@ -23,6 +23,7 @@ struct RevisionKey {
     hwnd: u64,
     max_elements: usize,
     max_depth: usize,
+    bounded: bool,
     serializer_version: String,
     projection_version: String,
 }
@@ -66,9 +67,16 @@ struct WindowsLineage {
 }
 
 impl WindowsLineage {
-    fn new(lineage_id: String) -> Result<Self, String> {
+    fn new(lineage_id: String, app_context: bool) -> Result<Self, String> {
         Ok(Self {
             revision: ObservationLineage::new(lineage_id, RETAINED_REVISIONS)
+                .map(|lineage| {
+                    if app_context {
+                        lineage.for_app()
+                    } else {
+                        lineage
+                    }
+                })
                 .map_err(|error| error.to_string())?,
             identities: HashMap::new(),
             next_native_identity: 0,
@@ -82,10 +90,13 @@ struct WindowsLineageEntry {
 }
 
 impl WindowsLineageEntry {
-    fn new() -> Result<Self, String> {
+    fn new(app_context: bool) -> Result<Self, String> {
         let lineage_id = format!("l_{}", uuid::Uuid::new_v4().simple());
         Ok(Self {
-            state: Arc::new(Mutex::new(WindowsLineage::new(lineage_id.clone())?)),
+            state: Arc::new(Mutex::new(WindowsLineage::new(
+                lineage_id.clone(),
+                app_context,
+            )?)),
             lineage_id,
         })
     }
@@ -159,17 +170,22 @@ impl WindowsObservationRevisions {
             hwnd,
             max_elements,
             max_depth,
+            bounded: tree.truncated,
             serializer_version: request.serializer_version.clone(),
             projection_version: request.projection_version.clone(),
         };
 
+        self.store.lock().unwrap().remove(&RevisionKey {
+            bounded: !key.bounded,
+            ..key.clone()
+        });
         if tree.backend == UiaBackend::Msaa {
             self.store.lock().unwrap().remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::UnsupportedBackend);
+            return transient_full(&tree.nodes, FullResyncReason::UnsupportedBackend, request);
         }
-        if !tree.complete {
+        if !tree.read_complete() {
             self.store.lock().unwrap().remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::CaptureIncomplete);
+            return transient_full(&tree.nodes, FullResyncReason::CaptureIncomplete, request);
         }
 
         let runtime_ids = tree
@@ -188,15 +204,16 @@ impl WindowsObservationRevisions {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let automation: IUIAutomation =
-            match unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) } {
-                Ok(automation) => automation,
-                Err(error) => {
-                    self.store.lock().unwrap().remove(&key);
-                    tracing::debug!(target: "uia", "UIA comparison initialization failed: {error}");
-                    return transient_full(&tree.nodes, FullResyncReason::ProviderInvalidated);
-                }
-            };
+        let automation: IUIAutomation = match unsafe {
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+        } {
+            Ok(automation) => automation,
+            Err(error) => {
+                self.store.lock().unwrap().remove(&key);
+                tracing::debug!(target: "uia", "UIA comparison initialization failed: {error}");
+                return transient_full(&tree.nodes, FullResyncReason::ProviderInvalidated, request);
+            }
+        };
 
         let lineage_state = {
             let mut store = self.store.lock().unwrap();
@@ -204,7 +221,7 @@ impl WindowsObservationRevisions {
                 store.ensure_capacity();
                 store
                     .lineages
-                    .insert(key.clone(), WindowsLineageEntry::new()?);
+                    .insert(key.clone(), WindowsLineageEntry::new(request.projection_version == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION)?);
             }
             store.touch(&key);
             store
@@ -252,18 +269,33 @@ impl WindowsObservationRevisions {
             .map(|(node, identity)| CapturedNode {
                 identity,
                 depth: node.depth,
-                body: format_revision_body(node),
+                body: if request.projection_version
+                    == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION
+                {
+                    format_app_revision_body(node)
+                } else {
+                    format_revision_body(node)
+                },
                 actionable_index: node.element_index,
             })
             .collect::<Vec<_>>();
         let forced_reason =
             cua_driver_core::observation_revision::requested_format_resync_reason(request)
                 .or_else(|| request.force_full.then_some(FullResyncReason::Requested));
-        let result = match lineage.revision.observe_with_reason(
-            captured,
-            request.base_revision_id.as_deref(),
-            forced_reason,
-        ) {
+        let observed = if tree.truncated {
+            lineage.revision.observe_bounded(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        } else {
+            lineage.revision.observe_with_reason(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        };
+        let result = match observed {
             Ok(result) => result,
             Err(error) => {
                 drop(lineage);
@@ -302,7 +334,7 @@ impl WindowsObservationRevisions {
             current
         };
         if !still_current {
-            return transient_full(&tree.nodes, FullResyncReason::ProviderInvalidated);
+            return transient_full(&tree.nodes, FullResyncReason::ProviderInvalidated, request);
         }
         Ok(result)
     }
@@ -342,6 +374,7 @@ impl Default for WindowsObservationRevisions {
 fn transient_full(
     nodes: &[UiaNode],
     reason: FullResyncReason,
+    request: &ObservationRevisionRequest,
 ) -> Result<ObservationRevisionResult, String> {
     let captured = nodes
         .iter()
@@ -349,7 +382,13 @@ fn transient_full(
         .map(|(identity, node)| CapturedNode {
             identity,
             depth: node.depth,
-            body: format_revision_body(node),
+            body: if request.projection_version
+                == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION
+            {
+                format_app_revision_body(node)
+            } else {
+                format_revision_body(node)
+            },
             actionable_index: node.element_index,
         })
         .collect::<Vec<_>>();
@@ -358,6 +397,11 @@ fn transient_full(
         RETAINED_REVISIONS,
     )
     .map_err(|error| error.to_string())?;
+    if request.projection_version
+        == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION
+    {
+        lineage = lineage.for_app();
+    }
     lineage
         .observe_unretained_full(captured, reason)
         .map_err(|error| error.to_string())
@@ -433,6 +477,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_budget_truncation_is_a_complete_read() {
+        let mut tree = UiaTreeResult {
+            tree_markdown: String::new(),
+            nodes: vec![],
+            backend: UiaBackend::Uia,
+            complete: false,
+            truncated: true,
+            incomplete_notes: vec!["uia_max_elements_reached".into()],
+        };
+        assert!(tree.read_complete());
+        tree.incomplete_notes.push("provider_unresponsive".into());
+        assert!(!tree.read_complete());
+        tree.incomplete_notes.clear();
+        assert!(!tree.read_complete());
+    }
+
+    #[test]
     fn incomplete_capture_evicts_the_current_lineage() {
         let revisions = WindowsObservationRevisions::new();
         let session = ObservationSessionIdentity {
@@ -453,6 +514,7 @@ mod tests {
             hwnd: 7,
             max_elements: 100,
             max_depth: 10,
+            bounded: false,
             serializer_version: request.serializer_version.clone(),
             projection_version: request.projection_version.clone(),
         };
@@ -460,7 +522,7 @@ mod tests {
             let mut store = revisions.store.lock().unwrap();
             store
                 .lineages
-                .insert(key.clone(), WindowsLineageEntry::new().unwrap());
+                .insert(key.clone(), WindowsLineageEntry::new(false).unwrap());
             store.touch(&key);
         }
         let tree = UiaTreeResult {

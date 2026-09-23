@@ -845,8 +845,37 @@ contributed is dropped, with a log identifying it, when it cannot be resolved,
 so one workspace's stale entry does not strand the others; a name the primary
 workspace listed still fails the restore as a whole, whether or not another
 workspace lists it too.
-`all` remains primary-only: it is ignored, and reported, anywhere else. With no
-explicit or configured selection, channel runtime loading stays lazy.
+`all` remains primary-only: it is ignored, and reported, anywhere else.
+
+A trusted non-primary workspace registered after boot restores its own
+`serve.channels` too, loading the channel runtime and reserving the
+channel-service lease if nothing else has. That restore:
+
+- happens **once per daemon run** — recorded as soon as the workspace asks for
+  anything — so a later removal and re-registration, or a trust
+  re-materialization, does not undo an operator who stopped one of those
+  channels in between;
+- does not happen under an explicit `--channel` selection, which no workspace
+  registered later extends;
+- does not happen after `DELETE /workspace/channel` stopped hosting, until a
+  `PUT /workspace/channel` commits a selection again or the daemon restarts;
+- leaves a committed `all` selection as it is;
+- adds that workspace's names to the committed selection in one change, one
+  late restore at a time. Unlike boot, which drops a name it cannot host and
+  keeps the rest, a name that cannot be attributed leaves that workspace's
+  whole list unrestored, with the error logged.
+
+Registration does not wait on channel control at all. The restore is queued
+on the channel-control lane and the response is written without waiting for
+it, and so is the reconcile a registration or trust change triggers for
+channels the daemon already hosts. A worker that never becomes ready therefore
+delays only the channel work queued behind it, never another registration or a
+trust reconcile. The flip side is that a `201` from `POST /workspaces` does not
+mean that workspace's channels are up, or that an already-hosted channel it
+owns has finished restarting; read `GET /workspace/channel` for that.
+
+Without an explicit selection, a boot-time `serve.channels` restore, or a
+registration like the one above, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
