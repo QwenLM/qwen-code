@@ -15,6 +15,8 @@ import {
 } from './managed-runtime-attestation-contract.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
+const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
+const INVALID_BOOT_MESSAGE = 'Managed Runtime worker boot payload is invalid.';
 const BOOT_KEYS = Object.freeze([
   'capabilityDigest',
   'epoch',
@@ -66,7 +68,7 @@ function isExactBoot(value: unknown): value is ManagedRuntimeWorkerBoot {
   return boot['type'] === 'boot' && boot['version'] === 1;
 }
 
-export async function readManagedRuntimeWorkerBoot(
+async function collectManagedRuntimeWorkerBoot(
   input: Readable,
 ): Promise<ManagedRuntimeWorkerBoot> {
   const chunks: Buffer[] = [];
@@ -75,7 +77,7 @@ export async function readManagedRuntimeWorkerBoot(
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += bytes.byteLength;
     if (size > MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES) {
-      throw new Error('Managed Runtime worker boot payload is invalid.');
+      throw new Error(INVALID_BOOT_MESSAGE);
     }
     chunks.push(bytes);
   }
@@ -83,12 +85,33 @@ export async function readManagedRuntimeWorkerBoot(
   try {
     parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw new Error('Managed Runtime worker boot payload is invalid.');
+    throw new Error(INVALID_BOOT_MESSAGE);
   }
   if (!isExactBoot(parsed)) {
-    throw new Error('Managed Runtime worker boot payload is invalid.');
+    throw new Error(INVALID_BOOT_MESSAGE);
   }
   return parsed;
+}
+
+export async function readManagedRuntimeWorkerBoot(
+  input: Readable,
+): Promise<ManagedRuntimeWorkerBoot> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      input.destroy();
+      reject(new Error(INVALID_BOOT_MESSAGE));
+    }, MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS);
+    timeout.unref();
+  });
+  try {
+    return await Promise.race([
+      collectManagedRuntimeWorkerBoot(input),
+      timedOut,
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export async function startManagedRuntimeAttestationWorker(

@@ -5,9 +5,9 @@
  */
 
 import { spawn } from 'node:child_process';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   readManagedRuntimeWorkerBoot,
   startManagedRuntimeAttestationWorker,
@@ -122,6 +122,23 @@ describe('Managed Runtime attestation worker', () => {
     await expect(
       readManagedRuntimeWorkerBoot(Readable.from([payload])),
     ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
+  });
+
+  it('rejects boot input that is not closed within the startup deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const input = new PassThrough();
+      const result = readManagedRuntimeWorkerBoot(input).catch(
+        (error: unknown) => error,
+      );
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await result).toEqual(
+        new Error('Managed Runtime worker boot payload is invalid.'),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('mounts only the attestation manifest on a loopback listener', async () => {

@@ -76,7 +76,7 @@ Java Runtime Broker 测试使用 Jackson 读取仓库中的同一批文件，固
 
 ## 仅提供身份证明的 Worker 外壳
 
-隐藏命令 `qwen managed-runtime-worker` 从标准输入接收且只接收一份 JSON boot 文档。这个闭合文档包含 v1 boot 标记和不可变 attestation identity，其中包括每个 generation 独立的 bearer token。输入上限为 32 KiB，未知字段会让启动失败。通过标准输入传入 token，可避免它出现在命令参数或长期环境变量中。
+隐藏命令 `qwen managed-runtime-worker` 从标准输入接收且只接收一份 JSON boot 文档。这个闭合文档包含 v1 boot 标记和不可变 attestation identity，其中包括每个 generation 独立的 bearer token。输入上限为 32 KiB，且必须在 30 秒内关闭；超时或出现未知字段都会让启动失败。通过标准输入传入 token，可避免它出现在命令参数或长期环境变量中。
 
 进程使用同一个 attestation registrar 校验 identity 后，在操作系统分配的 `127.0.0.1` 端口监听。raw listener 由 `ownedManagedRuntimeRouteGate` 包装，因此唯一放行的操作是 manifest 中精确的 attestation route。进程输出一份闭合的 v1 ready record，其中包含 loopback URL 和 fencing identity，但永不包含 token。收到 `SIGINT` 或 `SIGTERM` 时，进程先关闭 listener 再退出。
 
@@ -87,7 +87,7 @@ Java Runtime Broker 测试使用 Jackson 读取仓库中的同一批文件，固
 - raw gate 检查原始 URL，拒绝 query 变体，不会把它规范化为允许路由。
 - 在 JSON 解析前校验 authentication 和 lease headers，减少未鉴权 parser 暴露面。
 - 每个 route 与外层 gate 响应都带 `Cache-Control: no-store`，包括 4xx 响应。
-- boot credential 只从有界标准输入读取一次，ready record 不得泄露它；本阶段外壳只绑定 IPv4 loopback。
+- boot credential 只从大小和时间均有界的标准输入读取一次，ready record 不得泄露它；本阶段外壳只绑定 IPv4 loopback。
 - `401/403` 分类为凭据失败，`400/413` 分类为协议失败，`404/405` 分类为不兼容，`409` 分类为身份冲突。未来 Broker 不能把 404 解释为暂时未 ready。
 - attestation 验证应用身份信封，不是 TPM/TEE remote attestation。跨主机流量仍需要 TLS/mTLS 或等价 workload identity 和网络策略。
 

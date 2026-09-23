@@ -76,7 +76,7 @@ The Java Runtime Broker test reads these exact repository files with Jackson. It
 
 ## Attestation-only Worker Shell
 
-The hidden `qwen managed-runtime-worker` command accepts exactly one JSON boot document on standard input. The closed document carries the v1 boot marker plus the immutable attestation identity, including the per-generation bearer token. Input is capped at 32 KiB and unknown fields fail startup. Keeping the token on standard input avoids exposing it in command arguments or a long-lived environment variable.
+The hidden `qwen managed-runtime-worker` command accepts exactly one JSON boot document on standard input. The closed document carries the v1 boot marker plus the immutable attestation identity, including the per-generation bearer token. Input is capped at 32 KiB, must close within 30 seconds, and fails startup on timeout or unknown fields. Keeping the token on standard input avoids exposing it in command arguments or a long-lived environment variable.
 
 After validating the identity through the same attestation registrar, the process listens on an operating-system-assigned `127.0.0.1` port. The raw listener is wrapped by `ownedManagedRuntimeRouteGate`, so the only admitted operation is the manifest's exact attestation route. The process emits one closed v1 ready record containing its loopback URL and fencing identity, but never the token. `SIGINT` and `SIGTERM` close the listener before the process exits.
 
@@ -87,7 +87,7 @@ This shell is an executable ownership boundary for the next Java client and proc
 - The raw gate sees the original URL and rejects query variants instead of normalizing them into an allowed route.
 - Authentication and lease headers are checked before JSON parsing, reducing unauthenticated parser exposure.
 - Every route and outer-gate response carries `Cache-Control: no-store`, including 4xx responses.
-- The boot credential is read once from bounded standard input, and the ready record cannot disclose it. The shell binds only to IPv4 loopback in this phase.
+- The boot credential is read once from size- and time-bounded standard input, and the ready record cannot disclose it. The shell binds only to IPv4 loopback in this phase.
 - `401/403` classify as credential failure, `400/413` as protocol failure, `404/405` as incompatibility, and `409` as identity conflict. A future Broker must not interpret 404 as temporary readiness.
 - Attestation verifies an application identity envelope; it is not TPM/TEE remote attestation. Cross-host traffic still requires TLS/mTLS or equivalent workload identity and network policy.
 
