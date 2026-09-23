@@ -38,9 +38,14 @@ export function percent(value: number): string {
 
 function spanStyle(span: TimelineSpan, total: number): CSSProperties {
   const length = span.end - span.start;
+  const share = total > 0 ? length / total : 0;
   const style: Record<string, string> = {
     '--left': percent(total > 0 ? (span.start / total) * 100 : 0),
-    '--width': percent(total > 0 ? (length / total) * 100 : 0),
+    '--width': percent(share * 100),
+    // Calls running side by side share a lane, and a long one drawn after a
+    // short one would cover it completely. Shorter spans stack higher, so
+    // every one stays visible and clickable.
+    '--stack': String(1 + Math.round((1 - share) * 1000)),
   };
   if (span.ttftEnd !== undefined && length > 0) {
     style['--ttft'] = percent(((span.ttftEnd - span.start) / length) * 100);

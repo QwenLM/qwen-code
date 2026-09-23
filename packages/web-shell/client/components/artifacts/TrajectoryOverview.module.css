@@ -76,6 +76,7 @@
   left: var(--left);
   width: max(3px, var(--width));
   height: 8px;
+  z-index: var(--stack, 1);
   border-radius: 1px;
   background: var(--traj-request);
   cursor: pointer;
@@ -113,7 +114,7 @@
 }
 
 .span[data-current='true'] {
-  z-index: 1;
+  z-index: 1002;
   outline: 2px solid var(--foreground);
   outline-offset: 1px;
 }

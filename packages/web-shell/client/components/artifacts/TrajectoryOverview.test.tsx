@@ -155,6 +155,28 @@ describe('TrajectoryOverview', () => {
     expect(onSelect).toHaveBeenCalledWith('sub');
   });
 
+  it('stacks a short call above a long one it runs beside', () => {
+    // A 37 ms shell call and a 12.7 s delegation started within a millisecond
+    // of each other in a recorded session; drawn in time order, the long bar
+    // covered the short one entirely.
+    const [long, short] = spansOf(
+      render({
+        model: {
+          ...MODEL,
+          spans: [
+            span({ rowKey: 'agent', lane: 1, start: 0, end: 1800 }),
+            span({ rowKey: 'echo', lane: 1, start: 0, end: 10 }),
+          ],
+          turnMarks: [],
+          total: 2000,
+        },
+      }),
+    );
+    expect(Number(short!.style.getPropertyValue('--stack'))).toBeGreaterThan(
+      Number(long!.style.getPropertyValue('--stack')),
+    );
+  });
+
   it('names each span through the table', () => {
     const [req] = spansOf(render({ model: MODEL }));
     expect(req!.title).toBe('about req');
