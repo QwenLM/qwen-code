@@ -3526,14 +3526,14 @@ export function WebShellSidebar({
   );
 
   const handleToggleWorkspacePin = useCallback(
-    (workspace: DaemonWorkspaceCapability) => {
-      const targetPinned = !workspace.isPinned;
+    (workspaceCapability: DaemonWorkspaceCapability) => {
+      const targetPinned = !workspaceCapability.isPinned;
       void (async () => {
         let registrationId: string;
         try {
           const hashBuffer = await crypto.subtle.digest(
             'SHA-256',
-            new TextEncoder().encode(workspace.cwd),
+            new TextEncoder().encode(workspaceCapability.cwd),
           );
           const hashArray = Array.from(new Uint8Array(hashBuffer));
           registrationId = hashArray
@@ -3559,7 +3559,7 @@ export function WebShellSidebar({
         }
       })();
     },
-    [workspaceActions, onError, t],
+    [workspaceActions, workspace, onError, t],
   );
 
   const handleArchive = useCallback(
