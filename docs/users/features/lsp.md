@@ -104,10 +104,10 @@ Example:
 
 #### Transport Fields
 
-| Option    | Type             | Description                                                                                                                                |
-| --------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `command` | string           | Required only for `stdio`. Resolved through `PATH` or an absolute path.                                                                    |
-| `socket`  | string or object | Required for `tcp` and `socket`: `host`/`port` or `path`. The same fields (or `socketPath`) may also be set at the top level of the entry. |
+| Option    | Type             | Description                                                                                                                                                                |
+| --------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `command` | string           | Required only for `stdio`. Resolved through `PATH` or an absolute path.                                                                                                    |
+| `socket`  | string or object | Required for `tcp` and `socket`: `host`/`port` or `path`. A bare string is a socket path. The same fields (or `socketPath`) may also be set at the top level of the entry. |
 
 #### Optional Fields
 
@@ -139,8 +139,10 @@ unmapped extensions use `plaintext`; otherwise the entry's language key is used.
 Qwen Code watches the project-root `.lsp.json` for semantic changes and
 reconciles added, removed, and changed servers. Invalid JSON leaves the current
 LSP runtime unchanged and logs the configuration error (visible with
-`--debug`). At startup, invalid `tcp` or `socket` entries are skipped; on hot
-reload, any invalid entry aborts the reload. Both are logged only under `--debug`.
+`--debug`). At startup, any invalid entry is skipped; on hot reload, any invalid
+entry aborts the reload. The startup skip is logged only under `--debug`; a reload
+abort is also shown by `/status` as `initialization failed` until a later reload
+succeeds.
 
 ### TCP/Socket Transport
 
