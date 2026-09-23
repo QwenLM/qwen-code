@@ -4,11 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Mobile composer backend (#5958). Runs under the `mobile-chromium` project
-// (Pixel 7 emulation: touch, coarse pointer, no hover), where the composer
-// must render the plain-textarea backend instead of CodeMirror.
+// Mobile composer backend (#5958). Runs under the `mobile-chromium` (Pixel 7)
+// and `mobile-webkit` (iPhone 13) projects — both emulate touch, coarse
+// pointer, and no hover — where the composer must render the plain-textarea
+// backend instead of CodeMirror.
 
-import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from '@playwright/test';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -25,6 +32,7 @@ import {
   expectEmptyMobileWelcomeChromeVisible,
   gotoEmptyMobileWelcomeHarness,
 } from './utils/emptyMobileComposer';
+import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
@@ -305,6 +313,30 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveCount(0);
 });
 
+test('history arrows recall the first welcome submission @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('First input from mobile');
+  await page.locator('[data-web-shell-composer-submit]').tap();
+  await completeReplay(page, daemon, scenario.sessionId);
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  await daemon.sendEvent(turnCompleteEvent('prompt-mobile', { id: 11 }));
+  await expect(textarea).toHaveValue('');
+
+  const draft = 'New draft 😀\nsecond line';
+  await textarea.fill(draft);
+  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
+  await expect(textarea).toHaveValue('First input from mobile');
+  await expect(textarea).toBeFocused();
+  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
+  await expect(textarea).toHaveValue(draft);
+  expect(daemon.promptRequests()).toHaveLength(1);
+});
+
 for (const width of [390, 240]) {
   test(`history arrows restore the draft without submitting at ${width}px @smoke`, async ({
     page,
@@ -528,6 +560,203 @@ test('mobile stop remains reachable with a queued draft @smoke', async ({
     .toBe(true);
   await expect(textarea).toHaveValue('keep this follow-up');
 });
+
+// 412x360 is a smaller phone once the soft keyboard has resized the viewport.
+// With attachments the composer fills its cap, leaving less room below the
+// header than the search panel's minimum height.
+test('mobile history search stays reachable above a soft keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 412, height: 360 });
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'qwen-web-shell-history',
+      JSON.stringify(
+        Array.from({ length: 8 }, (_, index) => `saved input ${index + 1}`),
+      ),
+    ),
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await pasteFiles(textarea, ['first.png', 'notes-one.txt', 'notes-two.txt']);
+  await textarea.fill('working draft');
+  await page.getByRole('button', { name: 'Add to message' }).tap();
+  await page.getByRole('button', { name: 'Input history', exact: true }).tap();
+  const search = page.locator('[data-web-shell-composer-history-search]');
+  await expect(search).toBeFocused();
+  const close = page
+    .locator('[data-web-shell-composer-surface]')
+    .getByRole('button', { name: 'close', exact: true });
+  // Polled: the Add drawer's closing overlay briefly covers the page.
+  for (const control of [search, close]) {
+    await expect.poll(() => isUncovered(control, { topEdge: true })).toBe(true);
+  }
+  // Not even the panel's minimum height fits, so it overlaps the composer.
+  const shift = await search.evaluate(
+    (element) =>
+      element
+        .closest<HTMLElement>('[style*="--chat-editor-search-shift"]')
+        ?.style.getPropertyValue('--chat-editor-search-shift') ?? null,
+  );
+  expect(shift).not.toBeNull();
+  expect(Number.parseFloat(shift!)).toBeGreaterThan(0);
+  await close.tap();
+  await expect(textarea).toHaveValue('working draft');
+  await expect(textarea).toBeFocused();
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile workspace row stays clear of the editing row @smoke', async ({
+  page,
+}, testInfo) => {
+  await installScenario(page, createGitWorkspaceScenario(), testInfo);
+  await page.goto('/');
+  const branch = page.locator('[data-web-shell-git-branch]');
+  await expect(branch).toBeVisible({ timeout: 10_000 });
+  const branchBox = (await branch.boundingBox())!;
+  const previousBox = (await page
+    .getByRole('button', { name: 'Previous input' })
+    .boundingBox())!;
+  expect(previousBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
+});
+
+// 412x450 is a Pixel 7 once the soft keyboard has resized the viewport. A
+// second workspace and a long branch wrap the workspace row onto two lines.
+test('mobile attachments stay reachable above a soft keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 412, height: 450 });
+  const scenario = createGitWorkspaceScenario({
+    gitStatus: {
+      v: 2,
+      workspaceCwd: '/tmp/qwen-web-shell-e2e',
+      branch: `feature/${'a'.repeat(60)}`,
+    },
+  });
+  scenario.capabilities.workspaces!.push({
+    id: 'secondary',
+    cwd: '/tmp/another-project',
+    trusted: true,
+    primary: false,
+  });
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  const branch = page.locator('[data-web-shell-git-branch]');
+  await expect(branch).toBeVisible({ timeout: 10_000 });
+  const workspace = page
+    .locator('[data-web-shell-composer-surface]')
+    .getByRole('button', { name: 'Workspace', exact: true });
+  expect((await branch.boundingBox())!.y).toBeGreaterThan(
+    (await workspace.boundingBox())!.y,
+  );
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await pasteFiles(textarea, ['first.png', 'notes-one.txt', 'notes-two.txt']);
+  const remove = page.getByRole('button', { name: 'Remove notes-two.txt' });
+  await expect(remove).toBeAttached();
+  // The strip caps its own height, so the trailing card is scrolled to first.
+  const strip = page.locator('[data-web-shell-composer-attachments]');
+  await expect
+    .poll(async () => {
+      await strip.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      return isUncovered(remove);
+    })
+    .toBe(true);
+});
+
+// 412x360 is below the height at which the strip stays readable (see the
+// design doc), so the strip is a sliver either way; what the height-cap rule
+// must hold even there is that showing the workspace row never shrinks it.
+test('mobile workspace row does not shrink the attachments strip @smoke', async ({
+  page,
+}, testInfo) => {
+  const stripHeight = async (
+    target: Page,
+    scenario: WebShellDaemonScenario,
+    withRow: boolean,
+  ): Promise<number> => {
+    await target.setViewportSize({ width: 412, height: 360 });
+    await installScenario(target, scenario, testInfo);
+    await target.goto('/');
+    const textarea = target.locator(COMPOSER_TEXTAREA);
+    await expect(textarea).toBeVisible();
+    if (withRow) {
+      await expect(target.locator('[data-web-shell-git-branch]')).toBeVisible({
+        timeout: 10_000,
+      });
+    }
+    await textarea.tap();
+    await pasteFiles(textarea, ['first.png', 'notes-one.txt', 'notes-two.txt']);
+    const strip = target.locator('[data-web-shell-composer-attachments]');
+    // Attached, not visible: when the cap rule is broken the strip collapses
+    // to 0px, and the comparison below — not the wait — should be what fails.
+    await expect(strip).toBeAttached();
+    return strip.evaluate((element) => element.getBoundingClientRect().height);
+  };
+  const withRow = await stripHeight(page, createGitWorkspaceScenario(), true);
+  const secondPage = await page.context().newPage();
+  try {
+    const withoutRow = await stripHeight(
+      secondPage,
+      createWebShellDaemonScenario(),
+      false,
+    );
+    expect(withRow).toBeGreaterThanOrEqual(withoutRow);
+  } finally {
+    await secondPage.close();
+  }
+});
+
+// Pastes each file as its own clipboard event, like a phone keyboard does.
+async function pasteFiles(textarea: Locator, names: string[]): Promise<void> {
+  await textarea.evaluate(async (element, fileNames) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 120;
+    canvas.height = 90;
+    const png = await new Promise<Blob>((resolve) =>
+      canvas.toBlob((blob) => resolve(blob!), 'image/png'),
+    );
+    for (const name of fileNames) {
+      const data = new DataTransfer();
+      data.items.add(
+        name.endsWith('.png')
+          ? new File([png], name, { type: 'image/png' })
+          : new File(['notes\n'], name, { type: 'text/plain' }),
+      );
+      element.dispatchEvent(
+        new ClipboardEvent('paste', {
+          clipboardData: data,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }, names);
+}
+
+// True when the control is topmost at its centre and, with `topEdge`, also
+// just inside its top edge, so a control half under the header cannot pass.
+function isUncovered(
+  control: Locator,
+  { topEdge = false } = {},
+): Promise<boolean> {
+  return control.evaluate((element, checkTopEdge) => {
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const ys = [rect.top + rect.height / 2];
+    if (checkTopEdge) ys.push(rect.top + 1);
+    return ys.every((y) => {
+      const hit = document.elementFromPoint(x, y);
+      return element === hit || element.contains(hit);
+    });
+  }, topEdge);
+}
 
 async function installScenario(
   page: Page,

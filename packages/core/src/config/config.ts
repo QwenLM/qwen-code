@@ -153,6 +153,7 @@ import {
   resetDenialState,
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
+import { clearSessionCommits } from '../permissions/destructive-commands.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -239,6 +240,12 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import type { BwrapPolicy } from '../sandbox/bwrap-execution.js';
+import {
+  admitShellSandbox,
+  probeShellSandbox,
+  assertShellSandboxCwd,
+} from '../sandbox/runtime-shell-policy.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -952,6 +959,7 @@ export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  executionEnvironment?: ExecutionEnvironment;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
@@ -1075,6 +1083,8 @@ export interface ConfigParameters {
    * before execution. A configured guard fails closed.
    */
   toolInvocationGuard?: ToolInvocationGuard;
+  /** Internal trusted-host integration; never loaded from workspace settings. */
+  shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1529,6 +1539,10 @@ export interface ConfigParameters {
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
+}
+
+export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
+  requestedBackend?: 'auto' | 'bwrap';
 }
 
 export type TerminalImageRenderSupport =
@@ -2501,6 +2515,17 @@ export function deriveConfig(
   base: Config,
   overrides: DerivedConfigOverrides = {},
 ): Config {
+  const shellSandbox = base.getShellExecutionSandbox?.();
+  if (shellSandbox) {
+    for (const key of [
+      'getTargetDir',
+      'getCwd',
+      'getWorkingDir',
+      'getProjectRoot',
+    ] as const) {
+      assertShellSandboxCwd(shellSandbox, overrides[key]?.() ?? base[key]());
+    }
+  }
   const derived = Object.create(base) as Config;
   for (const key in overrides) {
     if (!Object.hasOwn(overrides, key)) continue;
@@ -2519,6 +2544,9 @@ export function deriveConfig(
 }
 
 export class Config {
+  private readonly shellExecutionSandbox:
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
   private sessionSourceId?: string;
@@ -2900,6 +2928,7 @@ export class Config {
   private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly agentExecutionBackend?: 'container';
   private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  private readonly executionEnvironment?: ExecutionEnvironment;
   private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
   private readonly executionShutdown = new AbortController();
   private executionCleanupPromise?: Promise<void>;
@@ -3033,6 +3062,12 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.executionEnvironment = params.executionEnvironment;
+    if (params.executionEnvironment) {
+      this.executionEnvironments = new Set([
+        Promise.resolve(params.executionEnvironment),
+      ]);
+    }
     this.agentExecutionBackend = params.agentExecutionBackend;
     const executionFactory = params.executionEnvironmentFactory;
     this.executionEnvironmentFactory = executionFactory
@@ -3043,6 +3078,11 @@ export class Config {
           )
       : undefined;
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
+    this.shellExecutionSandbox = admitShellSandbox(
+      params,
+      this.sessionRuntimeBaseDir,
+      Storage.getGlobalQwenDir(),
+    );
     this.provisionalWorkspace = params.provisionalWorkspace === true;
     this.sessionId = params.sessionId ?? randomUUID();
     // Only set the global env marker once per process lifetime, so
@@ -3621,6 +3661,15 @@ export class Config {
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
+    if (this.executionEnvironment) {
+      options = {
+        ...options,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      };
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot be initialized');
     }
@@ -3720,6 +3769,8 @@ export class Config {
     options?: ConfigInitializeOptions,
   ): Promise<void> {
     try {
+      if (this.shellExecutionSandbox)
+        await probeShellSandbox(this.shellExecutionSandbox, options?.signal);
       const activation = this.activateChatRecording();
       this.sessionWriterActivationPromise = activation;
       try {
@@ -3772,7 +3823,6 @@ export class Config {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
     options?.signal?.throwIfAborted();
-
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
     // prerequisites: fail fast at startup with an actionable message
     // instead of erroring midway through the first video interaction.
@@ -3791,7 +3841,7 @@ export class Config {
       await assertOmniRuntimeDependencies();
     }
 
-    if (options?.skipFileCheckpointing === true) {
+    if (options?.skipFileCheckpointing === true || this.shellExecutionSandbox) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
     }
@@ -3811,9 +3861,19 @@ export class Config {
           (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
         );
     recordStartupEvent('config_initialize_extensions_initial_start');
-    if (!this.isSafeMode() && !this.getBareMode()) {
+    if (
+      !this.executionEnvironment &&
+      !this.shellExecutionSandbox &&
+      !this.isSafeMode() &&
+      !this.getBareMode()
+    ) {
       await this.extensionManager.refreshCache();
-    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
+    } else if (
+      !this.executionEnvironment &&
+      !this.shellExecutionSandbox &&
+      !this.isSafeMode() &&
+      explicitExtensionNames.length > 0
+    ) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
       });
@@ -4175,7 +4235,11 @@ export class Config {
         }
       }
       this.skillManager = new SkillManager(this);
-      if (this.getBareMode() || this.isSafeMode()) {
+      if (
+        this.shellExecutionSandbox ||
+        this.getBareMode() ||
+        this.isSafeMode()
+      ) {
         await this.skillManager.refreshCache();
       } else {
         await this.skillManager.startWatching();
@@ -4242,7 +4306,12 @@ export class Config {
     }
 
     recordStartupEvent('config_initialize_extensions_final_start');
-    if (!this.getBareMode() && !this.isSafeMode()) {
+    if (
+      !this.executionEnvironment &&
+      !this.shellExecutionSandbox &&
+      !this.getBareMode() &&
+      !this.isSafeMode()
+    ) {
       await this.extensionManager.refreshCache();
     }
     recordStartupEvent('config_initialize_extensions_final_end');
@@ -4348,6 +4417,7 @@ export class Config {
     // also respects the `allowedMcpServers` filter already applied there.
     const hasMcpServers = Object.keys(this.getMcpServers() ?? {}).length > 0;
     if (
+      !this.shellExecutionSandbox &&
       skipInlineMcpDiscovery &&
       (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
       !this.provisionalWorkspace &&
@@ -4377,7 +4447,11 @@ export class Config {
     // directly would cause launches from a monorepo subdirectory to
     // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
     // sweep would silently be a no-op forever.
-    if (!this.getBareMode() && !this.provisionalWorkspace) {
+    if (
+      !this.shellExecutionSandbox &&
+      !this.getBareMode() &&
+      !this.provisionalWorkspace
+    ) {
       void (async () => {
         try {
           // Resolve the repo top-level FIRST. The previous code bailed
@@ -4720,6 +4794,7 @@ export class Config {
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.executionEnvironment) return;
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
@@ -6771,6 +6846,9 @@ export class Config {
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
   }> {
+    if (this.shellExecutionSandbox) {
+      assertShellSandboxCwd(this.shellExecutionSandbox, path.resolve(newDir));
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
     }
@@ -7137,6 +7215,21 @@ export class Config {
 
   /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
+    if (this.shellExecutionSandbox)
+      return [
+        ToolNames.SHELL,
+        ToolNames.TASK_STOP,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+        ToolNames.MONITOR,
+        ToolNames.AGENT,
+        ToolNames.EXEC,
+        ToolNames.GLOB,
+        ToolNames.LS,
+        ToolNames.ASK_USER_QUESTION,
+        ToolNames.STRUCTURED_OUTPUT,
+      ];
     if (this.getBareMode()) {
       return DEFAULT_BARE_CORE_TOOLS;
     }
@@ -7460,6 +7553,7 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    if (this.executionEnvironment || this.shellExecutionSandbox) return {};
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -7548,6 +7642,8 @@ export class Config {
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
+    if (this.shellExecutionSandbox && Object.keys(servers).length)
+      throw new Error('Tool execution sandbox does not support MCP servers.');
     if (this.initialized) {
       throw new Error('Cannot modify mcpServers after initialization');
     }
@@ -7562,6 +7658,8 @@ export class Config {
    * {@link getMcpServers} still layers them on top. See sub-task 3.
    */
   setMcpServers(servers: Record<string, MCPServerConfig> | undefined): void {
+    if (this.shellExecutionSandbox && Object.keys(servers ?? {}).length)
+      throw new Error('Tool execution sandbox does not support MCP servers.');
     this.mcpServers = servers;
   }
 
@@ -7703,6 +7801,7 @@ export class Config {
   }
 
   private async refreshMcpServers(): Promise<void> {
+    if (this.shellExecutionSandbox) return;
     if (!this.initialized) {
       // No tool registry yet — boot-time discovery will pick up the new map.
       this.debugLogger.debug(
@@ -7776,6 +7875,8 @@ export class Config {
    * of the settings layer (Task 5).
    */
   addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
+    if (this.shellExecutionSandbox)
+      throw new Error('Tool execution sandbox does not support MCP servers.');
     this.runtimeMcpServers.set(name, config);
   }
 
@@ -7806,7 +7907,12 @@ export class Config {
   }
 
   isLspEnabled(): boolean {
-    return this.lspEnabled && !this.getBareMode() && !this.provisionalWorkspace;
+    return (
+      this.lspEnabled &&
+      !this.shellExecutionSandbox &&
+      !this.getBareMode() &&
+      !this.provisionalWorkspace
+    );
   }
 
   getLspClient(): LspClient | undefined {
@@ -7861,6 +7967,8 @@ export class Config {
    * Allows wiring an LSP client after Config construction but before initialize().
    */
   setLspClient(client: LspClient | undefined): void {
+    if (this.shellExecutionSandbox && client)
+      throw new Error('Tool execution sandbox does not support LSP.');
     if (this.initialized) {
       throw new Error('Cannot set LSP client after initialization');
     }
@@ -8006,6 +8114,8 @@ export class Config {
   }
 
   setArenaManager(manager: ArenaManager | null): void {
+    if (this.shellExecutionSandbox && manager)
+      throw new Error('Tool execution sandbox does not support agent arenas.');
     this.arenaManager = manager;
     this.arenaManagerChangeCallback?.(manager);
   }
@@ -8035,6 +8145,8 @@ export class Config {
   }
 
   setTeamManager(manager: TeamManager | null): void {
+    if (this.shellExecutionSandbox && manager)
+      throw new Error('Tool execution sandbox does not support agent teams.');
     this.teamManager = manager;
     for (const cb of this.teamManagerChangeCallbacks) {
       cb(manager);
@@ -8292,6 +8404,31 @@ export class Config {
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
+      // ...and the session-commit registry behind the AUTO-mode
+      // `git commit --amend` exemption, per its contract ("cleared on session
+      // end or mode switch"): exemptions must not carry across a boundary
+      // where the user re-decides how much the agent may do unattended.
+      // Clearing is fail-closed. Gated on a real transition so a no-op re-set,
+      // which several callers do, cannot drop registrations still in use.
+      // Root Config only, like the workflow-revision stamp above: a derived
+      // overlay's `setApprovalMode` delegates here, and a subagent flipping
+      // its own mode is child-local, not a decision about the root session's
+      // autonomy. Clearing there cost the root a false "not made by the agent
+      // in this session" block on its own commit.
+      //
+      // PLAN is excluded on both legs for the same reason. `enter_plan_mode`
+      // is model-callable from AUTO and `exit_plan_mode` restores it, so the
+      // round trip is two real transitions that end in the posture it started
+      // in — and PLAN cannot execute a commit, so the excursion cannot add an
+      // exemption either. Clearing on it bought nothing and cost the agent a
+      // false block on its own commit, with no escape from inside AUTO.
+      if (
+        !isDerivedConfig(this) &&
+        mode !== ApprovalMode.PLAN &&
+        fromMode !== ApprovalMode.PLAN
+      ) {
+        clearSessionCommits();
+      }
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
@@ -8868,6 +9005,7 @@ export class Config {
   }
 
   isCronEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
   }
@@ -8897,12 +9035,14 @@ export class Config {
   }
 
   isAgentTeamEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
   }
 
   isArtifactEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     // Publishing writes outside the project and opens a browser, so it is
     // limited to interactive or managed preview sessions, excluding SDK use.
     // Managed previews render in Web Shell instead of opening a host browser.
@@ -9121,6 +9261,7 @@ export class Config {
   }
 
   isImageGenerationEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return this.getImageGenerationConfig() !== undefined;
   }
 
@@ -9131,6 +9272,7 @@ export class Config {
   }
 
   isWorkflowsEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (this.provisionalWorkspace) return false;
     // Workflows are opt-in via settings, env, or the bundled review skill.
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
@@ -9145,6 +9287,7 @@ export class Config {
 
   async enableReviewWorkflow(): Promise<void> {
     if (
+      this.shellExecutionSandbox ||
       this.workflowsEnabled === false ||
       !isTopLevelSession() ||
       this.getBareMode() ||
@@ -9173,6 +9316,7 @@ export class Config {
    * destroying it.
    */
   isSessionWorkflowEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.sessionWorkflowEnabledProvider?.() ?? this.sessionWorkflowEnabled
     );
@@ -9213,7 +9357,7 @@ export class Config {
   }
 
   getExecutionEnvironment(): ExecutionEnvironment | undefined {
-    return undefined;
+    return this.executionEnvironment;
   }
 
   shutdownExecutionEnvironments(): Promise<void> {
@@ -9510,10 +9654,14 @@ export class Config {
   }
 
   getFileCheckpointingEnabled(): boolean {
-    return this.fileCheckpointingEnabled;
+    return !this.shellExecutionSandbox && this.fileCheckpointingEnabled;
   }
 
   enableFileCheckpointing(): void {
+    if (this.shellExecutionSandbox)
+      throw new Error(
+        'File checkpointing is unavailable with tools.executionSandbox.',
+      );
     this.fileCheckpointingEnabled = true;
     this.fileHistoryService = undefined;
   }
@@ -9522,7 +9670,7 @@ export class Config {
     if (!this.fileHistoryService) {
       const service = new FileHistoryService(
         this.sessionId,
-        this.fileCheckpointingEnabled,
+        this.getFileCheckpointingEnabled(),
         this.cwd,
         (snapshot) => {
           if (this.fileHistoryService !== service) return;
@@ -9631,6 +9779,7 @@ export class Config {
    * Returns undefined if hooks are not enabled.
    */
   getHookSystem(): HookSystem | undefined {
+    if (this.shellExecutionSandbox) return undefined;
     return this.hookSystem;
   }
 
@@ -9652,6 +9801,7 @@ export class Config {
    * Check if all hooks are disabled.
    */
   getDisableAllHooks(): boolean {
+    if (this.shellExecutionSandbox) return true;
     return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 
@@ -9660,6 +9810,7 @@ export class Config {
   }
 
   getManagedAutoMemoryEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.enableManagedAutoMemory && !this.getBareMode() && !this.isSafeMode()
     );
@@ -9671,6 +9822,7 @@ export class Config {
    * for tests / power users ('0' forces off, '1' forces on).
    */
   getTeamMemoryEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
@@ -9691,6 +9843,7 @@ export class Config {
    * Off by default since it mutates the repo and pushes. Inert in bare mode.
    */
   getTeamMemorySyncEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
@@ -9705,16 +9858,19 @@ export class Config {
   }
 
   isManagedMemoryAvailable(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.enableManagedAutoDream && !this.getBareMode() && !this.isSafeMode()
     );
   }
 
   getAutoSkillEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.enableAutoSkill &&
       !this.getBareMode() &&
@@ -9923,6 +10079,7 @@ export class Config {
   }
 
   getExtensions(): Extension[] {
+    if (this.shellExecutionSandbox) return [];
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
       const overrideExtensionNames = new Set(
@@ -9980,7 +10137,7 @@ export class Config {
   }
 
   getIdeMode(): boolean {
-    return this.ideMode;
+    return !this.shellExecutionSandbox && this.ideMode;
   }
 
   getFolderTrustFeature(): boolean {
@@ -10025,6 +10182,10 @@ export class Config {
   }
 
   setIdeMode(value: boolean): void {
+    if (this.shellExecutionSandbox && value)
+      throw new Error(
+        'Tool execution sandbox does not support IDE integration.',
+      );
     this.ideMode = value;
   }
 
@@ -10093,6 +10254,11 @@ export class Config {
    * Set a custom FileSystemService
    */
   setFileSystemService(fileSystemService: FileSystemService): void {
+    if (this.shellExecutionSandbox) {
+      throw new Error(
+        'Internal sandbox does not support delegated filesystem services.',
+      );
+    }
     this.fileSystemService = fileSystemService;
   }
 
@@ -10921,6 +11087,12 @@ export class Config {
     return this.toolInvocationGuard;
   }
 
+  getShellExecutionSandbox():
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined {
+    return this.shellExecutionSandbox;
+  }
+
   /**
    * Returns the callback for persisting permission rules to settings files.
    * Returns undefined if no callback was provided (e.g. SDK mode).
@@ -11081,35 +11253,6 @@ export class Config {
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
 
-    const environment = this.getExecutionEnvironment();
-    if (environment) {
-      if (this.getCodeModeOnly()) {
-        throw new Error(
-          'Container execution cannot be combined with tools.codeModeOnly.',
-        );
-      }
-      const [{ createExecutionTools }, { wrapExecutionTool }] =
-        await Promise.all([
-          import('../services/local-execution-environment.js'),
-          import('../tools/execution-tool.js'),
-        ]);
-      for (const [name, tool] of createExecutionTools(this)) {
-        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
-        await registerLazy(name as ToolName, async () =>
-          wrapExecutionTool(tool, environment, this),
-        );
-      }
-      await registerLazy(ToolNames.TOOL_CALL, async () => {
-        const { ToolCallTool } = await import('../tools/tool-call.js');
-        return new ToolCallTool(registry);
-      });
-      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
-        const { ToolSearchTool } = await import('../tools/tool-search.js');
-        return new ToolSearchTool(this);
-      });
-      return registry;
-    }
-
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
     // branch and the regular branch — without it the model can't finish
@@ -11172,6 +11315,139 @@ export class Config {
       });
     };
 
+    const registerHostSessionTools = async (): Promise<void> => {
+      if (this.isTodoWriteEnabled()) {
+        await registerLazy(ToolNames.TODO_WRITE, async () => {
+          const { TodoWriteTool } = await import('../tools/todoWrite.js');
+          return new TodoWriteTool(this);
+        });
+      }
+      await registerLazy(ToolNames.WEB_FETCH, async () => {
+        const { WebFetchTool } = await import('../tools/web-fetch.js');
+        return new WebFetchTool(this);
+      });
+      // WebSearch is opt-out: it registers whenever the gate can resolve a
+      // usable backend — either configured explicitly, or derived from the
+      // provider the main model runs on. `enabled: false` turns it off without
+      // importing anything. A gate failure surfaces a one-time startup notice
+      // only when the tool was actually asked for; a provider with no search
+      // backend fails silently (`gate.silent`), since warning about a feature
+      // the user never configured is noise.
+      const hasExplicitWebSearchBackend =
+        !!this.webSearchSettings?.model?.trim() ||
+        !!this.webSearchSettings?.baseUrl;
+      if (
+        !this.getBareMode() &&
+        !this.isSafeMode() &&
+        this.webSearchSettings?.enabled !== false &&
+        (this.webSearchSettings?.enabled === true ||
+          !hasExplicitWebSearchBackend)
+      ) {
+        const { evaluateWebSearchGate } = await import(
+          '../tools/web-search.js'
+        );
+        const gate = evaluateWebSearchGate(this);
+        if (gate.ok) {
+          await registerLazy(ToolNames.WEB_SEARCH, async () => {
+            const { WebSearchTool } = await import('../tools/web-search.js');
+            return new WebSearchTool(this);
+          });
+        } else if (
+          !gate.silent &&
+          !this.webSearchNoticeEmitted &&
+          !options?.forSubAgent
+        ) {
+          this.webSearchNoticeEmitted = true;
+          this.warnings.push(gate.notice);
+        }
+      }
+    };
+
+    const environment = this.getExecutionEnvironment();
+    if (environment) {
+      if (this.getCodeModeOnly()) {
+        throw new Error(
+          'Container execution cannot be combined with tools.codeModeOnly.',
+        );
+      }
+      const [{ createExecutionTools }, { wrapExecutionTool }] =
+        await Promise.all([
+          import('../services/local-execution-environment.js'),
+          import('../tools/execution-tool.js'),
+        ]);
+      for (const [name, tool] of createExecutionTools(this)) {
+        if (environment.toolNames && !environment.toolNames.has(name)) continue;
+        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
+        await registerLazy(name as ToolName, async () =>
+          wrapExecutionTool(tool, environment, this),
+        );
+      }
+      await registerLazy(ToolNames.TOOL_CALL, async () => {
+        const { ToolCallTool } = await import('../tools/tool-call.js');
+        return new ToolCallTool(registry);
+      });
+      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+        const { ToolSearchTool } = await import('../tools/tool-search.js');
+        return new ToolSearchTool(this);
+      });
+      if (this.executionEnvironment && !options?.forSubAgent) {
+        await registerStructuredOutputIfRequested();
+        await registerGoalWorkerTools();
+        if (!this.getBareMode()) await registerHostSessionTools();
+      }
+      return registry;
+    }
+
+    if (this.shellExecutionSandbox) {
+      await registerLazy(ToolNames.SHELL, async () => {
+        const { ShellTool } = await import('../tools/shell.js');
+        return new ShellTool(this);
+      });
+      await registerLazy(ToolNames.TASK_STOP, async () => {
+        const { TaskStopTool } = await import('../tools/task-stop.js');
+        return new TaskStopTool(this);
+      });
+      await registerLazy(ToolNames.READ_FILE, async () => {
+        const { ReadFileTool } = await import('../tools/read-file.js');
+        return new ReadFileTool(this);
+      });
+      await registerLazy(ToolNames.WRITE_FILE, async () => {
+        const { WriteFileTool } = await import('../tools/write-file.js');
+        return new WriteFileTool(this);
+      });
+      await registerLazy(ToolNames.EDIT, async () => {
+        const { EditTool } = await import('../tools/edit.js');
+        return new EditTool(this);
+      });
+      await registerLazy(ToolNames.MONITOR, async () => {
+        const { MonitorTool } = await import('../tools/monitor.js');
+        return new MonitorTool(this);
+      });
+      await registerLazy(ToolNames.AGENT, async () => {
+        const { AgentTool } = await import('../tools/agent/agent.js');
+        return new AgentTool(this);
+      });
+      await registerLazy(ToolNames.GLOB, async () => {
+        const { GlobTool } = await import('../tools/glob.js');
+        return new GlobTool(this);
+      });
+      await registerLazy(ToolNames.LS, async () => {
+        const { LSTool } = await import('../tools/ls.js');
+        return new LSTool(this);
+      });
+      if (resolveInteractionMode(this) !== 'headless') {
+        await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+          const { AskUserQuestionTool } = await import(
+            '../tools/askUserQuestion.js'
+          );
+          return new AskUserQuestionTool(this);
+        });
+      }
+      await registerExecIfEnabled();
+      await registerStructuredOutputIfRequested();
+      return registry;
+    }
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -11199,6 +11475,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_CALL, async () => {
@@ -11312,12 +11589,6 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    if (this.isTodoWriteEnabled()) {
-      await registerLazy(ToolNames.TODO_WRITE, async () => {
-        const { TodoWriteTool } = await import('../tools/todoWrite.js');
-        return new TodoWriteTool(this);
-      });
-    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'
@@ -11353,10 +11624,6 @@ export class Config {
       const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
       return new ExitWorktreeTool(this);
     });
-    await registerLazy(ToolNames.WEB_FETCH, async () => {
-      const { WebFetchTool } = await import('../tools/web-fetch.js');
-      return new WebFetchTool(this);
-    });
     if (
       resolveInteractionMode(this) === 'interactive' &&
       !this.sdkMode &&
@@ -11367,38 +11634,6 @@ export class Config {
         const { DisplayImageTool } = await import('../tools/display-image.js');
         return new DisplayImageTool(this);
       });
-    }
-    // WebSearch is opt-out: it registers whenever the gate can resolve a
-    // usable backend — either configured explicitly, or derived from the
-    // provider the main model runs on. `enabled: false` turns it off without
-    // importing anything. A gate failure surfaces a one-time startup notice
-    // only when the tool was actually asked for; a provider with no search
-    // backend fails silently (`gate.silent`), since warning about a feature
-    // the user never configured is noise.
-    const hasExplicitWebSearchBackend =
-      !!this.webSearchSettings?.model?.trim() ||
-      !!this.webSearchSettings?.baseUrl;
-    if (
-      !this.getBareMode() &&
-      !this.isSafeMode() &&
-      this.webSearchSettings?.enabled !== false &&
-      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
-    ) {
-      const { evaluateWebSearchGate } = await import('../tools/web-search.js');
-      const gate = evaluateWebSearchGate(this);
-      if (gate.ok) {
-        await registerLazy(ToolNames.WEB_SEARCH, async () => {
-          const { WebSearchTool } = await import('../tools/web-search.js');
-          return new WebSearchTool(this);
-        });
-      } else if (
-        !gate.silent &&
-        !this.webSearchNoticeEmitted &&
-        !options?.forSubAgent
-      ) {
-        this.webSearchNoticeEmitted = true;
-        this.warnings.push(gate.notice);
-      }
     }
     await this.registerImageGenerationTool(registry);
     if (this.isArtifactEnabled()) {

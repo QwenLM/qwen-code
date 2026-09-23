@@ -245,6 +245,7 @@ async function main() {
     const named = new Map([
       ['omni', 'omni/index.ts'], ['omniPolicyCollection', 'omni/policy/model-call-collection.ts'],
       ['transcriptRecords', 'utils/transcript-records.ts'], ['envVarResolver', 'utils/envVarResolver.ts'],
+      ['shellResult', 'utils/shell-result.ts'],
       ['goalWire', 'goals/goal-wire.ts'], ['memoryScopes', 'memory/scopes.ts'],
       ['subSessionConstants', 'tools/sub-session-constants.ts'], ['toolWriteOrigin', 'services/tool-write-origin.ts'],
       ['userPromptSubmitContext', 'hooks/user-prompt-submit-context.ts'], ['noFollowOpen', 'utils/no-follow-open.ts'],

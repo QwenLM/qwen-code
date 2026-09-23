@@ -131,7 +131,10 @@ Tailwind/shadcn 组件；现有 CSS Modules 的主题色值保持不变。组件
   变量以及外部配置的 z-index 才能正确继承。
 - 保留组件上的 `data-web-shell-*` 属性和公开 CSS 变量。接入方可能通过这些属性或
   `--web-shell-dialog-backdrop-z-index`、`--web-shell-popover-z-index`、
-  `--web-shell-tooltip-z-index` 等变量定制样式和层级。
+  `--web-shell-tooltip-z-index` 等变量定制样式和层级。宿主自己的标题栏覆盖在
+  shell 之上但并不裁剪它时，必须通过 `--web-shell-popover-safe-top` 声明顶部
+  安全区，向上展开的浮层（输入历史、@ 引用）才能避开它；显式声明 `0px` 表示
+  没有顶部安全区，不会被默认值覆盖。
 
 在 `packages/web-shell` 目录添加后续组件，例如：
 
@@ -357,6 +360,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 | 属性                   | 类型                                  | 说明                                                                                                                                           |
 | ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `urlNavigation`        | `WebShellUrlNavigationOptions`        | 可选 URL 管理，含 `basePath`；默认关闭。详见 [URL 导航](#url-导航可选)。                                                                       |
 | `browserNotifications` | `WebShellBrowserNotificationsOptions` | 可选接入通知；`appName` 默认 QwenCode，`iconUrl` 默认内联 PNG（支持 CDN），`defaultEnabled` 默认 false；已保存偏好优先；不传时停用，不重建会话 |
 | `baseUrl`              | `string`                              | daemon API 地址，未传时使用 `window.location.origin`                                                                                           |
 | `token`                | `string`                              | daemon API Bearer token                                                                                                                        |
@@ -566,13 +570,30 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 />
 ```
 
-`WebShellSettingsOptions.excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。新增的上游设置默认仍然可见；未知的运行时 ID 会被忽略。
+也可以只开放少量条目，未列出的设置（包括上游新增设置）默认隐藏：
 
-前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control` 和 `builtin:model-management`。隐藏普通 Model 字段时，模型列表与选择仍然可用；如需隐藏模型管理块，需显式排除 `builtin:model-management`。浏览器通知与聊天宽度相互独立。既有的能力限制仍然适用。
+```tsx
+<WebShellWithProviders
+  settings={{
+    includeItems: ['setting:language', 'builtin:chat-width'],
+  }}
+/>
+```
 
-不传 `settings`、不传 `excludeItems` 或传入空列表，都会保持现有呈现。排除在两个设置作用域（工作区与用户）中都生效。被排空的分类会消失，分类导航回退到可用分类；排除全部条目则显示现有的空状态。从设置面板打开的选择器会在其来源条目被排除时关闭。
+`WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
-**呈现限制不是访问控制。** 排除不会改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供白名单、作用域策略、字段覆盖或条目级深链。
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+
+- 未传 `includeItems` 时保持现有展示逻辑，仅应用 `excludeItems`；新增的上游设置默认仍然可见。
+- `includeItems: []` 隐藏全部原生设置条目；它与未传入白名单不同。
+- 同时传入两个列表时，排除优先：仅展示白名单中且未被排除的条目。
+- 不传 `settings`、传入 `{}` 或仅传 `excludeItems: []` 时，保持默认呈现。
+
+过滤在工作区与用户两个作用域中都生效。被排空的分类会消失，分类导航回退到可用分类；全部隐藏则显示现有空状态。从设置面板打开的选择器会在来源条目不再可见时关闭，包括动态修改白名单的情况。
+
+**呈现限制不是访问控制。** 白名单与排除列表只影响原生设置页展示，不启用或关闭底层功能，不改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供作用域策略、字段覆盖或条目级深链。
+
+设计与验证范围见 [English](../../docs/design/web-shell-settings-allowlists.md) / [简体中文](../../docs/design/web-shell-settings-allowlists.zh-CN.md)。
 
 ## Markdown 图表接入
 
@@ -679,3 +700,22 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
 | `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
+
+## URL 导航（可选）
+
+`WebShellWithProviders` 支持 `urlNavigation={{ basePath: '/agentic-code' }}`。
+独立入口默认启用同一实现，并推断既有部署基础路径（默认根路径）。嵌入组件默认不启用，原有受控
+`sessionId`、`workspaceId`、`workspaceCwd` 和 `sessionContext` 接入保持兼容。
+启用后，显式初始会话目标 props 优先于 URL，后续目标 props 变化 replace 地址；
+宿主必须停止自行写 history，避免双重控制。`lockWorkspaceCwd` 仍是宿主约束。
+
+基础路径下支持 `/session/<id>`、`/plugins`、`/channels`、`/scheduled-tasks`、
+`/goals` 和 `/settings`。会话保留原有 `workspace` / `context` 协议，页面仅定位
+页面，设置不持久化分类或作用域。无关参数（包括宿主的实例参数）和 fragment 保留。
+主动导航新增历史，重复点击不新增；浏览器前进后退恢复页面和会话。页面来源保存在
+history.state，直接打开或复制到新标签页的页面没有来源时返回空白聊天，不创建会话。
+
+宿主部署必须把基础路径和上述深层路径的文档请求返回宿主 HTML，并保留 API 路由。
+`basePath` 只配置客户端，不创建服务端 rewrite。Qwen daemon 自带五个页面的文档
+GET/HEAD 入口，JSON 请求、子路径和写请求仍走原有鉴权/API。
+详见[导航协议设计](../../docs/design/web-shell-url-navigation.zh-CN.md)。

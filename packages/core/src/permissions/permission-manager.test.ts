@@ -1859,6 +1859,17 @@ function makeConfig(
 describe('PermissionManager', () => {
   let pm: PermissionManager;
 
+  it('does not implicitly allow read-only shell commands under internal sandbox policy', async () => {
+    const manager = new PermissionManager({
+      ...makeConfig(),
+      getShellExecutionSandbox: () => ({}),
+    });
+    manager.initialize();
+    expect(await manager.isCommandAllowed('git status && ls', '/project')).toBe(
+      'ask',
+    );
+  });
+
   describe('basic rule evaluation', () => {
     beforeEach(() => {
       pm = new PermissionManager(
@@ -3381,6 +3392,13 @@ describe('PermissionManager', () => {
         ['plan-mode ask_user_question', 'ask_user_question'],
         ['task_stop', 'task_stop'],
         ['tool_search', 'tool_search'],
+        // The bridge's other half, exempt since the bridge landed (#10410) and
+        // untested until now: deleting that arm of isExemptFromEagerAllowList
+        // left this whole suite green. Both halves are also alwaysLoad=true, so
+        // the declaration list does not move without this arm — what it protects
+        // is the permission-deferred state other readers consult (speculation's
+        // boundary check, the workflow-authoring skill's hidden-tool text).
+        ['tool_call', 'tool_call'],
       ];
 
       it.each(exempt)('%s', async (_label, toolName) => {

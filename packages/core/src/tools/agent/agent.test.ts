@@ -863,6 +863,29 @@ describe('AgentTool', () => {
     );
   });
 
+  it.each<Partial<AgentParams>>([
+    { isolation: 'worktree' },
+    { working_dir: '/another/workspace' },
+    { name: 'teammate' },
+  ])(
+    'rejects unsupported sandbox agent entry %j before execution',
+    async (overrides) => {
+      config.getShellExecutionSandbox = vi.fn().mockReturnValue({});
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Sandbox agent',
+        prompt: 'inspect the project',
+        subagent_type: 'file-search',
+        ...overrides,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.llmContent).toContain('same-workspace in-process agents');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    },
+  );
+
   describe('initialization', () => {
     it('should initialize with correct name and properties', () => {
       expect(agentTool.name).toBe('agent');
@@ -924,7 +947,12 @@ describe('AgentTool', () => {
       expect(interactiveTool.description).toContain('When to fork');
       expect(interactiveTool.description).toContain("Don't peek");
       expect(interactiveTool.description).toContain("Don't race");
-      expect(interactiveTool.description).toContain('Writing a fork prompt');
+      // Fork facts that shape the call stay here. How to *write* a fork
+      // prompt moved to the bundled `agent-delegation` skill; which half
+      // lives where is pinned in that skill's own SKILL.test.ts (#12054).
+      expect(interactiveTool.description).toContain(
+        "Don't set `model` on a fork",
+      );
       expect(interactiveTool.description).toContain(
         'result arrives through a completion notification',
       );
@@ -935,7 +963,7 @@ describe('AgentTool', () => {
         "won't need the result back",
       );
       expect(interactiveTool.description).toContain(
-        'forks inherit all or the selected recent window',
+        'Forks inherit the full parent conversation by default',
       );
     });
 
@@ -950,15 +978,20 @@ describe('AgentTool', () => {
       expect(nonInteractiveTool.description).toContain('When to fork');
       expect(nonInteractiveTool.description).toContain("Don't peek");
       expect(nonInteractiveTool.description).toContain("Don't race");
-      expect(nonInteractiveTool.description).toContain('Writing a fork prompt');
-      expect(nonInteractiveTool.description).toContain('Writing the prompt');
+      expect(nonInteractiveTool.description).toContain(
+        'Pass a short `name` (one or two words, lowercase)',
+      );
+      // Prompt-writing craft is reached through the bundled
+      // `agent-delegation` skill rather than sent every turn; this stub Config
+      // has no skill manager, so the reference is inlined here. Both shapes
+      // are pinned in that skill's SKILL.test.ts (#12054).
       expect(nonInteractiveTool.description).toContain(
         'Never delegate understanding',
       );
       // Forks are now available in headless sessions too, so the fork
       // inheritance guidance is present regardless of interactivity.
       expect(nonInteractiveTool.description).toContain(
-        'forks inherit all or the selected recent window',
+        'Forks inherit the full parent conversation by default',
       );
     });
 
@@ -973,7 +1006,9 @@ describe('AgentTool', () => {
       expect(tool.description).toContain('When to fork');
       expect(tool.description).toContain("Don't peek");
       expect(tool.description).toContain("Don't race");
-      expect(tool.description).toContain('Writing a fork prompt');
+      expect(tool.description).toContain(
+        'Choose a fork when the task needs substantial context',
+      );
     });
 
     it('states the background-agent discipline outside the fork section', async () => {

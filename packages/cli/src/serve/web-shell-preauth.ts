@@ -40,6 +40,14 @@ export function isDocumentNavigation(req: Request): boolean {
   );
 }
 
+export const WEB_SHELL_PAGE_PATHS = [
+  '/plugins',
+  '/channels',
+  '/scheduled-tasks',
+  '/goals',
+  '/settings',
+] as const;
+
 /**
  * Exact session deep-link document navigations: `/session/<id>` with an
  * optional trailing slash and no further segments. Expressed as a regex (not
@@ -81,5 +89,11 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
     )
   )
     return true;
-  return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);
+  return (
+    (SESSION_DEEP_LINK_PATH.test(reqPath) ||
+      WEB_SHELL_PAGE_PATHS.some(
+        (route) => reqPath === route || reqPath === `${route}/`,
+      )) &&
+    isDocumentNavigation(req)
+  );
 }

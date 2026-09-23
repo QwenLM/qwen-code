@@ -1436,6 +1436,78 @@ describe('HookEventHandler', () => {
     });
   });
 
+  it.each([
+    ['use', 'completed'],
+    ['batch', 'completed'],
+    ['batch', 'failed'],
+  ] as const)(
+    'preserves shell text for %s hooks with %s results without mutating the UI result',
+    async (event, outcome) => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      const display = Object.freeze({
+        type: 'shell_result',
+        version: 1,
+        text: outcome === 'failed' ? 'Exit Code: 7' : 'line one\nline two',
+        output: 'line one\nline two',
+        directory: '/tmp',
+        exitCode: outcome === 'failed' ? 7 : 0,
+        signal: null,
+        pid: 42,
+        error: null,
+        outcome,
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      });
+      const response = Object.freeze({
+        returnDisplay: display,
+        result_display: display,
+      });
+      if (event === 'use') {
+        await hookEventHandler.firePostToolUseEvent(
+          'run_shell_command',
+          {},
+          response,
+          'shell-1',
+          PermissionMode.Default,
+        );
+      } else {
+        await hookEventHandler.firePostToolBatchEvent([
+          {
+            tool_name: 'run_shell_command',
+            tool_input: {},
+            tool_use_id: 'shell-1',
+            status: outcome === 'failed' ? 'error' : 'success',
+            tool_response: response,
+          },
+        ]);
+      }
+      const input = vi.mocked(mockHookRunner.executeHooksParallel).mock
+        .calls[0][2];
+      expect(input).toMatchObject(
+        event === 'use'
+          ? { tool_response: { returnDisplay: display.text } }
+          : {
+              tool_calls: [{ tool_response: { result_display: display.text } }],
+            },
+      );
+      expect(response.returnDisplay).toBe(display);
+      expect(response.result_display).toBe(display);
+    },
+  );
+
   describe('firePostToolBatchEvent', () => {
     it('preserves question text for batch hooks without changing other results', async () => {
       vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
