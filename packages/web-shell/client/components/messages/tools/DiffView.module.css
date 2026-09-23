@@ -26,6 +26,11 @@
   overflow-y: auto;
 }
 
+.lines:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
 :global([data-transcript-render-mode='document']) .lines {
   max-height: none;
   overflow-y: visible;

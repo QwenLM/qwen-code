@@ -50,6 +50,15 @@ export const formatRelativeTime = (timestamp: number): string => {
   return 'just now';
 };
 
+/** 24-hour `[HH:MM:SS]` clock label for `output.showTimestamps`. */
+export const formatClockTime = (timestamp: number): string =>
+  `[${new Date(timestamp).toLocaleTimeString('en-US', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })}]`;
+
 export const formatTokenCount = (count: number): string => {
   if (count < 1000) {
     return `${count}`;

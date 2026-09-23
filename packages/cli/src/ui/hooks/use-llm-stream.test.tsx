@@ -9027,6 +9027,75 @@ describe('useLlmStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('records a bridged Goal duplicate as bookkeeping without scheduling it', async () => {
+    const recordToolResult = vi.fn();
+    (
+      mockConfig as Config & {
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getChatRecordingService = () => ({ recordToolResult });
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-history',
+      revision: 1,
+      turnId: 'turn-history',
+    };
+    const args = { name: 'get_goal', arguments: {} };
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryToolCallFingerprints = vi
+      .fn()
+      .mockReturnValue(
+        new Map([['tool-history', getToolCallFingerprint('tool_call', args)]]),
+      );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'tool_call',
+              args,
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history',
+              goalContext: permit,
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(recordToolResult).toHaveBeenCalledWith(
+      toolResultParts,
+      expect.objectContaining({ executionStatus: 'not_started' }),
+      { goalContext: permit, provenance: 'goal_runtime' },
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
   it('schedules an id-colliding tool call whose args differ from the handled call', async () => {
     const client = new MockedLlmClientClass(mockConfig);
     client.getHistoryToolCallFingerprints = vi
@@ -17055,6 +17124,23 @@ describe('useLlmStream', () => {
       );
     });
 
+    it('does not run host review-worktree cleanup in the tool sandbox', async () => {
+      mockConfig.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({ network: 'closed' });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'partial' };
+          throw new Error('stream failed in sandbox');
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('sandbox query');
+      });
+      expect(mockCleanupReviewWorktreeLeases).not.toHaveBeenCalled();
+    });
+
     it('should clean up review lease when the stream throws', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -19849,39 +19935,6 @@ describe('useLlmStream', () => {
   });
 
   describe('StopHookLoop Event', () => {
-    it('ignores legacy active_goal events after the Goal runtime cutover', async () => {
-      const activeGoal = {
-        condition: 'finish the refactor',
-        iterations: 1,
-        setAt: 123,
-        tokensAtStart: 456,
-        hookId: 'goal-hook-id',
-        lastReason: 'still missing verification',
-      };
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.ActiveGoal,
-            value: activeGoal,
-          };
-          yield {
-            type: ServerLlmEventType.ActiveGoal,
-            value: null,
-          };
-        })(),
-      );
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('continue goal');
-      });
-
-      expect(mockAddItem).not.toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'goal_status' }),
-        expect.any(Number),
-      );
-    });
-
     it('should handle StopHookLoop event and add stop hook loop history item', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
