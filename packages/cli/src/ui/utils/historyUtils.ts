@@ -7,7 +7,7 @@
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 /**

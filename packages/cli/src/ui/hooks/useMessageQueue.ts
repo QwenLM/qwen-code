@@ -9,9 +9,11 @@ import { useCallback, useRef, useState } from 'react';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
-  type GoalContinuationTurn,
-  type GoalTurnHost,
-  type GoalTurnPermit,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import type {
+  GoalContinuationTurn,
+  GoalTurnHost,
+  GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import { isOnlyLeadingSystemReminders } from '../utils/historyUtils.js';
