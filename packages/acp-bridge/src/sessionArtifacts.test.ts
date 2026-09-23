@@ -98,8 +98,12 @@ describe('SessionArtifactStore', () => {
     sessionId: string,
     runtimeBaseDir: string,
     uuid: string,
+    html = '<html>saved</html>',
+    stamps?: { createdAt: string; persistedAt?: string },
   ): Promise<PersistedSessionArtifact> {
-    const html = '<html>saved</html>';
+    const createdAt = stamps?.createdAt ?? '2026-09-17T16:53:00.000Z';
+    const persistedAt =
+      stamps === undefined ? '2026-09-17T16:53:00.000Z' : stamps.persistedAt;
     const dir = path.join(runtimeBaseDir, 'artifacts', 'snapshots', uuid);
     await fs.mkdir(path.join(dir, 'references'), { recursive: true });
     await fs.writeFile(path.join(dir, 'index.html'), html);
@@ -115,9 +119,9 @@ describe('SessionArtifactStore', () => {
       url: pathToFileURL(path.join(dir, 'index.html')).href,
       retention: 'restorable',
       clientRetained: false,
-      createdAt: '2026-09-17T16:53:00.000Z',
-      updatedAt: '2026-09-17T16:53:00.000Z',
-      persistedAt: '2026-09-17T16:53:00.000Z',
+      createdAt,
+      updatedAt: createdAt,
+      ...(persistedAt !== undefined ? { persistedAt } : {}),
       metadata: {
         artifactType: 'web_preview_snapshot',
         'qwen.snapshot.references': 1,
@@ -2014,6 +2018,10 @@ describe('SessionArtifactStore', () => {
     const store = new SessionArtifactStore({
       sessionId: 's2-published-file-url',
       workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
     });
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
     try {
@@ -2079,6 +2087,7 @@ describe('SessionArtifactStore', () => {
             toolName: 'artifact',
             managedId: 'a582c3d4-1111-4111-8111-111111111111',
             url,
+            retention: 'restorable',
           },
           {
             kind: 'html',
@@ -6649,34 +6658,10 @@ describe('SessionArtifactStore', () => {
       recordEvent: async () => {},
       recordSnapshot: async () => {},
     };
-    async function saved(sessionId: string, html: string) {
-      const uuid = randomUUID();
-      const dir = path.join(workspace, 'artifacts', 'snapshots', uuid);
-      await fs.mkdir(path.join(dir, 'references'), { recursive: true });
-      await fs.writeFile(path.join(dir, 'index.html'), html);
-      return {
-        id: stableSessionArtifactId(sessionId, `managed:preview-${uuid}`),
-        kind: 'html' as const,
-        storage: 'published' as const,
-        source: 'tool' as const,
-        toolName: 'artifact',
-        title: 'Saved page',
-        managedId: `preview-${uuid}`,
-        url: pathToFileURL(path.join(dir, 'index.html')).href,
-        status: 'available' as const,
-        retention: 'restorable' as const,
-        clientRetained: false,
+    const saved = (sessionId: string, html: string) =>
+      writePersistedSnapshot(sessionId, workspace, randomUUID(), html, {
         createdAt: '2026-09-07T00:00:00.000Z',
-        updatedAt: '2026-09-07T00:00:00.000Z',
-        metadata: {
-          artifactType: 'web_preview_snapshot',
-          'qwen.snapshot.references': 1,
-          'qwen.published.sha256': createHash('sha256')
-            .update(html)
-            .digest('hex'),
-        },
-      };
-    }
+      });
     function snapshot(
       sessionId: string,
       artifacts: Array<Awaited<ReturnType<typeof saved>>>,
@@ -7587,7 +7572,12 @@ describe('SessionArtifactStore', () => {
           v: 2,
           sessionId,
           sequence: 2,
-          artifacts: [],
+          artifacts: [
+            persistedLocalPublishedPage(
+              sessionId,
+              'a582c3d4-6666-4666-8666-666666666666',
+            ),
+          ],
           tombstonedIds: [],
           stickyEphemeralIds: [],
           warnings: [],
@@ -7745,6 +7735,54 @@ describe('SessionArtifactStore', () => {
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it('does not journal a published file url after a failed workspace persist', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let failNext = true;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-no-journal-after-persist-fail',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (failNext) {
+            failNext = false;
+            throw new Error('disk full');
+          }
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/dashboard.html');
+    await fs.writeFile(artifactPath, 'hello');
+
+    await store.upsertMany([
+      { title: 'Draft', workspacePath: 'reports/dashboard.html' },
+    ]);
+    await store.upsertMany(
+      [
+        {
+          kind: 'html',
+          title: 'Published dashboard',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          managedId: managedIdForWorkspacePath('reports/dashboard.html'),
+          url: pathToFileURL(artifactPath).href,
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(
+      events.flatMap((payload) =>
+        payload.changes
+          .map((change) => change.artifact?.url)
+          .filter((url): url is string => url?.startsWith('file:') === true),
+      ),
+    ).toEqual([]);
   });
 
   it('prunes over-limit restored artifacts and records eviction tombstones', async () => {

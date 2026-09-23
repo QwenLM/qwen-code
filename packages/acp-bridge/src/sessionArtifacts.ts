@@ -25,6 +25,7 @@ import {
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   pathHasSkippedDirectoryComponent,
+  sessionArtifactIdentityKey,
   stableSessionArtifactId,
   WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
   WORKSPACE_CONTENT_SHA256_METADATA_KEY,
@@ -794,16 +795,8 @@ export class SessionArtifactStore {
         }
       }
       for (const artifact of snapshot?.artifacts ?? []) {
-        if (
-          isExpectedExpiredLocalPublishedArtifact(artifact) &&
-          artifactIdMatchesIdentity(this.sessionId, artifact)
-        ) {
+        if (this.dropLegacyLocalPublished(artifact)) {
           expectedExpiredDrops++;
-          writeStderrLine(
-            `[artifacts] session=${this.sessionId} ` +
-              'action=legacy_local_published_dropped ' +
-              `artifactId=${artifact.id}`,
-          );
           continue;
         }
         try {
@@ -1000,20 +993,29 @@ export class SessionArtifactStore {
     });
   }
 
+  private dropLegacyLocalPublished(
+    artifact: PersistedSessionArtifact,
+  ): boolean {
+    if (
+      !isExpectedExpiredLocalPublishedArtifact(artifact) ||
+      !artifactIdMatchesIdentity(this.sessionId, artifact)
+    ) {
+      return false;
+    }
+    writeStderrLine(
+      `[artifacts] session=${this.sessionId} ` +
+        'action=legacy_local_published_dropped ' +
+        `artifactId=${artifact.id}`,
+    );
+    return true;
+  }
+
   private async normalizeRestoredMarkerArtifact(
     artifact: PersistedSessionArtifact,
     warnings: string[],
     metadataOnly = false,
   ): Promise<PersistedSessionArtifact | undefined> {
-    if (
-      isExpectedExpiredLocalPublishedArtifact(artifact) &&
-      artifactIdMatchesIdentity(this.sessionId, artifact)
-    ) {
-      writeStderrLine(
-        `[artifacts] session=${this.sessionId} ` +
-          'action=legacy_local_published_dropped ' +
-          `artifactId=${artifact.id}`,
-      );
+    if (this.dropLegacyLocalPublished(artifact)) {
       return undefined;
     }
     try {
@@ -2806,29 +2808,13 @@ function isNonSnapshotPublishedFileUrl(
 
 function artifactIdMatchesIdentity(
   sessionId: string,
-  artifact: Partial<PersistedSessionArtifact> & {
-    storage?: PersistedSessionArtifact['storage'];
-  },
+  artifact: Partial<PersistedSessionArtifact>,
 ): boolean {
-  if (!artifact.id || artifact.storage === undefined) {
-    return false;
-  }
-  try {
-    return (
-      artifact.id ===
-      stableSessionArtifactId(
-        sessionId,
-        buildIdentityKey({
-          storage: artifact.storage,
-          workspacePath: artifact.workspacePath,
-          managedId: artifact.managedId,
-          url: artifact.url,
-        }),
-      )
-    );
-  } catch {
-    return false;
-  }
+  const identityKey = sessionArtifactIdentityKey(artifact);
+  return (
+    identityKey !== undefined &&
+    artifact.id === stableSessionArtifactId(sessionId, identityKey)
+  );
 }
 
 function isExpectedExpiredLocalPublishedArtifact(
@@ -2862,6 +2848,7 @@ function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
     return true;
   }
   if (!change.artifact) return false;
+  if (isNonSnapshotPublishedFileUrl(change.artifact)) return false;
   return (
     change.artifact.retention !== 'ephemeral' ||
     change.artifact.persistenceWarning === 'persistence_unavailable'

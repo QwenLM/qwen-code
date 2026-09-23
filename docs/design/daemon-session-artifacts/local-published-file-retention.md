@@ -57,6 +57,9 @@ On restore and marker restore, drop only Artifact-shaped local pages:
 - `source: tool`
 - `toolName: artifact`
 - file URL that is not a snapshot descriptor
+- record `id` equal to the identity recomputed from the record itself
+  (`storage` / `workspacePath` / `managedId` / `url`); a record whose `id` does
+  not match is not dropped and still fails restore
 
 Do not prefix that drop with `skipped `. Log
 `action=legacy_local_published_dropped` on stderr. Rollback uses

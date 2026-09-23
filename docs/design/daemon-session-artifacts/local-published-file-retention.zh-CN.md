@@ -54,6 +54,8 @@ journal。恢复并不信任该定位符，加载时出现
 - `source: tool`
 - `toolName: artifact`
 - 不是快照描述符的 file URL
+- 记录的 `id` 必须等于由该记录自身重算的 identity（`storage` /
+  `workspacePath` / `managedId` / `url`）；id 不一致的记录不丢弃，仍会恢复失败
 
 丢弃时不要加 `skipped ` 前缀。在 stderr 记录
 `action=legacy_local_published_dropped`。回滚条件为
