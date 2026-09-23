@@ -297,7 +297,7 @@ describe('runScratchTree', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'remains available when only trusted-origin attribution fails',
+    'refuses when trusted-origin attribution fails',
     () => {
       const realGit = execFileSync('which', ['git'], {
         encoding: 'utf8',
@@ -317,7 +317,9 @@ describe('runScratchTree', () => {
       const savedPath = process.env['PATH'];
       try {
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
-        expect(run().available).toBe(true);
+        const result = run();
+        expect(result.available).toBe(false);
+        expect(result.note).toContain('global/system config graph');
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;

@@ -356,4 +356,67 @@ describe('filter origin regressions (real Git)', () => {
       },
     );
   }
+
+  it('R7-1: does not re-trust a native slot the screened tree can rewrite', () => {
+    const home = isolation.home;
+    init(home);
+    git(home, 'config', '--global', LFS, 'cat');
+    expect(git(home, 'ls-files', '--', '.gitconfig')).toBe('');
+    const common = discover(home, '--git-common-dir');
+    const gitDir = discover(home, '--git-dir');
+
+    const screen = filterCommandsIn(common, gitDir, home);
+    expect.soft(screen.filters).toEqual([LFS]);
+    expect.soft(screen.exempt).toEqual([]);
+    expect.soft(checkoutFilterCommands(home)).toEqual([LFS]);
+  });
+
+  it('R7-2: does not trust non-containment under a redirected core.worktree', () => {
+    const { repo, linked, common, gitDir } = trackedInclude();
+    const redirected = join(dir, 'redirected-worktree');
+    mkdirSync(redirected);
+    git(repo, 'config', 'core.worktree', redirected);
+    expect(discover(repo, '--show-toplevel')).toBe(redirected);
+
+    const screen = filterCommandsIn(common, gitDir, linked);
+    expect.soft(screen.filters).toContain(TEAM);
+    expect.soft(screen.exempt).toEqual([]);
+    expect.soft(checkoutFilterCommands(linked)).toContain(TEAM);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'R7-3: refuses when the trusted origin listing cannot be read',
+    () => {
+      const { linked, common, gitDir } = trackedInclude();
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const shimDir = join(dir, 'trusted-read-shim');
+      mkdirSync(shimDir);
+      writeFileSync(
+        join(shimDir, 'git'),
+        [
+          '#!/bin/sh',
+          'scope=0; includes=0; list=0',
+          'for arg in "$@"; do',
+          '  [ "$arg" = --show-scope ] && scope=1',
+          '  [ "$arg" = --includes ] && includes=1',
+          '  [ "$arg" = --list ] && list=1',
+          'done',
+          '[ "$scope$includes$list" = 111 ] && exit 129',
+          `exec ${shellQuotePath(realGit)} "$@"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      process.env['PATH'] = `${shimDir}:${process.env['PATH'] ?? ''}`;
+
+      const screen = filterCommandsIn(common, gitDir, linked);
+      expect.soft(screen.exempt).toEqual([]);
+      expect
+        .soft(screen.unread)
+        .toEqual([expect.stringContaining('git config exited 129')]);
+      expect.soft(checkoutFilterCommands(linked)).not.toEqual([]);
+    },
+  );
 });

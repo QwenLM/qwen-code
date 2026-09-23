@@ -2600,8 +2600,8 @@ describe('filterCommandsIn — the include walk', () => {
     );
 
     const screen = filterCommandsIn(commonDir, gitDir, linked);
-    expect(screen.filters).toEqual(['filter.team.clean']);
-    expect(screen.exempt).toEqual(['filter.user.clean']);
+    expect(screen.filters).toEqual(['filter.team.clean', 'filter.user.clean']);
+    expect(screen.exempt).toEqual([]);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -2633,7 +2633,7 @@ describe('filterCommandsIn — the include walk', () => {
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
         const screen = filterCommandsIn(dir, dir);
         expect(screen.filters).toEqual(['filter.lfs.clean']);
-        expect(screen.unread).toEqual([]);
+        expect(screen.unread.join(' ')).toContain('git config exited 129');
         expect(screen.attribution.join(' ')).toContain('git config exited 129');
 
         writeFileSync(join(dir, 'config'), '');
@@ -2641,7 +2641,7 @@ describe('filterCommandsIn — the include walk', () => {
         const healthy = filterCommandsIn(dir, dir);
         expect(healthy.filters).toEqual([]);
         expect(healthy.exempt).toEqual([]);
-        expect(healthy.unread).toEqual([]);
+        expect(healthy.unread.join(' ')).toContain('git config exited 129');
         expect(healthy.dangling).toEqual([]);
         expect(healthy.attribution.join(' ')).toContain(
           'git config exited 129',
