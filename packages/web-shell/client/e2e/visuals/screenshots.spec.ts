@@ -528,6 +528,18 @@ for (const theme of THEMES) {
       // no row in the window, so it has nowhere to be drawn.
       await expect(page.getByTestId('trajectory-span')).toHaveCount(6);
       await captureScreenshot(page, `trajectory-${theme}`);
+
+      // The same run with a stretch of it selected on the overview.
+      const plot = await page.getByTestId('trajectory-plot').boundingBox();
+      expect(plot).not.toBeNull();
+      const y = plot!.y + 10;
+      await page.mouse.move(plot!.x + plot!.width * 0.3, y);
+      await page.mouse.down();
+      await page.mouse.move(plot!.x + plot!.width * 0.7, y, { steps: 8 });
+      await page.mouse.up();
+      await expect(page.getByTestId('trajectory-range')).toBeVisible();
+      await expect(page.getByTestId('trajectory-range-status')).toBeVisible();
+      await captureScreenshot(page, `trajectory-range-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {

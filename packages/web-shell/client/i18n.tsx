@@ -3046,6 +3046,11 @@ const EN: Messages = {
   'trajectory.overview.label': (v) =>
     `Timeline of ${plural(v?.spans, 'timed record')}, ${v?.busy ?? ''} of activity`,
   'trajectory.overview.busy': (v) => `${v?.duration ?? ''} active`,
+  'trajectory.range.status': (v) =>
+    `Showing ${v?.shown ?? 0} of ${v?.total ?? 0} rows in the selected time`,
+  'trajectory.range.clear': 'Clear time selection',
+  'trajectory.range.aria': (v) =>
+    `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
   'trajectory.overview.lane.requests': 'req',
   'trajectory.overview.lane.tools': 'tool',
   'trajectory.overview.lane.subagents': 'sub',
@@ -6873,6 +6878,10 @@ const ZH: Messages = {
   'trajectory.overview.label': (v) =>
     `时间轴：${v?.spans ?? 0} 条有计时的记录，活跃 ${v?.busy ?? ''}`,
   'trajectory.overview.busy': (v) => `活跃 ${v?.duration ?? ''}`,
+  'trajectory.range.status': (v) =>
+    `已筛选：区间内 ${v?.shown ?? 0} / ${v?.total ?? 0} 行`,
+  'trajectory.range.clear': '清除时间区间',
+  'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
   'trajectory.overview.lane.requests': '请求',
   'trajectory.overview.lane.tools': '工具',
   'trajectory.overview.lane.subagents': '子代理',
