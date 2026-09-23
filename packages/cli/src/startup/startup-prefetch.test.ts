@@ -732,7 +732,9 @@ describe('startupPrefetch', () => {
   });
 
   it('starts batch auto-collect for interactive sessions, delivering by default', async () => {
-    startPostRenderPrefetches(makeConfig(), makeSettings());
+    // Update check off: when it and auto-collect import the mocked update
+    // emitter in the same tick, vitest hands one of them the real module.
+    startPostRenderPrefetches(makeConfig(), makeSettings(false));
 
     await vi.dynamicImportSettled();
 
