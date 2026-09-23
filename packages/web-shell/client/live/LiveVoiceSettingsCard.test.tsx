@@ -549,20 +549,22 @@ describe('LiveVoiceSettingsCard', () => {
   });
 
   describe('endpoint', () => {
-    const beijing = 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
-    const intl = 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+    const dedicated =
+      'https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
 
-    async function pickEndpoint(container: HTMLElement, label: string) {
+    function endpointInput(container: HTMLElement): HTMLInputElement {
+      const input = container.querySelector<HTMLInputElement>(
+        '#live-realtime-endpoint',
+      );
+      if (!input) throw new Error('endpoint input was not rendered');
+      return input;
+    }
+
+    async function save(container: HTMLElement): Promise<void> {
       await act(async () => {
-        click(container.querySelector<HTMLElement>('#live-realtime-endpoint')!);
-        await Promise.resolve();
-      });
-      const option = Array.from(
-        document.body.querySelectorAll<HTMLElement>('[role="option"]'),
-      ).find((candidate) => candidate.textContent?.includes(label));
-      if (!option) throw new Error(`endpoint option ${label} was not rendered`);
-      await act(async () => {
-        click(option);
+        container
+          .querySelector<HTMLButtonElement>('[data-live-endpoint-save]')!
+          .click();
         await Promise.resolve();
       });
     }
@@ -572,88 +574,87 @@ describe('LiveVoiceSettingsCard', () => {
       expect(container.querySelector('[data-live-endpoint]')).toBeNull();
     });
 
-    it('shows the region of a preset endpoint', () => {
-      const container = mount(setupResult({ endpoint: intl }));
-      expect(
-        container.querySelector('#live-realtime-endpoint')?.textContent,
-      ).toContain('settings.liveSetup.endpointRegion.singapore');
-      expect(container.querySelector('[data-live-endpoint-input]')).toBeNull();
+    it('comes first, next to the key, and starts empty with the default as a hint', () => {
+      const container = mount(setupResult({ endpoint: '' }));
+      const input = endpointInput(container);
+      expect(input.value).toBe('');
+      expect(input.placeholder).toBe(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+      const fields = Array.from(
+        container.querySelectorAll(
+          '#live-realtime-endpoint, #live-realtime-key, #live-realtime-model, #live-realtime-voice',
+        ),
+      ).map((element) => element.id);
+      expect(fields).toEqual([
+        'live-realtime-endpoint',
+        'live-realtime-key',
+        'live-realtime-model',
+        'live-realtime-voice',
+      ]);
     });
 
-    it('saves a picked region together with a key typed above', async () => {
-      const setup = setupResult({ endpoint: beijing });
+    it('saves a base URL together with a key typed next to it', async () => {
+      const setup = setupResult({ endpoint: '' });
       const container = mount(setup);
-      const key =
-        container.querySelector<HTMLInputElement>('#live-realtime-key')!;
-      act(() => setInputValue(key, 'intl-secret'));
-
-      await pickEndpoint(
-        container,
-        'settings.liveSetup.endpointRegion.singapore',
-      );
-
-      expect(setup.update).toHaveBeenCalledWith({
-        endpoint: intl,
-        apiKey: { operation: 'replace', value: 'intl-secret' },
-      });
-    });
-
-    it('edits a dedicated domain in the custom field', async () => {
-      const dedicated =
-        'wss://llm-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime';
-      const setup = setupResult({ endpoint: dedicated });
-      const container = mount(setup);
-      const input = container.querySelector<HTMLInputElement>(
-        '[data-live-endpoint-input]',
-      );
-      if (!input) throw new Error('custom endpoint input was not rendered');
-      expect(input.value).toBe(dedicated);
-      const save = container.querySelector<HTMLButtonElement>(
-        '[data-live-endpoint-save]',
-      )!;
-      expect(save.disabled).toBe(true);
-
       act(() =>
         setInputValue(
-          input,
-          'https://llm-xyz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          container.querySelector<HTMLInputElement>('#live-realtime-key')!,
+          'dedicated-secret',
         ),
       );
-      await act(async () => {
-        save.click();
-        await Promise.resolve();
-      });
+      act(() => setInputValue(endpointInput(container), ` ${dedicated} `));
+      await save(container);
 
       expect(setup.update).toHaveBeenCalledWith({
-        endpoint:
-          'https://llm-xyz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        endpoint: dedicated,
+        apiKey: { operation: 'replace', value: 'dedicated-secret' },
       });
+    });
+
+    it('clears a stored base URL back to the default', async () => {
+      const setup = setupResult({ endpoint: dedicated });
+      const container = mount(setup);
+      const input = endpointInput(container);
+      expect(input.value).toBe(dedicated);
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-live-endpoint-save]',
+      )!;
+      expect(button.disabled).toBe(true);
+
+      act(() => setInputValue(input, ''));
+      expect(button.disabled).toBe(false);
+      await save(container);
+
+      expect(setup.update).toHaveBeenCalledWith({ endpoint: '' });
     });
 
     it('names a stored endpoint a call would refuse', () => {
       const container = mount(
         setupResult({
-          endpoint: 'wss://example.com/api-ws/v1/realtime',
+          endpoint: 'https://example.com/compatible-mode/v1',
           endpointError:
-            'experimental.liveVoice.endpoint must be a supported secure DashScope WebSocket endpoint.',
+            'The endpoint must be a DashScope or Model Studio (*.maas.aliyuncs.com) base URL, such as https://dashscope.aliyuncs.com/compatible-mode/v1.',
         }),
       );
       expect(
         container.querySelector('[data-live-endpoint-error]')?.textContent,
-      ).toContain('DashScope WebSocket endpoint');
+      ).toContain('DashScope or Model Studio');
     });
 
-    it('shows a route-derived endpoint read-only', () => {
+    it('shows a route base URL read-only', () => {
       const container = mount(
         setupResult({
-          endpoint: beijing,
+          endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
           keySource: 'route',
           keyEnv: 'DASHSCOPE_API_KEY',
         }),
       );
       const section = container.querySelector('[data-live-endpoint]')!;
-      expect(section.querySelector('[role="combobox"]')).toBeNull();
-      expect(section.textContent).toContain(beijing);
+      expect(section.querySelector('input')).toBeNull();
+      expect(section.textContent).toContain(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
       expect(section.textContent).toContain(
         'settings.liveSetup.endpointFromRoute',
       );

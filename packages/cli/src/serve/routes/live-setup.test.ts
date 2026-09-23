@@ -65,7 +65,17 @@ describe('POST /live/setup', () => {
     });
   });
 
-  it.each([7, '  ', 'x'.repeat(2049)])(
+  it('forwards an empty endpoint, which restores the default', async () => {
+    const { app, update } = createApp();
+    const response = await request(app)
+      .post('/live/setup')
+      .send({ endpoint: '' });
+
+    expect(response.status).toBe(200);
+    expect(update).toHaveBeenCalledWith({ endpoint: '' });
+  });
+
+  it.each([7, null, 'x'.repeat(2049)])(
     'rejects an invalid endpoint %j before reaching the controller',
     async (value) => {
       const { app, update } = createApp();

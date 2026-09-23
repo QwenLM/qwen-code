@@ -43,16 +43,7 @@ import {
 // none can start with a space.
 const CUSTOM_MODEL = ' custom';
 
-// Realtime endpoints of the public DashScope regions. Anything else, such as
-// a dedicated Model Studio domain, goes through the custom field.
-const ENDPOINT_PRESETS = [
-  ['beijing', 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime'],
-  ['singapore', 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime'],
-] as const;
-
-function endpointPreset(endpoint: string | undefined): string {
-  return ENDPOINT_PRESETS.find(([, url]) => url === endpoint)?.[0] ?? 'custom';
-}
+const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 function RequirementBadge({
   state,
@@ -110,17 +101,13 @@ export function LiveVoiceSettingsCard({
     setModel(savedModel);
     setCustomModel(false);
   }, [savedModel]);
-  // Absent on daemons that predate a configurable endpoint.
+  // Absent on daemons that predate a configurable endpoint; empty while the
+  // default is in use.
   const savedEndpoint = status?.endpoint;
   const [endpointDraft, setEndpointDraft] = useState(savedEndpoint ?? '');
-  const [customEndpoint, setCustomEndpoint] = useState(false);
   useEffect(() => {
     setEndpointDraft(savedEndpoint ?? '');
-    setCustomEndpoint(false);
   }, [savedEndpoint]);
-  const endpointChoice = customEndpoint
-    ? 'custom'
-    : endpointPreset(savedEndpoint);
   const savedVoice = status?.voice ?? '';
   // Absent on daemons that predate selectable voices; an update there is
   // refused with empty_live_setup_update, so the control stays read-only.
@@ -173,9 +160,9 @@ export function LiveVoiceSettingsCard({
   // A key typed for the new endpoint goes in the same request: validating
   // the new endpoint with the old key, or the new key against the old
   // endpoint, would fail for a key bound to one region or domain.
-  const saveEndpoint = async (value: string) => {
-    const endpoint = value.trim();
-    if (!endpoint || endpoint === savedEndpoint) return;
+  const saveEndpoint = async () => {
+    const endpoint = endpointDraft.trim();
+    if (savedEndpoint === undefined || endpoint === savedEndpoint) return;
     const key = apiKey.trim();
     try {
       await setup.update({
@@ -186,16 +173,6 @@ export function LiveVoiceSettingsCard({
     } catch {
       // The hook exposes the sanitized daemon error in the card.
     }
-  };
-
-  const chooseEndpoint = (choice: string) => {
-    if (choice === 'custom') {
-      setCustomEndpoint(true);
-      return;
-    }
-    setCustomEndpoint(false);
-    const preset = ENDPOINT_PRESETS.find(([name]) => name === choice);
-    if (preset) void saveEndpoint(preset[1]);
   };
 
   const saveVoice = async () => {
@@ -280,6 +257,69 @@ export function LiveVoiceSettingsCard({
       <Separator />
 
       <div className="grid gap-4 lg:grid-cols-2">
+        {savedEndpoint !== undefined ? (
+          <div className="space-y-2" data-live-endpoint>
+            <label
+              htmlFor="live-realtime-endpoint"
+              className="text-sm font-medium"
+            >
+              {t('settings.liveSetup.endpoint')}
+            </label>
+            {keyFromRoute ? (
+              <>
+                <p className="break-all text-sm" id="live-realtime-endpoint">
+                  {savedEndpoint}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.liveSetup.endpointFromRoute')}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    id="live-realtime-endpoint"
+                    autoComplete="off"
+                    value={endpointDraft}
+                    disabled={setup.mutating || !keyEditable}
+                    placeholder={DEFAULT_BASE_URL}
+                    onChange={(event) => setEndpointDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void saveEndpoint();
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    data-live-endpoint-save
+                    disabled={
+                      endpointDraft.trim() === savedEndpoint ||
+                      setup.mutating ||
+                      !keyEditable
+                    }
+                    onClick={() => void saveEndpoint()}
+                  >
+                    {t('settings.liveSetup.save')}
+                  </Button>
+                </div>
+                {status?.endpointError ? (
+                  <p
+                    className="text-xs text-destructive"
+                    role="alert"
+                    data-live-endpoint-error
+                  >
+                    {status.endpointError}
+                  </p>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.liveSetup.endpointHint')}
+                </p>
+              </>
+            )}
+          </div>
+        ) : null}
+
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-3">
             <label htmlFor="live-realtime-key" className="text-sm font-medium">
@@ -428,97 +468,6 @@ export function LiveVoiceSettingsCard({
             {t('settings.liveSetup.appliesNextCall')}
           </p>
         </div>
-
-        {savedEndpoint !== undefined ? (
-          <div className="space-y-2" data-live-endpoint>
-            <label
-              htmlFor="live-realtime-endpoint"
-              className="text-sm font-medium"
-            >
-              {t('settings.liveSetup.endpoint')}
-            </label>
-            {keyFromRoute ? (
-              <>
-                <p className="break-all text-sm" id="live-realtime-endpoint">
-                  {savedEndpoint}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {t('settings.liveSetup.endpointFromRoute')}
-                </p>
-              </>
-            ) : (
-              <>
-                <Select
-                  value={endpointChoice}
-                  disabled={setup.mutating || !keyEditable}
-                  onValueChange={chooseEndpoint}
-                >
-                  <SelectTrigger id="live-realtime-endpoint" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ENDPOINT_PRESETS.map(([name]) => (
-                      <SelectItem key={name} value={name}>
-                        {t(`settings.liveSetup.endpointRegion.${name}`)}
-                      </SelectItem>
-                    ))}
-                    <SelectItem value="custom">
-                      {t('settings.liveSetup.endpointRegion.custom')}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                {endpointChoice === 'custom' ? (
-                  <div className="flex gap-2">
-                    <Input
-                      autoComplete="off"
-                      aria-label={t('settings.liveSetup.endpoint')}
-                      data-live-endpoint-input
-                      value={endpointDraft}
-                      disabled={setup.mutating || !keyEditable}
-                      placeholder={t('settings.liveSetup.endpointPlaceholder')}
-                      onChange={(event) => setEndpointDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter')
-                          void saveEndpoint(endpointDraft);
-                      }}
-                    />
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      data-live-endpoint-save
-                      disabled={
-                        !endpointDraft.trim() ||
-                        endpointDraft.trim() === savedEndpoint ||
-                        setup.mutating ||
-                        !keyEditable
-                      }
-                      onClick={() => void saveEndpoint(endpointDraft)}
-                    >
-                      {t('settings.liveSetup.save')}
-                    </Button>
-                  </div>
-                ) : (
-                  <p className="break-all text-xs text-muted-foreground">
-                    {savedEndpoint}
-                  </p>
-                )}
-                {status?.endpointError ? (
-                  <p
-                    className="text-xs text-destructive"
-                    role="alert"
-                    data-live-endpoint-error
-                  >
-                    {status.endpointError}
-                  </p>
-                ) : null}
-                <p className="text-xs text-muted-foreground">
-                  {t('settings.liveSetup.endpointHint')}
-                </p>
-              </>
-            )}
-          </div>
-        ) : null}
 
         <div className="space-y-2">
           <label htmlFor="live-realtime-voice" className="text-sm font-medium">

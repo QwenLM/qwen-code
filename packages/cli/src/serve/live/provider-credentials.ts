@@ -269,7 +269,7 @@ function readRouteApiKey(
 }
 
 /** The Realtime endpoint a `realtimeOnly` route derives from its `baseUrl`. */
-export function resolveLiveRouteEndpoint(route: LiveRealtimeRoute): string {
+function resolveLiveRouteEndpoint(route: LiveRealtimeRoute): string {
   if (!route.baseUrl) {
     throw new LiveProviderConfigError(
       `Live Voice model '${route.id}' must declare baseUrl and envKey in modelProviders.`,
@@ -353,7 +353,8 @@ export function resolveLiveProviderCredential(
         `The DashScope Realtime API key is not configured. '${live.model}' matches no realtimeOnly route in modelProviders, so experimental.liveVoice.apiKey is required.`,
       );
     }
-    endpoint = validateRealtimeEndpoint(live.endpoint);
+    // Stored as entered: an OpenAI-compatible base URL or a Realtime URL.
+    endpoint = normalizeLiveRealtimeEndpoint(live.endpoint);
   }
   const credential = {
     endpoint,

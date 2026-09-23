@@ -121,14 +121,14 @@ Two rules are deliberate:
   store new ones.
 
 On the free-standing path the Web Shell's Qwen Live settings set the endpoint
-and model directly. The endpoint defaults to Beijing
-(`wss://dashscope.aliyuncs.com/api-ws/v1/realtime`); pick the region or
-dedicated domain your key belongs to, otherwise the key is rejected with `401`.
-Both the Realtime WebSocket URL and the OpenAI-compatible base URL
-(`https://<host>/compatible-mode/v1`) are accepted and stored as
-`wss://<host>/api-ws/v1/realtime`, and the host must be a DashScope or
-`*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new endpoint is
-checked with a Realtime handshake before it is saved.
+and model directly. Enter the OpenAI-compatible base URL of the region or
+dedicated domain your key belongs to, such as
+`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; left empty, Live uses
+Beijing (`https://dashscope.aliyuncs.com/compatible-mode/v1`), and a key from
+elsewhere is rejected with `401`. The base URL is stored as entered and
+converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
+be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
+endpoint is checked with a Realtime handshake before it is saved.
 
 ## Override reasoning capabilities
 

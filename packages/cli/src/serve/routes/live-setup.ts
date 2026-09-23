@@ -97,13 +97,10 @@ function parseUpdate(body: Record<string, unknown>): LiveSetupUpdate {
   }
   if (body['endpoint'] !== undefined) {
     const value = body['endpoint'];
-    if (
-      typeof value !== 'string' ||
-      value.trim().length === 0 ||
-      value.length > 2048
-    ) {
+    // Empty restores the default endpoint.
+    if (typeof value !== 'string' || value.length > 2048) {
       throw new LiveSetupError(
-        'endpoint must be a non-empty URL.',
+        'endpoint must be a URL, or empty for the default.',
         'invalid_live_endpoint',
         400,
       );

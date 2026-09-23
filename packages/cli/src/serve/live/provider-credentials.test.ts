@@ -342,6 +342,23 @@ describe('Live provider credentials', () => {
     });
   });
 
+  it('connects a stored base URL through its Realtime endpoint', () => {
+    const credential = resolveLiveProviderCredential(
+      settings({
+        experimental: {
+          liveVoice: {
+            enabled: true,
+            apiKey: 'settings-secret',
+            endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+          },
+        },
+      } as Partial<Settings>),
+    );
+    expect(credential.endpoint).toBe(
+      'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime',
+    );
+  });
+
   describe('normalizeLiveRealtimeEndpoint', () => {
     it.each([
       [

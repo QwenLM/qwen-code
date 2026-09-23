@@ -482,54 +482,56 @@ describe('LiveSetupController', () => {
   });
 
   describe('endpoint', () => {
-    const intl = 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+    const intlBase = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+    const intlRealtime = 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
 
-    it('reports the default endpoint and a stored one', async () => {
-      const fresh = createHarness({ apiKey: 'realtime-secret' });
-      expect(await fresh.controller.getStatus()).toMatchObject({
-        endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
-      });
-
-      const stored = createHarness({ endpoint: intl });
-      const status = await stored.controller.getStatus();
-      expect(status.endpoint).toBe(intl);
+    it('reports an empty endpoint while the default is in use', async () => {
+      const harness = createHarness({ apiKey: 'realtime-secret' });
+      const status = await harness.controller.getStatus();
+      expect(status.endpoint).toBe('');
       expect(status.endpointError).toBeUndefined();
     });
 
-    it('names a stored endpoint that a call would refuse', async () => {
-      const harness = createHarness({
-        endpoint: 'wss://example.com/api-ws/v1/realtime',
-      });
+    it('reports a stored base URL as entered', async () => {
+      const harness = createHarness({ endpoint: intlBase });
       const status = await harness.controller.getStatus();
-      expect(status.endpoint).toBe('wss://example.com/api-ws/v1/realtime');
-      expect(status.endpointError).toMatch(/DashScope WebSocket endpoint/);
+      expect(status.endpoint).toBe(intlBase);
+      expect(status.endpointError).toBeUndefined();
     });
 
-    it('stores a compatible-mode base URL as its Realtime endpoint', async () => {
+    it('names a stored endpoint that a call would refuse, by the field', async () => {
+      const harness = createHarness({
+        endpoint: 'https://example.com/compatible-mode/v1',
+      });
+      const status = await harness.controller.getStatus();
+      expect(status.endpointError).toMatch(/^The endpoint must be a DashScope/);
+      expect(status.endpointError).not.toContain('experimental.liveVoice');
+    });
+
+    it('stores a base URL as entered', async () => {
       const harness = createHarness({ apiKey: 'realtime-secret' });
       const status = await harness.controller.update({
         endpoint:
-          'https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          '  https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1 ',
       });
 
       expect(harness.settings().experimental?.liveVoice?.endpoint).toBe(
-        'wss://llm-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime',
+        'https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       );
       expect(status.endpoint).toBe(
-        'wss://llm-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime',
+        'https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       );
       // Live is off: nothing to validate until it is turned on.
       expect(harness.validateCredential).not.toHaveBeenCalled();
     });
 
-    it('keeps the default implicit when it is picked again', async () => {
-      const harness = createHarness({ endpoint: intl });
-      await harness.controller.update({
-        endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
-      });
+    it('restores the default when the endpoint is cleared', async () => {
+      const harness = createHarness({ endpoint: intlBase });
+      const status = await harness.controller.update({ endpoint: '' });
       expect(
         harness.settings().experimental?.liveVoice?.endpoint,
       ).toBeUndefined();
+      expect(status.endpoint).toBe('');
     });
 
     it('refuses a host outside the DashScope allow-list without writing', async () => {
@@ -548,19 +550,32 @@ describe('LiveSetupController', () => {
         apiKey: 'old-secret',
       });
       await harness.controller.update({
-        endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        endpoint: intlBase,
         apiKey: { operation: 'replace', value: 'intl-secret' },
       });
 
       expect(harness.validateCredential).toHaveBeenCalledOnce();
       const [[credential]] = harness.validateCredential.mock
         .calls as unknown as Array<[{ endpoint: string; apiKey: string }]>;
-      expect(credential.endpoint).toBe(intl);
+      expect(credential.endpoint).toBe(intlRealtime);
       expect(credential.apiKey).toBe('intl-secret');
       expect(harness.settings().experimental?.liveVoice).toMatchObject({
-        endpoint: intl,
+        endpoint: intlBase,
         apiKey: 'intl-secret',
       });
+    });
+
+    it('does not revalidate when the same endpoint is saved in another form', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        apiKey: 'intl-secret',
+        endpoint: intlRealtime,
+      });
+      await harness.controller.update({ endpoint: intlBase });
+      expect(harness.validateCredential).not.toHaveBeenCalled();
+      expect(harness.settings().experimental?.liveVoice?.endpoint).toBe(
+        intlBase,
+      );
     });
 
     it('keeps the old endpoint when the new one fails validation', async () => {
@@ -572,7 +587,7 @@ describe('LiveSetupController', () => {
         new Error('Realtime provider rejected the WebSocket upgrade (401).'),
       );
       await expect(
-        harness.controller.update({ endpoint: intl }),
+        harness.controller.update({ endpoint: intlBase }),
       ).rejects.toMatchObject({
         code: 'live_provider_validation_failed',
         status: 409,
@@ -580,7 +595,7 @@ describe('LiveSetupController', () => {
       expect(harness.persistSettings).not.toHaveBeenCalled();
     });
 
-    it('refuses an endpoint for a model that follows its route', async () => {
+    it('reports the route base URL and refuses an endpoint for a routed model', async () => {
       const harness = createHarness({
         modelProviders: {
           openai: [
@@ -596,10 +611,10 @@ describe('LiveSetupController', () => {
       });
       expect(await harness.controller.getStatus()).toMatchObject({
         keySource: 'route',
-        endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+        endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       });
       await expect(
-        harness.controller.update({ endpoint: intl }),
+        harness.controller.update({ endpoint: intlBase }),
       ).rejects.toMatchObject({ code: 'live_endpoint_unused', status: 400 });
       expect(harness.persistSettings).not.toHaveBeenCalled();
     });

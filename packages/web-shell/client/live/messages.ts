@@ -81,16 +81,11 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     `The selected model reads its key from ${v?.env ?? ''}, which is not set in the daemon's environment.`,
   'settings.liveSetup.model': 'Realtime model',
   'settings.liveSetup.modelHint':
-    'Pick "Other model id…" to use any Realtime model with the endpoint and key above. Models with realtimeOnly: true under modelProviders in your user settings (~/.qwen/settings.json) are listed here and use their own base URL and key.',
+    'Pick “Other model id…” to use any Realtime model.',
   'settings.liveSetup.modelCustom': 'Other model id…',
   'settings.liveSetup.endpoint': 'Realtime endpoint',
-  'settings.liveSetup.endpointRegion.beijing': 'China (Beijing)',
-  'settings.liveSetup.endpointRegion.singapore': 'International (Singapore)',
-  'settings.liveSetup.endpointRegion.custom': 'Custom',
-  'settings.liveSetup.endpointPlaceholder':
-    'wss://…/api-ws/v1/realtime or https://…/compatible-mode/v1',
   'settings.liveSetup.endpointHint':
-    'Use the region or dedicated domain your API key belongs to; an OpenAI-compatible base URL is converted automatically. A key typed above is saved and checked together with the endpoint.',
+    'The OpenAI-compatible base URL of your key’s region or dedicated domain. Leave empty for the default (Beijing).',
   'settings.liveSetup.endpointFromRoute':
     "Follows the base URL of the selected model's modelProviders route.",
   'settings.liveSetup.voice': 'Voice',
@@ -219,17 +214,11 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.keyFromEnvMissing': (v) =>
     `所选模型从 ${v?.env ?? ''} 读取 key，但 daemon 的环境里没有设置它。`,
   'settings.liveSetup.model': 'Realtime 模型',
-  'settings.liveSetup.modelHint':
-    '选择“其他模型 id…”即可配合上方的地址和 Key 使用任意 Realtime 模型。用户设置（~/.qwen/settings.json）的 modelProviders 下带 realtimeOnly: true 的模型会列在这里，并使用各自的地址和 Key。',
+  'settings.liveSetup.modelHint': '选“其他模型 id…”可填写任意 Realtime 模型。',
   'settings.liveSetup.modelCustom': '其他模型 id…',
   'settings.liveSetup.endpoint': 'Realtime 接入地址',
-  'settings.liveSetup.endpointRegion.beijing': '中国内地（北京）',
-  'settings.liveSetup.endpointRegion.singapore': '国际（新加坡）',
-  'settings.liveSetup.endpointRegion.custom': '自定义',
-  'settings.liveSetup.endpointPlaceholder':
-    'wss://…/api-ws/v1/realtime 或 https://…/compatible-mode/v1',
   'settings.liveSetup.endpointHint':
-    '请选择 API Key 所属的地域或专属域名；OpenAI 兼容地址会自动换算。上方填写的新 Key 会与地址一起保存并校验。',
+    '填写 Key 所属地域或专属域名的 OpenAI 兼容 baseUrl，留空使用默认地址（北京）。',
   'settings.liveSetup.endpointFromRoute':
     '跟随所选模型在 modelProviders 中路由的 baseUrl。',
   'settings.liveSetup.voice': '音色',
