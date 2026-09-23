@@ -1733,8 +1733,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         ) {
           // In VP mode with empty input, scroll the conversation instead of
           // navigating input history. This handles terminals that translate
-          // mouse wheel events to Up/Down arrow keys.
-          if (isVpMode && buffer.text.length === 0 && scrollActions) {
+          // mouse wheel events to Up/Down arrow keys. Only take the key when
+          // the transcript actually overflows: in a short conversation there is
+          // nothing to scroll and ↑ must keep recalling history rather than
+          // going dead.
+          if (
+            isVpMode &&
+            buffer.text.length === 0 &&
+            scrollActions?.hasScrollableTranscript()
+          ) {
             scrollActions.scrollBy(-1);
             return true;
           }
@@ -1755,12 +1762,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         ) {
           // In VP mode with empty input, scroll the conversation instead of
           // navigating input history. This handles terminals that translate
-          // mouse wheel events to Up/Down arrow keys. Descending into the live
-          // agent panel / tab bar / background-tasks pill still wins.
+          // mouse wheel events to Up/Down arrow keys. Yields to history when
+          // the transcript does not overflow, and to descendFromComposer when
+          // an agent surface is on screen — descending is the only keyboard
+          // route into those.
           if (
             isVpMode &&
             buffer.text.length === 0 &&
-            scrollActions &&
+            scrollActions?.hasScrollableTranscript() &&
             !hasComposerDescendTarget()
           ) {
             scrollActions.scrollBy(1);

@@ -35,10 +35,12 @@ import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
   const footerRef = useRef<DOMElement>(null);
-  const scrollByRef = useRef<((delta: number) => void) | null>(null);
+  const scrollActionsRef = useRef<ScrollActions | null>(null);
   const scrollActions = useMemo<ScrollActions>(
     () => ({
-      scrollBy: (delta: number) => scrollByRef.current?.(delta),
+      scrollBy: (delta: number) => scrollActionsRef.current?.scrollBy(delta),
+      hasScrollableTranscript: () =>
+        scrollActionsRef.current?.hasScrollableTranscript() ?? false,
     }),
     [],
   );
@@ -92,7 +94,10 @@ export const DefaultAppLayout: React.FC = () => {
       ) : (
         <ScrollContext.Provider value={scrollActions}>
           {/* Main view: conversation history + main composer / dialogs */}
-          <MainContent footerRef={footerRef} scrollByRef={scrollByRef} />
+          <MainContent
+            footerRef={footerRef}
+            scrollActionsRef={scrollActionsRef}
+          />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />

@@ -6204,9 +6204,12 @@ describe('InputPrompt', () => {
       merged: { ui: { useTerminalBuffer: true } },
     } as LoadedSettings;
 
-    const renderVp = (scrollBy: (delta: number) => void) =>
+    const renderVp = (
+      scrollBy: (delta: number) => void,
+      hasScrollableTranscript: () => boolean = () => true,
+    ) =>
       renderWithProviders(
-        <ScrollContext.Provider value={{ scrollBy }}>
+        <ScrollContext.Provider value={{ scrollBy, hasScrollableTranscript }}>
           <InputPrompt {...props} />
         </ScrollContext.Provider>,
         { settings: vpSettings },
@@ -6267,7 +6270,9 @@ describe('InputPrompt', () => {
       mockBuffer.setText('');
       mockBuffer.visualCursor = [0, 0];
       const { stdin, unmount } = renderWithProviders(
-        <ScrollContext.Provider value={{ scrollBy }}>
+        <ScrollContext.Provider
+          value={{ scrollBy, hasScrollableTranscript: () => true }}
+        >
           <InputPrompt {...props} />
         </ScrollContext.Provider>,
       );
@@ -6306,6 +6311,43 @@ describe('InputPrompt', () => {
 
       expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
       expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up still recalls history when the transcript does not overflow', async () => {
+      // A short conversation has nothing to scroll. Consuming ↑ there would
+      // leave it dead — no scroll and no history — so it falls through.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy, () => false);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up at the top of a scrollable transcript does not replay history', async () => {
+      // The other half of the tradeoff: once the transcript overflows, ↑ stays
+      // owned by scrolling even at the top edge. A wheel spun past the top
+      // emits a burst of ↑ presses, and letting the first dead one fall through
+      // to history would reintroduce exactly the bug being fixed.
+      const scrollBy = vi.fn();
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(-1);
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       unmount();
     });
   });
