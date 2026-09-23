@@ -123,8 +123,8 @@ workspace and channel; the channel list reports such a channel as `error` with
 the recorded `lastError`, and daemon status raises one `channel_restore_failed`
 warning per workspace. The record changes only the runtime state: the
 configured instances and startup toggles are still read from settings. It
-lasts until an operator acts on the channel or on the whole selection, the
-channel is committed, or the workspace is removed.
+lasts until an operator acts on the channel or on the whole selection, or the
+workspace is removed.
 
 Legacy `runtime.channelWorker`, grouped `runtime.channelWorkers`, pidfile
 fields, standalone `qwen channel start`, and `qwen channel reload` remain

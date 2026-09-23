@@ -909,10 +909,10 @@ worker snapshots do not show it; instead:
 A boot name several workspaces listed is reported against each of them. The
 report lasts until an operator acts on the channel (start, stop, a
 configuration write or removal) or on the whole selection (`PUT` or
-`DELETE /workspace/channel`), until the channel is committed, or until its
-workspace is removed. It is kept in memory: a restarted daemon restores again
-and reports what that attempt did. The error text is credential-redacted and
-bounded the way the daemon log renders it.
+`DELETE /workspace/channel`), or until its workspace is removed. It is kept
+in memory: a restarted daemon restores again and reports what that attempt
+did. The error text is credential-redacted and bounded the way the daemon log
+renders it.
 
 After a worker has reached ready, unexpected exits are restarted by the serve
 supervisor within a bounded policy: up to 3 restart attempts in a 5 minute

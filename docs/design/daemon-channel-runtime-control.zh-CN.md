@@ -94,7 +94,7 @@ daemon 级闸门）。队列自己保证这些工作的先后，晚恢复在队�
 在内存里按 workspace 与频道记下这些失败；频道列表把这样的频道报告为 `error`，
 `lastError` 即记录的错误，daemon 状态为每个 workspace 发出一条
 `channel_restore_failed` 警告。记录只影响运行时状态：已配置实例和启动开关仍从
-设置读取。操作者对该频道或整份选择有所动作、该频道被提交、或该 workspace 被移除时，
+设置读取。操作者对该频道或整份选择有所动作、或该 workspace 被移除时，
 记录即清除。
 
 既有 `runtime.channelWorker`、分组后的 `runtime.channelWorkers`、pidfile
