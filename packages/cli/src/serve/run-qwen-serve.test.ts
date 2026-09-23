@@ -84,9 +84,10 @@ import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import * as trustPolicyRuntime from '../config/daemon-trust-policy.js';
 import * as workspaceServiceRuntime from './workspace-service/index.js';
-import type {
-  ChannelWorkerSnapshot,
-  CreateChannelWorkerSupervisorOptions,
+import {
+  ChannelWorkerStartupError,
+  type ChannelWorkerSnapshot,
+  type CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import type {
   ServiceInfo,
@@ -15376,6 +15377,23 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(
         stderr.mock.calls.map(([chunk]) => String(chunk)).join(''),
       ).toContain('channel "ghost" was not restored');
+      // Reported against the workspace that asked for it, not only on stderr.
+      const status = (await (
+        await fetch(`${handle.url}/daemon/status`, {
+          headers: { Authorization: 'Bearer secret' },
+        })
+      ).json()) as { issues: Array<{ code: string; message: string }> };
+      expect(
+        status.issues.filter(
+          (issue) => issue.code === 'channel_restore_failed',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          message: expect.stringContaining(
+            `serve.channels for workspace ${canonicalizeWorkspace(secondary)} were not restored: ghost (`,
+          ),
+        }),
+      ]);
     } finally {
       await handle.close();
     }
@@ -16019,6 +16037,148 @@ describe('runQwenServe channel worker supervisor', () => {
           `workspaceCwd=${canonicalizeWorkspace(broken)}`,
         );
       });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('reports a late restore failure in the channel list and daemon status', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-failure-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    daemon.factory.mockImplementation(
+      (opts: CreateChannelWorkerSupervisorOptions) => {
+        const worker = makeWorker({
+          enabled: true,
+          state: 'failed',
+          channels: [],
+        });
+        worker.start.mockRejectedValue(
+          new ChannelWorkerStartupError('Channel worker failed to start.', {
+            workspaceCwd: opts.workspace,
+            startupFailures: [
+              {
+                channel: 'feishu',
+                phase: 'connect',
+                code: 'connect_timeout',
+                message: 'feishu gateway did not answer the upgrade',
+              },
+            ],
+          }),
+        );
+        return worker;
+      },
+    );
+    const handle = await daemon.start();
+    const secondaryCwd = canonicalizeWorkspace(daemon.secondary);
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      const { id } = (await added.json()) as { id: string };
+      const channelsUrl = `${handle.url}/workspaces/${encodeURIComponent(id)}/channels`;
+      const feishuRuntime = async () =>
+        (
+          (await (
+            await fetch(channelsUrl, { headers: daemon.headers })
+          ).json()) as {
+            instances: Record<string, { runtime: Record<string, unknown> }>;
+          }
+        ).instances['feishu']?.runtime;
+      const restoreIssues = async () =>
+        (
+          (await (
+            await fetch(`${handle.url}/daemon/status`, {
+              headers: daemon.headers,
+            })
+          ).json()) as { issues: Array<{ code: string; message: string }> }
+        ).issues.filter((issue) => issue.code === 'channel_restore_failed');
+
+      // The failed name never joins the committed selection, so without the
+      // record it would list as `stopped`, as if nobody had asked for it.
+      // The first listing loads the channel plugins, which alone can outlast
+      // the default one-second budget.
+      await vi.waitFor(
+        async () =>
+          expect(await feishuRuntime()).toEqual({
+            state: 'error',
+            lastError: 'feishu gateway did not answer the upgrade',
+          }),
+        { timeout: 10_000 },
+      );
+      const [issue, ...rest] = await restoreIssues();
+      expect(rest).toEqual([]);
+      expect(issue!.message).toContain(secondaryCwd);
+      expect(issue!.message).toContain(
+        'feishu (feishu gateway did not answer the upgrade)',
+      );
+
+      // An operator decision supersedes the restore's outcome.
+      const stopped = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(stopped.status).toBe(200);
+      expect(await feishuRuntime()).toEqual({ state: 'stopped' });
+      expect(await restoreIssues()).toEqual([]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('forgets a restore failure when its workspace is removed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-failure-rm-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const broken = path.join(tmpDir, 'broken');
+    // Asks for a channel no workspace defines, so its restore cannot commit.
+    writeWorkspaceSettings(broken, { serve: { channels: ['ghost'] } });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: broken }),
+      });
+      expect(added.status).toBe(201);
+      const { id } = (await added.json()) as { id: string };
+      const restoreIssues = async () =>
+        (
+          (await (
+            await fetch(`${handle.url}/daemon/status`, {
+              headers: daemon.headers,
+            })
+          ).json()) as { issues: Array<{ code: string; message: string }> }
+        ).issues.filter((issue) => issue.code === 'channel_restore_failed');
+      await vi.waitFor(async () =>
+        expect(await restoreIssues()).toEqual([
+          expect.objectContaining({
+            message: expect.stringContaining(
+              `serve.channels for workspace ${canonicalizeWorkspace(broken)} were not restored: ghost (`,
+            ),
+          }),
+        ]),
+      );
+
+      const removed = await fetch(
+        `${handle.url}/workspaces/${encodeURIComponent(id)}`,
+        {
+          method: 'DELETE',
+          headers: daemon.headers,
+          body: JSON.stringify({ force: true }),
+        },
+      );
+      expect(removed.status).toBe(200);
+      expect(await restoreIssues()).toEqual([]);
     } finally {
       await handle.close();
     }

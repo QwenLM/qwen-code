@@ -15,6 +15,10 @@ import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
 } from './channel-management-service.js';
+import {
+  createChannelRestoreFailures,
+  type ChannelRestoreFailures,
+} from './channel-restore-failures.js';
 
 const WORKSPACE = '/ws/primary';
 
@@ -40,6 +44,7 @@ function setup(options: {
   snapshot?: ChannelSettingsSnapshot;
   committedNames?: string[];
   workspaceCwd?: string;
+  restoreFailures?: ChannelRestoreFailures;
 }) {
   let persisted = options.snapshot ?? settingsSnapshot();
   const store = {
@@ -135,6 +140,9 @@ function setup(options: {
     workspaceCwd: WORKSPACE,
     store,
     manager,
+    ...(options.restoreFailures
+      ? { restoreFailures: options.restoreFailures }
+      : {}),
   });
   return { service, store, manager, persisted: () => persisted };
 }
@@ -563,6 +571,110 @@ describe('createChannelManagementService', () => {
     });
 
     expect(result.instance.runtime).toEqual({ state: 'connected' });
+  });
+
+  it('lists a channel that failed to restore as an error, not stopped', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        source: 'late',
+        code: 'connect_timeout',
+        message: 'gateway did not answer',
+      },
+      // Another workspace's same-name channel is not this one.
+      {
+        workspaceCwd: '/ws/other',
+        channel: 'bot',
+        source: 'late',
+        message: 'unrelated',
+      },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'gateway did not answer',
+    });
+  });
+
+  it('reports a committed channel from its worker, not a restore failure', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        source: 'boot',
+        message: 'stale',
+      },
+    ]);
+    const { service } = setup({ committedNames: ['bot'], restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'connected',
+    });
+  });
+
+  it.each([
+    {
+      operation: 'start',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.start('bot'),
+    },
+    {
+      operation: 'stop',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.stop('bot'),
+    },
+    {
+      operation: 'upsert',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.upsert('bot', {
+          expectedRevision: 'rev-1',
+          config: { type: 'dingtalk', clientId: 'client-id' },
+        }),
+    },
+    {
+      operation: 'remove',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.remove('bot', { expectedRevision: 'rev-1' }),
+    },
+  ])(
+    'forgets a restore failure once an operator uses $operation',
+    async ({ act }) => {
+      const restoreFailures = createChannelRestoreFailures();
+      restoreFailures.record([
+        {
+          workspaceCwd: WORKSPACE,
+          channel: 'bot',
+          source: 'late',
+          message: 'x',
+        },
+      ]);
+      const { service } = setup({ restoreFailures });
+
+      await act(service);
+
+      expect(restoreFailures.get(WORKSPACE, 'bot')).toBeUndefined();
+    },
+  );
+
+  it('keeps a restore failure when only the startup flag changes', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      { workspaceCwd: WORKSPACE, channel: 'bot', source: 'late', message: 'x' },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(restoreFailures.get(WORKSPACE, 'bot')).toMatchObject({
+      message: 'x',
+    });
   });
 
   it('does not delete config when worker stop is unconfirmed', async () => {

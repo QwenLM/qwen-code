@@ -220,6 +220,7 @@ import { DaemonMetricsRing } from './daemon-metrics-ring.js';
 import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
+  ChannelStartupAttemptFailure,
   ChannelWorkerSupervisor,
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
@@ -241,6 +242,10 @@ import {
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
 import { channelSelectionNames } from './channel-selection.js';
+import {
+  createChannelRestoreFailures,
+  type ChannelRestoreFailureInput,
+} from './channel-restore-failures.js';
 import {
   resolveChannelWorkspaceGroups,
   type ChannelWorkspaceGroup,
@@ -4106,6 +4111,14 @@ async function runQwenServeImpl(
   // is re-materialized, and repeating the restore there would undo an operator
   // who stopped one of those channels in between.
   const lateRestoredWorkspaces = new Set<string>();
+  // Every workspace that listed each boot name in its own `serve.channels`, so
+  // a name the boot restore drops is reported against the workspaces that
+  // asked for it.
+  let bootChannelClaimants: ReadonlyMap<string, readonly string[]> = new Map();
+  // `serve.channels` names this daemon did not bring up, for the workspace
+  // channel list and daemon status: a name that failed to restore never joins
+  // the committed selection, so neither would otherwise see it.
+  const channelRestoreFailures = createChannelRestoreFailures();
   // Whether an operator stopped channel hosting through `DELETE
   // /workspace/channel`. The manager cannot say so on its own: one created by
   // a read — listing channels creates it — and one whose hosting was stopped
@@ -4224,6 +4237,7 @@ async function runQwenServeImpl(
         }
         channelOwnerHints = new Map(bootChannelOwnerHints);
         channelStartupTolerantNames = restored.tolerantNames;
+        bootChannelClaimants = restored.claimants;
         channelRuntime = await ensureChannelRuntime();
         daemonLog.info('restoring channels from workspace serve.channels', {
           channels: channelSelectionNames(opts.channelSelection),
@@ -4746,7 +4760,54 @@ async function runQwenServeImpl(
     // Cleared after the commit, not before: a selection that fails leaves
     // hosting exactly as stopped as it was.
     channelHostingStoppedByOperator = false;
+    // The operator chose the whole selection; what the restores did before it
+    // is no longer the state anyone needs to act on.
+    channelRestoreFailures.clearAll();
     return result;
+  };
+  // What a failed late restore left unhosted. A name the worker itself
+  // reported gets its own error; every other requested name was rolled back
+  // with it (or never started) and carries the restore's error. A name that
+  // is committed anyway — hosted before this restore — did not fail.
+  const lateRestoreFailures = (
+    workspaceCwd: string,
+    requested: readonly string[],
+    err: unknown,
+  ): ChannelRestoreFailureInput[] => {
+    const committed = new Set(channelWorkerManager?.committedChannelNames());
+    // Read structurally: the manager module is loaded lazily, and this runs
+    // for errors raised before it exists too.
+    const startupFailures = (err as { startupFailures?: unknown } | null)
+      ?.startupFailures;
+    const reported = new Map(
+      (Array.isArray(startupFailures)
+        ? (startupFailures as ChannelStartupAttemptFailure[])
+        : []
+      )
+        .filter((failure) => failure.workspaceCwd === workspaceCwd)
+        .map((failure) => [failure.channel, failure] as const),
+    );
+    const code = (err as { code?: unknown } | null)?.code;
+    const message = err instanceof Error ? err.message : String(err);
+    return requested
+      .filter((channel) => !committed.has(channel))
+      .map((channel) => {
+        const failure = reported.get(channel);
+        return {
+          workspaceCwd,
+          channel,
+          source: 'late' as const,
+          ...(failure
+            ? {
+                ...(failure.code ? { code: failure.code } : {}),
+                message: failure.message,
+              }
+            : {
+                ...(typeof code === 'string' ? { code } : {}),
+                message,
+              }),
+        };
+      });
   };
   // The same entry checks as `setChannelWorkerSelection`, for a change that
   // adds names instead of replacing the selection: the manager computes the
@@ -4780,6 +4841,7 @@ async function runQwenServeImpl(
     // Only a stop that stopped something is a decision to remember; an
     // idempotent `DELETE` against hosting that was never on is not.
     if (result.changed) channelHostingStoppedByOperator = true;
+    channelRestoreFailures.clearAll();
     return result;
   };
   const reloadChannelWorker = async (): Promise<ChannelWorkerSnapshot> => {
@@ -7693,6 +7755,11 @@ async function runQwenServeImpl(
               null,
               { workspaceCwd },
             );
+            // Shutting down is not a restore failure to report.
+            if (channelControlDraining) return;
+            channelRestoreFailures.record(
+              lateRestoreFailures(workspaceCwd, requested, err),
+            );
           })
           .finally(() => {
             writeChannelWorkerPidfile();
@@ -7825,6 +7892,12 @@ async function runQwenServeImpl(
             stopSubSessions?.();
           } catch {
             // Continue to bridge teardown.
+          }
+          if (
+            reason !== 'daemon_shutdown' &&
+            runtimeToDrain.provenance !== 'live-conversation'
+          ) {
+            channelRestoreFailures.clearWorkspace(runtimeToDrain.workspaceCwd);
           }
           if (
             reason !== 'daemon_shutdown' &&
@@ -7993,6 +8066,7 @@ async function runQwenServeImpl(
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
           manager: await ensureChannelWorkerManager(),
+          restoreFailures: channelRestoreFailures,
         });
       })();
       channelManagementServices.set(targetRuntime, pending);
@@ -8085,6 +8159,7 @@ async function runQwenServeImpl(
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
+      getChannelRestoreFailures: () => channelRestoreFailures.list(),
       getChannelWorkerControl,
       isChannelControlDraining: () => channelControlDraining,
       isChannelControlInitializing: () =>
@@ -9498,6 +9573,15 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
+              for (const group of groups) {
+                if (group.selection.mode === 'all') {
+                  channelRestoreFailures.clearWorkspace(group.workspaceCwd);
+                  continue;
+                }
+                for (const name of group.selection.names) {
+                  channelRestoreFailures.clear(group.workspaceCwd, name);
+                }
+              }
               channelOwnerHints = new Map([
                 ...bootChannelOwnerHints,
                 ...groups.flatMap((group) =>
@@ -10136,6 +10220,17 @@ async function runQwenServeImpl(
               code: skip.code,
               channel: skip.channel,
             });
+            channelRestoreFailures.record(
+              (bootChannelClaimants.get(skip.channel) ?? []).map(
+                (workspaceCwd) => ({
+                  workspaceCwd,
+                  channel: skip.channel,
+                  source: 'boot' as const,
+                  code: skip.code,
+                  message: skip.message,
+                }),
+              ),
+            );
           }
           if (resolved.skipped.length > 0) {
             // The committed selection has to name exactly what the groups

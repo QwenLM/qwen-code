@@ -1722,6 +1722,58 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('warns once per workspace about channels its serve.channels did not restore', async () => {
+    const at = '2026-09-23T08:00:00.000Z';
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () => [
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'feishu',
+          source: 'late',
+          code: 'connect_timeout',
+          message: 'gateway did not answer',
+          at,
+        },
+        {
+          workspaceCwd: '/ws/b',
+          channel: 'ghost',
+          source: 'boot',
+          message: 'not configured',
+          at,
+        },
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'dingtalk',
+          source: 'late',
+          message: 'rolled back',
+          at,
+        },
+      ],
+    });
+
+    expect(
+      response.issues.filter(
+        (issue) => issue.code === 'channel_restore_failed',
+      ),
+    ).toEqual([
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/a were not restored: ' +
+          'feishu (gateway did not answer); dingtalk (rolled back).',
+      },
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/b were not restored: ghost (not configured).',
+      },
+    ]);
+    expect(response.status).toBe('warning');
+  });
+
   it('rolls up statuses inside tools, hooks, and extensions', async () => {
     const response = await buildDaemonStatusResponse(
       'full',

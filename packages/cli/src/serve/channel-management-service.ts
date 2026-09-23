@@ -21,6 +21,7 @@ import type {
   WorkspaceChannelSettingsStore,
 } from './channel-settings-store.js';
 import { isAllChannelSelectionName } from './channel-selection.js';
+import type { ChannelRestoreFailures } from './channel-restore-failures.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
 import type {
   ChannelWorkerControlState,
@@ -155,6 +156,12 @@ export interface CreateChannelManagementServiceOptions {
   workspaceCwd: string;
   store: ChannelManagementSettingsStore | WorkspaceChannelSettingsStore;
   manager: ChannelManagementWorkerManager | ChannelWorkerManager;
+  /**
+   * The daemon's record of `serve.channels` names that were not restored. A
+   * failed restore never reaches the committed selection, so without it such
+   * a channel would list as `stopped`.
+   */
+  restoreFailures?: Pick<ChannelRestoreFailures, 'get' | 'clear'>;
 }
 
 export class ChannelManagementError extends Error {
@@ -183,6 +190,12 @@ export function createChannelManagementService(
   opts: CreateChannelManagementServiceOptions,
 ): ChannelManagementService {
   const diagnostics = new Map<string, string>();
+  // An operator acting on a channel supersedes both what a previous action
+  // left behind and a restore failure: the outcome that matters is now theirs.
+  const forgetDiagnostics = (name: string): void => {
+    diagnostics.delete(name);
+    opts.restoreFailures?.clear(opts.workspaceCwd, name);
+  };
   let mutationTail = Promise.resolve();
 
   const inMutationLane = <T>(mutation: () => Promise<T>): Promise<T> => {
@@ -242,6 +255,10 @@ export function createChannelManagementService(
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
     if (!workspaceCommittedNames().includes(name)) {
+      const restoreFailure = opts.restoreFailures?.get(opts.workspaceCwd, name);
+      if (restoreFailure) {
+        return { state: 'error', lastError: restoreFailure.message };
+      }
       return { state: 'stopped' };
     }
     const state = opts.manager.state();
@@ -437,7 +454,7 @@ export function createChannelManagementService(
       const active = workspaceCommittedNames().includes(name);
       if (active) assertOwnedRuntime(name);
       const persisted = await opts.store.upsert(name, request);
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       if (active) {
         try {
           await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
@@ -468,7 +485,7 @@ export function createChannelManagementService(
         await stopChannel(name);
       }
       const persisted = await opts.store.remove(name, request);
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       return resultFor(name, persisted);
     },
     async setStartup(name, request) {
@@ -514,7 +531,7 @@ export function createChannelManagementService(
         { name, workspaceCwd: opts.workspaceCwd },
         true,
       );
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       return resultFor(name, persisted);
     },
     async stop(name) {
@@ -531,7 +548,7 @@ export function createChannelManagementService(
         { name, workspaceCwd: opts.workspaceCwd },
         false,
       );
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       return resultFor(name, persisted);
     },
     async restart(name) {
@@ -553,7 +570,7 @@ export function createChannelManagementService(
       assertOwnedRuntime(name);
       try {
         await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
-        diagnostics.delete(name);
+        forgetDiagnostics(name);
       } catch (error) {
         diagnostics.set(name, diagnostic(error));
         throw error;
