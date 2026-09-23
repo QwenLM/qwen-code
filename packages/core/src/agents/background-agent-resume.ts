@@ -17,6 +17,7 @@ import {
 } from './runtime/agent-events.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
+import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
   buildAgentTranscriptAttach,
   getAgentJsonlPath,
@@ -38,7 +39,8 @@ import {
   getInitialChatHistory,
 } from '../core/environmentContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
-import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import type { PermissionMode, StopHookOutput } from '../hooks/types.js';
+import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
@@ -68,7 +70,9 @@ import {
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
+import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
 import {
+  buildInheritedForkExecutionToolNames,
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from './runtime/agent-core.js';
@@ -107,6 +111,8 @@ const WORKTREE_ISOLATION_BLOCKED_REASON =
   'Background task worktree isolation cannot be reconstructed after session restore.';
 const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
   'Background task isolation metadata is incompatible.';
+const CONTAINER_EXECUTION_BLOCKED_REASON =
+  'Container background tasks cannot be resumed. Start a new container agent to continue.';
 
 /**
  * Returns true when the subagent's effective tool surface will include the
@@ -144,6 +150,7 @@ interface ResolvedResumeTarget {
 interface CurrentForkRuntime {
   systemInstruction: string | Content;
   toolNames: string[];
+  executionToolNames: string[];
 }
 
 interface ResumeOperation {
@@ -155,22 +162,6 @@ interface RestorePausedEntryOptions {
   error?: string;
   resumeBlockedReason?: string;
   suppressRegisterCallback?: boolean;
-}
-
-function approvalModeToPermissionMode(mode?: string): PermissionMode {
-  switch (mode) {
-    case 'yolo':
-      return PermissionMode.Yolo;
-    case 'auto-edit':
-      return PermissionMode.AutoEdit;
-    case 'auto':
-      return PermissionMode.Auto;
-    case 'plan':
-      return PermissionMode.Plan;
-    case 'default':
-    default:
-      return PermissionMode.Default;
-  }
 }
 
 function normalizeApprovalMode(
@@ -329,7 +320,10 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
   const stableForBranch = [...filtered];
   while (stableForBranch.length > 0) {
     const last = stableForBranch[stableForBranch.length - 1]!;
-    if (isWhitespaceOnlyAssistant(last)) {
+    if (
+      isWhitespaceOnlyAssistant(last) ||
+      (last.type === 'system' && last.subtype === 'agent_session_ready')
+    ) {
       stableForBranch.pop();
       continue;
     }
@@ -388,7 +382,7 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
 }
 
 function getCompletionStats(
-  subagent: AgentHeadless,
+  subagent: SubagentExecutor,
   liveToolCallCount: number,
 ): AgentCompletionStats {
   const summary = subagent.getExecutionSummary();
@@ -503,7 +497,12 @@ export class BackgroundAgentResumeService {
         if (registry.get(meta.agentId)) continue;
         const subagentName = meta.subagentName ?? meta.agentType;
         if (typeof subagentName !== 'string' || !subagentName) continue;
-        const target = await this.resolveResumeTarget(subagentName);
+        const target = await this.resolveResumeTarget(
+          subagentName,
+          meta.executor,
+          meta.model,
+          meta.persistedCliFlags?.model,
+        );
 
         const outputFile = getAgentJsonlPath(
           projectDir,
@@ -526,6 +525,11 @@ export class BackgroundAgentResumeService {
           )
         ) {
           retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
+        } else if (
+          meta.isolation === 'container' ||
+          meta.executionBackend !== undefined
+        ) {
+          retainedStateBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
         } else if (
           meta.isolation !== undefined &&
           meta.isolation !== 'worktree'
@@ -692,10 +696,15 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
-    if (!readAgentMeta(entry.metaPath)) {
+    const meta = readAgentMeta(entry.metaPath);
+    if (!meta) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
       );
+      return undefined;
+    }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      entry.resumeBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
       return undefined;
     }
     if (!jsonl.exists(entry.outputFile)) {
@@ -803,6 +812,12 @@ export class BackgroundAgentResumeService {
     if (!meta) {
       return undefined;
     }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      this.restorePausedEntry(agentId, {
+        resumeBlockedReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      });
+      return undefined;
+    }
 
     const bgAbortController = new AbortController();
 
@@ -863,7 +878,12 @@ export class BackgroundAgentResumeService {
 
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
-      const target = await this.resolveResumeTarget(subagentName);
+      const target = await this.resolveResumeTarget(
+        subagentName,
+        meta.executor,
+        meta.model,
+        meta.persistedCliFlags?.model,
+      );
       if (!target.subagentConfig && !target.isFork) {
         const reason =
           target.unavailableReason ||
@@ -992,7 +1012,7 @@ export class BackgroundAgentResumeService {
 
       const bgEventEmitter = new AgentEventEmitter();
       const launchModel = meta.model ?? meta.persistedCliFlags?.model;
-      let subagent: AgentHeadless;
+      let subagent: SubagentExecutor;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
           activeAgentConfig,
@@ -1000,6 +1020,7 @@ export class BackgroundAgentResumeService {
           resumeHistory ?? [],
           currentForkRuntime!,
           meta.executionAllowedTools,
+          meta.disallowedTools,
           meta.agentId,
           meta.description,
         );
@@ -1545,7 +1566,29 @@ export class BackgroundAgentResumeService {
 
   private async resolveResumeTarget(
     subagentName: string,
+    executor?: AgentMeta['executor'],
+    ...legacyModels: Array<string | undefined>
   ): Promise<ResolvedResumeTarget> {
+    if (resolveAgentExecutionBackend(this.config) === 'container') {
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      };
+    }
+    // Older external runs wrote a synthetic model label instead of provenance.
+    // It can deny replay, but never authorizes selecting an executor.
+    if (
+      executor !== undefined ||
+      legacyModels.some((model) => model?.startsWith('external-acp:'))
+    ) {
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason:
+          'External subagent session cannot be restored from a Qwen transcript. Start a new agent instead.',
+      };
+    }
     if (subagentName === FORK_SUBAGENT_TYPE) {
       return {
         agentName: FORK_AGENT.name,
@@ -1554,9 +1597,37 @@ export class BackgroundAgentResumeService {
       };
     }
 
-    const subagentConfig = await this.config
-      .getSubagentManager()
-      .loadSubagent(subagentName);
+    let subagentConfig: SubagentConfig | null;
+    try {
+      subagentConfig = await this.config
+        .getSubagentManager()
+        .loadSubagent(subagentName);
+      if (
+        subagentConfig &&
+        resolveAgentExecutionBackend(this.config, subagentConfig) ===
+          'container'
+      ) {
+        return {
+          agentName: subagentName,
+          isFork: false,
+          unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+        };
+      }
+    } catch (error) {
+      // loadSubagent throws a recorded executor-block refusal (R10-2/R11) when a
+      // same-named definition failed to load. This is resume *discovery*, not a
+      // dispatch, so surface it as the existing "unavailable" shape — the row
+      // stays listed with a resumeBlockedReason — instead of letting the throw
+      // escape into the per-sidecar catch, which would drop the row entirely.
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason:
+          error instanceof Error
+            ? error.message
+            : `Subagent "${subagentName}" is no longer available.`,
+      };
+    }
     if (!subagentConfig) {
       return {
         agentName: subagentName,
@@ -1565,6 +1636,12 @@ export class BackgroundAgentResumeService {
       };
     }
 
+    if (subagentConfig.executor !== undefined) {
+      return this.resolveResumeTarget(
+        subagentName,
+        subagentConfig.executor.kind,
+      );
+    }
     return {
       agentName: subagentConfig.name,
       isFork: false,
@@ -1671,6 +1748,13 @@ export class BackgroundAgentResumeService {
           generationConfig.systemInstruction as string | Content,
         ),
         toolNames,
+        executionToolNames: buildInheritedForkExecutionToolNames(
+          toolNames,
+          toolRegistry.getAllToolNames(),
+          // Forks launch only from the main session; the wake-up caller's
+          // ambient allowlist is unrelated to the persisted fork policy.
+          undefined,
+        ),
       };
     } catch (error) {
       debugLogger.warn(
@@ -1716,6 +1800,7 @@ export class BackgroundAgentResumeService {
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
+    disallowedTools?: string[],
     subagentId?: string,
     taskName?: string,
   ): Promise<AgentHeadless> {
@@ -1731,8 +1816,18 @@ export class BackgroundAgentResumeService {
       // parity but must not execute it.
       executionAllowedTools: resolveForkExecutionAllowedTools(
         runtime.toolNames,
-        buildForkExecutionAllowlist(executionAllowedTools, runtime.toolNames),
+        buildForkExecutionAllowlist(
+          executionAllowedTools,
+          runtime.executionToolNames,
+          runtime.toolNames,
+        ),
       ),
+      // Restore the persisted blocklist beside the allowlist: the
+      // invocation-level re-check is the only enforcement a wildcard
+      // allowlist entry (e.g. mcp__*) cannot provide on its own.
+      ...(disallowedTools?.length
+        ? { disallowedTools: [...disallowedTools] }
+        : {}),
     };
 
     return AgentHeadless.create(
@@ -1784,7 +1879,7 @@ export class BackgroundAgentResumeService {
   }
 
   private async runSubagentStopHookLoop(
-    subagent: AgentHeadless,
+    subagent: SubagentExecutor,
     opts: {
       agentId: string;
       agentType: string;

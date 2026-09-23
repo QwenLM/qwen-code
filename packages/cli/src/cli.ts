@@ -36,10 +36,17 @@ import {
 initStartupProfiler();
 initCpuProfiler();
 
-type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
+type BootstrapRoute =
+  | 'serve'
+  | 'mcp'
+  | 'managed-runtime-worker'
+  | 'help'
+  | 'version'
+  | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
+  ['board <command>', 'Share work with other agents through a board'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
@@ -47,6 +54,10 @@ export const TOP_LEVEL_COMMANDS = [
   [
     'review <command>',
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
+  ],
+  [
+    'sandbox [cmd...]',
+    'Inspect the sandbox backend, or run a command inside it',
   ],
   [
     'serve',
@@ -375,6 +386,9 @@ export function resolveBootstrapRoute(
   if (firstArg === 'mcp') {
     return 'mcp';
   }
+  if (firstArg === 'managed-runtime-worker') {
+    return 'managed-runtime-worker';
+  }
 
   return 'default';
 }
@@ -537,6 +551,17 @@ export async function runCliEntry(
     }
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
+    return;
+  } else if (route === 'managed-runtime-worker') {
+    if (argv.length !== 1) {
+      writeStderrLine('Managed Runtime worker arguments are invalid.');
+      process.exitCode = 1;
+      return;
+    }
+    const { runManagedRuntimeAttestationWorker } = await import(
+      './serve/managed-runtime-attestation-worker.js'
+    );
+    await runManagedRuntimeAttestationWorker();
     return;
   } else if (route === 'help') {
     await printTopLevelHelp();

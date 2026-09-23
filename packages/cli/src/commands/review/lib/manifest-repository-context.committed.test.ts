@@ -70,6 +70,12 @@ const expectedManifest = {
       requiredConfigurations: ['node22'],
     },
     {
+      paths: ['integration-tests/concurrent-runner/**'],
+      domains: ['integration-tests'],
+      recommendedTests: ['helper-tests'],
+      requiredConfigurations: ['node22'],
+    },
+    {
       paths: ['.github/workflows/**'],
       domains: ['ci', 'workflows'],
       recommendedTests: ['helper-tests'],

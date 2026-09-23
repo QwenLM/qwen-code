@@ -3,12 +3,18 @@ import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
+/** @deprecated Use PrivatePolicy. */
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+export type PrivatePolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+/** Members who may speak inside an admitted group. */
+export type GroupSenderPolicy = 'open' | 'allowlist';
+/** @deprecated Use PrivatePolicy. */
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
+export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
 
 export interface ChannelIdentityConfig {
   id?: string;
@@ -38,18 +44,10 @@ export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
   groupHistoryLimit?: number;
-}
-
-export interface BlockStreamingChunkConfig {
-  /** Minimum characters before emitting a block. Default: 400. */
-  minChars?: number;
-  /** Force-emit when buffer exceeds this size. Default: 1000. */
-  maxChars?: number;
-}
-
-export interface BlockStreamingCoalesceConfig {
-  /** Emit buffered text after this many ms of inactivity. Default: 1500. */
-  idleMs?: number;
+  /** Who may speak in the group. Default: `open`. */
+  senders?: GroupSenderPolicy;
+  /** Members allowed to speak when `senders` is `allowlist`. */
+  allowedUsers?: string[];
 }
 
 export interface ChannelConfig {
@@ -57,7 +55,9 @@ export interface ChannelConfig {
   token: string;
   clientId?: string;
   clientSecret?: string;
-  senderPolicy: SenderPolicy;
+  privatePolicy?: PrivatePolicy;
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  senderPolicy?: SenderPolicy;
   allowedUsers: string[];
   /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
@@ -66,14 +66,20 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
-  /** Only dispatch user messages beginning with this exact prefix. */
-  messagePrefix?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
   model?: string;
+  /** Output grouping for opted-in adapters. Defaults to `per_turn`. */
+  outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
-  dmPolicy: DmPolicy; // default: "open"
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  dmPolicy?: DmPolicy;
+  /**
+   * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
+   * Unset or empty grants no shared-session operator permissions.
+   */
+  operators?: string[];
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
@@ -82,13 +88,6 @@ export interface ChannelConfig {
 
   /** Poll interval in ms for polling adapters. Default: 60000. */
   pollInterval?: number;
-
-  /** Enable block streaming — emit completed blocks as separate messages. */
-  blockStreaming?: 'on' | 'off';
-  /** Chunk size bounds for block streaming. */
-  blockStreamingChunk?: BlockStreamingChunkConfig;
-  /** Idle coalescing for block streaming. */
-  blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
 export interface Attachment {
@@ -111,36 +110,12 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
-  /** User-authored text to display when `text` contains model-only context. */
-  displayText?: string;
-  /**
-   * Where `displayText` begins inside `text`, for adapters that compose
-   * the two.
-   *
-   * The prefix filter rewrites the user-authored segment in place. Both
-   * the sender nick and the message body are attacker-controlled on some
-   * platforms, so a nick equal to the body would make a search for
-   * `displayText` land in the sender tag and leave the prefix on the
-   * dispatched message. An adapter that knows where it put the segment
-   * says so here; without it the filter refuses to guess between two
-   * occurrences.
-   */
-  displayTextOffset?: number;
-  /**
-   * The user-authored text with the leading mention run removed, for
-   * adapters whose mention markers the shared prefix matcher cannot read as
-   * one token. Mentions after the prefix stay in place.
-   */
-  messagePrefixText?: string;
-  /** System event, or adapter input whose prefix was already checked. */
-  bypassMessagePrefix?: true;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
    *
-   * No user action can put the configured prefix on it, so it bypasses the
-   * prefix filter -- and it is never recorded as quoted group history,
-   * where it would reach the next prompt as if a member had typed it.
+   * It is never recorded as quoted group history, where it would reach
+   * the next prompt as if a member had typed it.
    */
   syntheticText?: true;
   threadId?: string;
@@ -274,6 +249,24 @@ export interface ChannelUserInputRequestContext {
   respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
 
+export type ChannelPermissionDecision = 'allow_once' | 'allow_always' | 'deny';
+
+export interface ChannelPermissionRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  title: string;
+  decisions: Array<{
+    kind: ChannelPermissionDecision;
+    label: string;
+  }>;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(decision: ChannelPermissionDecision): Promise<boolean>;
+}
+
 export interface ChannelOutputSegmentContext {
   channelName: string;
   sessionId: string;
@@ -283,6 +276,7 @@ export interface ChannelOutputSegmentContext {
   target: SessionTarget;
   sourceLabel?: string;
   messageId?: string;
+  partial?: boolean;
 }
 
 export type ChannelOutputSegmentEndReason =
@@ -324,6 +318,7 @@ export interface SanitizedToolCallEvent {
 /** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
 export type ChannelTaskCancellationReason =
   | 'cancel_command'
+  | 'runtime_cancelled'
   | 'clear'
   | 'steer'
   | 'timeout'
@@ -454,6 +449,8 @@ export interface ChannelConfigValueFieldDescriptor
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  /** Render the field as a multi-line text area in management UIs. */
+  multiline?: boolean;
   properties?: never;
 }
 
@@ -462,6 +459,7 @@ export interface ChannelConfigPlainValueFieldDescriptor
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   properties?: never;
 }
 
@@ -470,6 +468,7 @@ export interface ChannelConfigEnumFieldDescriptor
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
@@ -479,6 +478,7 @@ export interface ChannelConfigNumberFieldDescriptor
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   exclusiveMinimum?: number;
   properties?: never;
 }
@@ -488,16 +488,21 @@ export interface ChannelConfigObjectFieldDescriptor
   kind: 'object';
   required?: false;
   envResolvable?: never;
+  multiline?: never;
   properties: readonly ChannelConfigNestedFieldDescriptor[];
 }
 
 export type ChannelConfigNestedFieldDescriptor =
-  | (Omit<ChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+  | (Omit<
+      ChannelConfigValueFieldDescriptor,
+      'kind' | 'envResolvable' | 'multiline'
+    > & {
       kind: Exclude<
         ChannelConfigFieldKind,
         'secret' | 'enum' | 'number' | 'object'
       >;
       envResolvable?: never;
+      multiline?: never;
     })
   | (Omit<ChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
       kind: 'enum';
@@ -549,6 +554,9 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Opt in to shared task, response, and turn output grouping. */
+  supportsOutputMode?: boolean;
 
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;

@@ -310,7 +310,8 @@ async function checkClipboardForImage(
 /**
  * Checks if the system clipboard contains an image.
  * Uses platform-native tools (wl-paste/xclip) on Linux.
- * @param onUnavailable Called when the macOS/Windows native module cannot load.
+ * @param onUnavailable Called when no clipboard backend can be reached: the
+ *   macOS/Windows native module cannot load, or Linux has no wl-paste/xclip.
  * @returns true if clipboard contains an image
  */
 export async function clipboardHasImage(
@@ -332,6 +333,10 @@ export async function clipboardHasImage(
           '-o',
         ]);
       }
+      // No usable clipboard tool: either there is no display server to reach
+      // one through, or the wl-paste/xclip probe failed. Report it instead of
+      // failing silently, so callers can tell "no image" from "no tool".
+      onUnavailable?.();
     } catch (error) {
       debugLogger.error('Error checking clipboard for image:', error);
     }
@@ -348,6 +353,9 @@ export async function clipboardHasImage(
     return clipboard.hasFormat('image');
   } catch (error) {
     debugLogger.error('Error checking clipboard for image:', error);
+    // The module resolved but the call threw, so "no image" and "unreachable
+    // clipboard backend" would otherwise be indistinguishable to the caller.
+    onUnavailable?.();
     return false;
   }
 }

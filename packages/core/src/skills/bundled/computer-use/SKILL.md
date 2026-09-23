@@ -3,163 +3,280 @@ name: computer-use
 description: Control local desktop applications through Computer Use for tasks that require reading or operating app UI. Prefer purpose-built connectors, APIs, or CLIs when available.
 ---
 
-# Computer Use with the CUA SDK
+## node_repl + @qwen-code/cua-sdk (Computer Use)
 
-- Prefer a dedicated connector or API. Use Computer Use only for UI state or
-  interactions the dedicated interface does not expose.
-- Perform Computer Use through `node_repl` and the typed `ComputerUse` API.
-  Do not use generic `callTool`, direct driver imports, AppleScript, JXA, or
-  synthesized-input utilities.
-- Observe the exact current window before acting. Prefer current element tokens
-  over screenshot coordinates; use coordinates only when accessibility is
-  incomplete and the screenshot provides the target.
-- Treat an action result as delivery evidence, not task completion. Decide from
-  fresh state and require stable postcondition evidence.
+- Use `node_repl` (JavaScript) for all Computer Use actions.
+- Do not use other technologies besides `node_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, synthesized input).
+- Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
+- `node_repl` state is persistent across calls.
+- For text output, use `nodeRepl.write(...)`. It takes a string; use `JSON.stringify(...)` only for textual metadata. For an observation, write its `.text` and emit its screenshots as images; do not stringify an observation or driver result containing image bytes.
+- Omit `yield_time_ms` for ordinary UI calls to use the default 10-second wait. A shorter yield does not speed up the action and can add a `node_repl_wait` round. Use a shorter yield only when you need control back before completion; if a cell is still running, collect its result with `node_repl_wait` before issuing dependent actions.
 
-## Setup
+## Forwarding results in Codex code mode
 
-If `node_repl` is unavailable, run these commands yourself:
+When calling `node_repl` through `tools.*` inside Codex's outer `functions.exec`,
+forward each returned `content` block by its type. `nodeRepl.emitImage(...)`
+produces an MCP image block; the outer script must pass that block to `image()`
+for the model to receive an image. Use the tool name exposed by your MCP server:
 
-```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.2
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.3
+```js
+const result = await tools.mcp__node_repl__node_repl({ code });
+for (const block of result.content ?? []) {
+  if (block.type === 'text') {
+    text(block.text);
+  } else if (block.type === 'image') {
+    image(block);
+  }
+}
 ```
 
-Tell the user to restart Qwen Code, then stop. If only the SDK import is
-missing, run the second command and retry.
+Here `code` is the JavaScript to run in the persistent Node REPL. Keep the
+forwarding loop in the outer code-mode script, outside that `code` string.
+Apply the same loop to `node_repl_wait` results: images may arrive only when a
+running cell completes. Forward text blocks too, including running-cell IDs and
+errors. Direct MCP tool calls do not need this outer forwarding loop.
 
-Create one persistent client per REPL kernel:
+Do not use `text(result)`, `text(block)`, or `JSON.stringify(result)` to forward
+an MCP result containing images: this turns image base64 into text, consuming
+context without showing the image. `image()` accepts one image block, not the
+whole result, so do not use `image(result)` either.
+
+## Bootstrap
+
+If `node_repl` is unavailable, run:
+
+```bash
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.11
+```
+
+Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,
+run the second command and retry.
+
+Reuse an existing `computer` connected to the intended desktop. Otherwise import
+once per fresh `node_repl` session. The same App workflow below applies to macOS,
+Linux and Windows; no additional platform resource is needed:
 
 ```js
 globalThis.computer = await (
   await import('@qwen-code/cua-sdk/computer-use')
 ).ComputerUse.create();
-globalThis.cuaRevisions ??= new Map();
+var platform = await computer.getPlatform();
+nodeRepl.write(`Connected platform: ${platform}`);
 ```
 
-## Target and observe
+Use the connected platform for shortcuts, not the CLI or Node host operating system.
+When the task identifies an app, combine initialization with `computer.getApp()`
+and its first `getState()` in the same call. Read that state before editing or input.
 
-Use `listApps({signal:nodeRepl.signal})` and filter in JavaScript; print only
-likely matches. After selecting a real PID, call
-`listWindows({pid,signal:nodeRepl.signal})` and choose from returned
-metadata. Never guess a PID, window ID, element token, or coordinate. If the
-app is not running, start it with ordinary Node.js process APIs and refresh the
-lists.
+## API surface
 
-Maintain one revision cursor per window surface. The first observation has no
-base; later observations use only the last revision actually consumed for that
-same surface:
-
-```js
-globalThis.observeCuaWindow = async (target, options = {}) => {
-  const key = `${target.pid}:${target.windowId}`;
-  const state = await computer.observeWindow({
-    ...target,
-    ...options,
-    baseRevisionId: cuaRevisions.get(key),
-    signal: nodeRepl.signal,
-  });
-  if (state.revisionId) cuaRevisions.set(key, state.revisionId);
-  return state;
+```ts
+type Point = number | { x: number; y: number };
+type ComputerUse = {
+  getPlatform: () => Promise<'macos' | 'linux' | 'windows'>;
+  getApp: (nameOrIdentifierOrPath: string) => Promise<App>;
+  listApps: () => Promise<
+    Array<{ id: string; displayName: string; isRunning: boolean }>
+  >;
+  close: () => Promise<void>;
+};
+type App = {
+  getState: (options?: {
+    disableDiff?: boolean;
+    includeScreenshot?: boolean;
+    maxTextChars?: number;
+  }) => Promise<State>;
+  click: (
+    point: Point,
+    options?: { button?: 'left' | 'right' | 'middle'; count?: number },
+  ) => Promise<object>;
+  doubleClick: (point: Point) => Promise<object>;
+  rightClick: (
+    point: Point,
+    options?: { modifier?: string[] },
+  ) => Promise<object>;
+  setValue: (element: number, value: string) => Promise<object>;
+  performSecondaryAction: (element: number, action: string) => Promise<object>;
+  typeText: (text: string) => Promise<object>;
+  paste: (
+    text: string,
+    options?: { format?: 'text' | 'md' | 'html'; signal?: AbortSignal },
+  ) => Promise<object>;
+  selectText: (
+    element: number,
+    text: string,
+    options?: {
+      prefix?: string;
+      suffix?: string;
+      selection?: 'text' | 'cursor_before' | 'cursor_after';
+      signal?: AbortSignal;
+    },
+  ) => Promise<object>;
+  pressKey: (
+    key: string,
+    options?: { modifiers?: string[] },
+  ) => Promise<object>;
+  hotkey: (keys: string[]) => Promise<object>;
+  scroll: (
+    point: Point,
+    options: { direction: 'up' | 'down' | 'left' | 'right'; amount?: number },
+  ) => Promise<object>;
+  drag: (options: {
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+  }) => Promise<object>;
+};
+type State = {
+  app: string;
+  window: string;
+  mode: 'full' | 'diff' | 'no_change';
+  text: string;
+  screenshot?: { images: Array<{ mimeType: string; dataBase64: string }> };
 };
 ```
 
-Use accessibility text for efficient decisions. Request a screenshot when the
-tree is incomplete, visual layout matters, or action evidence conflicts with
-the tree. Emit only decision-relevant images:
+## Workflow
+
+`paste` and `selectText` currently require macOS. On Linux/Windows, use the shared
+`typeText`, `setValue`, `pressKey` and observed actions. Unsupported text methods
+fail with `unsupported_platform`; do not retry them as window failures.
+
+### 1. Initialize
+
+If initialization already bound the task's app and returned its state, reuse
+that `app` and observation. Otherwise, bind the app named by the task, then read its state.
+`getApp()` binds identity; `getState()` can open a discovered stopped app. Combine these
+steps in one Node REPL call:
 
 ```js
+var app = await computer.getApp('Microsoft Excel');
+nodeRepl.write((await app.getState()).text);
+```
+
+The app handle tracks its current window and dialog. Read the returned window
+title to confirm the intended document. If the app is unknown or its name is
+ambiguous, discover applications with `computer.listApps()` and use a matching
+application `id` when it distinguishes the app. Two running instances may have
+the same ID; retrying that ID cannot resolve the ambiguity. Ask the user to keep
+only the intended instance open rather than guessing a target or retrying it.
+
+AX text uses short numeric IDs, such as `[37] TextField "Name"`. Use IDs from
+the current observation for element actions. IDs can change when the app's
+window or session changes. Disabled and static-text rows are observation-only.
+
+For token efficiency, the accessibility tree will be returned
+as a diff when appropriate. Prefer this default diff output. A full state
+replaces the previous state; a diff updates it; no-change preserves it. If you
+need a full replacement, use `disableDiff: true` only when the previous state
+is unavailable or no longer useful. Do not disregard the text and then assume
+that a subsequent diff will reproduce the information you skipped.
+
+Returned text defaults to at most 12,000 characters. Set `maxTextChars` (minimum 512) to adjust the limit. A truncation notice means some captured rows were
+omitted; request `app.getState({ disableDiff: true, maxTextChars: 24000 })` when
+you need more full text. An omitted row does not prove an element is absent.
+Traversal-limited captures cover only the captured nodes: identical captures
+can return no-change, while changes return full captured state. Use current
+captured IDs; after a read failure, use only IDs from the latest observation.
+
+### 2. Actions using app
+
+After performing one or more UI actions, call `app.getState()` before deciding
+what to do next. Batch actions whose target remains the same, then print only
+the state needed for the next decision:
+
+```js
+await app.click(37);
+await app.hotkey([platform === 'macos' ? 'super' : 'ctrl', 'a']);
+await app.typeText('hello');
+await app.pressKey('Return');
+nodeRepl.write((await app.getState()).text);
+```
+
+Use the actual ID from your observation; `37` is only an example.
+
+An observation is a decision boundary. When the current state already identifies
+the controls and the next actions are known, combine those actions and saving
+in the same call. Read state after the batch. End the batch at a new dialog,
+menu, changed target or uncertain result; use that state before choosing the
+next action. Do not split a known sequence merely to put each action in its own
+call.
+
+- Prefer element IDs to coordinates. `setValue(id, value)` changes a writable control, and `performSecondaryAction(id, action)` invokes a secondary action listed for that element. Use an observed action name rather than guessing.
+- When an action opens or closes a dialog, sheet or menu, end the batch and call `app.getState()` to read the new window and IDs before continuing.
+- `No open application window.` means the app is still running without a document window. If closing it completed the task, finish instead of retrying actions; otherwise open the intended file or window first.
+- An action error can occur after the UI already changed. Read state before deciding whether to retry. Partial, unconfirmed or cancelled actions must not be blindly repeated.
+- Coordinate actions use pixels in this app's current screenshot, with `(0, 0)` at its top-left. Every App observation refreshes that frame internally. Request `includeScreenshot: true` when you need to inspect the image, especially after a window change. Do not infer coordinates from another window or desktop screenshot.
+- `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the connected platform's appropriate shortcut: macOS generally uses `super`; Linux/Windows generally use `ctrl`.
+- App input manages any required activation internally and restores the previous focus, unless the user has moved it elsewhere. If the platform cannot confirm the target or restore focus, the action reports an error. There is no delivery-mode choice and no automatic replay after an uncertain result.
+- On Linux, some compositor sessions cannot confirm an exact App target. An `app_window_unavailable` result can mean the session does not support this workflow; ask the user to use a supported desktop session instead of retrying input.
+- Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
+- If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Only currently captured actionable IDs can be used for element actions.
+
+## Paste and select text
+
+These App methods are available on macOS only. Read current state first and use
+an observed element ID for selection.
+
+```js
+await app.selectText(37, 'draft', { prefix: 'Status: ' });
+nodeRepl.write((await app.getState()).text);
+```
+
+Use a real ID and text from your observation; the example assumes that the
+selected element contains exactly one matching `draft` immediately after
+`Status: `.
+
+After confirming the selection, replace it with plain text:
+
+```js
+await app.paste('ready');
+nodeRepl.write((await app.getState()).text);
+```
+
+- `selectText(element, text)` selects one exact, case-sensitive match. Optional
+  `prefix` and `suffix` must be immediately adjacent to that match. Missing or
+  ambiguous matches fail; provide enough observed context to identify one.
+- `selection` defaults to `'text'`. Use `'cursor_before'` or `'cursor_after'` to
+  place the insertion point at a match boundary instead of selecting the text.
+  The element must support a writable text selection; static labels may not.
+- `paste(text)` defaults to plain text. Use `{ format: 'md' }` for Markdown or
+  `{ format: 'html' }` for HTML; the receiving app determines which supplied
+  format it accepts. Use plain text when markup should remain literal.
+- Paste uses the clipboard temporarily. It restores the previous clipboard only
+  while it still owns that transaction; a newer external clipboard change is
+  preserved.
+- Both methods accept an optional `signal`. A completed dispatch, error or
+  cancellation does not by itself prove what changed. Observe state before
+  deciding whether to retry; do not blindly repeat unconfirmed text operations.
+
+## Reading screenshots
+
+Every App observation captures the current screenshot internally, independent
+of whether AX returns full state, a diff or no-change. The default return omits
+the image. `includeScreenshot: true` exposes it when visual inspection is needed.
+Prefer the text-only default when it identifies the controls and confirms the
+requested change. Request an image to resolve missing or ambiguous information,
+choose coordinates or verify an appearance that AX does not describe.
+
+```js
+var state = await app.getState({ includeScreenshot: true });
+nodeRepl.write(state.text);
 for (const image of state.screenshot?.images ?? []) {
-  if (image?.dataBase64 && image?.mimeType) {
-    await nodeRepl.emitImage(
-      `data:${image.mimeType};base64,${image.dataBase64}`,
-    );
-  }
+  await nodeRepl.emitImage(`data:${image.mimeType};base64,${image.dataBase64}`);
 }
 ```
 
-If the SDK explicitly reports a missing/invalid base or a stale lineage,
-perform one observation with `forceFull: true`, replace that surface's cursor,
-then resume the normal helper. Do not make full observations the default.
-
-## Act and verify
-
-Choose the narrowest action supported by current state. Pass an observed
-`element_token` as `elementToken`. Use `performSecondaryAction` only when that
-exact action appears in the element's current `actions` list.
-
-Before acting, state a concrete observable postcondition. For postconditions
-expressible as window or element state, use `actAndVerify` with `verifyState`:
-
-```js
-try {
-  globalThis.lastCuaOutcome = await computer.actAndVerify({
-    action: () =>
-      computer.setValue({
-        ...target,
-        elementToken,
-        value: expectedValue,
-        signal: nodeRepl.signal,
-      }),
-    verify: () =>
-      computer.verifyState({
-        ...target,
-        expect: [
-          {
-            element: {
-              selector: { role: expectedRole, label_contains: expectedLabel },
-              value_equals: expectedValue,
-            },
-          },
-        ],
-        stableSamples: 2,
-        signal: nodeRepl.signal,
-      }),
-  });
-  nodeRepl.write(JSON.stringify(lastCuaOutcome));
-} catch (error) {
-  nodeRepl.write(JSON.stringify(error?.details ?? { message: String(error) }));
-  throw error;
-}
-```
-
-`verifyState.expect` accepts one to eight AND-combined predicates:
-
-- `{window:{exists, bounds?}}`
-- `{element:{selector:{role?, label_contains?}, exists:true?,
-value_equals?, enabled?, selected?}}`
-
-Element absence is not provable. `unknown` and `stable:false` are not success.
-When the postcondition is visual or unsupported, observe the exact window
-again with a screenshot and inspect the fresh result before deciding. If state
-is unexpected, observe again rather than repeating the action blindly.
-
-Read every action result. `effect` is `confirmed`, `partial`, `unverifiable`,
-`suspected_noop`, or `refused`; `route`, `delivery`, `evidence`, `escalation`,
-and `operation` explain what actually happened. A committed operation can
-still have `cancellationRequested:true`, so it still requires verification.
-Follow an advertised escalation only after fresh state shows it is needed.
-
-## Interaction details
-
-- After navigation, dialogs, menus, or other surface changes, refresh the
-  relevant window list and observe the new exact surface.
-- Use returned state to determine text-field behavior; do not assume typing
-  replaces existing text. Use the platform-appropriate select-all action when
-  replacement is required.
-- Prefer background delivery. Use `deliveryMode:'foreground'` only when the
-  action result or fresh state shows the background route is unavailable or
-  ineffective.
-- Stop as soon as the requested postcondition is stably satisfied. Do not add
-  extra cleanup actions that could undo the result.
-
-## Finish
+Include connection cleanup at the end of the call that emits the final
+verification. Inspect that result before reporting success; reconnect and
+continue if it reveals unfinished work. A separate cleanup-only model turn is
+unnecessary:
 
 ```js
 await computer.close();
 globalThis.computer = undefined;
-globalThis.cuaRevisions = undefined;
-globalThis.observeCuaWindow = undefined;
 ```
 
-Reset the REPL only when no other persistent state is needed.
+Reset the Node REPL only when no other persistent state is needed.

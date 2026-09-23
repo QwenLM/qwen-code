@@ -8,7 +8,20 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => true),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 import {
   fetchGitBranches,
   gitCheckout,
@@ -36,6 +49,8 @@ function makeRepo(): string {
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  git(dir, 'config', 'tag.gpgsign', 'false');
+  git(dir, 'config', 'core.autocrlf', 'false');
   git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
@@ -76,6 +91,7 @@ function makeUpstream(): { dir: string; clone: string } {
   git(clone, 'config', 'user.email', 'other@example.com');
   git(clone, 'config', 'user.name', 'Other');
   git(clone, 'config', 'commit.gpgsign', 'false');
+  git(clone, 'config', 'core.autocrlf', 'false');
   return { dir, clone };
 }
 
@@ -216,6 +232,7 @@ describe('gitEnv (R12 env isolation)', () => {
       GIT_CONFIG_PARAMETERS: "'foo=bar'",
       GIT_OBJECT_DIRECTORY: '/tmp/objects',
       GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/alt',
+      GIT_ALLOW_PROTOCOL: 'https:ssh:ext',
     });
     expect(env['PATH']).toBe('/usr/bin');
     expect(env['LC_ALL']).toBe('C');
@@ -234,6 +251,22 @@ describe('gitEnv (R12 env isolation)', () => {
     ]) {
       expect(env[key]).toBeUndefined();
     }
+    // GIT_ALLOW_PROTOCOL is normalized, not deleted: the helper-executing
+    // entries are stripped while a restrictive inherited list keeps its
+    // deny-by-default force over config-file policy.
+    expect(env['GIT_ALLOW_PROTOCOL']).toBe('https:ssh');
+  });
+
+  it('normalizes an inherited GIT_ALLOW_PROTOCOL instead of deleting it', () => {
+    expect(
+      gitEnv({ GIT_ALLOW_PROTOCOL: 'https:ssh' })['GIT_ALLOW_PROTOCOL'],
+    ).toBe('https:ssh');
+    // A helper-only list filters to empty, which stays SET: an empty list
+    // is deny-all, while undefined would hand the decision to config.
+    expect(gitEnv({ GIT_ALLOW_PROTOCOL: 'ext:fd' })['GIT_ALLOW_PROTOCOL']).toBe(
+      '',
+    );
+    expect(gitEnv({})['GIT_ALLOW_PROTOCOL']).toBeUndefined();
   });
 
   it('keeps repository discovery on the cwd even with a hostile GIT_DIR', async () => {
@@ -579,6 +612,10 @@ describe('gitCreateBranch', () => {
 });
 
 describe('gitCreateBranch rollback (R12)', () => {
+  beforeEach(() => {
+    mockDebugLogger.warn.mockClear();
+  });
+
   it('rolls back a branch created before a failing post-checkout hook', async () => {
     const dir = makeRepo();
     const before = currentBranch(dir);
@@ -598,7 +635,118 @@ describe('gitCreateBranch rollback (R12)', () => {
     expect(currentBranch(dir)).toBe(before);
     const branches = git(dir, 'branch', '--format=%(refname:short)');
     expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+    expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
   });
+
+  it('rolls back a branch created from an annotated tag before a failing post-checkout hook', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    git(dir, 'tag', '-a', 'v1.0', '-m', 'annotated start');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+    expect(git(dir, 'cat-file', '-t', 'v1.0').trim()).toBe('tag');
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+      {
+        mode: 0o755,
+      },
+    );
+
+    await expect(gitCreateBranch(dir, 'topic', 'v1.0')).rejects.toThrow();
+
+    expect(currentBranch(dir)).toBe(before);
+    const branches = git(dir, 'branch', '--format=%(refname:short)');
+    expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+    expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
+  });
+
+  it('keeps a branch that a failing post-checkout hook committed to', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      '#!/bin/sh\necho hook-change >> file.txt\ngit add file.txt\ngit commit --no-verify -qm "hook-created commit"\nexit 1\n',
+      { mode: 0o755 },
+    );
+
+    await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow();
+
+    // HEAD is restored, but the branch is kept because the hook created a
+    // commit on it — force-deleting would discard that commit.
+    expect(currentBranch(dir)).toBe(before);
+    const branches = git(dir, 'branch', '--format=%(refname:short)');
+    expect(branches.split('\n').map((s) => s.trim())).toContain('topic');
+    // The hook-created commit is still reachable from the branch.
+    const topicLog = git(dir, 'log', '--oneline', 'topic');
+    expect(topicLog).toContain('hook-created commit');
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
+  });
+
+  it('keeps hook commits when an empty start point defaults to HEAD', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      '#!/bin/sh\necho hook-change >> file.txt\ngit add file.txt\ngit commit --no-verify -qm "hook-created commit"\nexit 1\n',
+      { mode: 0o755 },
+    );
+
+    await expect(gitCreateBranch(dir, 'topic', '')).rejects.toThrow();
+
+    expect(currentBranch(dir)).toBe(before);
+    const branches = git(dir, 'branch', '--format=%(refname:short)');
+    expect(branches.split('\n').map((s) => s.trim())).toContain('topic');
+    const topicLog = git(dir, 'log', '--oneline', 'topic');
+    expect(topicLog).toContain('hook-created commit');
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps hook commits when resolving the start commit fails',
+    async () => {
+      const dir = makeRepo();
+      const before = currentBranch(dir);
+      const hookDir = path.join(dir, '.git', 'hooks');
+      fs.mkdirSync(hookDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hookDir, 'post-checkout'),
+        '#!/bin/sh\necho hook-change >> file.txt\ngit add file.txt\ngit commit --no-verify -qm "hook-created commit"\nexit 1\n',
+        { mode: 0o755 },
+      );
+      const env = gitShim(hermeticEnv(), [
+        { match: '"rev-parse --verify "*', script: 'exit 128' },
+      ]);
+
+      await expect(
+        gitCreateBranch(dir, 'topic', undefined, env),
+      ).rejects.toThrow();
+
+      expect(currentBranch(dir)).toBe(before);
+      const branches = git(dir, 'branch', '--format=%(refname:short)');
+      expect(branches.split('\n').map((s) => s.trim())).toContain('topic');
+      const topicLog = git(dir, 'log', '--oneline', 'topic');
+      expect(topicLog).toContain('hook-created commit');
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('keeping branch "topic"'),
+      );
+    },
+  );
 });
 
 describe('gitPush', () => {
@@ -607,9 +755,9 @@ describe('gitPush', () => {
     git(dir, 'tag', 'v1.0');
     git(dir, 'checkout', '-q', 'v1.0');
 
-    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
-      /detached HEAD/,
-    );
+    await expect(
+      gitPush(dir, { setUpstream: true }, hermeticEnv()),
+    ).rejects.toThrow(/detached HEAD/);
   });
 
   it('preserves an existing upstream instead of rewriting it', async () => {
@@ -628,7 +776,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     // Tracking must still point at upstream, not origin.
     const tracking = git(
@@ -652,7 +800,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -675,7 +823,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '--amend', '-m', 'amended');
 
-    await gitPush(dir, { force: true });
+    await gitPush(dir, { force: true }, hermeticEnv());
 
     const remoteLog = git(remote, 'log', '--oneline', '-1');
     expect(remoteLog).toContain('amended');
@@ -694,7 +842,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -721,7 +869,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const tracking = git(
       dir,

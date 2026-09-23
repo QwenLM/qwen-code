@@ -216,14 +216,20 @@ export const SERVE_CONTROL_EXT_METHODS = {
   userLanguage: 'qwen/control/user/language',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  /**
+   * Control a workflow run, delete its history, or start a new run from a
+   * saved definition or a caller-supplied script. Params:
+   * `{ sessionId, taskId, action }` plus the optional start input
+   * ({@link ServeWorkflowActionInput}) the two start actions read.
+   */
   sessionWorkflowTaskAction: 'qwen/control/session/task/workflow-action',
   sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
-   * Read a live session's `/goal` state. The active goal lives only in the
-   * child's in-memory store, so this is the sole authoritative source for the
-   * condition, its running turn count and the judge's last verdict. Params:
-   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   * Read a live session's `/goal` state from the child's Goal runtime. Params:
+   * `{ sessionId }`; result: `BridgeSessionGoal` — the runtime's
+   * `GoalSnapshotV2` plus `active`, a projection of it for clients that still
+   * read the older shape.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
   sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
@@ -582,6 +588,7 @@ export interface ServeWorkspaceProviderCurrent {
 }
 
 export interface ServeWorkspaceProviderModel {
+  configurationKey?: string;
   modelId: string;
   baseModelId: string;
   name: string;
@@ -622,6 +629,14 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  recovery?: {
+    kind:
+      | 'clean'
+      | 'interrupted_prompt'
+      | 'interrupted_turn'
+      | 'degraded_history';
+    canContinue: boolean;
+  };
   state: {
     models?: unknown;
     modes?: unknown;
@@ -636,7 +651,13 @@ export interface ServeContextCategoryBreakdown {
   mcpTools: number;
   memoryFiles: number;
   skills: number;
+  /** Startup prelude outside the skill listing. Absent from older servers. */
+  startupContext?: number;
   messages: number;
+  /** Provider total not accounted for by any category. Absent from older servers. */
+  unattributed?: number;
+  /** Cached prefix tokens; an annotation that overlaps categories. Absent from older servers. */
+  cachedTokens?: number;
   freeSpace: number;
   autocompactBuffer: number;
 }
@@ -686,10 +707,30 @@ export interface ServeSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    workflowStepId: boolean;
+    /** Whether `run-saved` reads `args` and `sourceRef` from the request. */
+    runSavedArgs?: boolean;
+    /** Whether the `run-script` action exists. */
+    runScript?: boolean;
+    /**
+     * Whether the session's model may run named workflows only. The host's
+     * own `run-saved`, `run-script`, `retry` and `rerun` are not restricted.
+     */
+    nameOnly?: boolean;
+    /**
+     * Whether `retry` and `rerun` accept a run restored from history
+     * (`isHistorical`), such as one a daemon restart interrupted.
+     */
+    retryHistorical?: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
-    source: 'project' | 'user';
+    /** `extension` definitions are named `<extension>:<workflow>`. */
+    source: 'project' | 'user' | 'extension';
   }>;
 }
 
@@ -706,7 +747,7 @@ export interface ServeSessionSavedWorkflowDetail {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   name: string;
-  source: 'project' | 'user';
+  source: 'project' | 'user' | 'extension';
   /** Absolute path of the `.js` file the definition was read from. */
   scriptPath: string;
   /** Full script source, `export const meta` included. */
@@ -856,6 +897,8 @@ export type ServeWorkflowDispatchStatus =
   | 'cached';
 
 export interface ServeWorkflowDispatchStatusEntry {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -920,15 +963,108 @@ export type ServeWorkflowEvent =
       error: string;
     });
 
+/**
+ * A workflow run's large-run flag: the first threshold it crossed. Mirrors
+ * core's `WorkflowSizeWarning`.
+ */
+export interface ServeWorkflowSizeWarning {
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduledAgents: number;
+  totalTokens: number;
+  projectedTokens: number;
+  agentCap: number;
+  tokenCap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  capFromGuideline: boolean;
+  at: number;
+}
+
+export interface ServeWorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
+/**
+ * Start input for the `run-saved` and `run-script` workflow actions: what to
+ * run beyond the definition itself. The control actions (`pause`, `resume`,
+ * `retry`, `rerun`, `delete-history`) ignore it — a retry or rerun replays the
+ * original run's own `args` and `sourceRef`, which is what makes it the same
+ * run rather than a new one.
+ */
+export interface ServeWorkflowActionInput {
+  /** Bound to the script's `args` global; any JSON value. */
+  args?: unknown;
+  /**
+   * The caller's own definition id and revision, recorded on the run, its
+   * journal and its snapshot so a host can tie a run back to what it built.
+   */
+  sourceRef?: { id: string; revision: string };
+  /** `run-script` only: the script source to run. */
+  script?: string;
+}
+
+/**
+ * The start input a workflow-action request carries, or `undefined` when it
+ * carries none — in which case the request reaching the session runtime is
+ * byte-identical to one sent before start input existed.
+ *
+ * Values are forwarded verbatim rather than checked here: the session runtime
+ * that starts the run validates them against the workflow tool's own rules, so
+ * every entry point refuses a malformed `sourceRef` with the same text.
+ */
+export function readServeWorkflowActionInput(
+  body: Record<string, unknown>,
+): ServeWorkflowActionInput | undefined {
+  const input: ServeWorkflowActionInput = {};
+  // `args` is any JSON value, `null` included, so presence decides.
+  if (Object.hasOwn(body, 'args')) input.args = body['args'];
+  if (Object.hasOwn(body, 'sourceRef')) {
+    input.sourceRef = body[
+      'sourceRef'
+    ] as ServeWorkflowActionInput['sourceRef'];
+  }
+  if (Object.hasOwn(body, 'script')) {
+    input.script = body['script'] as ServeWorkflowActionInput['script'];
+  }
+  return Object.keys(input).length > 0 ? input : undefined;
+}
+
 export interface ServeSessionWorkflowTaskStatus {
+  sourceRef?: { id: string; revision: string };
+  workflowCalls?: ServeWorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
-  /** Restored from the project snapshot store; controls are read-only. */
+  /**
+   * Restored from the project snapshot store. `pause` and `resume` do not
+   * apply; `delete-history` does, and so do `retry` and `rerun` when
+   * `workflowToolFeatures.retryHistorical` is reported.
+   */
   isHistorical?: boolean;
+  /**
+   * The run was launched with `args` too large for its snapshot to keep. It
+   * is one reason for {@link argsUnavailable}, reported separately so a
+   * client can say which.
+   */
+  argsOmitted?: true;
+  /**
+   * The run cannot be retried or rerun from history because its history does
+   * not have the `args` to start it with: they were too large to keep
+   * (`argsOmitted`), or the snapshot predates keeping them at all and so
+   * cannot say whether the run had any. Offer neither action when this is
+   * set -- the daemon answers both with `workflow_args_unavailable`.
+   */
+  argsUnavailable?: true;
   sourceRunId?: string;
   startMode?: 'retry' | 'rerun';
   label: string;
@@ -944,6 +1080,17 @@ export interface ServeSessionWorkflowTaskStatus {
   dispatches: ServeWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
+  /**
+   * Journaled agent() calls a resume ran live again, because the previous run
+   * failed them or was interrupted with them in flight. Absent on snapshots
+   * created before respawns were counted; treat as 0.
+   */
+  agentsRespawned?: number;
+  /**
+   * Present once the run crossed a large-run threshold; absent while it stays
+   * within bounds and on snapshots created before the flag existed.
+   */
+  sizeWarning?: ServeWorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];

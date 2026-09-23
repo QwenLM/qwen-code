@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import {
@@ -135,11 +136,14 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   /** Returns undefined when no policy was built — direct-embed, or no budget. */
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  getCommittedAcpChildCount?: () => number;
+  childAdmissionEnforced?: boolean;
 }
 
 interface DaemonStatusSection<T> {
@@ -183,6 +187,8 @@ interface DaemonStatusSecurity {
 }
 
 interface DaemonStatusLimits {
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
   maxSessions: number | null;
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
@@ -203,27 +209,21 @@ interface DaemonStatusLimits {
   acpPreAttachMaxPayloadBytesPerConnection: number | null;
   acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
-   * The daemon's resolved memory figures. Observed and reported only: nothing
-   * consumes them to size a child. `null` on paths that resolve none, such as
-   * direct-embed bridges.
+   * The daemon's resolved memory figures and child policy. `null` on paths
+   * that resolve none, such as direct-embed bridges.
    */
   memory: DaemonStatusMemoryLimits | null;
 }
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False, and required — scoped to the CHILD-HEAP model: every figure in
-   * this section except `journalGrowth` is resolved input or a model of a
-   * policy that does not exist yet; nothing sizes or bounds a child
-   * process. The flag exists so a client can never mistake the modeled
-   * partition for enforcement that has not shipped. Adaptive live-journal
-   * growth IS a runtime effect of the budget and is reported separately
-   * under `journalGrowth`.
+   * True only when managed child-count admission and the fixed old-space
+   * ceiling are both applied. Does not bound total process RSS. Adaptive
+   * journal growth is reported separately under `journalGrowth`.
    */
-  enforced: false;
+  enforced: boolean;
   /**
-   * Adaptive live-journal growth derived from this budget — the one figure
-   * in this section with runtime effect: session journal caps really do
+   * Adaptive live-journal growth derived from this budget: session caps really do
    * grow within this pool mid-turn (per-session effective limits appear on
    * each session diagnostic in `detail=full`). `null` when growth is
    * disabled (an operator-pinned journal cap, or a budget that leaves no
@@ -237,11 +237,12 @@ export interface DaemonStatusMemoryLimits {
     baselineMaxBytes: number;
   } | null;
   /**
-   * The per-child heap partition the daemon models but does not apply.
+   * The fixed per-child heap partition, applied only under `enforce`.
    * `null` when no policy was built.
    */
   childHeap: {
     mode: ChildHeapMode;
+    admissionEnforced: boolean;
     /**
      * Children the pool could host at once. 0 when no partition can be
      * modeled — either the pool cannot cover one child at the minimum heap,
@@ -251,15 +252,15 @@ export interface DaemonStatusMemoryLimits {
      */
     maxConcurrentChildren: number | null;
     /**
-     * What each would receive. Never 0 and never below
+     * What each receives under `enforce`. Never 0 and never below
      * `modeled.minChildHeapMb`; `null` instead, both under `off` and wherever
      * the partition cannot be modeled within that floor.
      */
     perChildCeilingMb: number | null;
     /**
      * Spawns that would have exceeded `maxConcurrentChildren`. Admission
-     * pressure only: 0 does **not** mean the partition is safe to apply,
-     * because children still run on the much larger host-derived ceiling.
+     * pressure only: 0 does **not** prove the workload fits the ceiling.
+     * Under `observe` and `admit`, children retain the legacy heap arguments.
      *
      * Two known sources of counts that are not capacity pressure: a channel
      * swap on a daemon already at `maxConcurrentChildren` books one, because
@@ -279,9 +280,8 @@ export interface DaemonStatusMemoryLimits {
   availableMemorySource: 'constrained' | 'host';
   insufficientMemory: boolean;
   /**
-   * Derived figures for a capacity policy that has not shipped. Grouped, and
-   * named for what they are, so they cannot read as memory already reserved or
-   * limits already applied.
+   * Derived memory model used to calculate child-count admission and the
+   * fixed old-space ceiling. These values do not reserve physical memory.
    */
   modeled: {
     rootReserveMb: number;
@@ -301,14 +301,16 @@ export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
   childHeap?: ChildHeapPolicySnapshot,
   journalGrowth?: DaemonStatusMemoryLimits['journalGrowth'],
+  admissionEnforced = false,
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    enforced: false,
+    enforced: admissionEnforced && childHeap?.mode === 'enforce',
     journalGrowth: journalGrowth ?? null,
     childHeap: childHeap
       ? {
           mode: childHeap.mode,
+          admissionEnforced,
           maxConcurrentChildren: childHeap.maxConcurrentChildren,
           perChildCeilingMb: childHeap.perChildCeilingMb,
           refusals: childHeap.refusals,
@@ -415,6 +417,7 @@ interface DaemonStatusRuntimeMemory {
    * need an in-flight spawn count to admit without racing.
    */
   activeAcpChildren: number;
+  committedAcpChildren: number | null;
   /**
    * Which children the daemon's RSS sampling covers: every ACP child with a
    * live channel, i.e. the same set `activeAcpChildren` counts. Still not
@@ -468,8 +471,9 @@ interface DaemonStatusRuntimeMemory {
      * all while children keep running. Publishing zeros there would assert
      * that no child needs any heap.
      *
-     * Observational. Nothing here sizes a child or refuses a spawn; see
-     * `limits.memory.enforced`, which stays `false`.
+     * Observational. Nothing in this block sizes a child or refuses a spawn;
+     * `limits.memory.enforced` reports whether the modeled child ceiling is
+     * currently applied.
      */
     heap: {
       /** Committed high-water. Rises with the ceiling the child was given, so
@@ -758,6 +762,7 @@ export async function buildDaemonStatusResponse(
     runtimeMemory = {
       registeredWorkspaces: registeredWorkspaceCount,
       activeAcpChildren: activeAcpChildCount,
+      committedAcpChildren: input.getCommittedAcpChildCount?.() ?? null,
       childRssCoverage: 'active_children',
       children: {
         rssBytes: childRssBytesTotal,
@@ -976,6 +981,11 @@ export async function buildDaemonStatusResponse(
       sessionShellCommandEnabled: input.sessionShellCommandEnabled,
     },
     limits: {
+      maxRegisteredWorkspaces:
+        input.opts.maxRegisteredWorkspaces ?? MAX_REGISTERED_WORKSPACES,
+      ...(input.maxChannelControlWorkspaces !== undefined
+        ? { maxChannelControlWorkspaces: input.maxChannelControlWorkspaces }
+        : {}),
       maxSessions: bridgeSnapshot.limits.maxSessions,
       maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
       maxPendingPromptsPerSession:
@@ -1018,6 +1028,7 @@ export async function buildDaemonStatusResponse(
               baselineMaxBytes: bridgeSnapshot.limits.maxJournalBytes,
             }
           : null,
+        input.childAdmissionEnforced,
       ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1

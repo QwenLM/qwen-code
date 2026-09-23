@@ -10,6 +10,7 @@ import type {
   CronJob,
   GoalJournal,
   GoalRuntime,
+  GoalSnapshotV2,
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
   ToolCallRequestInfo,
@@ -55,6 +56,7 @@ import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
+  formatGoalState,
   skipHeadlessLoopSentinel,
   TurnInterruptedError,
 } from './nonInteractiveCli.js';
@@ -68,7 +70,11 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
-import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import {
+  _resetCleanupFunctionsForTest,
+  runExitCleanup,
+} from './utils/cleanup.js';
+import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 import {
   AlreadyReportedError,
   _resetExitLatchForTest,
@@ -82,6 +88,9 @@ const getActiveInteractionSpanSpy = vi.hoisted(() => vi.fn());
 const addAgentOutputMessageAttributesSpy = vi.hoisted(() => vi.fn());
 const interactionSpan = vi.hoisted(() => ({}));
 vi.mock('./ui/hooks/atCommandProcessor.js');
+vi.mock('./services/review-worktree-lease.js', () => ({
+  cleanupReviewWorktreeLeases: vi.fn(),
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -304,6 +313,7 @@ describe('runNonInteractive', () => {
       getTool: vi.fn(),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
+      isDeferredAndHidden: vi.fn().mockReturnValue(false),
     } as unknown as ToolRegistry;
 
     mockBackgroundTaskRegistry = {
@@ -495,6 +505,48 @@ describe('runNonInteractive', () => {
     }
   }
 
+  it.each([false, true])(
+    'scopes review lease cleanup to the ordinary runtime (sandbox=%s)',
+    async (sandbox) => {
+      setupMetricsMock();
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue(
+        sandbox
+          ? {
+              workspace: '/test/project',
+              installation: '/test/installation',
+              state: '/test/state',
+              filesystem: 'workspace-write',
+              network: 'closed',
+            }
+          : undefined,
+      );
+      vi.mocked(cleanupReviewWorktreeLeases).mockClear();
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        await runExitCleanup();
+        yield { type: LlmEventType.Content, value: 'Done' };
+      });
+
+      await runNonInteractive(mockConfig, mockSettings, 'Hello', 'test-prompt');
+
+      if (sandbox) {
+        expect(cleanupReviewWorktreeLeases).not.toHaveBeenCalled();
+      } else {
+        expect(cleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt',
+          repositoryRoot: '/test/project',
+          gitTimeout: 1_000,
+        });
+        expect(cleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt',
+          repositoryRoot: '/test/project',
+          gitTimeout: undefined,
+        });
+      }
+    },
+  );
+
   type GoalControlCase = {
     name: string;
     input: string;
@@ -589,6 +641,533 @@ describe('runNonInteractive', () => {
       });
     }
   }
+
+  it.each([
+    [OutputFormat.JSON, false],
+    [OutputFormat.JSON, true],
+    [OutputFormat.STREAM_JSON, false],
+    [OutputFormat.STREAM_JSON, true],
+  ] as const)(
+    'repairs discarded Retry tools and executes only the accepted attempt in %s (drain=%s)',
+    async (format, drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      };
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+          if (cb)
+            cb(
+              'Monitor ready',
+              '<task-notification>ready</task-notification>',
+              {
+                monitorId: 'mon_retry',
+                toolUseId: 'tool_monitor',
+                status: 'running',
+                eventCount: 1,
+              },
+            );
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([finished]),
+        );
+      }
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'abandoned attempt' },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'discarded-tool',
+                name: 'test-tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'retry-tools',
+              },
+            },
+            {
+              type: LlmEventType.Retry,
+              retryInfo: {
+                attempt: 1,
+                maxRetries: 10,
+                delayMs: 60_000,
+                skipDelay: vi.fn(),
+                ...(drain ? { message: 'Too many requests' } : {}),
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'kept-tool',
+                name: 'test-tool',
+                args: { accepted: true },
+                isClientInitiated: false,
+                prompt_id: 'retry-tools',
+              },
+            },
+            { type: LlmEventType.Content, value: 'accepted attempt' },
+            finished,
+          ]),
+        )
+        .mockImplementation(() => createStreamFromEvents([finished]));
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: 'kept-tool',
+        responseParts: [{ text: 'accepted tool execution' }],
+        resultDisplay: 'accepted',
+        error: undefined,
+        errorType: undefined,
+        executionStatus: 'success',
+      });
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'retry-tools',
+      );
+      expect(exitCode).toBe(0);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+        callId: 'kept-tool',
+        args: { accepted: true },
+      });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+        drain ? 3 : 2,
+      );
+      expect(processStderrSpy).toHaveBeenCalledWith(
+        `Retrying in 60s (attempt 1/10)${drain ? ': Too many requests' : ''}\n`,
+      );
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      const blocks = messages.flatMap(
+        (message: { message?: { content?: unknown[] } }) =>
+          message.message?.content ?? [],
+      ) as Array<{ type?: string; id?: string; tool_use_id?: string }>;
+      const discardedUses = blocks.filter(
+        (block) => block.type === 'tool_use' && block.id === 'discarded-tool',
+      );
+      const discardedResults = blocks.filter(
+        (block) =>
+          block.type === 'tool_result' &&
+          block.tool_use_id === 'discarded-tool',
+      );
+      if (format === OutputFormat.JSON) {
+        expect(discardedUses).toEqual([]);
+        expect(discardedResults).toEqual([]);
+        expect(stdout).not.toContain('abandoned attempt');
+      } else {
+        expect(discardedUses).toHaveLength(1);
+        expect(discardedResults).toHaveLength(1);
+        const discardedUseFrame = messages.findIndex(
+          (message: {
+            type?: string;
+            message?: { content?: Array<{ type?: string; id?: string }> };
+          }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_use' && block.id === 'discarded-tool',
+            ),
+        );
+        const discardedResultFrame = messages.findIndex(
+          (message: {
+            message?: {
+              content?: Array<{ type?: string; tool_use_id?: string }>;
+            };
+          }) =>
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_result' &&
+                block.tool_use_id === 'discarded-tool',
+            ),
+        );
+        expect(discardedUseFrame).toBeGreaterThanOrEqual(0);
+        expect(discardedResultFrame).toBeGreaterThan(discardedUseFrame);
+      }
+      expect(stdout).toContain('accepted attempt');
+      expect(blocks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_use', id: 'kept-tool' }),
+          expect.objectContaining({
+            type: 'tool_result',
+            tool_use_id: 'kept-tool',
+          }),
+        ]),
+      );
+    },
+  );
+
+  it.each([
+    [OutputFormat.JSON, false],
+    [OutputFormat.JSON, true],
+    [OutputFormat.STREAM_JSON, false],
+    [OutputFormat.STREAM_JSON, true],
+  ] as const)(
+    'preserves delivered text across a continuation Retry in %s (drain=%s)',
+    async (format, drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      if (format === OutputFormat.STREAM_JSON) {
+        vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+      }
+      setupMetricsMock();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      };
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+          cb?.(
+            'Monitor ready',
+            '<task-notification>ready</task-notification>',
+            {
+              monitorId: 'mon_continuation',
+              toolUseId: 'tool_monitor',
+              status: 'running',
+              eventCount: 1,
+            },
+          );
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([finished]),
+        );
+      }
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'prefix ' },
+          { type: LlmEventType.Retry, isContinuation: true },
+          { type: LlmEventType.Content, value: 'suffix' },
+          finished,
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'continuation'),
+      ).resolves.toBe(0);
+
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(JSON.stringify(messages)).toContain('prefix suffix');
+      if (format === OutputFormat.STREAM_JSON) {
+        const assistantMessages = messages.filter(
+          (message: { type?: string; message?: { content?: unknown[] } }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block: { type?: string }) => block.type === 'text',
+            ),
+        );
+        expect(assistantMessages).toHaveLength(1);
+        expect(
+          messages.find(
+            (message: { type?: string }) => message.type === 'result',
+          )?.result,
+        ).toContain('prefix suffix');
+      }
+    },
+  );
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'preserves continuation text while discarding a pending recovery tool in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'prefix-answer ' },
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'recovery-tool',
+              name: 'test-tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'continuation-tool',
+            },
+          },
+          { type: LlmEventType.Retry, isContinuation: true },
+          { type: LlmEventType.Content, value: 'suffix' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'continuation-tool',
+        ),
+      ).resolves.toBe(0);
+
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      const assistantText = messages
+        .filter((message: { type?: string }) => message.type === 'assistant')
+        .flatMap(
+          (message: { message?: { content?: Array<{ text?: string }> } }) =>
+            message.message?.content ?? [],
+        )
+        .map((block: { text?: string }) => block.text ?? '')
+        .join('');
+      expect(assistantText).toContain('prefix-answer suffix');
+      if (format === OutputFormat.JSON) {
+        expect(JSON.stringify(messages)).not.toContain('recovery-tool');
+      } else {
+        const useFrame = messages.findIndex(
+          (message: {
+            type?: string;
+            message?: { content?: Array<{ type?: string; id?: string }> };
+          }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_use' && block.id === 'recovery-tool',
+            ),
+        );
+        const resultFrame = messages.findIndex(
+          (message: {
+            message?: {
+              content?: Array<{ type?: string; tool_use_id?: string }>;
+            };
+          }) =>
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_result' &&
+                block.tool_use_id === 'recovery-tool',
+            ),
+        );
+        expect(useFrame).toBeGreaterThanOrEqual(0);
+        expect(resultFrame).toBeGreaterThan(useFrame);
+      }
+    },
+  );
+
+  it('repairs a discarded tool when a drain attempt falls back models', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    const finished: ServerLlmStreamEvent = {
+      type: LlmEventType.Finished,
+      value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+    };
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      cb?.('Monitor ready', '<task-notification>ready</task-notification>', {
+        monitorId: 'mon_fallback',
+        toolUseId: 'tool_monitor',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    const request = (callId: string): ServerLlmStreamEvent => ({
+      type: LlmEventType.ToolCallRequest,
+      value: {
+        callId,
+        name: 'test-tool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'fallback-tools',
+      },
+    });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([finished]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          request('discarded-tool'),
+          {
+            type: LlmEventType.ModelFallback,
+            fromModel: 'primary',
+            toModel: 'fallback',
+            fallbackIndex: 0,
+          },
+          request('kept-tool'),
+          finished,
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents([finished]));
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'kept-tool',
+      responseParts: [{ text: 'accepted' }],
+      resultDisplay: 'accepted',
+      error: undefined,
+      errorType: undefined,
+      executionStatus: 'success',
+    });
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'fallback-tools'),
+    ).resolves.toBe(0);
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+    expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+      callId: 'kept-tool',
+    });
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+    );
+    expect(JSON.stringify(messages)).not.toContain('discarded-tool');
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'model_fallback',
+        }),
+      ]),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Falling back from primary to fallback (1 buffered tool call(s) discarded).\n',
+    );
+  });
+
+  it('retains every model fallback marker across repeated JSON attempt resets', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'abandoned primary' },
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'primary',
+          toModel: 'fallback-a',
+          fallbackIndex: 0,
+        },
+        { type: LlmEventType.Content, value: 'abandoned fallback-a' },
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'fallback-a',
+          toModel: 'fallback-b',
+          fallbackIndex: 1,
+        },
+        { type: LlmEventType.Content, value: 'final answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'two-fallbacks'),
+    ).resolves.toBe(0);
+
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+    );
+    const fallbacks = messages.filter(
+      (message: { type?: string; subtype?: string }) =>
+        message.type === 'system' && message.subtype === 'model_fallback',
+    );
+    expect(fallbacks).toHaveLength(2);
+    expect(
+      messages.filter(
+        (message: { type?: string; subtype?: string }) =>
+          message.type === 'system' && message.subtype === 'retry',
+      ),
+    ).toHaveLength(2);
+    expect(fallbacks).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          fromModel: 'primary',
+          toModel: 'fallback-a',
+        }),
+      }),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          fromModel: 'fallback-a',
+          toModel: 'fallback-b',
+        }),
+      }),
+    ]);
+    const output = JSON.stringify(messages);
+    expect(output).not.toContain('abandoned primary');
+    expect(output).not.toContain('abandoned fallback-a');
+    expect(output).toContain('final answer');
+  });
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits a structured marker for a bare Retry in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned answer' },
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'final answer' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'bare-retry'),
+      ).resolves.toBe(0);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'retry',
+            data: expect.objectContaining({
+              discardedToolCalls: 0,
+              preserveText: false,
+            }),
+          }),
+        ]),
+      );
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(
+        'Retrying provider attempt (0 buffered tool call(s) discarded).',
+      );
+      expect(stderr).not.toContain('undefined');
+    },
+  );
 
   function mockFinishedGoalWorker(): void {
     vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
@@ -763,6 +1342,39 @@ describe('runNonInteractive', () => {
     const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
       'Verifier feedback: Need independent evidence',
+    );
+  });
+
+  it('carries the spend figures into a scheduled Goal continuation', async () => {
+    // The host copies `usage` onto its own turn record. The field is optional
+    // on both sides, so a dropped copy typechecks and costs the prompt its
+    // budget line on this host alone.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-usage',
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
     );
   });
 
@@ -942,7 +1554,7 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
-      'The autonomous token budget for this Goal window is spent.',
+      'An autonomous budget for this Goal window is spent',
     );
   });
 
@@ -1842,7 +2454,7 @@ describe('runNonInteractive', () => {
     expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
   });
 
-  it('emits direct Goal v2 state before the legacy partial projection', async () => {
+  it('emits Goal v2 state as the only Goal stream event with partial messages on', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('active');
@@ -1864,7 +2476,7 @@ describe('runNonInteractive', () => {
       )
       .map(({ event }) => event?.type)
       .filter((type) => type === 'goal_state' || type === 'active_goal');
-    expect(goalEventTypes).toEqual(['goal_state', 'active_goal']);
+    expect(goalEventTypes).toEqual(['goal_state']);
     expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
@@ -2157,7 +2769,11 @@ describe('runNonInteractive', () => {
     );
 
     await vi.waitFor(() =>
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: expect.stringContaining(
+          'requires an explicit interactive approval surface',
+        ),
+      }),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -2218,7 +2834,11 @@ describe('runNonInteractive', () => {
     );
 
     await vi.waitFor(() =>
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: expect.stringContaining(
+          `current approval mode (${ApprovalMode.DEFAULT})`,
+        ),
+      }),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -2441,6 +3061,99 @@ describe('runNonInteractive', () => {
     await runNonInteractive(mockConfig, mockSettings, 'test', 'p1');
 
     expect(stdoutDestroySpy).toHaveBeenCalled();
+  });
+
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'surfaces Stop hook system messages only in text mode (%s)',
+    async (format) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      const warning =
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          { type: LlmEventType.HookSystemMessage, value: warning },
+        ]),
+      );
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-cap');
+      const warnings = processStderrSpy.mock.calls.filter(([text]) =>
+        String(text).includes(warning),
+      );
+      expect(warnings).toHaveLength(format === OutputFormat.TEXT ? 1 : 0);
+    },
+  );
+
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'sanitizes queued Stop hook messages only in text mode (%s)',
+    async (format) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      mockMonitorRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          if (!callback) return;
+          callback(
+            'Monitor event',
+            '<task-notification>ready</task-notification>',
+            {
+              monitorId: 'mon_1',
+              toolUseId: 'tool_mon_1',
+              status: 'running',
+              eventCount: 1,
+            },
+          );
+        },
+      );
+      const warning =
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'done' },
+            ...finishedEvents,
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.HookSystemMessage,
+              value: '\u001b[2J' + warning + '\u202e',
+            },
+            ...finishedEvents,
+          ]),
+        );
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-drain');
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        processStderrSpy.mock.calls.filter(([text]) =>
+          String(text).includes(warning),
+        ),
+      ).toHaveLength(format === OutputFormat.TEXT ? 1 : 0);
+      const output = processStderrSpy.mock.calls
+        .map(([text]) => String(text))
+        .join('');
+      expect(output).not.toContain('\u001b');
+      expect(output).not.toContain('\u202e');
+    },
+  );
+
+  it('neutralizes terminal control characters in Stop hook system messages', async () => {
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.HookSystemMessage,
+          value: 'hook says \u001b[2Jhello\u202e',
+        },
+      ]),
+    );
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-output');
+    const output = processStderrSpy.mock.calls
+      .map(([text]) => String(text))
+      .join('');
+    expect(output).toContain('hook says');
+    expect(output).toContain('hello');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('\u202e');
   });
 
   it('returns non-zero and skips pending tool calls after loop detection', async () => {
@@ -3304,9 +4017,15 @@ describe('runNonInteractive', () => {
         finalize: vi.fn(),
         flush: vi.fn().mockResolvedValue(undefined),
       });
-      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
-        kind: Kind.Read,
-      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name) =>
+          ({ name, kind: Kind.Read }) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name) => name === ToolNames.GET_GOAL || name === ToolNames.UPDATE_GOAL,
+      );
       const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
       mockCoreExecuteToolCall.mockImplementation(
         async (
@@ -3335,12 +4054,16 @@ describe('runNonInteractive', () => {
             : {}),
         }),
       );
-      const goalToolCall = (callId: string, name: string) => ({
+      const goalToolCall = (
+        callId: string,
+        name: string,
+        args: Record<string, unknown> = {},
+      ) => ({
         type: LlmEventType.ToolCallRequest,
         value: {
           callId,
           name,
-          args: {},
+          args,
           isClientInitiated: false,
           prompt_id: 'p-goal',
           goalContext: permit,
@@ -3351,6 +4074,10 @@ describe('runNonInteractive', () => {
           createStreamFromEvents([
             goalToolCall('shell-1', ToolNames.READ_FILE),
             goalToolCall('goal-read', ToolNames.GET_GOAL),
+            goalToolCall('goal-update-bridged', ToolNames.TOOL_CALL, {
+              name: ToolNames.UPDATE_GOAL,
+              arguments: {},
+            }),
             goalToolCall('shell-failed', ToolNames.SHELL),
           ] as unknown as ServerLlmStreamEvent[]),
         )
@@ -3365,6 +4092,10 @@ describe('runNonInteractive', () => {
       expect(optionsByCallId.get('shell-1')).toEqual({ goalContext: permit });
       // ...while the Goal's own reads stay out of the catalog.
       expect(optionsByCallId.get('goal-read')).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+      expect(optionsByCallId.get('goal-update-bridged')).toEqual({
         goalContext: permit,
         provenance: 'goal_runtime',
       });
@@ -3481,6 +4212,94 @@ describe('runNonInteractive', () => {
       expect(started).toBe(total);
       expect(startOrder).toEqual(['tool-1', 'tool-2', 'tool-3']);
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
+    });
+
+    it('uses deferred target identity for headless bridge concurrency and completion tracking', async () => {
+      setupMetricsMock();
+      const targetName = 'mcp__docs__read';
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === targetName
+            ? { name: targetName, kind: Kind.Read }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name: string) => name === targetName,
+      );
+
+      const total = 2;
+      let started = 0;
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          started += 1;
+          if (started === total) openGate();
+          await gate;
+          const response = {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: ToolNames.TOOL_CALL,
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          };
+          await options.onAllToolCallsComplete?.([
+            {
+              status: 'success',
+              request: {
+                ...request,
+                name: targetName,
+                args: request.args['arguments'],
+              },
+              response,
+              durationMs: 1,
+            } as never,
+          ]);
+          return response;
+        },
+      );
+
+      const bridgeEvents = ['bridge-1', 'bridge-2'].map((callId) => ({
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId,
+          name: ToolNames.TOOL_CALL,
+          args: {
+            name: targetName,
+            arguments: { path: callId },
+          },
+          isClientInitiated: false,
+          prompt_id: 'p-bridge-parallel',
+        },
+      })) as ServerLlmStreamEvent[];
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(bridgeEvents))
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'read both',
+        'p-bridge-parallel',
+      );
+
+      expect(started).toBe(total);
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        targetName,
+        { path: 'bridge-1' },
+      );
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        targetName,
+        { path: 'bridge-2' },
+      );
     });
 
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {
@@ -4370,6 +5189,83 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
 
+  it.each([
+    {
+      label: 'a call denied for approval',
+      approvalRequired: true as const,
+      reason:
+        'Qwen Code requires permission to use "run_shell_command", but that permission was declined (non-interactive mode cannot prompt for confirmation).',
+      expected: 'use the -y flag (YOLO mode)',
+      unexpected: 'was not run',
+    },
+    {
+      label: 'a call blocked by a hook',
+      approvalRequired: undefined,
+      reason: 'no shell today',
+      expected: 'Warning: Tool "run_shell_command" was not run: no shell today',
+      unexpected: 'requires user approval',
+    },
+  ])(
+    'tells the headless user why $label did not run',
+    async ({ approvalRequired, reason, expected, unexpected }) => {
+      setupMetricsMock();
+      const toolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-denied',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-denied',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: 'tool-denied',
+        error: new Error(reason),
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'tool-denied',
+              name: 'run_shell_command',
+              response: { error: reason },
+            },
+          },
+        ],
+        resultDisplay: reason,
+        ...(approvalRequired ? { approvalRequired } : {}),
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Done.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 10 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Run ls',
+        'prompt-id-denied',
+      );
+
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(expected);
+      expect(stderr).not.toContain(unexpected);
+    },
+  );
+
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
     const apiError = new Error('API connection failed: token=secret');
@@ -5186,6 +6082,47 @@ describe('runNonInteractive', () => {
     const errorOutput = stderrCalls.map((call) => call[0]).join('');
     expect(errorOutput).toContain('401');
     expect(errorOutput).toContain('Incorrect API key provided');
+  });
+
+  it('fails stream-json runs when the model stream emits an API error', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const apiErrorEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.Error,
+      value: {
+        error: {
+          message: '429 Too Many Requests',
+          status: 429,
+        },
+      },
+    };
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]).trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { [key: string]: unknown });
+    const results = messages.filter((message) => message['type'] === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('429 Too Many Requests') },
+    });
   });
 
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
@@ -7821,6 +8758,44 @@ describe('runNonInteractive', () => {
       });
     });
 
+    it('reports only the accepted attempt in the structured-output preview', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({ type: 'object' });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned prose' },
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'accepted prose' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Should call structured_output',
+          'prompt-id-preview-retry',
+        ),
+      ).resolves.toBe(1);
+
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      const result = messages.find(
+        (message: { type?: string }) => message.type === 'result',
+      );
+      expect(result.error.message).toContain('accepted prose');
+      expect(result.error.message).not.toContain('abandoned prose');
+    });
+
     it('synthesises tool_result for suppressed sibling calls when structured_output fails validation', async () => {
       // Same-turn batch: [side_effect_tool, structured_output(bad)]. The
       // pre-scan suppresses the side_effect_tool; structured_output then
@@ -8615,5 +9590,145 @@ describe('runNonInteractive', () => {
         await fs.rm(realTmpDir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('formatGoalState', () => {
+  const goalSnapshot = (
+    overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+  ): GoalSnapshotV2 => ({
+    v: 2,
+    activity: 'idle',
+    goal: {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the release notes',
+      status: 'active',
+      evidenceCursor: { recordId: null },
+      turnCount: 0,
+      activeTimeMs: 0,
+      tokensUsed: 0,
+      createdAt: 0,
+      updatedAt: 0,
+      ...overrides,
+    },
+  });
+
+  it('shows budgets on a stopped Goal in the usage order', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'paused',
+          turnCount: 3,
+          turnBudget: 20,
+          activeTimeMs: 723_000,
+          activeTimeBudgetMs: 1_800_000,
+          tokensUsed: 1234,
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal paused: ship the release notes\nUsage: 3 of 20 turns · 12m 3s of 30m active · 1,234 tokens',
+    );
+  });
+
+  it('does not add active time without a budget', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 1, activeTimeMs: 723_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 1 turn');
+  });
+
+  it('hides budgets before any usage', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnBudget: 20, activeTimeBudgetMs: 1_800_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes');
+  });
+
+  it('reports turns and spend against the budget', () => {
+    // Spelled out rather than abbreviated: this output is read in a terminal
+    // and piped into scripts, neither of which is helped by `1.2k`.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          turnCount: 3,
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal active: ship the release notes\nUsage: 3 turns · 1,234 of 30,000,000 tokens',
+    );
+  });
+
+  it('reports spend alone when the Goal has no budget', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 1, tokensUsed: 900 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 1 turn · 900 tokens');
+  });
+
+  it('omits the spend it has none of', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 2, tokenBudget: 30_000_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 2 turns');
+  });
+
+  it('says nothing about usage for a Goal that has not run', () => {
+    expect(formatGoalState(goalSnapshot(), 'status')).toBe(
+      'Goal active: ship the release notes',
+    );
+  });
+
+  it('keeps the stop reason below the usage line', () => {
+    // The reason is why the Goal is where it is; the figures are context for
+    // it, so they read first.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'paused',
+          turnCount: 3,
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+          lastReason: 'Paused with /goal pause.',
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal paused: ship the release notes\nUsage: 3 turns · 1,234 of 30,000,000 tokens\nReason: Paused with /goal pause.',
+    );
+  });
+
+  it('writes no control sequence from a stop reason to stdout', () => {
+    // A pause reason can embed a raw provider error.
+    const output = formatGoalState(
+      goalSnapshot({
+        status: 'paused',
+        lastReason: 'paused\r\u001b]52;c;ZXh0cmFjdGVk\u0007 by user',
+      }),
+      'status',
+    );
+
+    expect(output).toContain('Reason: paused');
+    expect(output).not.toContain('\r');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('\u0007');
+  });
+
+  it('has no usage to report for a cleared Goal', () => {
+    expect(
+      formatGoalState({ v: 2, activity: 'idle', goal: null }, 'clear'),
+    ).toBe('Goal cleared.');
   });
 });

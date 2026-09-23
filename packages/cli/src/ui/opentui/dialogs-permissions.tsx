@@ -28,6 +28,7 @@ import { SettingScope } from '../../config/settings.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
+import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { matchesSearchQuery } from './dialogs-core.js';
 import {
   DialogFrame,
@@ -211,17 +212,31 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   } = props;
 
   const tabs = getPermissionsTabs();
-  const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const {
+    cursor: activeTabIndex,
+    cursorRef: tabIndexRef,
+    setCursor: setActiveTabIndex,
+  } = useBatchSafeCursor();
   const activeTab = tabs[activeTabIndex]!;
   const [view, setView] = useState<PermissionsView>('rule-list');
   const [searchQuery, setSearchQuery] = useState('');
-  const [newRuleInput, setNewRuleInput] = useState('');
+  // Enter lands in the same burst as the characters typed into the field, so
+  // the handler submits the ref rather than the pre-burst render value.
+  const {
+    value: newRuleInput,
+    ref: newRuleInputRef,
+    setValue: setNewRuleInput,
+  } = useBatchSafeState('');
   const [ruleInputError, setRuleInputError] = useState('');
   const [pendingRuleText, setPendingRuleText] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<PermissionRuleEntry | null>(
     null,
   );
-  const [newDirInput, setNewDirInput] = useState('');
+  const {
+    value: newDirInput,
+    ref: newDirInputRef,
+    setValue: setNewDirInput,
+  } = useBatchSafeState('');
   const [dirInputError, setDirInputError] = useState('');
   const [removeDirTarget, setRemoveDirTarget] = useState<string | null>(null);
 
@@ -308,7 +323,8 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   });
 
   const cycleTab = (direction: 1 | -1) => {
-    const newIndex = (activeTabIndex + direction + tabs.length) % tabs.length;
+    const newIndex =
+      (tabIndexRef.current + direction + tabs.length) % tabs.length;
     setActiveTabIndex(newIndex);
     setSearchQuery('');
     const newTab = tabs[newIndex]!;
@@ -354,7 +370,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         return;
       }
       if (name === 'return') {
-        const trimmed = newRuleInput.trim();
+        const trimmed = newRuleInputRef.current.trim();
         if (!trimmed) return;
         const rule = parseRule(trimmed);
         if (rule.invalid) {
@@ -371,11 +387,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         return;
       }
       if (name === 'backspace') {
-        setNewRuleInput((v) => v.slice(0, -1));
+        setNewRuleInput(newRuleInputRef.current.slice(0, -1));
         return;
       }
       if (!ctrl && original.sequence.length === 1 && original.sequence >= ' ') {
-        setNewRuleInput((v) => v + original.sequence);
+        setNewRuleInput(newRuleInputRef.current + original.sequence);
         setRuleInputError('');
       }
       return;
@@ -423,8 +439,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         // ink's handleAddDirSubmit returns early on empty input — the user
         // stays in the form instead of silently dropping back to the list
         // (validateWorkspaceDirectory's empty-input sentinel is falsy).
-        if (!newDirInput.trim()) return;
-        const result = validateWorkspaceDirectory(newDirInput, directories);
+        if (!newDirInputRef.current.trim()) return;
+        const result = validateWorkspaceDirectory(
+          newDirInputRef.current,
+          directories,
+        );
         if (result.error) {
           setDirInputError(result.error);
           return;
@@ -436,11 +455,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         return;
       }
       if (name === 'backspace') {
-        setNewDirInput((v) => v.slice(0, -1));
+        setNewDirInput(newDirInputRef.current.slice(0, -1));
         return;
       }
       if (!ctrl && original.sequence.length === 1 && original.sequence >= ' ') {
-        setNewDirInput((v) => v + original.sequence);
+        setNewDirInput(newDirInputRef.current + original.sequence);
         if (dirInputError) setDirInputError('');
       }
       return;
@@ -589,10 +608,12 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
               'Permission rules are a tool name, optionally followed by a specifier in parentheses.',
             )}
           </text>
-          <text fg={C.text}>
-            {t('e.g.,')} <text attributes={1}>WebFetch</text> {t('or')}{' '}
+          <box flexDirection="row">
+            <text fg={C.text}>{`${t('e.g.,')} `}</text>
+            <text attributes={1}>WebFetch</text>
+            <text fg={C.text}>{` ${t('or')} `}</text>
             <text attributes={1}>Bash(ls:*)</text>
-          </text>
+          </box>
           <box height={1} />
           <box borderStyle="rounded" borderColor={C.dim} paddingX={1}>
             <text fg={newRuleInput ? C.text : C.dim}>
@@ -637,9 +658,9 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onHover={scopeList.setActiveIndex}
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
-              <text fg={titleColor}>
-                {item.label} <text fg={C.dim}>{item.description}</text>
-              </text>
+              <text
+                fg={titleColor}
+              >{`${item.label}    ${item.description}`}</text>
             )}
           />
         </DialogFrame>

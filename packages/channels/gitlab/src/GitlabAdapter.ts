@@ -5,7 +5,10 @@ import type {
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
-import { PollingChannelBase } from '@qwen-code/channel-base';
+import {
+  lowercaseGroupAllowedUsers,
+  PollingChannelBase,
+} from '@qwen-code/channel-base';
 import { Gitlab, type TodoSchema } from '@gitbeaker/rest';
 import { z } from 'zod';
 import { testBotMention, stripBotMention } from './mention.js';
@@ -99,6 +102,10 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     );
     this.config.allowedUsers = allowed;
     this.gate.replaceAllowedUsers(allowed);
+    lowercaseGroupAllowedUsers(this.config.groups);
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
 
     this.startPollLoop();
   }
@@ -353,12 +360,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       ),
       true,
     );
-    const isMentionTrigger =
-      todo.action_name === 'mentioned' ||
-      todo.action_name === 'directly_addressed';
-    if (!isNoteMention && !isMentionTrigger) {
-      envelope.bypassMessagePrefix = true;
-    }
 
     if (isNoteMention) {
       this.reactions.set(messageId, {

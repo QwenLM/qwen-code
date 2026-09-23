@@ -15,6 +15,7 @@ import {
   daemonBlockToPlainText,
   daemonUiEventToTerminalText,
   estimateDaemonTranscriptBlockBytes,
+  extractTranscriptTiming,
   getOutputText,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
@@ -840,40 +841,54 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks[3]).not.toHaveProperty('usage');
   });
 
-  it('deduplicates legacy sub-agent usage repeated after its execution summary', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        { type: 'user.text.delta', text: 'question' },
-        { type: 'assistant.text.delta', text: 'delegating' },
-        {
-          type: 'tool.update',
-          toolCallId: 'sub-1',
-          status: 'completed',
-          sourceRecordIds: ['subagent-result'],
-          rawOutput: {
-            executionSummary: {
+  it.each([
+    [undefined, true],
+    [undefined, false],
+    ['sub-1', true],
+    ['sub-1', false],
+  ] as const)(
+    'deduplicates persisted sub-agent usage (parent=%s, retain=%s)',
+    (parentToolCallId, retainSubagentBlocks) => {
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1, retainSubagentBlocks }),
+        [
+          { type: 'user.text.delta', text: 'question' },
+          { type: 'assistant.text.delta', text: 'delegating' },
+          {
+            type: 'tool.update',
+            toolCallId: 'sub-1',
+            status: 'completed',
+            sourceRecordIds: ['subagent-result'],
+            rawOutput: {
+              executionSummary: {
+                inputTokens: 5000,
+                outputTokens: 800,
+                cachedTokens: 4500,
+              },
+            },
+          },
+          {
+            type: 'assistant.usage',
+            ...(parentToolCallId ? { parentToolCallId } : {}),
+            usage: {
               inputTokens: 5000,
               outputTokens: 800,
               cachedTokens: 4500,
             },
+            sourceRecordIds: ['subagent-result'],
           },
-        },
-        {
-          type: 'assistant.usage',
-          usage: {
-            inputTokens: 5000,
-            outputTokens: 800,
-            cachedTokens: 4500,
-          },
-          sourceRecordIds: ['subagent-result'],
-        },
-      ],
-      { now: 2 },
-    );
+        ],
+        { now: 2 },
+      );
 
-    expect(state.blocks[1]).not.toHaveProperty('usage');
-  });
+      expect(state.blocks[1]).not.toHaveProperty('usage');
+      expect(state.blocks[2]).toHaveProperty('rawOutput.executionSummary', {
+        inputTokens: 5000,
+        outputTokens: 800,
+        cachedTokens: 4500,
+      });
+    },
+  );
 
   it('keeps sub-agent usage in the parent turn total by default', () => {
     const state = reduceDaemonTranscriptEvents(
@@ -1022,13 +1037,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
       id: 23,
       v: 1,
       type: 'session_closed',
-      data: { reason: 'idle timeout' },
+      data: { reason: 'idle_timeout' },
     });
 
     expect(events).toMatchObject([
       {
         type: 'status',
-        text: 'Session closed: idle timeout',
+        text: 'Session closed after idle timeout',
       },
     ]);
   });
@@ -2436,14 +2451,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: { reason: 'slow' },
       }),
     ).toMatchObject([{ type: 'error', recoverable: true, text: 'slow' }]);
-    expect(
-      normalizeDaemonEvent({
-        id: 54,
-        v: 1,
-        type: 'slow_client_warning',
-        data: {},
-      }),
-    ).toMatchObject([{ type: 'status', text: 'SSE stream is lagging' }]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(
+        normalizeDaemonEvent({
+          id: 54,
+          v: 1,
+          type: 'slow_client_warning',
+          data: { queueSize: 200, maxQueued: 256 },
+        }),
+      ).toEqual([]);
+      expect(warn).toHaveBeenCalledWith('[daemon-ui] SSE stream is lagging', {
+        queueSize: 200,
+        maxQueued: 256,
+      });
+    } finally {
+      warn.mockRestore();
+    }
     expect(
       normalizeDaemonEvent({
         id: 55,
@@ -5363,6 +5387,129 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     ).toEqual({ kind: 'text', text: 'visible' });
     expect(
       createDaemonToolResultPreview(undefined, content('x'.repeat(100_001))),
+    ).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    'retains structured shell metadata while bounding large preview text: %s',
+    (large) => {
+      const text = large ? 'output '.repeat(100_000) : '';
+      const result = {
+        type: 'shell_result',
+        version: 1,
+        text,
+        output: text,
+        directory: '/workspace',
+        exitCode: null,
+        signal: 15,
+        pid: 42,
+        error: large ? 'error '.repeat(30_000) : null,
+        outcome: 'cancelled',
+        notices: ['Cancelled by user', text],
+        truncated: false,
+        outputFiles: ['/tmp/output.log'],
+      };
+      const preview = createDaemonToolResultPreview({
+        ...result,
+        internalPayload: 'x'.repeat(200_000),
+      });
+      expect(preview).not.toHaveProperty('result.internalPayload');
+      expect(preview?.kind).toBe('shell_result');
+      if (preview?.kind !== 'shell_result')
+        throw new Error('Missing shell preview');
+      expect(preview.result).toMatchObject({
+        type: 'shell_result',
+        version: 1,
+        directory: '/workspace',
+        exitCode: null,
+        signal: 15,
+        pid: 42,
+        outcome: 'cancelled',
+        notices: ['Cancelled by user', expect.any(String)],
+        truncated: large,
+        outputFiles: ['/tmp/output.log'],
+      });
+      const retainedText = [
+        preview.result.text,
+        preview.result.output,
+        preview.result.error ?? '',
+        ...preview.result.notices,
+        preview.result.directory,
+        ...preview.result.outputFiles,
+      ].join('');
+      expect(retainedText.length).toBeLessThanOrEqual(100_000);
+      if (large) {
+        expect(preview.result.output.length).toBeGreaterThan(0);
+        expect(preview.result.output.length).toBeLessThan(text.length);
+        expect(text.startsWith(preview.result.output)).toBe(true);
+      } else {
+        expect(preview.result).toEqual(result);
+      }
+      expect(result.truncated).toBe(false);
+      expect(result.output).toBe(text);
+    },
+  );
+
+  it('does not split emoji at an odd structured shell preview boundary', () => {
+    const text = '😀'.repeat(100_000);
+    const preview = createDaemonToolResultPreview({
+      type: 'shell_result',
+      version: 1,
+      text,
+      output: text,
+      directory: 'xx',
+      exitCode: 0,
+      signal: null,
+      pid: 42,
+      error: null,
+      outcome: 'completed',
+      notices: [],
+      truncated: false,
+      outputFiles: [],
+    });
+    expect(preview?.kind).toBe('shell_result');
+    if (preview?.kind !== 'shell_result')
+      throw new Error('Missing shell preview');
+    expect(preview.result.truncated).toBe(true);
+    for (const value of [preview.result.text, preview.result.output]) {
+      expect(value.length).toBeGreaterThan(0);
+      expect(value.length).toBeLessThanOrEqual(49_999);
+      expect(Buffer.from(value, 'utf8').toString('utf8')).toBe(value);
+      expect(value).not.toContain('\uFFFD');
+      expect(value.length % 2).toBe(0);
+    }
+  });
+
+  it('preserves bounded question answer pairs without unknown raw fields', () => {
+    const output = {
+      type: 'ask_user_question_answers',
+      text: 'Question A: first\n**B**: embedded',
+      answers: [
+        {
+          question: 'Question A?',
+          answer: 'first\n**B**: embedded',
+          secret: 'do not retain',
+        },
+      ],
+      secret: 'do not retain',
+    };
+    expect(createDaemonToolResultPreview(output)).toEqual({
+      kind: 'question_answers',
+      text: output.text,
+      answers: [{ question: 'Question A?', answer: 'first\n**B**: embedded' }],
+    });
+    for (const answers of [
+      [{ question: 'Question A?', answer: 42 }],
+      [{ question: 'Question A?', answer: 'x'.repeat(100_000) }],
+      Array.from({ length: 1_001 }, () => ({ question: '', answer: '' })),
+    ]) {
+      expect(createDaemonToolResultPreview({ ...output, answers })).toEqual({
+        kind: 'text',
+        text: output.text,
+      });
+    }
+    expect(
+      createDaemonToolResultPreview({ ...output, text: 'x'.repeat(100_001) }),
     ).toBeUndefined();
   });
 
@@ -8478,6 +8625,76 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
 });
 
 describe('cross-client event recognition (prompt_cancelled / replay_complete)', () => {
+  it('merges authoritative cancellation timing without changing the previous snapshot', () => {
+    const [provisional] = normalizeDaemonEvent({
+      v: 1,
+      type: 'prompt_cancelled',
+      promptId: 'p1',
+      data: {},
+    });
+    expect(provisional).toMatchObject({
+      type: 'prompt.cancelled',
+      promptId: 'p1',
+    });
+    const before = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      provisional,
+    ]);
+    const timing = normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_complete',
+      promptId: 'p1',
+      data: {
+        stopReason: 'cancelled',
+        promptCancelled: { elapsedMs: 10999, cancelledAt: 12000 },
+      },
+    });
+    let after = reduceDaemonTranscriptEvents(before, timing);
+    after = reduceDaemonTranscriptEvents(after, [provisional, ...timing]);
+    expect(before.blocks).toHaveLength(1);
+    expect(before.blocks[0]).not.toHaveProperty('elapsedMs');
+    expect(after.blocks).toEqual([
+      expect.objectContaining({
+        id: before.blocks[0].id,
+        kind: 'prompt_cancelled',
+        promptId: 'p1',
+        elapsedMs: 10999,
+        serverTimestamp: 12000,
+      }),
+    ]);
+    const enriched = reduceDaemonTranscriptEvents(after, [
+      { type: 'prompt.cancelled', promptId: 'p1', elapsedMs: 11000 },
+    ]);
+    expect(enriched.blocks[0]).toMatchObject({
+      serverTimestamp: 12000,
+      elapsedMs: 11000,
+    });
+    expect(after.blocks[0]).toMatchObject({ elapsedMs: 10999 });
+    after = reduceDaemonTranscriptEvents(after, [
+      { ...timing[0], promptId: 'p2' },
+    ]);
+    expect(after.blocks).toHaveLength(2);
+  });
+
+  it.each([
+    { elapsedMs: -1, cancelledAt: 12000 },
+    { elapsedMs: NaN, cancelledAt: 12000 },
+    { elapsedMs: 1000, cancelledAt: Infinity },
+    { elapsedMs: '1000', cancelledAt: 12000 },
+    undefined,
+  ])(
+    'ignores malformed or legacy cancellation timing %j',
+    (promptCancelled) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'p1',
+          data: { stopReason: 'cancelled', promptCancelled },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes prompt_cancelled to prompt.cancelled (not debug)', () => {
     const events = normalizeDaemonEvent({
       id: 1,
@@ -8494,6 +8711,34 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
     ]);
     // No reason for a plain user cancel.
     expect(events[0]).not.toHaveProperty('reason');
+  });
+
+  it('uses the persisted cancellation identity when replayed during another prompt', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      promptId: 'current-prompt',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            promptCancelled: {
+              promptId: 'cancelled-prompt',
+              cancelledAt: 1000,
+              elapsedMs: 0,
+            },
+          },
+        },
+      },
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'prompt.cancelled',
+        promptId: 'cancelled-prompt',
+        elapsedMs: 0,
+      }),
+    ]);
   });
 
   it('forwards the prompt_cancelled reason (C3 forward_failed)', () => {
@@ -9247,73 +9492,85 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(state.blocks[1]).not.toHaveProperty('content');
   });
 
-  it('preserves accumulated subagent usage when completed rawOutput has lower totals', () => {
-    let state = createDaemonTranscriptState({
-      now: 1,
-      retainSubagentBlocks: false,
-    });
+  it.each([
+    { inputTokens: 1000, outputTokens: 200, cachedTokens: 100 },
+    { outputTokens: 200 },
+  ])(
+    'preserves accumulated usage after a lower or partial persisted aggregate: %j',
+    (summary) => {
+      let state = createDaemonTranscriptState({
+        now: 1,
+        retainSubagentBlocks: false,
+      });
 
-    state = reduceDaemonTranscriptEvents(state, [
-      {
-        type: 'tool.update',
-        toolCallId: 'agent-task-B',
-        toolName: 'agent',
-        status: 'running',
-        rawOutput: { type: 'task_execution', status: 'running' },
-      },
-      {
-        type: 'assistant.usage',
-        usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
-        parentToolCallId: 'agent-task-B',
-      },
-    ] as DaemonUiEvent[]);
-
-    expect(state.blocks[0]).toMatchObject({
-      kind: 'tool',
-      rawOutput: {
-        executionSummary: {
-          inputTokens: 5000,
-          outputTokens: 800,
-          cachedTokens: 200,
-          totalTokens: 5800,
+      state = reduceDaemonTranscriptEvents(state, [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-B',
+          toolName: 'agent',
+          status: 'running',
+          rawOutput: { type: 'task_execution', status: 'running' },
         },
-      },
-    });
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
+          parentToolCallId: 'agent-task-B',
+        },
+      ] as DaemonUiEvent[]);
 
-    state = reduceDaemonTranscriptEvents(state, [
-      {
-        type: 'tool.update',
-        toolCallId: 'agent-task-B',
-        toolName: 'agent',
+      expect(state.blocks[0]).toMatchObject({
+        kind: 'tool',
+        rawOutput: {
+          executionSummary: {
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 200,
+            totalTokens: 5800,
+          },
+        },
+      });
+
+      state = reduceDaemonTranscriptEvents(state, [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-B',
+          toolName: 'agent',
+          status: 'completed',
+          sourceRecordIds: ['result-B'],
+          rawOutput: {
+            type: 'task_execution',
+            status: 'completed',
+            executionSummary: summary,
+          },
+        },
+        {
+          type: 'assistant.usage',
+          parentToolCallId: 'agent-task-B',
+          sourceRecordIds: ['result-B'],
+          usage: {
+            inputTokens: summary.inputTokens ?? 0,
+            outputTokens: summary.outputTokens,
+            cachedTokens: summary.cachedTokens ?? 0,
+          },
+        },
+      ] as DaemonUiEvent[]);
+
+      expect(state.blocks[0]).toMatchObject({
+        kind: 'tool',
         status: 'completed',
         rawOutput: {
           type: 'task_execution',
           status: 'completed',
           executionSummary: {
-            inputTokens: 0,
-            outputTokens: 0,
-            cachedTokens: 0,
-            totalTokens: 0,
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 200,
+            totalTokens: 5800,
           },
         },
-      },
-    ] as DaemonUiEvent[]);
-
-    expect(state.blocks[0]).toMatchObject({
-      kind: 'tool',
-      status: 'completed',
-      rawOutput: {
-        type: 'task_execution',
-        status: 'completed',
-        executionSummary: {
-          inputTokens: 5000,
-          outputTokens: 800,
-          cachedTokens: 200,
-          totalTokens: 5800,
-        },
-      },
-    });
-  });
+      });
+    },
+  );
 
   it('keeps merged subagent totals consistent without mutating the event', () => {
     let state = createDaemonTranscriptState({
@@ -10192,5 +10449,526 @@ describe('parallel subAgent text interleaving fix', () => {
         },
       ]);
     }
+  });
+});
+
+describe('subagent session readiness', () => {
+  it.each([true, false])(
+    'updates a started agent from meta-only readiness with compact=%s',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (sessionUpdate: string, subagentSessionReady: boolean) => {
+        state = reduceDaemonTranscriptEvents(
+          state,
+          normalizeDaemonEvent({
+            id: subagentSessionReady ? 2 : 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate,
+                toolCallId: 'agent-1',
+                ...(sessionUpdate === 'tool_call'
+                  ? { title: 'Review changes', status: 'in_progress' }
+                  : {}),
+                _meta: { toolName: 'agent', subagentSessionReady },
+              },
+            },
+          }),
+        );
+      };
+      apply('tool_call', false);
+      expect(state.blocks).toMatchObject([{ subagentSessionReady: false }]);
+      const id = state.blocks[0].id;
+      apply('tool_call_update', true);
+      expect(state.blocks).toHaveLength(1);
+      expect(state.blocks[0]).toMatchObject({
+        id,
+        toolCallId: 'agent-1',
+        title: 'Review changes',
+        status: 'in_progress',
+        subagentSessionReady: true,
+      });
+    },
+  );
+
+  it.each([true, false])(
+    'retains readiness through compact=%s and partial updates',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        now: 1,
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (update: Record<string, unknown>) => {
+        const events = normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'agent-1',
+              ...update,
+            },
+          },
+        });
+        state = reduceDaemonTranscriptEvents(state, events);
+      };
+      apply({
+        toolName: 'agent',
+        _meta: { subagentSessionReady: false, phase: 'preparing' },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({ rawOutput: { type: 'task_execution', status: 'running' } });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({
+        rawOutput: { type: 'task_execution', subagentSessionReady: true },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: true });
+      apply({ _meta: { subagentSessionReady: false } });
+      apply({ status: 'failed' });
+      expect(state.blocks[0]).toMatchObject({
+        subagentSessionReady: true,
+        status: 'failed',
+      });
+    },
+  );
+
+  it.each([undefined, 'false', 0])(
+    'does not interpret legacy or invalid readiness %s as creating',
+    (value) => {
+      const events = normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'legacy',
+            toolName: 'agent',
+            _meta: { subagentSessionReady: value },
+          },
+        },
+      });
+      expect(events[0]).not.toHaveProperty('subagentSessionReady');
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        events,
+      );
+      expect(state.blocks[0]).not.toHaveProperty('subagentSessionReady');
+    },
+  );
+});
+
+describe('background completion status', () => {
+  it('does not start a model stream for a completed task waiting in the queue', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      id: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Explore completed' },
+          _meta: {
+            source: 'background_task_completed',
+            backgroundTask: {
+              taskId: 'task-1',
+              kind: 'agent',
+              status: 'completed',
+            },
+          },
+        },
+      },
+    });
+    expect(events).toMatchObject([
+      {
+        type: 'status',
+        source: 'background_task_completed',
+        data: { taskId: 'task-1' },
+      },
+    ]);
+    expect(events.some((event) => event.type === 'assistant.text.delta')).toBe(
+      false,
+    );
+  });
+});
+
+it('retains automatic execution provenance on a tool-first replay', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: { backgroundTurn },
+      },
+    },
+  });
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    events,
+  );
+  expect(state.blocks[0]).toMatchObject({
+    kind: 'tool',
+    promptId: 'auto-1',
+    backgroundTurn,
+  });
+});
+
+it('ignores malformed background provenance without coercing untrusted kind values', () => {
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: {
+          backgroundTurn: {
+            turnId: 'auto-1',
+            taskId: 'task-1',
+            kind: Object.create(null),
+            startedAt: 100,
+          },
+        },
+      },
+    },
+  });
+  expect(events).not.toHaveLength(0);
+  for (const event of events)
+    expect(event).not.toHaveProperty('backgroundTurn');
+});
+
+it('retains background execution identity on permission-first updates', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'permission_request',
+    promptId: 'auto-1',
+    data: {
+      requestId: 'permission-1',
+      backgroundTurn,
+      request: {
+        toolCall: { toolCallId: 'tool-1', title: 'Read file' },
+        options: [],
+      },
+    },
+  });
+  expect(events[0]).toMatchObject({ backgroundTurn });
+});
+
+it('ignores background execution descriptors with a negative start time', () => {
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: {
+          backgroundTurn: {
+            turnId: 'auto-1',
+            taskId: 'task-1',
+            kind: 'agent',
+            startedAt: -1,
+          },
+        },
+      },
+    },
+  });
+  expect(events[0]).not.toHaveProperty('backgroundTurn');
+});
+
+it('projects an automatic start as lifecycle status without assistant text', () => {
+  const backgroundTurn = {
+    turnId: 'auto',
+    taskId: 'task',
+    kind: 'agent',
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Worker label' },
+        _meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn,
+          qwenDiscreteMessage: true,
+        },
+      },
+    },
+  });
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    type: 'status',
+    source: 'background_notification_turn_started',
+    backgroundTurn,
+  });
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    events,
+  );
+  expect(state.blocks[0]).toMatchObject({ kind: 'status', backgroundTurn });
+  expect(state.activeAssistantBlockId).toBeUndefined();
+});
+
+it.each(['background_task_completed', 'background_notification_turn_started'])(
+  'keeps text after %s in a separate block',
+  (source) => {
+    const chunk = (text: string, id: number, meta?: Record<string, unknown>) =>
+      normalizeDaemonEvent({
+        v: 1,
+        id,
+        type: 'session_update',
+        promptId: 'prompt-1',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            ...(meta ? { _meta: meta } : {}),
+          },
+        },
+      });
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      ...chunk('A', 1),
+      ...chunk('marker', 2, { source }),
+      ...chunk('B', 3),
+    ]);
+    expect(
+      state.blocks.map((block) => [
+        block.kind,
+        'text' in block ? block.text : undefined,
+      ]),
+    ).toEqual([
+      ['assistant', 'A'],
+      ['status', 'marker'],
+      ['assistant', 'B'],
+    ]);
+  },
+);
+
+it('retains the same background text execution ID for live and replay events', () => {
+  const backgroundTurn = {
+    turnId: 'automatic',
+    taskId: 'task',
+    kind: 'agent',
+    startedAt: 100,
+  };
+  const event = {
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Result' },
+        _meta: { backgroundTurn },
+      },
+    },
+  } as const;
+  for (const promptId of [backgroundTurn.turnId, undefined]) {
+    const events = normalizeDaemonEvent({
+      ...event,
+      ...(promptId ? { promptId } : {}),
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(events[0]).toMatchObject({
+      promptId: backgroundTurn.turnId,
+      backgroundTurn,
+    });
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'Result',
+      promptId: backgroundTurn.turnId,
+    });
+  }
+  expect(
+    normalizeDaemonEvent({ ...event, promptId: 'explicit' })[0],
+  ).toMatchObject({ promptId: 'explicit' });
+});
+
+describe('transcript timing frames', () => {
+  const TIMING_FRAME = {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      timing: {
+        kind: 'request',
+        status: 'ok',
+        durationMs: 6544,
+        ttftMs: 2344,
+        startedAt: 1_760_000_000_000,
+        responseId: 'chatcmpl-abc',
+        promptId: 'session-1########0',
+        model: 'qwen3.8-max',
+      },
+    },
+  };
+
+  it('normalizes a timing frame to no UI events', () => {
+    // Existing clients must stay unaffected by the new frame: it carries no
+    // text and no usage, so the normalizer has nothing to surface.
+    expect(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { update: TIMING_FRAME },
+      } as never),
+    ).toEqual([]);
+  });
+
+  it('reads a request timing frame', () => {
+    expect(extractTranscriptTiming(TIMING_FRAME)).toEqual({
+      kind: 'request',
+      status: 'ok',
+      durationMs: 6544,
+      ttftMs: 2344,
+      startedAt: 1_760_000_000_000,
+      responseId: 'chatcmpl-abc',
+      promptId: 'session-1########0',
+      model: 'qwen3.8-max',
+    });
+  });
+
+  it('reads a tool timing frame', () => {
+    expect(
+      extractTranscriptTiming({
+        ...TIMING_FRAME,
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            toolName: 'read_file',
+            toolStatus: 'success',
+            responseId: 'chatcmpl-abc',
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'tool',
+      durationMs: 16,
+      callId: 'call-1',
+      toolName: 'read_file',
+      toolStatus: 'success',
+      responseId: 'chatcmpl-abc',
+    });
+  });
+
+  it.each([
+    ['a plain assistant chunk', { sessionUpdate: 'agent_message_chunk' }],
+    ['a usage frame', { _meta: { usage: { inputTokens: 1 } } }],
+    ['a non-object update', 'nope'],
+    ['a non-object timing', { _meta: { timing: 'nope' } }],
+    ['an unknown kind', { _meta: { timing: { kind: 'x', durationMs: 1 } } }],
+    ['a missing duration', { _meta: { timing: { kind: 'tool' } } }],
+    [
+      'a non-numeric duration',
+      { _meta: { timing: { kind: 'tool', durationMs: '16' } } },
+    ],
+  ])('returns nothing for %s', (_label, update) => {
+    expect(extractTranscriptTiming(update)).toBeUndefined();
+  });
+
+  it('keeps the start time a tool frame carries', () => {
+    // The producer only sends one the session recorded, never a derived one.
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: 1_760_000_000_000,
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'tool',
+      durationMs: 16,
+      callId: 'call-1',
+      startedAt: 1_760_000_000_000,
+    });
+  });
+
+  it('drops a tool start time that is not a finite number', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: '1760000000000',
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
+  });
+
+  it('rejects a negative duration', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: { timing: { kind: 'request', durationMs: -1 } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('drops a negative TTFT but keeps the frame', () => {
+    const timing = extractTranscriptTiming({
+      _meta: { timing: { kind: 'request', durationMs: 10, ttftMs: -5 } },
+    });
+
+    expect(timing).toEqual({ kind: 'request', durationMs: 10 });
+  });
+
+  it('drops fields that do not belong to the frame kind', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            // Request-only fields on a tool frame, and a bad tool status.
+            ttftMs: 100,
+            status: 'ok',
+            toolStatus: 'timed_out',
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
   });
 });

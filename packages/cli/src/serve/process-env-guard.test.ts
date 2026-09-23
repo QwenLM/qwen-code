@@ -38,7 +38,7 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
-    'packages/acp-bridge/src/bridge.ts',
+    'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
       accesses: { 'key:QWEN_SERVE_DEBUG': 1 },
@@ -215,8 +215,10 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/serve-token.ts',
     {
       reason:
-        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
-      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
+        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN; ' +
+        'the remote-bind resolver reads the same variable so the generation ' +
+        'decision distinguishes an absent source from an explicitly empty one.',
+      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 2 },
     },
   ],
   [
@@ -235,7 +237,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
         'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move; its access surface is unchanged.',
+        'leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
         'key:BUILD_SANDBOX': 2,
@@ -280,6 +282,15 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:no_proxy': 2,
         whole: 6,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-git-branches.ts',
+    {
+      reason:
+        "The git error redaction mirrors the daemon process's own HOME/" +
+        'XDG_CONFIG_HOME to label the inherited config paths git echoes.',
+      accesses: { 'key:HOME': 1, 'key:XDG_CONFIG_HOME': 1 },
     },
   ],
   [

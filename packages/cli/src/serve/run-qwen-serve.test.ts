@@ -7,13 +7,22 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { X509Certificate } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createHash, X509Certificate } from 'node:crypto';
+import { createServer, request as httpRequest } from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import * as tls from 'node:tls';
-import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
+import type { ChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from 'vitest';
 import express from 'express';
 import {
   createLazyBridgeProxy,
@@ -36,7 +45,10 @@ import {
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import * as nativeDirectoryPicker from './native-directory-picker.js';
 import * as localPathOpen from './local-path-open.js';
-import { loadServeFastPathEnvironment } from './fast-path-settings.js';
+import {
+  loadServeFastPathEnvironment,
+  resetServeFastPathHomeEnvBootstrapForTesting,
+} from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
@@ -58,8 +70,11 @@ import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import * as pemCertificateBlocks from './pem-certificate-blocks.js';
 import * as webShellResolver from './web-shell-resolver.js';
 import * as webShellStatic from './web-shell-static.js';
@@ -82,9 +97,15 @@ import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import {
   workspaceRegistrationId,
-  type WorkspaceRegistrationStore,
+  WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import {
+  ENSURE_KEEP_ALIVE_MS,
+  WorkspaceRuntimeCoordinator,
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from './workspace-runtime-coordinator.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
@@ -566,6 +587,7 @@ it('restores the Conversations runtime for a persisted scheduled task', async ()
     .spyOn(scheduledTaskKeepalive, 'startScheduledTaskKeepalive')
     .mockReturnValue({
       stop: vi.fn(),
+      activeWork: false,
       tick: vi.fn().mockResolvedValue(undefined),
     });
   vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
@@ -660,6 +682,7 @@ it('marks only the live-conversation bridge with the Conversations provenance en
     'startScheduledTaskKeepalive',
   ).mockReturnValue({
     stop: vi.fn(),
+    activeWork: false,
     tick: vi.fn().mockResolvedValue(undefined),
   });
   const createBridge = vi
@@ -733,6 +756,315 @@ it('marks only the live-conversation bridge with the Conversations provenance en
   }
 });
 
+it.each([
+  ['chat', false],
+  ['image', false],
+  ['voice', false],
+  ['image', true],
+] as const)(
+  'preserves saved %s configuration through the provider HTTP installer (environment auth: %s)',
+  async (purpose, environmentAuth) => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qws-provider-reconnect-'),
+    );
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    fs.mkdirSync(home);
+    fs.mkdirSync(workspace);
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, '');
+    }
+    if (environmentAuth) {
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'OPENAI_API_KEY=environment-chat-key\nOPENAI_MODEL=environment-chat\nOPENAI_BASE_URL=https://chat.example/v1\n',
+      );
+    }
+    vi.stubEnv('QWEN_HOME', home);
+    const baseUrl = 'https://media.example/v1';
+    const id = purpose === 'voice' ? 'qwen3-asr-flash' : `${purpose}-model`;
+    const envKey =
+      qwenCore.generateCustomEnvKey(qwenCore.AuthType.USE_OPENAI, baseUrl) +
+      (purpose === 'chat' ? '' : `_${purpose.toUpperCase()}`);
+    vi.stubEnv(envKey, 'before');
+    const model = {
+      id,
+      baseUrl,
+      envKey,
+      name: 'My tuned model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        samplingParams: { max_tokens: 4000 },
+        customHeaders: { 'X-Route': 'paid' },
+      },
+      ...(purpose === 'image'
+        ? { imageOnly: true, supportsImageGeneration: true }
+        : {}),
+      ...(purpose === 'voice' ? { voiceOnly: true } : {}),
+    };
+    const file = path.join(home, 'settings.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        $version: 4,
+        env: { [envKey]: 'before' },
+        modelProviders: { openai: [model] },
+      }),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          preheatBridge: false,
+          trustedWorkspace: true,
+          daemonLogBaseDir: path.join(root, 'debug'),
+        },
+      );
+      const response = await fetch(`${handle.url}/workspace/auth/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl,
+          apiKey: 'after',
+          modelIds: [id],
+        }),
+      });
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as { message: string };
+      if (purpose !== 'chat') {
+        expect(result.message).toBe(
+          environmentAuth
+            ? 'Service models saved.'
+            : 'Service models saved. Configure a conversation model to start chatting.',
+        );
+      }
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      expect(saved.modelProviders.openai).toEqual([model]);
+      expect(saved.env[envKey]).toBe('after');
+      if (purpose !== 'chat') {
+        expect(saved.security?.auth?.selectedType).toBeUndefined();
+        expect(saved.model?.name).toBeUndefined();
+      }
+      const cleared = await fetch(`${handle.url}/workspace/auth/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl,
+          apiKey: 'after',
+          modelIds: [id],
+          advancedConfig: { replaceExisting: true },
+        }),
+      });
+      expect(cleared.status).toBe(200);
+      expect(
+        JSON.parse(fs.readFileSync(file, 'utf8')).modelProviders.openai,
+      ).toEqual([
+        {
+          ...model,
+          generationConfig: { customHeaders: { 'X-Route': 'paid' } },
+        },
+      ]);
+    } finally {
+      await handle?.close();
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(
+  ['fast', 'full'].flatMap((startup) =>
+    [
+      'workspace',
+      'workspace-env',
+      'parent-env',
+      'shell',
+      'user',
+      'home-env',
+    ].map((source) => ({
+      startup,
+      source,
+    })),
+  ),
+)(
+  'isolates User model deletion after $startup environment bootstrap ($source)',
+  async ({ startup, source }) => {
+    const workspaceOnly = ['workspace', 'workspace-env', 'parent-env'].includes(
+      source,
+    );
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-delete-env-')),
+    );
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    fs.mkdirSync(home);
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    const baseUrl = 'https://delete.example/v1';
+    const model = { name: 'gpt-4o', baseUrl };
+    const env = {
+      ANTHROPIC_API_KEY: 'test-only-key',
+      ANTHROPIC_MODEL: 'claude-other',
+      ANTHROPIC_BASE_URL: baseUrl,
+    };
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      ...Object.keys(env),
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('QWEN_HOME', home);
+    vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', path.join(root, 'no-system'));
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(root, 'no-defaults'),
+    );
+    const userFile = path.join(home, 'settings.json');
+    const workspaceFile = path.join(workspace, '.qwen', 'settings.json');
+    fs.writeFileSync(
+      userFile,
+      JSON.stringify({
+        $version: 4,
+        modelProviders: { openai: [{ id: model.name, baseUrl }] },
+        model,
+        ...(source === 'user' ? { env } : {}),
+      }),
+    );
+    fs.writeFileSync(
+      workspaceFile,
+      JSON.stringify({
+        $version: 4,
+        ...(source.endsWith('-env') ? {} : { env }),
+      }),
+    );
+    fs.writeFileSync(
+      path.join(home, 'trustedFolders.json'),
+      JSON.stringify({ [root]: 'TRUST_PARENT' }),
+    );
+    if (source === 'shell') {
+      for (const [key, value] of Object.entries(env)) {
+        vi.stubEnv(key, value);
+      }
+    }
+    if (source.endsWith('-env')) {
+      const directory =
+        source === 'home-env'
+          ? home
+          : source === 'parent-env'
+            ? root
+            : workspace;
+      fs.writeFileSync(
+        path.join(directory, '.env'),
+        Object.entries(env)
+          .map(([key, value]) => `${key}=${value}`)
+          .join('\n'),
+      );
+    }
+    settingsRuntime.resetEnvironmentTrackingForTesting();
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    let handle: RunHandle | undefined;
+    try {
+      if (startup === 'fast') {
+        const { bootstrapServeFastPathEnvironment } = await import(
+          './fast-path.js'
+        );
+        await bootstrapServeFastPathEnvironment(workspace);
+      } else {
+        settingsRuntime.loadSettings(workspace, { workspaceTrusted: true });
+      }
+      expect(process.env['ANTHROPIC_MODEL']).toBe('claude-other');
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          preheatBridge: false,
+          trustedWorkspace: true,
+          daemonLogBaseDir: path.join(root, 'debug'),
+        },
+      );
+      const response = await fetch(`${handle.url}/workspace/models`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          authType: 'openai',
+          modelId: model.name,
+          baseUrl,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        clearedActiveModel: false,
+      });
+      const saved = JSON.parse(fs.readFileSync(userFile, 'utf8'));
+      expect(saved.modelProviders.openai).toEqual([]);
+      expect(saved.model).toEqual(
+        workspaceOnly ? { name: '', baseUrl: '' } : model,
+      );
+      if (workspaceOnly) {
+        expect(
+          JSON.parse(fs.readFileSync(workspaceFile, 'utf8')).model,
+        ).toEqual(model);
+      }
+    } finally {
+      await handle?.close();
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      settingsRuntime.resetEnvironmentTrackingForTesting();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 function writeWebShellFixture(workspaceDir: string): string {
   const shellDir = path.join(workspaceDir, 'web-shell');
   fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
@@ -790,6 +1122,20 @@ const mockTotalMemBytes = vi.hoisted(() => ({
 const mockNetworkInterfaces = vi.hoisted(() => ({
   value: undefined as NodeJS.Dict<os.NetworkInterfaceInfo[]> | undefined,
 }));
+const mockRemoteQuickstart = vi.hoisted(() => ({
+  print: vi.fn(),
+}));
+
+vi.mock('./remote-quickstart.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./remote-quickstart.js')>();
+  // Only the printer is stubbed; the real quickstartPrintMode /
+  // tokenQrNoEffectReason must stay, or boot-time callers get undefined.
+  return {
+    ...actual,
+    printRemoteQuickstart: mockRemoteQuickstart.print,
+  };
+});
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -871,6 +1217,199 @@ describe('workspace skill settings persistence', () => {
     vi.restoreAllMocks();
   });
 
+  const skillStatus = (
+    name: string,
+    level: ServeWorkspaceSkillStatus['level'],
+    extensionName?: string,
+  ): ServeWorkspaceSkillStatus => ({
+    kind: 'skill',
+    status: 'ok',
+    name,
+    description: name,
+    level,
+    modelInvocable: true,
+    ...(extensionName ? { extensionName } : {}),
+  });
+
+  const writeSkillSettings = (
+    workspaceDisabled: string[],
+    userDisabled: string[] = [],
+  ) => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-identity-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-identity-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: workspaceDisabled } }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ skills: { disabled: userDisabled } }),
+    );
+  };
+
+  const captureSkillPersistence = async (
+    skills: ServeWorkspaceSkillStatus[],
+  ) => {
+    const originalCreateServeApp = serverModule.createServeApp;
+    let deps: Parameters<typeof serverModule.createServeApp>[2];
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      deps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    const bridge = {
+      ...makeRuntimeBridge(),
+      queryWorkspaceStatus: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills,
+      }),
+    } as unknown as HttpAcpBridge;
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge },
+    );
+    await handle.runtimeReady;
+    expect(deps?.persistDisabledSkills).toBeDefined();
+    expect(deps?.persistDisabledSkillsBatch).toBeDefined();
+    return deps!;
+  };
+
+  it('uses catalog identity for a non-extension skill whose name contains a colon', async () => {
+    writeSkillSettings(['rust:chat', 'chat']);
+    const { persistDisabledSkills } = await captureSkillPersistence([
+      skillStatus('rust:chat', 'project'),
+    ]);
+
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:chat', true),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['chat'],
+      settingsChanges: [
+        { key: 'skills.disabled', value: ['chat'] },
+        { key: 'skills.enabled', value: ['rust:chat'] },
+      ],
+    });
+  });
+
+  it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
+    writeSkillSettings([], ['pdf', 'legacy']);
+    const { persistDisabledSkills } = await captureSkillPersistence([
+      skillStatus('rust:pdf', 'extension', 'rust'),
+    ]);
+
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:pdf', true),
+    ).resolves.toMatchObject({
+      changed: false,
+      block: { entry: 'pdf', scope: 'User' },
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:legacy', true),
+    ).resolves.toMatchObject({
+      changed: false,
+      block: { entry: 'legacy', scope: 'User' },
+    });
+  });
+
+  it('makes a batch enable order-independent without bypassing a user block', async () => {
+    writeSkillSettings(['pdf'], ['locked']);
+    const { persistDisabledSkillsBatch } = await captureSkillPersistence([
+      skillStatus('pdf', 'user'),
+      skillStatus('rust:pdf', 'extension', 'rust'),
+      skillStatus('rust:locked', 'extension', 'rust'),
+    ]);
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+
+    const first = await persistDisabledSkillsBatch!(
+      workspace,
+      ['pdf', 'rust:pdf'],
+      true,
+    );
+    expect(first.outcomes).toEqual([
+      { skillName: 'pdf', changed: true },
+      { skillName: 'rust:pdf', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['pdf'] } }),
+    );
+    setValues.mockClear();
+
+    const reversed = await persistDisabledSkillsBatch!(
+      workspace,
+      ['rust:pdf', 'pdf'],
+      true,
+    );
+    expect(reversed.outcomes).toEqual([
+      { skillName: 'rust:pdf', changed: true },
+      { skillName: 'pdf', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: [] } }),
+    );
+    setValues.mockClear();
+
+    const blocked = await persistDisabledSkillsBatch!(
+      workspace,
+      ['rust:locked'],
+      true,
+    );
+    expect(blocked.outcomes).toEqual([
+      { skillName: 'rust:locked', changed: false },
+    ]);
+    expect(setValues).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a batch until a multi-step alias chain converges', async () => {
+    writeSkillSettings(['y:z', 'z']);
+    const { persistDisabledSkillsBatch } = await captureSkillPersistence([
+      skillStatus('x:y:z', 'extension', 'x'),
+      skillStatus('y:z', 'extension', 'y'),
+      skillStatus('z', 'project'),
+    ]);
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+
+    const result = await persistDisabledSkillsBatch!(
+      workspace,
+      ['x:y:z', 'y:z', 'z'],
+      true,
+    );
+
+    expect(result.outcomes).toEqual([
+      { skillName: 'x:y:z', changed: true },
+      { skillName: 'y:z', changed: true },
+      { skillName: 'z', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+  });
+
   it('canonicalizes, deduplicates, preserves orphans, and serializes updates across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-settings-')),
@@ -927,6 +1466,48 @@ describe('workspace skill settings persistence', () => {
       changed: true,
       disabled: ['orphan', ' ReViEw ', 'review'],
       settingsChanges: [{ key: 'skills.enabled', value: ['inherited-opt-in'] }],
+    });
+
+    // A grant a standing entry still forbids is refused, not reported as a
+    // success the merged config then denies: the bare user entry blocks the
+    // qualified name under either spelling, the workspace entry the same,
+    // and a bare defaultDisabled entry is not cancelled by a qualified
+    // grant.
+    await expect(
+      persistDisabledSkills!(workspace, 'demo:locked-skill', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+      block: {
+        reason: 'hard',
+        list: 'disabled',
+        entry: 'locked-skill',
+        scope: 'User',
+      },
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'demo:review', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+      block: {
+        reason: 'hard',
+        list: 'disabled',
+        entry: 'review',
+        scope: 'Workspace',
+      },
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'demo:opt-in-skill', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+      block: {
+        reason: 'default',
+        list: 'defaultDisabled',
+        entry: 'opt-in-skill',
+        scope: 'User',
+      },
     });
 
     await expect(
@@ -986,21 +1567,20 @@ describe('workspace skill settings persistence', () => {
         },
       ],
     });
+    // The user-scope entry still blocks the grant under either spelling, so
+    // the write is refused and named instead of reported as a success the
+    // merged config then denies.
     await expect(
       persistDisabledSkills!(workspace, 'locked-skill', true),
     ).resolves.toEqual({
-      changed: true,
-      disabled: ['orphan', 'alpha', 'beta'],
-      settingsChanges: [
-        {
-          key: 'skills.disabled',
-          value: ['orphan', 'alpha', 'beta'],
-        },
-        {
-          key: 'skills.enabled',
-          value: ['inherited-opt-in', 'review', 'opt-in-skill', 'locked-skill'],
-        },
-      ],
+      changed: false,
+      disabled: ['orphan', 'alpha', 'beta', 'locked-skill'],
+      block: {
+        reason: 'hard',
+        list: 'disabled',
+        entry: 'locked-skill',
+        scope: 'User',
+      },
     });
     const savedUser = JSON.parse(
       fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
@@ -1466,9 +2046,9 @@ describe('formatChannelWorkerDaemonUrl', () => {
   it.each(['::', '[::]'])(
     'uses IPv6 loopback for the IPv6 wildcard host %j when the host assigns ::1',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
-      ).toBe('http://[::1]:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, true)).toBe(
+        'http://[::1]:4170',
+      );
     },
   );
 
@@ -1480,52 +2060,21 @@ describe('formatChannelWorkerDaemonUrl', () => {
   it.each(['::', '[::]'])(
     'falls back to IPv4 loopback for the IPv6 wildcard host %j when the host carries no ::1',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, false),
-      ).toBe('http://127.0.0.1:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, false)).toBe(
+        'http://127.0.0.1:4170',
+      );
     },
   );
 
-  // R10-1: `listen(port, '')` tries the IPv6 unspecified address first and
-  // falls back to binding `0.0.0.0` when IPv6 is unavailable, so an empty
-  // --hostname decides by the socket that actually bound, not by spelling —
-  // on the fallback host the old spelling-based rule handed workers `[::1]`,
-  // which nothing listened on, and the first worker's failure exited the
-  // daemon. Explicit `::`/`0.0.0.0` keep their spelling-based mapping: those
-  // binds fail loud when their family is unavailable.
-  it('uses IPv6 loopback for an empty hostname on an IPv6 socket when the host assigns ::1', () => {
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, undefined, true)).toBe(
-      'http://[::1]:4170',
-    );
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', true)).toBe(
-      'http://[::1]:4170',
-    );
-  });
-
-  it('falls back to IPv4 loopback for an empty hostname on an IPv6 socket when the host carries no ::1', () => {
-    expect(
-      formatChannelWorkerDaemonUrl('', 4170, false, undefined, false),
-    ).toBe('http://127.0.0.1:4170');
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', false)).toBe(
-      'http://127.0.0.1:4170',
-    );
-  });
-
-  it('falls back to IPv4 loopback for an empty hostname on an IPv4-bound socket', () => {
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv4')).toBe(
-      'http://127.0.0.1:4170',
-    );
-    expect(formatChannelWorkerDaemonUrl('', 4170, true, 'IPv4')).toBe(
-      'https://127.0.0.1:4170',
-    );
-  });
-
+  // R10-1's empty-hostname mapping is gone together with its branch: an
+  // empty --hostname is refused at boot as operator error before any
+  // listener exists, so no worker URL can ever be formatted for it.
   it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
     'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
-      ).toBe('http://[::1]:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, true)).toBe(
+        'http://[::1]:4170',
+      );
     },
   );
 
@@ -1569,11 +2118,6 @@ describe('formatChannelWorkerDaemonUrl', () => {
       // v4 loopback only — measured here through the same dial the workers
       // use; mutating the mapping to `[::1]` reddens this arm.
       ['::ffff:0.0.0.0', { host: '::ffff:0.0.0.0', port: 0 }],
-      // R10-1: the daemon's real bind shape for an empty --hostname. The
-      // loopback family is read from the socket that actually bound, so on a
-      // host without IPv6 this same arm binds 0.0.0.0 and exercises the
-      // IPv4 fallback instead.
-      ['', { host: '', port: 0 }],
     ] as const) {
       let server: net.Server;
       try {
@@ -1585,14 +2129,7 @@ describe('formatChannelWorkerDaemonUrl', () => {
       try {
         const addr = server.address() as AddressInfo;
         const certified = new URL(
-          formatChannelWorkerDaemonUrl(
-            bind,
-            addr.port,
-            false,
-            bind === '' && (addr.family === 'IPv4' || addr.family === 'IPv6')
-              ? addr.family
-              : undefined,
-          ),
+          formatChannelWorkerDaemonUrl(bind, addr.port, false),
         );
         // URL keeps IPv6 literals bracketed; net.connect wants them bare.
         const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
@@ -1635,8 +2172,9 @@ describe('formatChannelWorkerDaemonUrl', () => {
 
 describe('assertChannelWorkerDaemonUrlIsLocal', () => {
   it('accepts loopback and wildcard-rewritten worker URLs', () => {
+    // No empty-host arm: boot refuses an empty --hostname before any listener
+    // or worker URL exists, so the certifier never sees one.
     for (const host of [
-      '',
       '0',
       '0.0',
       '0.0.0.0',
@@ -4232,7 +4770,7 @@ describe('runQwenServe telemetry validation', () => {
       expect(body.features).toContain('multi_workspace_sessions');
       expect(body.features).toContain('workspace_runtime_removal');
       expect(body.features).toContain('scheduled_task_session_reuse');
-      expect(body.limits.maxTotalSessions).toBe(2);
+      expect(body.limits.maxTotalSessions).toBe(800);
       expect(body.limits.sessionRestoreTimeoutMs).toBe(90_000);
       expect(body.workspaces).toEqual([
         expect.objectContaining({
@@ -4540,8 +5078,16 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
-  it('adds, advertises, and hot-removes a dynamic workspace runtime', async () => {
+  it.each(['admit', 'enforce'] as const)('hot-add (%s)', async (mode) => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    const reclaim = vi.fn();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      expect(app.locals['reclaimIdleAcp']).toBeTypeOf('function');
+      app.locals['reclaimIdleAcp'] = reclaim;
+      return app;
+    });
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hot-remove-')),
     );
@@ -4600,6 +5146,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
+        childHeapMode: mode,
         workspace: primary,
         token: 'hot-remove-token',
         sessionRestoreTimeoutMs: 90_000,
@@ -4631,7 +5178,28 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(added.status).toBe(201);
       expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      const signal = new AbortController().signal;
+      for (const [index, cwd] of [primary, secondary].entries()) {
+        const callback = mockCreateSpawnChannelFactoryOptions[index][
+          'reclaimIdleChild'
+        ] as (signal?: AbortSignal) => ReturnType<IdleAcpReclaimer>;
+        expect(callback).toBeTypeOf('function');
+        await callback(signal);
+        expect(reclaim).toHaveBeenNthCalledWith(
+          index + 1,
+          hashDaemonWorkspace(canonicalizeWorkspace(cwd)),
+          signal,
+        );
+      }
+      const initialFactory = mockCreateSpawnChannelFactoryOptions[0];
+      expect(initialFactory['processRegistry']).toBeDefined();
+      const policy = initialFactory['childHeapPolicy'] as ChildHeapPolicy;
+      expect(policy.snapshot().mode).toBe(mode);
       for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['processRegistry']).toBe(
+          initialFactory['processRegistry'],
+        );
+        expect(options['childHeapPolicy']).toBe(policy);
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,
           maxQueuedMessages: 256,
@@ -4923,8 +5491,18 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
-  it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
+  it.each(['admit', 'enforce'] as const)('shared policy (%s)', async (mode) => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    mockTotalMemBytes.value = 8 * 1024 * 1024 * 1024;
+    vi.spyOn(process, 'constrainedMemory').mockReturnValue(0);
+    const reclaim = vi.fn();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      expect(app.locals['reclaimIdleAcp']).toBeTypeOf('function');
+      app.locals['reclaimIdleAcp'] = reclaim;
+      return app;
+    });
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
@@ -4985,6 +5563,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
+        childHeapMode: mode,
         workspace: [primary, secondary],
         maxSessions: 1,
         eventRingSize: 1234,
@@ -5004,13 +5583,44 @@ describe('runQwenServe telemetry validation', () => {
       await handle.runtimeReady;
       expect(createBridge).toHaveBeenCalledTimes(2);
       expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      const signal = new AbortController().signal;
+      for (const [index, cwd] of [primary, secondary].entries()) {
+        const callback = mockCreateSpawnChannelFactoryOptions[index][
+          'reclaimIdleChild'
+        ] as (signal?: AbortSignal) => ReturnType<IdleAcpReclaimer>;
+        expect(callback).toBeTypeOf('function');
+        await callback(signal);
+        expect(reclaim).toHaveBeenNthCalledWith(
+          index + 1,
+          hashDaemonWorkspace(canonicalizeWorkspace(cwd)),
+          signal,
+        );
+      }
+      const initialFactory = mockCreateSpawnChannelFactoryOptions[0];
+      expect(initialFactory['processRegistry']).toBeDefined();
+      const policy = initialFactory['childHeapPolicy'] as ChildHeapPolicy;
+      expect(policy.snapshot().mode).toBe(mode);
       for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['processRegistry']).toBe(
+          initialFactory['processRegistry'],
+        );
+        expect(options['childHeapPolicy']).toBe(policy);
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,
           maxQueuedMessages: 256,
           maxQueuedBytes: 64 * 1024 * 1024,
         });
       }
+      const status = await (await fetch(`${handle.url}/daemon/status`)).json();
+      expect(status.limits.memory).toMatchObject({
+        enforced: mode === 'enforce',
+        childHeap: {
+          mode,
+          admissionEnforced: true,
+          maxConcurrentChildren: 7,
+          perChildCeilingMb: 526,
+        },
+      });
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
@@ -5380,7 +5990,6 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
 /**
  * The budget is resolved at boot and reported. Whether it also sizes a child
  * depends on `childHeapMode`, which defaults to `observe` and sizes nothing.
- * The only boot-time behavior is rejecting an out-of-range flag value.
  */
 describe('runQwenServe memory budget', () => {
   let tmpDirs: string[] = [];
@@ -5425,6 +6034,7 @@ describe('runQwenServe memory budget', () => {
             enforced: boolean;
             childHeap: {
               mode: string;
+              admissionEnforced: boolean;
               maxConcurrentChildren: number;
               perChildCeilingMb: number | null;
               refusals: number;
@@ -5491,12 +6101,14 @@ describe('runQwenServe memory budget', () => {
       // all — so a matcher asserting `any(Number)` would fail on exactly the
       // host where the code is doing the right thing.
       expect(Object.keys(memory?.childHeap ?? {}).sort()).toEqual([
+        'admissionEnforced',
         'maxConcurrentChildren',
         'mode',
         'perChildCeilingMb',
         'refusals',
       ]);
       expect(memory?.childHeap?.mode).toBe('observe');
+      expect(memory?.childHeap?.admissionEnforced).toBe(false);
       expect(memory?.childHeap?.refusals).toBe(0);
       // Whichever branch this host took, the two figures agree with each
       // other. The arithmetic itself is pinned exhaustively in
@@ -6662,6 +7274,56 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it.each(['admit', 'enforce'] as const)(
+    'rejects %s with an injected bridge before listening or preheat',
+    async (mode) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-child-mode-')),
+      );
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      const bridge = makeRuntimeBridge();
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            childHeapMode: mode,
+          },
+          { bridge },
+        ),
+      ).rejects.toThrow('cannot be combined with an injected bridge');
+      expect(listen).not.toHaveBeenCalled();
+      expect(bridge.preheat).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['admit', 'enforce'] as const)(
+    'rejects a zero-slot %s partition before listening or creating children',
+    async (mode) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-child-zero-')),
+      );
+      mockTotalMemBytes.value = 768 * 1024 * 1024;
+      vi.spyOn(process, 'constrainedMemory').mockReturnValue(0);
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          childHeapMode: mode,
+          memoryBudgetMb: 1024,
+        }),
+      ).rejects.toThrow('models at least one child');
+      expect(listen).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ['maxSessions', Number.NaN, /maxSessions/],
@@ -8372,7 +9034,7 @@ describe('runQwenServe runtime startup failures', () => {
         ],
       ]);
       expect(createBridge).toHaveBeenCalledTimes(3);
-      expect(advertisedMaxTotalSessions).toBe(3);
+      expect(advertisedMaxTotalSessions).toBe(800);
       expect(
         stderrWrite.mock.calls.some(([message]) =>
           String(message).includes(
@@ -8466,24 +9128,54 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('skips persisted workspaces after the runtime limit is reached', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-limit-')),
-    );
-    const explicitWorkspaces = Array.from({ length: 25 }, (_, index) => {
-      const workspace = path.join(tmpDir, `explicit-${index}`);
-      fs.mkdirSync(workspace);
-      return workspace;
-    });
-    const overflow = path.join(tmpDir, 'persisted-overflow');
-    fs.mkdirSync(overflow);
-    const canonicalExplicit = explicitWorkspaces.map((workspace) =>
-      canonicalizeWorkspace(workspace),
-    );
-    const canonicalOverflow = canonicalizeWorkspace(overflow);
-    const stderrWrite = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
+  it.each([25, undefined])(
+    'rejects a complete restored union over capacity %s without constructing runtimes',
+    async (maxRegisteredWorkspaces) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-limit-')),
+      );
+      const capacity = maxRegisteredWorkspaces ?? 256;
+      const workspaces = Array.from({ length: capacity + 1 }, (_, index) => {
+        const cwd = path.join(tmpDir!, `workspace-${index}`);
+        fs.mkdirSync(cwd);
+        return cwd;
+      });
+      const store = new WorkspaceRegistrationStore(
+        workspaces[0]!,
+        path.join(tmpDir, 'home'),
+      );
+      await store.add(workspaces[capacity]!, 'Saved');
+      const before = fs.readFileSync(store.filePath);
+      const httpServerFactory = vi.fn(() => {
+        throw new Error('listener created');
+      });
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: workspaces.slice(0, capacity),
+            maxRegisteredWorkspaces,
+            serveWebShell: false,
+          },
+          {
+            workspaceRegistrationStore: store,
+            httpServerFactory,
+            daemonLogBaseDir: path.join(tmpDir, 'debug'),
+          },
+        ),
+      ).rejects.toThrow(
+        `${capacity} explicit + 1 restored workspaces exceed the configured limit of ${capacity}`,
+      );
+      expect(fs.readFileSync(store.filePath)).toEqual(before);
+      expect(httpServerFactory).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
+    },
+  );
+
+  function stubCapacityRuntimeDeps() {
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -8494,34 +9186,132 @@ describe('runQwenServe runtime startup failures', () => {
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockImplementation(() => makeRuntimeBridge());
-    let restoredCwds: string[] = [];
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeRuntimeBridge(),
+    );
+    const observed: {
+      maxRegisteredWorkspaces?: number;
+      maxTotalSessions?: number;
+      runtimeCount?: number;
+    } = {};
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
-      (_opts, _getPort, deps) => {
-        restoredCwds =
-          deps?.workspaceRegistry
-            ?.list()
-            .map((runtime) => runtime.workspaceCwd) ?? [];
+      (opts, _getPort, deps) => {
+        observed.maxRegisteredWorkspaces = opts.maxRegisteredWorkspaces;
+        observed.maxTotalSessions = opts.maxTotalSessions;
+        observed.runtimeCount = deps?.workspaceRegistry?.list().length;
         return express();
       },
     );
-    const store = {
-      read: vi.fn().mockResolvedValue({
-        schemaVersion: 1,
-        primaryWorkspace: canonicalExplicit[0],
-        workspaces: [canonicalOverflow],
-      }),
-    } as unknown as WorkspaceRegistrationStore;
+    return observed;
+  }
 
+  function makeCapacityWorkspaces(count: number): string[] {
+    return Array.from({ length: count }, (_, index) => {
+      const cwd = path.join(tmpDir!, `workspace-${index}`);
+      fs.mkdirSync(cwd);
+      return cwd;
+    });
+  }
+
+  it('resolves the registration cap and legacy session default from the launch environment', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-env-capacity-')),
+    );
+    const workspaces = makeCapacityWorkspaces(3);
+    const observed = stubCapacityRuntimeDeps();
+    const boot = (workspace: string | string[]) =>
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+          resolveOnListen: true,
+        },
+      );
+    const original = process.env['QWEN_SERVE_MAX_WORKSPACES'];
+    try {
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = '25';
+      const handle = await boot(workspaces[0]!);
+      try {
+        await handle.runtimeReady;
+        expect(observed.maxRegisteredWorkspaces).toBe(25);
+        expect(observed.maxTotalSessions).toBeUndefined();
+      } finally {
+        await handle.close();
+      }
+
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = '2';
+      await expect(boot(workspaces)).rejects.toThrow(
+        'At most 2 --workspace values may be registered.',
+      );
+
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = 'abc';
+      await expect(boot(workspaces[0]!)).rejects.toThrow(
+        'Invalid QWEN_SERVE_MAX_WORKSPACES="abc"',
+      );
+    } finally {
+      if (original === undefined) {
+        delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
+      } else {
+        process.env['QWEN_SERVE_MAX_WORKSPACES'] = original;
+      }
+    }
+  });
+
+  it('derives the legacy session total from the workspace count at capacity 25', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-legacy-total-')),
+    );
+    const workspaces = makeCapacityWorkspaces(2);
+    const observed = stubCapacityRuntimeDeps();
     const handle = await runQwenServe(
       {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
-        workspace: explicitWorkspaces,
+        workspace: workspaces,
+        maxRegisteredWorkspaces: 25,
         maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(observed.maxRegisteredWorkspaces).toBe(25);
+      expect(observed.maxTotalSessions).toBe(2);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('admits a restored union exactly at the configured capacity', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-at-limit-')),
+    );
+    const workspaces = makeCapacityWorkspaces(2);
+    const store = new WorkspaceRegistrationStore(
+      workspaces[0]!,
+      path.join(tmpDir, 'home'),
+    );
+    await store.add(workspaces[1]!, 'Saved');
+    const before = fs.readFileSync(store.filePath);
+    const observed = stubCapacityRuntimeDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: workspaces[0]!,
+        maxRegisteredWorkspaces: 2,
         serveWebShell: false,
       },
       {
@@ -8530,16 +9320,10 @@ describe('runQwenServe runtime startup failures', () => {
         resolveOnListen: true,
       },
     );
-
     try {
       await handle.runtimeReady;
-      expect(restoredCwds).toEqual(canonicalExplicit);
-      expect(createBridge).toHaveBeenCalledTimes(25);
-      expect(
-        stderrWrite.mock.calls.some(([message]) =>
-          String(message).includes('workspace limit reached'),
-        ),
-      ).toBe(true);
+      expect(observed.runtimeCount).toBe(2);
+      expect(fs.readFileSync(store.filePath)).toEqual(before);
     } finally {
       await handle.close();
     }
@@ -9148,6 +9932,91 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('holds GET /brand until the deferred runtime is ready, then answers 200', async () => {
+    // `/brand` is not a bootstrap route: on the default deferred path the
+    // delegating app must hold the request until the runtime is up and then
+    // answer it, per the protocol reference. Adding it to
+    // BOOTSTRAP_SERVE_PATHS would instead answer the bootstrap 503, which the
+    // client's brand fetch treats as retryable-but-never-settled.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-brand-hold-')),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = path.join(tmpDir, 'qwen-home');
+    fs.mkdirSync(qwenHome, { recursive: true });
+    process.env['QWEN_HOME'] = qwenHome;
+    const logBaseDir = path.join(tmpDir, 'debug');
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+        daemonLogBaseDir: logBaseDir,
+      },
+    );
+
+    let closed = false;
+    try {
+      let brandStatus: number | undefined;
+      let brandBody: unknown;
+      const brandPending = fetch(`${handle.url}/brand`).then(async (res) => {
+        brandStatus = res.status;
+        brandBody = await res.json();
+      });
+
+      // Held, not answered: no status yet. (The final assertions below are
+      // what discriminate — a bootstrap catch-all would answer 503 at once.)
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(brandStatus).toBeUndefined();
+
+      // The health probe triggers the deferred runtime start; once it
+      // settles, the held brand request is answered by the real route.
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(200);
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+
+      await brandPending;
+      expect(brandStatus).toBe(200);
+      expect(brandBody).toEqual({});
+      await handle.close();
+      closed = true;
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      if (!closed) {
+        await handle.close();
+      }
+    }
+  });
+
   it('returns retryable bootstrap deep health while starting deferred runtime', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-deep-first-')),
@@ -9467,6 +10336,90 @@ describe('runQwenServe runtime startup failures', () => {
       expect(await rootRes.text()).toContain('<div id="root">');
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the remote same-origin exception alive during the bootstrap window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-selforigin-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      serveOptions: { hostname: '0.0.0.0' },
+    });
+    try {
+      // Pin the premises, not just the statuses: the daemon really bound the
+      // wildcard (read from the socket, not from the option echoed back), and
+      // every request below is answered by the bootstrap app — the runtime
+      // bridge has not started, so a widened deferred-route classifier or a
+      // dropped override flips these instead of silently turning the test
+      // into a loopback/warm-app probe.
+      expect((handle.server.address() as AddressInfo).address).toBe('0.0.0.0');
+      // The single-workspace bootstrap capabilities handler answers 200; a
+      // multi-workspace boot would be 503, which the guard's own retry loop
+      // tolerates but this exception test is not about.
+      const authed = await fetch(`${handle.url}/capabilities`, {
+        headers: {
+          Origin: handle.url,
+          Authorization: 'Bearer secret-token',
+        },
+      });
+      expect(authed.status).toBe(200);
+      const unauthed = await fetch(`${handle.url}/capabilities`, {
+        headers: { Origin: handle.url },
+      });
+      expect(unauthed.status).toBe(401);
+      const crossOrigin = await fetch(`${handle.url}/capabilities`, {
+        headers: {
+          Origin: 'http://evil.test',
+          Authorization: 'Bearer secret-token',
+        },
+      });
+      expect(crossOrigin.status).toBe(403);
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('runs the Host gate ahead of the CORS wall during the bootstrap window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-order-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle } = await startDeferredDaemon(tmpDir);
+    try {
+      // A DNS-rebinding probe carries a bad Host AND an Origin, so which gate
+      // answers decides the reject body: the bootstrap chain must match the
+      // runtime app (hostAllowlist before the CORS wall). fetch cannot set
+      // Host, so drive the raw socket.
+      const port = new URL(handle.url).port;
+      const raw = await new Promise<string>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/capabilities',
+            method: 'GET',
+            headers: {
+              Host: `evil.example:${port}`,
+              Origin: 'http://evil.example',
+              Authorization: 'Bearer secret-token',
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk) => (data += chunk));
+            res.on('end', () => resolve(`${res.statusCode} ${data}`));
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      expect(raw).toContain('403');
+      expect(raw).toContain('Invalid Host header');
     } finally {
       await handle.close();
     }
@@ -12377,6 +13330,8 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
 
 describe('runQwenServe channel worker supervisor', () => {
   let tmpDir: string | undefined;
+  let qwenHome: string | undefined;
+  let previousQwenHome: string | undefined;
   // Some CI containers disable IPv6 entirely; binding ::1 then fails with
   // EADDRNOTAVAIL.
   const hasIpv6Loopback = Object.values(os.networkInterfaces()).some(
@@ -12386,6 +13341,16 @@ describe('runQwenServe channel worker supervisor', () => {
       ),
   );
 
+  beforeEach(() => {
+    previousQwenHome = process.env['QWEN_HOME'];
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-test-home-')),
+    );
+    process.env['QWEN_HOME'] = qwenHome;
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+  });
+
   afterEach(() => {
     mockChannelWorkerEnabledState.value = undefined;
     vi.restoreAllMocks();
@@ -12393,6 +13358,15 @@ describe('runQwenServe channel worker supervisor', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       tmpDir = undefined;
     }
+    if (qwenHome) {
+      fs.rmSync(qwenHome, { recursive: true, force: true });
+      qwenHome = undefined;
+    }
+    if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = previousQwenHome;
+    previousQwenHome = undefined;
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
   });
 
   function makeFakeBridge(onShutdown?: () => void): HttpAcpBridge {
@@ -12447,6 +13421,103 @@ describe('runQwenServe channel worker supervisor', () => {
       removeServeServiceInfo: vi.fn(() => true),
     };
   }
+
+  it.each([
+    { ownerCount: 25, source: 'explicit' },
+    { ownerCount: 26, source: 'explicit' },
+    { ownerCount: 26, source: 'configured' },
+  ])(
+    'checks $ownerCount $source channel owners before lease reservation with 26 registered workspaces',
+    async ({ ownerCount, source }) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-capacity-')),
+      );
+      const workspaces = Array.from({ length: 26 }, (_, index) => {
+        const cwd = path.join(tmpDir!, `workspace-${index}`);
+        fs.mkdirSync(cwd);
+        return cwd;
+      });
+      const names = workspaces.map((_, index) => `bot-${index}`);
+      vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+        (workspace) =>
+          ({
+            merged: {
+              channels: {
+                [names[workspaces.indexOf(String(workspace))] ?? 'unknown']: {
+                  type: 'telegram',
+                },
+              },
+            },
+          }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+      );
+      vi.spyOn(
+        trustedFoldersRuntime,
+        'getWorkspaceTrustStatus',
+      ).mockReturnValue({
+        effective: { state: 'trusted' },
+      } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+      vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      const pidfile = makePidfileDeps();
+      const httpServerFactory = vi.fn(() => {
+        throw new Error('listener created');
+      });
+      const workerFactory = vi.fn();
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const rejectsCapacity = ownerCount === 26 && source === 'explicit';
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: workspaces,
+            ...(source === 'explicit'
+              ? {
+                  channelSelection: {
+                    mode: 'names' as const,
+                    names: names.slice(0, ownerCount),
+                  },
+                }
+              : {}),
+            serveWebShell: false,
+          },
+          {
+            bootSettings: {
+              serve: { channels: names.slice(0, ownerCount) },
+            },
+            channelServicePidfile: pidfile,
+            channelWorkerSupervisorFactory: workerFactory,
+            httpServerFactory,
+            resolveOnListen: true,
+            deferRuntimeUntilFirstHealth: true,
+            daemonLogBaseDir: path.join(tmpDir, 'debug'),
+          },
+        ),
+      ).rejects.toMatchObject(
+        rejectsCapacity
+          ? { code: 'channel_control_workspace_limit_reached' }
+          : { message: 'listener created' },
+      );
+      expect(httpServerFactory).toHaveBeenCalledTimes(rejectsCapacity ? 0 : 1);
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledTimes(
+        ownerCount === 26 ? 0 : 1,
+      );
+      expect(pidfile.writeServeServiceInfo).not.toHaveBeenCalled();
+      expect(workerFactory).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
+      if (source === 'configured') {
+        expect(
+          stderr.mock.calls.map(([chunk]) => String(chunk)).join(''),
+        ).toContain(
+          'workspace serve.channels was not restored: Channel control supports at most 25 workspace owners',
+        );
+      }
+    },
+  );
 
   it('rejects webhook tasks when the channel worker is disabled', async () => {
     const supervisor = createDisabledChannelWorkerSupervisor();
@@ -12570,6 +13641,664 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(factory).toHaveBeenCalled();
     } finally {
       await handle.close();
+    }
+  });
+
+  it('refuses tokenless localhost resolving outside loopback instead of generating a token', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-localhost-remote-')),
+    );
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            serveWebShell: false,
+          },
+          {
+            bridge: makeFakeBridge(),
+            bindHostnameLookup: async () => ({
+              address: '192.0.2.1',
+              family: 4,
+            }),
+          },
+        ),
+      ).rejects.toThrow(/token/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses an empty --hostname as operator error', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        }),
+      ).rejects.toThrow(/empty value binds every interface/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('prints the quickstart with the resolved listener arguments', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-args-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe({
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        serveWebShell: false,
+        workspace: tmpDir,
+      });
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      expect(arg.bind).toBe('0.0.0.0');
+      expect(arg.boundAddress).toBe('0.0.0.0');
+      expect(arg.port).toBe(
+        (started.server.address() as { port: number }).port,
+      );
+      expect(arg.tls).toBe(false);
+      expect(arg.generated).toBe(true);
+      expect(arg.token).toBe(started.resolvedToken);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('hands the quickstart the bound address, not the operator spelling', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    // The print-mode decision (full / token-only / silent) lives inside
+    // printRemoteQuickstart and is pinned by its own unit tests; boot's
+    // contract is to report the address the socket actually bound, which an
+    // IP-literal bind exercises without touching any resolver.
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-bound-pin');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      expect(arg.bind).toBe('127.0.0.1');
+      expect(arg.boundAddress).toBe('127.0.0.1');
+      expect(arg.generated).toBe(false);
+      expect(arg.token).toBe('env-token-bound-pin');
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('resolves tokenQr from opts and from boot settings', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-token-qr');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge(), bootSettings: {} },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+      await started.close();
+      started = undefined;
+
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { tokenQr: true } },
+        },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'force',
+      );
+      await started.close();
+      started = undefined;
+
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          tokenQr: true,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'force',
+      );
+      await started.close();
+      started = undefined;
+
+      // An explicit flag veto (--no-token-qr) must beat an enabling
+      // setting — otherwise the flag is a dead switch on a credential
+      // guard.
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          tokenQr: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { tokenQr: true } },
+        },
+      );
+      // The printer must be able to tell a deliberate veto from policy
+      // suppression, or its hint advises the flag just passed.
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'veto',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('says so when the token QR was requested but the Web Shell is not mounted', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-no-web');
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      // Non-loopback so the Web Shell really is the operative cause; on a
+      // loopback bind no quickstart block prints at all and the diagnostic
+      // must name that instead.
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          tokenQr: true,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(stderrWrites.join('')).toContain(
+        '--token-qr / serve.tokenQr has no effect because the Web Shell is not mounted.',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('stays quiet about the token QR when nobody requested it', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-unrequested');
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge(), bootSettings: {} },
+      );
+      expect(stderrWrites.join('')).not.toContain('has no effect');
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('reports the inert token QR on a loopback bind with no bearer at all', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', '');
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-loopback-')),
+    );
+    // Mounted Web Shell, so the loopback bind — not a missing UI — is the
+    // operative cause. No bearer exists on loopback, which is exactly the
+    // case the diagnostic must not skip.
+    writeWebShellFixture(tmpDir);
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: true,
+          tokenQr: true,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      const output = stderrWrites.join('');
+      expect(output).toContain(
+        'has no effect on this bind: a loopback listener prints no quickstart QR.',
+      );
+      expect(output).not.toContain('Web Shell is not mounted');
+      expect(mockRemoteQuickstart.print).not.toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('warns about a malformed serve.tokenQr and keeps the rest of the settings', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-malformed');
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: {
+            // A display knob must not take the policy summary down with it:
+            // the reader passes the bad value through and the consumer warns.
+            policy: { permissionStrategy: 'consensus', consensusQuorum: 2 },
+            // Secret-shaped on purpose: a mis-keyed literal bearer — or a
+            // `${VAR}` placeholder outside INTERNAL_SECRET_ENV_VARS, which
+            // the loader substitutes before the consumer sees it — must
+            // never be echoed. The warning names the field and its type,
+            // never the value.
+            serve: { tokenQr: 'super-secret-bearer' },
+          },
+        },
+      );
+      expect(stderrWrites.join('')).toContain(
+        'serve.tokenQr must be a boolean; ignoring a string value.',
+      );
+      expect(stderrWrites.join('')).not.toContain('super-secret-bearer');
+      expect(stderrWrites.join('')).not.toContain('could not read settings');
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('names a workspace-scoped serve.tokenQr as ignored instead of dropping it silently', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-ws-scope');
+    // The real loader runs for this case (no deps.bootSettings), so pin the
+    // system scopes to absent files the way the enclosing beforeEach pins
+    // the user scope with a fresh QWEN_HOME.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-ws-scope-')),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+      path.join(tmpDir, 'no-system-settings.json'),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(tmpDir, 'no-system-defaults.json'),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      const output = stderrWrites.join('');
+      expect(output).toContain('serve.tokenQr in workspace settings');
+      expect(output).toContain(
+        'is ignored; it is honored from user, system, and system-defaults scopes only.',
+      );
+      // The dropped value never reaches resolution: the printer still sees
+      // the default posture, not the opt-in the workspace asked for.
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('reports what the socket bound, not what the operator typed', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-aton-pin');
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-aton-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      const socket = started.server.address() as {
+        address: string;
+        port: number;
+      };
+      // This case used to bind the inet_aton spelling '0' so the typed value
+      // and the socket address differed, but Windows answers that with
+      // `getaddrinfo ENOTFOUND 0`. remote-quickstart.test.ts already pins the
+      // spelling normalisation ('0', '0.0', '::0', …) platform-independently,
+      // so what is left to witness here is the port: the operator typed 0, so
+      // a report echoing its own input would show 0 rather than the ephemeral
+      // port the listener actually got.
+      expect(arg.bind).toBe('0.0.0.0');
+      expect(arg.boundAddress).toBe(socket.address);
+      expect(arg.port).toBe(socket.port);
+      expect(arg.port).not.toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('hands the quickstart the mounted-web-shell flag', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-web-')),
+    );
+    writeWebShellFixture(tmpDir);
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-web-pin');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      expect(mockRemoteQuickstart.print.mock.calls[0][0].web).toBe(true);
+      const startup = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(startup).toContain(
+        'same-origin Web Shell HTTP and WebSocket requests work without --allow-origin',
+      );
+      expect(startup).toContain(
+        'TLS-terminating proxy still need --allow-origin <origin>',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      stderr.mockRestore();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --require-auth on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-requireauth-gen-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          requireAuth: true,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --allow-origin * on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-anyorigin-gen-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['*'],
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --allow-origin with a remote HTTP(S) origin on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-remoteorigin-gen-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['https://app.example.com'],
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('refuses --require-auth and --allow-origin * on a tokenless loopback bind', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            requireAuth: true,
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--require-auth/);
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['*'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--allow-origin/);
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['https://app.example.com'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--allow-origin/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('boots loopback --require-auth when a token arrives pre-installed', async () => {
+    // The shape --open-with-auth leaves behind: its generated loopback token
+    // is installed on the options before runQwenServe, so the flag's
+    // fail-fast must see it like any configured source.
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          requireAuth: true,
+          token: 'pre-installed-loopback-token',
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toBe('pre-installed-loopback-token');
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('survives an asynchronous EPIPE on stdout and rethrows other stream errors', async () => {
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      // The guard listens on the process streams; without it an 'error'
+      // event with no listener throws out of emit itself.
+      const epipe = Object.assign(new Error('write EPIPE'), {
+        code: 'EPIPE',
+      });
+      expect(() => process.stdout.emit('error', epipe)).not.toThrow();
+      expect(() => process.stderr.emit('error', epipe)).not.toThrow();
+      const other = Object.assign(new Error('stream boom'), {
+        code: 'ENOENT',
+      });
+      expect(() => process.stdout.emit('error', other)).toThrow('stream boom');
+      expect(() => process.stderr.emit('error', other)).toThrow('stream boom');
+    } finally {
+      await started?.close();
     }
   });
 
@@ -13263,6 +14992,1830 @@ describe('runQwenServe channel worker supervisor', () => {
         }),
       ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
     } finally {
+      await handle.close();
+    }
+  });
+
+  it('starts workspace startup channels on a bare daemon boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-autostart-')),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: { telegram: { type: 'telegram' } },
+        serve: { channels: ['telegram'] },
+      }),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    const workerFactory = makeReadyWorkerFactory(worker);
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).toHaveBeenCalledOnce();
+      expect(worker.start).toHaveBeenCalledOnce();
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+        channels: ['telegram'],
+        servePid: process.pid,
+      });
+
+      const response = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        instances: {
+          telegram: {
+            startsWithServe: true,
+          },
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('restores configured all only for the primary workspace', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-all-startup-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    for (const workspace of [primary, secondary])
+      fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(primary, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: {
+          telegram: { type: 'telegram' },
+          feishu: { type: 'feishu' },
+        },
+        serve: { channels: ['all'] },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(secondary, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: { discord: { type: 'discord' } },
+        serve: { channels: ['discord'] },
+      }),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const workerFactory = makeReadyWorkerFactory(
+      makeWorker({
+        enabled: true,
+        state: 'running',
+        channels: ['telegram', 'feishu'],
+        requestedChannels: ['telegram', 'feishu'],
+      }),
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).toHaveBeenCalledOnce();
+      expect(workerFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: primary,
+          selection: { mode: 'all' },
+        }),
+      );
+      const response = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        instances: {
+          telegram: { startsWithServe: true },
+          feishu: { startsWithServe: true },
+        },
+      });
+      const output = stderr.mock.calls.map(([chunk]) => String(chunk)).join('');
+      expect(output).toContain(
+        'workspace serve.channels selection "all" is primary-workspace only',
+      );
+      expect(output).not.toContain('--channel all');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  function makePerWorkspaceWorkerFactory() {
+    const workers = new Map<string, ReturnType<typeof makeWorker>>();
+    const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      const channels =
+        opts.selection.mode === 'names' ? [...opts.selection.names] : [];
+      const worker = makeWorker({
+        enabled: true,
+        state: 'running',
+        channels,
+        requestedChannels: channels,
+      });
+      worker.start.mockImplementation(async () => {
+        opts.onReady?.(worker.snapshot());
+      });
+      workers.set(opts.workspace, worker);
+      return worker;
+    });
+    return { factory, workers };
+  }
+
+  function writeWorkspaceSettings(
+    workspace: string,
+    settings: Record<string, unknown>,
+  ) {
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify(settings),
+    );
+  }
+
+  it("restores every trusted workspace's own startup channels", async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-multi-startup-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    writeWorkspaceSettings(primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    writeWorkspaceSettings(secondary, {
+      channels: { discord: { type: 'discord' } },
+      serve: { channels: ['discord'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(primary),
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      );
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(secondary),
+          selection: { mode: 'names', names: ['discord'] },
+        }),
+      );
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+        channels: ['telegram', 'discord'],
+        servePid: process.pid,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('excludes SSH workspaces from startup channels and runtime selection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ssh-channels-')),
+    );
+    vi.stubEnv('QWEN_HOME', tmpDir);
+    const primary = path.join(tmpDir, 'primary');
+    const url = 'ssh://host/srv/project';
+    const anchor = path.join(
+      tmpDir,
+      'ssh-workspaces',
+      createHash('sha256').update(url).digest('hex'),
+      'workspace',
+    );
+    writeWorkspaceSettings(anchor, {
+      channels: { remote: { type: 'telegram' } },
+      serve: { channels: ['remote'] },
+    });
+    fs.writeFileSync(
+      path.join(anchor, '..', 'connection.json'),
+      JSON.stringify({ url }),
+    );
+    writeWorkspaceSettings(primary, {
+      channels: {
+        local: { type: 'telegram' },
+        remote: { type: 'telegram', cwd: anchor },
+      },
+      serve: { channels: ['local'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, anchor],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledOnce();
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: primary,
+          selection: { mode: 'names', names: ['local'] },
+        }),
+      );
+      const selected = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['remote'] },
+        }),
+      });
+      expect(selected.status).toBeGreaterThanOrEqual(400);
+      expect(factory).toHaveBeenCalledOnce();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('drops only the workspace whose startup channel cannot be resolved', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-partial-startup-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    writeWorkspaceSettings(primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    writeWorkspaceSettings(secondary, { serve: { channels: ['ghost'] } });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const pidfile = makePidfileDeps();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(primary),
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      );
+      expect(
+        stderr.mock.calls.map(([chunk]) => String(chunk)).join(''),
+      ).toContain('channel "ghost" was not restored');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('hosts a shared channel definition in the workspace that asked for it', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-shared-startup-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    writeWorkspaceSettings(secondary, { serve: { channels: ['feishu'] } });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    // A user-scope channel with no `cwd` is visible in every workspace, so
+    // ownership alone cannot decide it; only the workspace that listed it in
+    // its own serve.channels can.
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      () =>
+        ({
+          merged: { channels: { feishu: { type: 'feishu' } } },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(secondary),
+          selection: { mode: 'names', names: ['feishu'] },
+        }),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps a shared channel in its workspace across a stop and re-enable', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-shared-retoggle-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    writeWorkspaceSettings(secondary, { serve: { channels: ['feishu'] } });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      () =>
+        ({
+          merged: { channels: { feishu: { type: 'feishu' } } },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    };
+
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledTimes(1);
+
+      const stop = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'DELETE',
+        headers,
+      });
+      expect(stop.status).toBe(200);
+
+      // Ownership of a user-scope channel is only knowable from the boot-time
+      // hint, so stopping the selection must not forget it: re-enabling has to
+      // land in the same workspace instead of turning ambiguous.
+      const reenable = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['feishu'] },
+        }),
+      });
+      expect(reenable.status).toBe(201);
+      expect(factory).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(secondary),
+          selection: { mode: 'names', names: ['feishu'] },
+        }),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not banner a channel two workspaces list but one owns', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-shared-listing-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    // Both workspaces toggled the same channel on, but only one workspace
+    // defines it, so ownership resolves and the channel starts as configured.
+    writeWorkspaceSettings(primary, { serve: { channels: ['discord'] } });
+    writeWorkspaceSettings(secondary, {
+      channels: { discord: { type: 'discord' } },
+      serve: { channels: ['discord'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(secondary),
+          selection: { mode: 'names', names: ['discord'] },
+        }),
+      );
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      // The duplicate claim is recorded, but it cost the operator nothing, so
+      // it stays a log line instead of a boot banner.
+      expect(written).not.toContain(
+        `qwen serve: workspace ${JSON.stringify(primary)} serve.channels`,
+      );
+      expect(written).toContain('code=claimed_by_multiple_workspaces');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  function makeLateRegistrationDaemon() {
+    const primary = path.join(tmpDir!, 'primary');
+    const secondary = path.join(tmpDir!, 'secondary');
+    fs.mkdirSync(primary, { recursive: true });
+    writeWorkspaceSettings(secondary, {
+      channels: { feishu: { type: 'feishu' } },
+      serve: { channels: ['feishu'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeById: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const { factory } = makePerWorkspaceWorkerFactory();
+    return {
+      primary,
+      secondary,
+      factory,
+      store,
+      headers: {
+        Authorization: 'Bearer secret',
+        'Content-Type': 'application/json',
+      },
+      start: (
+        overrides: Partial<Parameters<typeof runQwenServe>[0]> = {},
+        depsOverrides: Partial<RunQwenServeDeps> = {},
+      ) =>
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: primary,
+            token: 'secret',
+            serveWebShell: false,
+            ...overrides,
+          },
+          {
+            preheatBridge: false,
+            daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+            channelWorkerSupervisorFactory: factory,
+            channelServicePidfile: makePidfileDeps(),
+            workspaceRegistrationStore: store,
+            ...depsOverrides,
+          },
+        ),
+    };
+  }
+
+  it("restores a workspace's own serve.channels when it registers after boot", async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-register-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      // Registration answers before the worker is up, so wait for the restore
+      // this hook runs afterwards rather than asserting on the response.
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not hold a later registration behind another workspace channel startup', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-bystander-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const bystander = path.join(tmpDir, 'bystander');
+    // Configures no channels at all.
+    fs.mkdirSync(bystander, { recursive: true });
+    // The first workspace's worker never becomes ready, so its startup holds
+    // the channel-control lane for as long as the startup budget allows.
+    let releaseStart: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    daemon.factory.mockImplementation(() => {
+      const worker = makeWorker({
+        enabled: true,
+        state: 'starting',
+        channels: [],
+        requestedChannels: ['feishu'],
+      });
+      worker.start.mockImplementation(() => blocked);
+      return worker;
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const first = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(first.status).toBe(201);
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalled());
+
+      // A workspace with no channels has nothing to wait for. Registering it
+      // must not queue behind the first workspace's stuck startup.
+      const started = Date.now();
+      const second = await Promise.race([
+        fetch(`${handle.url}/workspaces`, {
+          method: 'POST',
+          headers: daemon.headers,
+          body: JSON.stringify({ cwd: bystander }),
+        }).then((response) => response.status),
+        new Promise<'held'>((resolve) =>
+          setTimeout(() => resolve('held'), 3_000),
+        ),
+      ]);
+      expect(second).toBe(201);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      releaseStart?.();
+      await handle.close();
+    }
+  });
+
+  it('answers a workspace registration without waiting for its channel worker', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-latency-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    // A worker that never becomes ready. Awaiting it would hold the daemon's
+    // runtime-topology gate until the 30s startup budget expires, so this test
+    // fails by timing out if registration ever waits for channel startup.
+    let releaseStart: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    daemon.factory.mockImplementation(() => {
+      const worker = makeWorker({
+        enabled: true,
+        state: 'starting',
+        channels: [],
+        requestedChannels: ['feishu'],
+      });
+      worker.start.mockImplementation(() => blocked);
+      return worker;
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalled());
+    } finally {
+      releaseStart?.();
+      await handle.close();
+    }
+  });
+
+  it('leaves a late workspace alone under an explicit --channel selection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-explicit-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+    });
+    const handle = await daemon.start({
+      channelSelection: { mode: 'names', names: ['telegram'] },
+    });
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        daemon.factory.mock.calls.map(([call]) => call.workspace),
+      ).not.toContain(canonicalizeWorkspace(daemon.secondary));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("restores a workspace's channels once per daemon, not on every return", async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-once-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      const workspaceId = ((await added.json()) as { id: string }).id;
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalledTimes(1));
+
+      // An operator stops the channel, then the workspace leaves and comes
+      // back. Restoring again here would undo the stop, so the daemon does not.
+      const stopped = await fetch(
+        `${handle.url}/workspaces/${workspaceId}/channels/feishu/stop`,
+        { method: 'POST', headers: daemon.headers },
+      );
+      expect(stopped.status).toBe(200);
+      const removed = await fetch(`${handle.url}/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(removed.status).toBe(200);
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(readded.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(daemon.factory).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves a late workspace alone once channel hosting has been stopped', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-stopped-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalledTimes(1));
+
+      // `qwen channel stop` maps to this. Registering a workspace afterwards
+      // is not an instruction to turn hosting back on.
+      const stopped = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(stopped.status).toBe(200);
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(daemon.factory).toHaveBeenCalledTimes(1);
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: daemon.headers,
+      });
+      expect(await control.json()).toMatchObject({
+        enabled: false,
+        selection: null,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves a committed all selection alone when a workspace registers later', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-all-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['all'] },
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({ selection: { mode: 'all' } }),
+        ),
+      );
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // One flat selection cannot say "everything the primary has, plus
+      // these": `all` is left as it is rather than rewritten into names.
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: daemon.headers,
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'all' },
+      });
+      expect(
+        daemon.factory.mock.calls.map(([call]) => call.workspace),
+      ).not.toContain(canonicalizeWorkspace(daemon.secondary));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('still restores a late workspace after channels were only listed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-listed-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      // Listing channels creates the channel manager, and a manager that has
+      // never hosted anything reports the same state as one an operator
+      // stopped. A read must not switch the restore off.
+      const listed = await fetch(`${handle.url}/workspace/channels`, {
+        headers: daemon.headers,
+      });
+      expect(listed.status).toBe(200);
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('still restores a late workspace after an earlier late restore failed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-after-fail-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const broken = path.join(tmpDir, 'broken');
+    // Asks for a channel no workspace defines, so its restore cannot commit.
+    writeWorkspaceSettings(broken, { serve: { channels: ['ghost'] } });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const first = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: broken }),
+      });
+      expect(first.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      // Nobody stopped hosting; one workspace's failed restore must not read
+      // as if someone had.
+      const second = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(second.status).toBe(201);
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+      // The failure names the workspace that lost its list, so it is not
+      // left to adjacency in the log to guess whose restore failed.
+      await vi.waitFor(() => {
+        const failure = fs
+          .readFileSync(
+            path.join(tmpDir!, 'debug', 'daemon', 'daemon.log'),
+            'utf8',
+          )
+          .split('\n')
+          .find((line) => line.includes('were not restored'));
+        expect(failure).toContain(
+          `workspaceCwd=${canonicalizeWorkspace(broken)}`,
+        );
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps both workspaces registered back to back on a channel-less daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-pair-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const tertiary = path.join(tmpDir, 'tertiary');
+    writeWorkspaceSettings(tertiary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    // Creating the channel manager on a TLS daemon waits for this probe, which
+    // holds open the window the race lives in: the first restore has started
+    // but no manager exists yet, so nothing orders the second restore behind
+    // it, and each commit replaces the whole selection.
+    let releaseManager: (() => void) | undefined;
+    const managerGate = new Promise<void>((resolve) => {
+      releaseManager = resolve;
+    });
+    const workerTlsTrustVerifier = vi.fn(async () => {
+      await managerGate;
+      return undefined;
+    });
+    const handle = await daemon.start(
+      { tlsCert: certPath, tlsKey: keyPath },
+      { workerTlsTrustVerifier },
+    );
+    const request = (
+      method: string,
+      route: string,
+      body?: unknown,
+    ): Promise<{ status: number; json: unknown }> =>
+      new Promise((resolve, reject) => {
+        const req = https.request(
+          `${handle.url}${route}`,
+          { method, headers: daemon.headers, rejectUnauthorized: false },
+          (res) => {
+            let text = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => (text += chunk));
+            res.on('end', () =>
+              resolve({
+                status: res.statusCode ?? 0,
+                json: text ? JSON.parse(text) : undefined,
+              }),
+            );
+          },
+        );
+        req.on('error', reject);
+        if (body !== undefined) req.write(JSON.stringify(body));
+        req.end();
+      });
+
+    try {
+      await handle.runtimeReady;
+      const first = await request('POST', '/workspaces', {
+        cwd: daemon.secondary,
+      });
+      expect(first.status).toBe(201);
+      await vi.waitFor(() => expect(workerTlsTrustVerifier).toHaveBeenCalled());
+      const second = await request('POST', '/workspaces', { cwd: tertiary });
+      expect(second.status).toBe(201);
+      releaseManager?.();
+
+      await vi.waitFor(async () => {
+        const control = await request('GET', '/workspace/channel');
+        const state = control.json as {
+          transition: string;
+          selection: { mode: string; names?: string[] } | null;
+        };
+        expect(state.transition).toBe('idle');
+        expect(state.selection).toEqual({
+          mode: 'names',
+          names: ['feishu', 'telegram'],
+        });
+      });
+    } finally {
+      releaseManager?.();
+      await handle.close();
+    }
+  });
+
+  it('does not move a hosted channel to a workspace that registers later', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-claim-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const hosting = path.join(tmpDir, 'hosting');
+    const claimant = path.join(tmpDir, 'claimant');
+    fs.mkdirSync(primary, { recursive: true });
+    // Both workspaces ask for the same channel, which is what the per-workspace
+    // startup toggle produces for a channel defined once in user scope.
+    writeWorkspaceSettings(hosting, { serve: { channels: ['shared'] } });
+    writeWorkspaceSettings(claimant, { serve: { channels: ['shared'] } });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      () =>
+        ({
+          merged: { channels: { shared: { type: 'feishu' } } },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+    } as unknown as WorkspaceRegistrationStore;
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, hosting],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        workspaceRegistrationStore: store,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(hosting),
+          selection: { mode: 'names', names: ['shared'] },
+        }),
+      );
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      const hostingCallsBefore = factory.mock.calls.filter(
+        ([call]) => call.workspace === canonicalizeWorkspace(hosting),
+      ).length;
+      const totalCallsBefore = factory.mock.calls.length;
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The newcomer asks for a name the daemon already hosts, so it has
+      // nothing of its own to bring up and the running worker stays put.
+      expect(factory.mock.calls.map(([call]) => call.workspace)).not.toContain(
+        canonicalizeWorkspace(claimant),
+      );
+      // "Stays put" means the same worker, not a fresh one under the same
+      // owner: re-committing a name the daemon already hosts would tear the
+      // incumbent down and take every session on it with it.
+      expect(
+        factory.mock.calls.filter(
+          ([call]) => call.workspace === canonicalizeWorkspace(hosting),
+        ),
+      ).toHaveLength(hostingCallsBefore);
+      expect(factory.mock.calls).toHaveLength(totalCallsBefore);
+      // The committed selection is what a reconcile acts on, so re-committing
+      // a name the daemon already hosts is the step that would tear the
+      // incumbent down. It must not even be proposed.
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'names', names: ['shared'] },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('counts a registration whose names were all hosted as its one restore', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-hosted-once-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const hosting = path.join(tmpDir, 'hosting');
+    const claimant = path.join(tmpDir, 'claimant');
+    fs.mkdirSync(primary, { recursive: true });
+    // Two checkouts of one repository: both list the same channels, and the
+    // one registered at boot hosts them.
+    writeWorkspaceSettings(hosting, {
+      serve: { channels: ['shared', 'other'] },
+    });
+    writeWorkspaceSettings(claimant, {
+      serve: { channels: ['shared', 'other'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      () =>
+        ({
+          merged: {
+            channels: {
+              shared: { type: 'feishu' },
+              other: { type: 'feishu' },
+            },
+          },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeById: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    };
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, hosting],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        workspaceRegistrationStore: store,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      expect(added.status).toBe(201);
+      const workspaceId = ((await added.json()) as { id: string }).id;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // The operator stops one channel; the other keeps hosting enabled.
+      const narrowed = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['other'] },
+        }),
+      });
+      expect(narrowed.status).toBe(200);
+      const callsAfterStop = factory.mock.calls.length;
+
+      // The claimant leaves and comes back. It already had its restore — it
+      // found nothing to bring up — so coming back must not bring up the
+      // channel the operator stopped in between.
+      const removed = await fetch(`${handle.url}/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+        headers,
+      });
+      expect(removed.status).toBe(200);
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      expect(readded.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers,
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'names', names: ['other'] },
+      });
+      expect(factory.mock.calls).toHaveLength(callsAfterStop);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps explicit channel selection ahead of workspace startup channels', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-explicit-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      channels: ['feishu'],
+      requestedChannels: ['feishu'],
+    });
+    const workerFactory = makeReadyWorkerFactory(worker);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['feishu'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selection: { mode: 'names', names: ['feishu'] },
+        }),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
+    { label: 'mixed all', channels: ['all', 'telegram'] },
+    { label: 'scalar', channels: 'telegram' },
+    { label: 'non-string item', channels: ['telegram', 1] },
+    { label: 'all rejected', channels: [' ', '\u202e'] },
+  ])(
+    'keeps a bare daemon healthy with invalid configured channels: $label',
+    async ({ channels }) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-invalid-startup-')),
+      );
+      const workerFactory = vi.fn();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { channels } },
+          channelWorkerSupervisorFactory: workerFactory,
+          channelServicePidfile: makePidfileDeps(),
+        },
+      );
+
+      try {
+        await handle.runtimeReady;
+        expect(workerFactory).not.toHaveBeenCalled();
+        expect(
+          stderr.mock.calls.map(([chunk]) => String(chunk)).join(''),
+        ).toContain('serve.channels');
+        expect(
+          stderr.mock.calls.map(([chunk]) => String(chunk)).join(''),
+        ).not.toContain('falling back to defaults');
+        const health = await fetch(`${handle.url}/health`);
+        expect(health.status).toBe(200);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
+  it('ignores unsafe configured channel names without writing control bytes', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-unsafe-startup-')),
+    );
+    const workerFactory = makeReadyWorkerFactory(
+      makeWorker({
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      }),
+    );
+    const unsafeNames = [
+      '\u001b[31mRED',
+      '\u009b31mC1',
+      '\u202eRLO',
+      '\u2028',
+      '\u2029',
+      '\ufe0f',
+      ' telegram ',
+      ' ',
+    ];
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: {
+          serve: { channels: [...unsafeNames, 'telegram'] },
+        },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      );
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).not.toContain('\u001b');
+      for (const raw of unsafeNames.slice(0, -2)) {
+        expect(written).not.toContain(raw);
+      }
+      expect(written).toContain(
+        'ignored invalid workspace serve.channels entry at index 0',
+      );
+      expect(written).toContain(
+        'ignored invalid workspace serve.channels entry at index 6',
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps a bare daemon healthy when configured channels are untrusted', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-untrusted-startup-')),
+    );
+    const workerFactory = vi.fn();
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        trustedWorkspace: false,
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).not.toHaveBeenCalled();
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps a bare daemon healthy when the configured channel lease is busy', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-busy-startup-')),
+    );
+    const pidfile = makePidfileDeps();
+    pidfile.readServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 9988,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+    const workerFactory = vi.fn();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).not.toHaveBeenCalled();
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('reports configured channel worker startup failure without stopping the daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-failed-startup-')),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: { telegram: { type: 'telegram' } },
+        serve: { channels: ['telegram'] },
+      }),
+    );
+    const failedWorker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      channels: ['telegram'],
+      exitCode: 1,
+    });
+    const leakedCredential = 'configured-channel-secret-1234567890';
+    failedWorker.start.mockRejectedValueOnce(
+      new Error(`worker failed before ready: Bearer ${leakedCredential}`),
+    );
+    const recoveredWorker = makeWorker({
+      enabled: true,
+      state: 'running',
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      adapters: [{ name: 'telegram', state: 'connected' }],
+    });
+    const workerFactory = vi
+      .fn((workerOptions: CreateChannelWorkerSupervisorOptions) => {
+        recoveredWorker.start.mockImplementation(async () => {
+          workerOptions.onReady?.(recoveredWorker.snapshot());
+        });
+        return recoveredWorker;
+      })
+      .mockReturnValueOnce(failedWorker);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: makePidfileDeps(),
+        daemonLogBaseDir: logBaseDir,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('Bearer <redacted>');
+      expect(written).not.toContain(leakedCredential);
+      const logPath = path.join(logBaseDir, 'daemon', 'daemon.log');
+      await vi.waitFor(() => {
+        const logContent = fs.readFileSync(logPath, 'utf8');
+        expect(logContent).toContain('Bearer <redacted>');
+        expect(logContent).not.toContain(leakedCredential);
+      });
+      const response = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        instances: {
+          telegram: {
+            startsWithServe: true,
+            runtime: {
+              state: 'stopped',
+            },
+          },
+        },
+      });
+      const settingsFile = path.join(tmpDir, '.qwen', 'settings.json');
+      const originalSettings = fs.readFileSync(settingsFile, 'utf8');
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({
+          channels: { telegram: { type: 'telegram' } },
+          serve: { channels: [] },
+        }),
+      );
+      const disabled = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(await disabled.json()).toMatchObject({
+        instances: { telegram: { startsWithServe: false } },
+      });
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ channels: {}, serve: { channels: [] } }),
+      );
+      const removed = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect((await removed.json()).instances).toEqual({});
+      fs.writeFileSync(settingsFile, originalSettings);
+      const recovered = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      });
+      expect(recovered.status).toBe(201);
+      const recoveredListing = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(await recoveredListing.json()).toMatchObject({
+        instances: {
+          telegram: { runtime: { state: 'connected' } },
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps configured startup fail-soft when manager construction fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-manager-startup-')),
+    );
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerUrlCertifier: () => {
+          throw new Error('manager construction sentinel');
+        },
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledOnce();
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('stays ready when configured startup manager and lease cleanup both fail', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-manager-cleanup-')),
+    );
+    const pidfile = makePidfileDeps();
+    pidfile.readServiceInfo.mockReturnValueOnce(null).mockReturnValue({
+      owner: 'serve',
+      pid: process.pid,
+      servePid: process.pid,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+    pidfile.removeServeServiceInfo.mockReturnValueOnce(false);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerUrlCertifier: () => {
+          throw new Error('manager construction sentinel');
+        },
+        channelServicePidfile: pidfile,
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      expect(handle.server.listening).toBe(true);
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledOnce();
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('manager construction sentinel');
+      expect(written).toContain('Failed to release the channel service lease');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('retains the channel lease and stays ready when configured startup cleanup is unconfirmed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-cleanup-startup-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      channels: ['telegram'],
+    });
+    worker.start.mockRejectedValueOnce(new Error('worker start failed'));
+    worker.stop.mockRejectedValue(new Error('worker stop failed'));
+    const pidfile = makePidfileDeps();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      expect(handle.server.listening).toBe(true);
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+      expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('worker start failed');
+      expect(written).toContain('worker stop failed');
+    } finally {
+      worker.stop.mockResolvedValue(undefined);
       await handle.close();
     }
   });
@@ -15433,70 +18986,87 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('does not write a worker pidfile after runtime startup already timed out', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-timeout-')),
-    );
-    let releaseStart!: () => void;
-    const worker = makeWorker({
-      enabled: true,
-      state: 'running',
-      pid: 1234,
-      channels: ['telegram'],
-    });
-    const pidfile = makePidfileDeps();
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        serveWebShell: false,
-        channelSelection: { mode: 'names', names: ['telegram'] },
-      },
-      {
-        bridge: makeFakeBridge(),
-        channelWorkerSupervisorFactory: vi.fn((opts) => {
-          worker.start.mockImplementation(
-            () =>
-              new Promise<void>((resolve) => {
-                releaseStart = () => {
-                  opts.onReady?.(worker.snapshot());
-                  resolve();
-                };
-              }),
-          );
-          return worker;
-        }),
-        channelServicePidfile: pidfile,
-        resolveOnListen: true,
-        runtimeStartupTimeoutMs: 1,
-      },
-    );
-
-    try {
-      await expect(
-        Promise.race([
-          handle.runtimeReady,
-          new Promise((_, reject) =>
-            setTimeout(
-              () => reject(new Error('runtimeReady did not settle')),
-              1000,
-            ),
-          ),
-        ]),
-      ).rejects.toThrow('Daemon runtime startup timed out after 1ms.');
-      await vi.waitFor(() => {
-        expect(handle.server.listening).toBe(false);
+  it.each(['explicit', 'configured'])(
+    'cleans up %s channels after the runtime startup deadline',
+    async (source) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-timeout-')),
+      );
+      let releaseStart!: () => void;
+      const worker = makeWorker({
+        enabled: true,
+        state: 'running',
+        pid: 1234,
+        channels: ['telegram'],
       });
-      releaseStart();
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(pidfile.writeServeServiceInfo).not.toHaveBeenCalled();
-    } finally {
-      releaseStart?.();
-      await handle.close();
-    }
-  });
+      const pidfile = makePidfileDeps();
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          ...(source === 'explicit'
+            ? {
+                channelSelection: {
+                  mode: 'names' as const,
+                  names: ['telegram'],
+                },
+              }
+            : {}),
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { channels: ['telegram'] } },
+          channelWorkerSupervisorFactory: vi.fn((opts) => {
+            worker.start.mockImplementation(
+              () =>
+                new Promise<void>((resolve) => {
+                  releaseStart = () => {
+                    opts.onReady?.(worker.snapshot());
+                    resolve();
+                  };
+                }),
+            );
+            return worker;
+          }),
+          channelServicePidfile: pidfile,
+          resolveOnListen: true,
+          runtimeStartupTimeoutMs: 1,
+        },
+      );
+
+      try {
+        await expect(
+          Promise.race([
+            handle.runtimeReady,
+            new Promise((_, reject) =>
+              setTimeout(
+                () => reject(new Error('runtimeReady did not settle')),
+                1000,
+              ),
+            ),
+          ]),
+        ).rejects.toThrow('Daemon runtime startup timed out after 1ms.');
+        await vi.waitFor(() => {
+          expect(handle.server.listening).toBe(false);
+        });
+        releaseStart();
+        await new Promise((resolve) => setImmediate(resolve));
+        await vi.waitFor(() => {
+          expect(worker.stop).toHaveBeenCalled();
+          expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(
+            process.pid,
+          );
+        });
+        expect(pidfile.writeServeServiceInfo).not.toHaveBeenCalled();
+      } finally {
+        releaseStart?.();
+        await handle.close();
+      }
+    },
+  );
 
   it('reports a warning when the ready channel worker exits', async () => {
     tmpDir = fs.realpathSync(
@@ -16321,6 +19891,51 @@ describe('runQwenServe startup observability', () => {
     throw new Error(`preheat status did not become ${status}`);
   }
 
+  async function waitForDaemonLog(
+    logBaseDir: string,
+    needle: string,
+  ): Promise<string> {
+    const daemonDir = path.join(logBaseDir, 'daemon');
+    for (let i = 0; i < 50; i++) {
+      if (fs.existsSync(daemonDir)) {
+        const logFile = fs
+          .readdirSync(daemonDir)
+          .find((file) => file.endsWith('.log'));
+        if (logFile) {
+          const content = fs.readFileSync(
+            path.join(daemonDir, logFile),
+            'utf8',
+          );
+          if (content.includes(needle)) return content;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`daemon log did not contain: ${needle}`);
+  }
+
+  function lifecycleBridgeExtras() {
+    return {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
+      queryWorkspaceStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: tmpDir,
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+        skills: [],
+      })),
+    };
+  }
+
   function installInternalBridge(preheat: () => Promise<void>): HttpAcpBridge {
     const bridge = makeFakeBridge();
     vi.mocked(bridge.preheat).mockImplementation(preheat);
@@ -16521,6 +20136,575 @@ describe('runQwenServe startup observability', () => {
       } else {
         process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
       }
+    }
+  });
+
+  it('starts workspace MCP discovery after ACP preheat succeeds', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-config-')),
+    );
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    const bridge = installInternalBridge(() => preheatPromise);
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      await waitForPreheatStatus(handle, 'running');
+      expect(ensureSpy).not.toHaveBeenCalled();
+      expect(bridge.preheat).toHaveBeenCalledTimes(1);
+      expect(bridge.preheat).toHaveBeenCalledWith();
+
+      resolvePreheat();
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
+      expect(ensureSpy).toHaveBeenCalledWith({
+        keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+      });
+      expect(ensureSpy.mock.instances[0]).toMatchObject({
+        runtime: expect.objectContaining({ workspaceCwd: tmpDir }),
+      });
+      expect(bridge.preheat).toHaveBeenCalledTimes(2);
+      expect(bridge.preheat).toHaveBeenNthCalledWith(1);
+      expect(bridge.preheat).toHaveBeenNthCalledWith(2, {
+        keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not leak an unhandled rejection when boot MCP discovery fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-reject-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi
+      .spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure')
+      .mockImplementation(async () => {
+        throw new WorkspaceRuntimeInitializationError(
+          new Error('cause detail'),
+        );
+      });
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown) => rejections.push(reason);
+    process.on('unhandledRejection', recordRejection);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(rejections).toEqual([]);
+      await waitForDaemonLog(
+        logBaseDir,
+        'workspace runtime ensure after preheat failed: cause detail',
+      );
+    } finally {
+      process.off('unhandledRejection', recordRejection);
+      await handle.close();
+    }
+  });
+
+  it('logs the deepest cause from a multi-hop boot runtime ensure failure', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-deep-cause-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, lifecycleBridgeExtras());
+    vi.spyOn(
+      WorkspaceRuntimeCoordinator.prototype,
+      'ensure',
+    ).mockImplementation(async () => {
+      throw new Error('wrapper', {
+        cause: new Error('middle', { cause: new Error('deepest leaf') }),
+      });
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      const logContent = await waitForDaemonLog(
+        logBaseDir,
+        'workspace runtime ensure after preheat failed: deepest leaf',
+      );
+      expect(logContent).not.toContain('wrapper');
+      expect(logContent).not.toContain('middle');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('logs non-Error boot runtime ensure failures via String(err)', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-string-err-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, lifecycleBridgeExtras());
+    vi.spyOn(
+      WorkspaceRuntimeCoordinator.prototype,
+      'ensure',
+    ).mockImplementation(async () => {
+      // eslint-disable-next-line no-restricted-syntax -- pins String(err) fallback
+      throw 'plain string failure';
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await waitForDaemonLog(
+        logBaseDir,
+        'workspace runtime ensure after preheat failed: plain string failure',
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('logs cause-less boot runtime ensure failures without an undefined suffix', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-no-cause-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, lifecycleBridgeExtras());
+    vi.spyOn(
+      WorkspaceRuntimeCoordinator.prototype,
+      'ensure',
+    ).mockImplementation(async () => {
+      throw new WorkspaceRuntimeStillStartingError();
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      const logContent = await waitForDaemonLog(
+        logBaseDir,
+        'workspace runtime ensure after preheat failed: Workspace runtime is still starting',
+      );
+      expect(logContent).not.toContain('(undefined)');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('logs when boot MCP discovery skips because lifecycle is unsupported', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-no-lifecycle-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = installInternalBridge(() => Promise.resolve());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await waitForDaemonLog(
+        logBaseDir,
+        'workspace runtime ensure after preheat skipped: ' +
+          'workspace runtime lifecycle is not supported',
+      );
+      expect(bridge.preheat).toHaveBeenCalledOnce();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('logs when boot ensure skips because primary workspace is not active', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qws-startup-mcp-inactive-primary-'),
+      ),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    const bridge = installInternalBridge(() => preheatPromise);
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+    let workspaceRegistry: WorkspaceRegistry | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      workspaceRegistry = args[2]?.workspaceRegistry;
+      return originalCreateServeApp(...args);
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
+    );
+
+    try {
+      await waitForPreheatStatus(handle, 'running');
+      const previousState = workspaceRegistry!.primaryEntry.state;
+      workspaceRegistry!.primaryEntry.state = 'draining';
+      resolvePreheat();
+      try {
+        await waitForDaemonLog(
+          logBaseDir,
+          'workspace runtime ensure after preheat skipped: no primary runtime',
+        );
+        expect(ensureSpy).not.toHaveBeenCalled();
+      } finally {
+        workspaceRegistry!.primaryEntry.state = previousState;
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('logs when boot MCP discovery skips because primary runtime is gone', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-no-runtime-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    installInternalBridge(() => preheatPromise);
+    let workspaceRegistry: WorkspaceRegistry | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      workspaceRegistry = args[2]?.workspaceRegistry;
+      return originalCreateServeApp(...args);
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
+    );
+
+    try {
+      await waitForPreheatStatus(handle, 'running');
+      const current = workspaceRegistry!.primaryEntry.current;
+      delete workspaceRegistry!.primaryEntry.current;
+      resolvePreheat();
+      try {
+        await waitForDaemonLog(
+          logBaseDir,
+          'workspace runtime ensure after preheat skipped: no primary runtime',
+        );
+      } finally {
+        workspaceRegistry!.primaryEntry.current = current;
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not schedule workspace MCP discovery when ACP preheat fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-preheat-fail-')),
+    );
+    const bridge = installInternalBridge(() =>
+      Promise.reject(new Error('preheat boom')),
+    );
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'failed')).toMatchObject({
+        status: 'failed',
+        error: 'preheat boom',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(ensureSpy).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('starts workspace MCP discovery only for the primary workspace', async () => {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-primary-only-')),
+    );
+    const primary = path.join(root, 'primary');
+    const secondary = path.join(root, 'secondary');
+    fs.mkdirSync(primary, { recursive: true });
+    fs.mkdirSync(secondary, { recursive: true });
+    tmpDir = root;
+    const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, {
+      ...lifecycleBridgeExtras(),
+      queryWorkspaceStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: primary,
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+        skills: [],
+      })),
+    });
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
+      expect(ensureSpy.mock.instances[0]).toMatchObject({
+        runtime: expect.objectContaining({
+          workspaceCwd: canonicalizeWorkspace(primary),
+        }),
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not schedule workspace MCP discovery when shutting down during preheat', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-shutdown-')),
+    );
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    const bridge = installInternalBridge(() => preheatPromise);
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      await waitForPreheatStatus(handle, 'running');
+      await handle.close();
+      resolvePreheat();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(ensureSpy).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not schedule workspace MCP discovery after runtime startup fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-runtime-fail-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    const bridge = installInternalBridge(() => preheatPromise);
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    let releaseWorkerStart!: () => void;
+    const workerStartGate = new Promise<void>((resolve) => {
+      releaseWorkerStart = resolve;
+    });
+    const worker = {
+      start: vi.fn(async () => {
+        await workerStartGate;
+        throw new Error('worker failed before ready');
+      }),
+      stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn(),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(
+        (): ChannelWorkerSnapshot => ({
+          enabled: true,
+          state: 'failed',
+          channels: ['telegram'],
+          exitCode: 1,
+        }),
+      ),
+      enqueueWebhookTask: vi.fn(),
+      deliverChannelMessage: vi.fn(),
+    };
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        preheatBridge: true,
+        resolveOnListen: true,
+        daemonLogBaseDir: logBaseDir,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+      },
+    );
+
+    try {
+      await vi.waitFor(() => expect(bridge.preheat).toHaveBeenCalledOnce());
+      releaseWorkerStart();
+      await vi.waitFor(() => {
+        if (
+          !stderrWrites.join('').includes('qwen serve: runtime startup failed')
+        ) {
+          throw new Error('waiting for runtime startup failure');
+        }
+      });
+      resolvePreheat();
+      await vi.waitFor(() => {
+        if (ensureSpy.mock.calls.length > 0) {
+          throw new Error(
+            'ensure was scheduled despite runtime startup failure',
+          );
+        }
+        const stderr = stderrWrites.join('');
+        if (
+          !stderr.includes(
+            'workspace runtime ensure after preheat skipped: runtime startup failed',
+          )
+        ) {
+          throw new Error('waiting for runtime startup skip reason');
+        }
+      });
+      expect(ensureSpy).not.toHaveBeenCalled();
+      await expect(handle.runtimeReady).rejects.toThrow(
+        'worker failed before ready',
+      );
+    } finally {
+      await handle.close();
     }
   });
 

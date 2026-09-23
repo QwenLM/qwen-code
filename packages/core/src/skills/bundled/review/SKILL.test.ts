@@ -62,6 +62,31 @@ describe('bundled review skill', () => {
     expect(body).toContain('decided stop with no composed artifact');
   });
 
+  it('rules an unplanned declarer under the eighth coverage failure, not a ninth', () => {
+    // `check-coverage` names a declarer whose chunk id the plan does not
+    // carry in the SAME `ERROR:` line as the planned ones, so the skill's
+    // eight rulings still cover everything the gate prints.
+    const body = skillBody();
+    expect(body).toContain(
+      'It reports eight failures, and they are not the same:',
+    );
+    // INSIDE the eighth bullet, not a bullet of its own — a ninth bullet
+    // would be a ninth failure with nothing in the gate to match it.
+    const eighth = body
+      .split('\n')
+      .find((l) => l.startsWith('- **Chunks declared uncoverable**'));
+    expect(eighth).toContain(
+      'The same line also names a declarer whose chunk id this plan does not carry',
+    );
+    expect(eighth).toContain(
+      'it is listed by that id but is no chunk of this plan',
+    );
+    expect(eighth).toContain(
+      'if you relay it in `uncoverableChunks`, write the bare `chunk <id>`',
+    );
+    expect(eighth).toContain('under the same ruling.');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice
@@ -171,7 +196,7 @@ describe('bundled review skill', () => {
   it('pins the setup-batch ordering constraints', () => {
     const body = skillBody();
     expect(body).toContain('`fetch-pr` before all of them');
-    expect(body).toContain('`agent-prompt --roster` after the rules load');
+    expect(body).toContain('`emit-workflow` after the rules load');
     // The re-run ordering, same class as the two above and newer. A side-file
     // `--since` re-run rewrites the fetch report from scratch, while
     // `repo-context` enriches that same file in place: run in the other
@@ -412,7 +437,7 @@ describe('bundled review skill', () => {
     expect(body).toContain('the work list carries across models');
   });
 
-  it('launches the 3B convergence pair in the same response', () => {
+  it('launches the 3B convergence pair in one generated workflow', () => {
     // The pair's wall-clock saving exists only while both rounds go out
     // together: a later edit serializing the skill while the prompt-builder
     // tests stay green (they call each round builder themselves) restores
@@ -426,11 +451,82 @@ describe('bundled review skill', () => {
     const section = body.slice(start, end);
     expect(section).toContain('`--all-chunks --round 1`');
     expect(section).toContain('`--all-chunks --round 2`');
-    expect(section).toContain('in the same response');
+    expect(section).toContain('in one generated workflow');
+    expect(section).toContain('emit-workflow --batch');
     // The reporting transition is the fix for the round-0 blocker; a revert
     // dropping it must fail here, not slip through.
     expect(section).toContain('wait for BOTH fan-outs');
     expect(section).toContain('every shard passed as `--round 2`');
+  });
+
+  it('routes both initial topologies through the fixed workflow emitter', () => {
+    const body = coreBody();
+    for (const [start, end] of [
+      ['## Step 3A:', '## Step 3B:'],
+      ['## Step 3B:', '### Whole-file invariant agents'],
+    ]) {
+      const section = body.slice(body.indexOf(start), body.indexOf(end));
+      const commands = [...section.matchAll(/```bash\n([\s\S]*?)```/g)].map(
+        ([, command]) => command,
+      );
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toContain('review emit-workflow --plan');
+      expect(commands[0]).toContain('--rules');
+      expect(commands[0]).not.toContain('agent-prompt');
+      expect(section).toContain('foreground `workflow` call');
+    }
+    expect(body.split('---')[1]).toMatch(/^ {2}- workflow$/m);
+    expect(body).toContain('`run_in_background: false`, without `args`');
+    expect(body).not.toContain(
+      'invoking all `agent` tools in a **single response**',
+    );
+  });
+
+  it('keeps focused navigation on workflow dispatch without reverse auditors', () => {
+    const body = coreBody();
+    const start = body.indexOf('**Automatic navigation profile:**');
+    expect(start).toBeGreaterThan(-1);
+    const focused = body.slice(start, body.indexOf('\n\n', start));
+    expect(focused).toContain('`emit-workflow`');
+    expect(focused).toContain('`scriptPath`');
+    expect(focused).toContain('ONE foreground `workflow` call');
+    expect(focused).toContain('single `docs-nav` reviewer');
+    expect(focused).toContain('Skip Step 5 entirely');
+    expect(focused).not.toContain('agent-prompt --roster');
+
+    const batch = body.slice(
+      body.indexOf('### Batch verification'),
+      body.indexOf('**Do not write the verifier'),
+    );
+    expect(batch).toContain('except for `reviewProfile: "docs-nav"`');
+    expect(batch).toContain('in the same generated workflow');
+    expect(batch).toContain('combine all successful manifests');
+    expect(batch).toContain(
+      'At medium or for `reviewProfile: "docs-nav"`, there is no reverse audit',
+    );
+  });
+
+  it('makes every recorded follow-up command produce a manifest for the selected wave', () => {
+    const body = coreBody();
+    const commands = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].flatMap(
+      ([, block]) => block.split(/(?=^"\$\{QWEN_CODE_CLI:-qwen\}")/m),
+    );
+    const builders = commands.filter((command) =>
+      command.startsWith('"${QWEN_CODE_CLI:-qwen}" review agent-prompt '),
+    );
+    expect(builders).toHaveLength(4);
+    for (const command of builders) {
+      expect(command).toContain('--batch');
+      expect(command).toMatch(/> [^\n]+\.json/);
+      expect(command).not.toContain('| head');
+    }
+    expect(body).toContain('Never glob historical manifests or prompt records');
+    expect(body).toContain('include a manifest after exit 4/5');
+    expect(body).toContain('If no build succeeded, invoke no workflow');
+    expect(body).toContain("round _k+1_ plus round _k_'s verifier shards");
+    expect(body).toContain('Keep the worktree until the workflow has settled');
+    expect(body).toContain('recover any completed verifier results');
+    expect(body).not.toContain('stop waiting on it yourself');
   });
 
   it('pins the bounded-tail protocol on the round-cap bullet', () => {
@@ -650,6 +746,61 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'Findings the convergence posture deferred stay out the same way',
     );
+  });
+
+  it('rules the selection-drift line as a disclosure that owes no mid-round repair', () => {
+    // Both commands print it as a NOTE and exit 0, so without a ruling the
+    // orchestrator has two readings and both are wrong: ignore it, or act on
+    // its text — "re-capture the diff and re-plan" is Step 1, and rewriting
+    // the plan mid-round moves the mtime every prompt record and transcript
+    // of the round is fenced on.
+    const body = skillBody();
+    expect(body).toContain(
+      '**The coverage report may also carry `selectionDrift`**',
+    );
+    expect(body).toContain('It is a disclosure, not a ninth failure');
+    // Each phrase below occurs ONCE in the corpus — a pin on words another
+    // ruling also uses ("it owes **no relaunch**") stays green with this
+    // paragraph deleted.
+    expect(body).toContain('this NOTE owes no relaunch and no repair round');
+    expect(body).toContain(
+      '**Do not re-capture or re-plan mid-round**, whatever the line says.',
+    );
+    // …and it must not have been turned into a gate along the way.
+    expect(body).toContain('it moves no exit code, it caps nothing');
+    // The causes have different repairs; the ruling must not flatten them
+    // back into "the diff moved".
+    expect(body).toContain('an unreadable file may never have moved');
+    // Step 6 describes the NOTE lines beside the FIXes as withheld builds;
+    // the drift NOTE is the other kind, and that paragraph has to say so.
+    expect(body).toContain(
+      'One other `NOTE:` can sit there — `selection drift:`, ruled in Step 3D: a disclosure that posts no gap and owes nothing this round.',
+    );
+    // The causes, kept apart: flattened to "the diff moved" the ruling sends
+    // every one of them to the same repair.
+    expect(body).toContain(
+      "the diff file changed, was replaced or is gone; it could not be read; or the plan's chunk list or recorded identity does not match, or is not something this build can read",
+    );
+    for (const phrase of [
+      'It is a disclosure, not a ninth failure',
+      'this NOTE owes no relaunch and no repair round',
+      '**Do not re-capture or re-plan mid-round**, whatever the line says.',
+      // Report-only, in the skill's own words: flipped to "it is part of
+      // `ok`" the paragraph above stayed green.
+      'it is not part of `ok`, it moves no exit code, it caps nothing',
+      // A NOTE from both commands — the skill performs FIX lines.
+      '`compose-review` prints `NOTE: selection drift: …` beside its FIX lines',
+      // The positive instruction, and the reason that makes it one.
+      "Finish the round against the plan as written, and relay the line's own words in the terminal report",
+      "the plan file's mtime is the epoch every prompt record and transcript of this round is fenced on",
+      'an unreadable file may never have moved',
+      // Who records it, which command says it how, and why it only reports.
+      'every capture command records in the plan what the plan was computed from',
+      '`check-coverage` prints `NOTE: <what it found>`',
+      'The check has never fired on a real run; that is why it only reports',
+    ]) {
+      expect(body.split(phrase)).toHaveLength(2);
+    }
   });
 
   it('pins the composed body budget and its trim order', () => {
@@ -1402,6 +1553,59 @@ describe('bundled review skill', () => {
     );
     expect(posting).not.toContain('position-independent substring test');
     expect(posting).not.toContain('occurs _anywhere_ in its body');
+  });
+
+  it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
+    // presubmit's reply carrier matches a wanted id at ANY location (its
+    // anchor may be unmapped or the finding moved); a location-qualified
+    // drop rule denied exactly the exemption that entry exists to grant.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**except a finding whose `id` appears in `matchedIds` of ANY `existingComments.repost` entry**',
+    );
+    expect(posting).toContain('so never re-check the location');
+    expect(posting).toContain('id appears in matchedIds of ANY repost');
+    expect(posting).not.toContain('entry at the same location');
+    expect(posting).not.toContain('repost entry at the same');
+    // The anchors-file and Exclusion-Criteria restatements of the rule.
+    expect(posting).toContain(
+      'the carried-id re-post exemption joins on the id',
+    );
+    expect(posting).not.toContain('intersects on `(path, line)` plus id');
+    expect(posting).not.toContain('at its location is exempted');
+  });
+
+  it('tells the model a deferral title leading with a fixed id is refused (#9940 review, round 30)', () => {
+    // `submit`'s gate reads deferred titles through the same head-slot
+    // read the closure mint uses, so an id-leading title IS a re-post —
+    // the doc listed it as a safe cross-reference, which sends the model
+    // into a refusal it was told could not happen.
+    const core = coreBody();
+    expect(core).toContain('A **deferral title is not**');
+    expect(core).toContain('a title whose HEAD SLOT carries a fixed id');
+    expect(core).toContain('re-posts that finding and is refused');
+    expect(core).not.toContain(
+      "a duplicate-drop note, a deferral title, another ruling's `by` — is a cross-reference",
+    );
+    // The gate reads the whole head slot, so "leading with" alone sends
+    // the model into the refusal the sentence exists to prevent.
+    expect(core).toContain('behind axis and source tags');
+  });
+
+  it('states where the repost legs anchor and who caps the downgrade reasons (#9940 review, round 30)', () => {
+    // presubmit writes the reasons uncapped; compose-review caps each at
+    // 400 code points, drops what a 2000-point total cannot hold, and
+    // joins and escapes the rest. And a carry-reply repost entry carries
+    // the REPLY's anchor, never null — a model told otherwise re-checks a
+    // location that answers nothing.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain("a ROOT leg's matchedIds are the ids of");
+    expect(posting).toContain("findings at that entry's own location");
+    expect(posting).toContain('else 0) — never null');
+    expect(posting).not.toContain("may be the reply's, `line: null` unmapped");
+    expect(posting).toContain('`compose-review` caps');
+    expect(posting).toContain('each at 400 code points');
+    expect(posting).toContain('ones past a 2000-point total');
   });
 
   it('names the CI salvage contract as the one exception to the drift restart', () => {

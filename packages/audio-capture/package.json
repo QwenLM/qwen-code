@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/audio-capture",
-  "version": "0.23.0",
+  "version": "0.24.4",
   "description": "Native microphone capture backend for Qwen Code voice input",
   "repository": {
     "type": "git",
@@ -29,7 +29,8 @@
   "scripts": {
     "install": "node install.js",
     "prebuildify": "prebuildify --napi --strip",
-    "build": "node-gyp rebuild && tsc --build",
+    "build": "tsc --build",
+    "build:native": "node-gyp rebuild && tsc --build",
     "build:ts": "tsc --build",
     "test": "vitest run",
     "test:ci": "vitest run",

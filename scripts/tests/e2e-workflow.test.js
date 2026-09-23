@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 describe('e2e workflow', () => {
   const workflow = readFileSync('.github/workflows/e2e.yml', 'utf8');
+  const e2eRunScript = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
   const buildSandboxScript = readFileSync('scripts/build_sandbox.js', 'utf8');
   const yml = parse(workflow);
 
@@ -34,6 +35,62 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.head_ref || github.ref_name');
   });
 
+  it('isolates child-process-heavy suites from the three parallel forks', () => {
+    const linuxJob = yml.jobs['e2e-test-linux'];
+    const runStep = linuxJob.steps.find(
+      (step) => step.name === 'Run E2E tests',
+    );
+
+    expect(linuxJob.strategy.matrix.shard).toEqual(['1/1']);
+    expect(runStep.run).toContain('.github/scripts/run-e2e-tests.sh');
+    expect(e2eRunScript).toContain(
+      'npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests "$@"',
+    );
+    expect(e2eRunScript).toContain(
+      'QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- "$@"',
+    );
+    expect(
+      e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
+    ).toHaveLength(1);
+    expect(
+      e2eRunScript.match(/--exclude '\*\*\/sdk-typescript\/\*\*'/g),
+    ).toHaveLength(1);
+    expect(e2eRunScript).toContain(
+      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
+    );
+    expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
+    // The arrangement is load-bearing: the batch must run first and the
+    // isolated suites second, joined by `&&` with no other command between
+    // or after. Counts and substrings are order- and backgrounding-blind;
+    // the pattern tolerates formatting-only rewrites (continuations, comment
+    // lines, trailing spaces) so a benign edit cannot turn CI red.
+    expect(e2eRunScript).toMatch(
+      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
+    );
+    // Text pins never touch the tree: renaming the file or directory these
+    // filters name silently returns the suites to the three-fork batch.
+    expect(existsSync('integration-tests/cli/qwen-serve-routes.test.ts')).toBe(
+      true,
+    );
+    expect(existsSync('integration-tests/sdk-typescript')).toBe(true);
+    expect(existsSync('integration-tests/channel-plugin.test.ts')).toBe(true);
+    expect(
+      existsSync('integration-tests/chat-transcript-document.test.ts'),
+    ).toBe(true);
+    expect(
+      existsSync('integration-tests/interactive/cron-interactive.test.ts'),
+    ).toBe(true);
+    // existsSync pins the directory's name, not its contents: suites moved
+    // out of it would rejoin the three-fork batch through the dead exclude,
+    // while vitest silently ignores a positional filter that matches nothing
+    // as long as a sibling filter still matches.
+    expect(
+      readdirSync('integration-tests/sdk-typescript').some((file) =>
+        file.endsWith('.test.ts'),
+      ),
+    ).toBe(true);
+  });
+
   describe('sandbox image preparation', () => {
     const steps = yml.jobs['e2e-test-linux'].steps;
     const setupStep = steps.find((step) => step.name === 'Set up Docker');
@@ -44,19 +101,19 @@ describe('e2e workflow', () => {
     });
 
     it('serializes image preparation on the shared Docker host', () => {
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain(
         'docker-sandbox-build-e2e-${GITHUB_SHA}.lock',
       );
-      expect(runStep.run).toContain('flock --wait 1800 8');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --wait 1800 8');
+      expect(e2eRunScript).toContain(
         'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
       );
-      expect(runStep.run).toContain('flock --shared --wait 1800 9');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --shared --wait 1800 9');
+      expect(e2eRunScript).toContain(
         'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
       );
-      expect(runStep.run).toContain('flock --wait 1800 7');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --wait 1800 7');
+      expect(e2eRunScript).toContain(
         'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
       );
     });
@@ -65,20 +122,20 @@ describe('e2e workflow', () => {
       expect(runStep.env.BUILD_SANDBOX_FLAGS).toContain(
         'org.qwen-code.ci.sandbox=true',
       );
-      expect(runStep.run).toContain('sandboxImageUri")-e2e-${GITHUB_SHA}"');
-      expect(runStep.run).toContain('docker image inspect "$sandbox_image"');
+      expect(e2eRunScript).toContain('sandboxImageUri")-e2e-${GITHUB_SHA}"');
+      expect(e2eRunScript).toContain('docker image inspect "$sandbox_image"');
     });
 
     it('pins each shard to the prepared image ID', () => {
-      expect(runStep.run).toContain("docker image inspect --format '{{.Id}}'");
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain("docker image inspect --format '{{.Id}}'");
+      expect(e2eRunScript).toContain(
         'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
       );
     });
 
     it('keeps one bounded retry without pruning the shared daemon', () => {
-      expect(runStep.run.match(/build_image/g)).toHaveLength(3);
-      expect(runStep.run).toContain(
+      expect(e2eRunScript.match(/build_image/g)).toHaveLength(3);
+      expect(e2eRunScript).toContain(
         'npm run build:sandbox -- -s --no-prune -i "$sandbox_image"',
       );
       expect(buildSandboxScript).toContain(".option('prune'");
@@ -90,6 +147,31 @@ describe('e2e workflow', () => {
       expect(runStep.env.VERBOSE).toBe('true');
     });
 
+    it('reaps only the sandbox containers owned by its matrix job', () => {
+      const owner =
+        '${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}';
+      const cleanupStep = steps.find(
+        (step) => step.name === 'Remove job-owned E2E containers',
+      );
+
+      expect(yml.jobs['e2e-test-linux'].env.E2E_CONTAINER_OWNER).toBe(owner);
+      expect(runStep.env.SANDBOX_FLAGS).toContain(
+        'org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}',
+      );
+      expect(e2eRunScript).toContain('trap cleanup_e2e_job EXIT');
+      expect(e2eRunScript).toContain("trap 'exit 1' INT TERM");
+      expect(e2eRunScript).toContain(
+        '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
+      );
+      expect(cleanupStep.if).toContain('always()');
+      expect(cleanupStep.run).toContain(
+        '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
+      );
+      expect(cleanupStep.run).toContain('docker rm -f > /dev/null || true');
+      expect(cleanupStep.run.match(/docker ps -aq/g)).toHaveLength(2);
+      expect(cleanupStep.run).toContain('E2E containers remain');
+    });
+
     it('never waits on a lock another run holds through its tests', () => {
       // Run 33637097713 lost two Docker shards to the #10605 protocol on one
       // host: shard 1/3 held the per-commit coordinator lock and polled 30
@@ -97,17 +179,17 @@ describe('e2e workflow', () => {
       // kept shared through its whole test phase, then shard 2/3 timed out
       // behind the coordinator lock shard 1/3 was still holding. Image
       // preparation may only ever wait on locks bounded by a build.
-      const sharedIndex = runStep.run.indexOf('flock --shared --wait 1800 9');
-      const buildLockIndex = runStep.run.indexOf('flock --wait 1800 7');
-      const releaseIndex = runStep.run.indexOf('flock --unlock 7');
-      const testIndex = runStep.run.indexOf('vitest run');
+      const sharedIndex = e2eRunScript.indexOf('flock --shared --wait 1800 9');
+      const buildLockIndex = e2eRunScript.indexOf('flock --wait 1800 7');
+      const releaseIndex = e2eRunScript.indexOf('flock --unlock 7');
+      const testIndex = e2eRunScript.indexOf('vitest run');
       expect(sharedIndex).toBeGreaterThanOrEqual(0);
       expect(buildLockIndex).toBeGreaterThan(sharedIndex);
       expect(releaseIndex).toBeGreaterThan(buildLockIndex);
       expect(testIndex).toBeGreaterThan(releaseIndex);
-      expect(runStep.run).not.toContain('acquire_daemon_write_lock');
-      expect(runStep.run).not.toContain('flock --unlock 9');
-      expect(runStep.run).not.toContain('flock --nonblock 9');
+      expect(e2eRunScript).not.toContain('acquire_daemon_write_lock');
+      expect(e2eRunScript).not.toContain('flock --unlock 9');
+      expect(e2eRunScript).not.toContain('flock --nonblock 9');
       expect(
         yml.jobs['e2e-test-linux'].strategy['max-parallel'],
       ).toBeUndefined();
@@ -118,10 +200,12 @@ describe('e2e workflow', () => {
       // inherits the descriptor and outlives its job keeps holding the lock
       // on the host. This shell keeps its own copy of the descriptor, so
       // closing it in children costs nothing.
-      expect(runStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
-      expect(runStep.run).toContain("--shard='${{ matrix.shard }}' 9>&-");
-      expect(runStep.run).toContain('exec 7>&-');
-      expect(runStep.run).toContain('exec 8>&-');
+      expect(e2eRunScript).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+      expect(e2eRunScript).toContain(
+        'vitest run --root ./integration-tests "$@" 9>&-',
+      );
+      expect(e2eRunScript).toContain('exec 7>&-');
+      expect(e2eRunScript).toContain('exec 8>&-');
       const cleanupStep = steps.find(
         (step) => step.name === 'Prune dangling docker images',
       );
@@ -160,28 +244,28 @@ describe('e2e workflow', () => {
     });
 
     it('wraps the sandbox:none shard command in a retryable function', () => {
-      expect(runStep.run).toContain('run_shard() {');
+      expect(e2eRunScript).toContain('run_shard() {');
     });
 
     it('retries the full shard command, shard and excludes included', () => {
-      // Everything after `--` is forwarded to vitest by the npm script, so
-      // shard and exclude coverage lives only in this argument list. The
-      // excludes are shared verbatim with the docker leg above.
-      expect(runStep.run).toContain(
-        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}'",
-      );
+      expect(e2eRunScript).toContain('run_vitest "${bulk_args[@]}"');
+      expect(e2eRunScript).toContain('--poolOptions.forks.maxForks=3');
+      expect(e2eRunScript).toContain('--shard="$shard"');
     });
 
     it('retries the sandbox:none shard exactly once', () => {
-      expect(runStep.run).toContain('run_shard || {');
+      expect(e2eRunScript).toContain('run_shard || {');
       // Definition + first attempt + one retry: the second attempt's exit
       // status is the step's, and a third attempt would burn pool time for
       // nothing.
-      expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
+      const retryBranch = e2eRunScript.slice(
+        e2eRunScript.lastIndexOf('if [ "$sandbox" = \'sandbox:docker\' ]'),
+      );
+      expect(retryBranch.match(/run_shard/g)).toHaveLength(3);
       // End-anchored scope: the retry is the group's last command and the
       // group is the script's last statement. A retry moved outside the
       // `|| { ... }` would run unconditionally, re-running green shards too.
-      expect(runStep.run).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
+      expect(e2eRunScript).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
     });
 
     it('gates the retry on the remaining job budget', () => {
@@ -189,7 +273,7 @@ describe('e2e workflow', () => {
       // that exits the step when the job cannot fit another shard. Shape
       // only — bash itself witnesses the execution semantics in
       // e2e-shard-retry.test.js.
-      const group = runStep.run.slice(runStep.run.indexOf('run_shard || {'));
+      const group = e2eRunScript.slice(e2eRunScript.indexOf('run_shard || {'));
       expect(group).toMatch(/elapsed[\s\S]*exit 1[\s\S]*run_shard\s*\n\s*\}/);
     });
 
@@ -211,40 +295,56 @@ describe('e2e workflow', () => {
       expect(yml.jobs['e2e-test-linux']['continue-on-error']).toBeUndefined();
     });
 
-    it('keeps the default step shell the execution harness assumes', () => {
-      // e2e-shard-retry.test.js executes this step's script under `bash -e`,
-      // GitHub's default Linux step shell only while the step carries no
-      // `shell:` override and neither the workflow nor the job a `defaults:`
-      // block. Any of those switches the lane's shell semantics — explicit
-      // `bash` expands to `bash --noprofile --norc -e -o pipefail {0}` —
-      // while the harness keeps executing the old shell, so every execution
-      // witness stays green for a contract the lane no longer runs. Absence
-      // only: this pins e2e.yml, not workflows that deliberately set a shell.
-      expect(runStep.shell).toBeUndefined();
-      expect(yml.defaults).toBeUndefined();
-      expect(yml.jobs['e2e-test-linux'].defaults).toBeUndefined();
+    it('passes the matrix sandbox and shard to the runner script', () => {
+      expect(runStep.run).toBe(
+        "exec bash .github/scripts/run-e2e-tests.sh '${{ matrix.sandbox }}' '${{ matrix.shard }}'",
+      );
     });
 
     it('does not retry the docker leg', () => {
-      // Two ~30min docker attempts would outrun the job's timeout-minutes.
-      expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
-        1,
+      const dockerBranch = e2eRunScript
+        .slice(
+          e2eRunScript.lastIndexOf('if [ "$sandbox" = \'sandbox:docker\' ]'),
+        )
+        .split('\nelse\n', 1)[0];
+      expect(dockerBranch.match(/run_shard/g)).toHaveLength(1);
+    });
+  });
+
+  describe('docker lock cache ownership heal', () => {
+    // Run 35054004633 (#11990) failed exactly the two steps that open
+    // ~/.cache/qwen-code-ci/docker-sandbox-daemon.lock — 'Run E2E tests'
+    // (via run-e2e-tests.sh) and 'Prune dangling docker images' — while
+    // the container-runtime preflight passed. Run 35039618620 (#11973)
+    // showed why: `exec 9>` on that lock fails with EACCES when a
+    // root-owned leftover sits in the runner's home, and both steps die
+    // on the same file. The workspace heal only chowns $GITHUB_WORKSPACE;
+    // the lock directory lives outside it, so the heal must reach it too.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const heal = steps.find(
+      (step) => step.name === 'Restore workspace ownership',
+    );
+
+    it('chowns the host-side docker lock directory back to the runner', () => {
+      expect(heal).toBeDefined();
+      expect(heal.run).toContain('[ -d "${HOME}/.cache/qwen-code-ci" ]');
+      // The whole fallback chain as one contiguous pin: each half alone
+      // contains the short pin, so dropping `-R` from the unprivileged
+      // attempt or dropping the `sudo -n` fallback leaves a substring pin
+      // green while the heal dies on the pool.
+      expect(heal.run).toContain(
+        'chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci"',
       );
-      // Structure, not just count: wrapping the docker command in a
-      // function and calling it twice keeps the literal count at one. The
-      // docker leg defines its own helper functions, so match by brace
-      // depth rather than any earlier definition: every `${...}` brace in
-      // the script is balanced, leaving the command at depth zero unless
-      // something wraps it.
-      const commandIndex = runStep.run.indexOf(
-        'QWEN_SANDBOX=docker vitest run',
+    });
+
+    it('heals before any step opens the daemon lock', () => {
+      const names = steps.map((step) => step.name);
+      expect(names.indexOf('Restore workspace ownership')).toBeLessThan(
+        names.indexOf('Run E2E tests'),
       );
-      let depth = 0;
-      for (const ch of runStep.run.slice(0, commandIndex)) {
-        if (ch === '{') depth += 1;
-        if (ch === '}') depth -= 1;
-      }
-      expect(depth).toBe(0);
+      expect(names.indexOf('Restore workspace ownership')).toBeLessThan(
+        names.indexOf('Prune dangling docker images'),
+      );
     });
   });
 
@@ -272,7 +372,7 @@ describe('e2e workflow', () => {
       );
       expect(pack.run).toContain('.github/scripts/e2e-build-pack.sh');
       // The same "the install must not build" premise as on the legs: without
-      // it npm ci runs prepare (a full build and bundle) and the explicit
+      // it the install runs prepare (a full build and bundle) and the explicit
       // build steps below then do it a second time on the critical path.
       const install = build.steps.find(
         (step) => step.name === 'Install dependencies',
@@ -307,7 +407,7 @@ describe('e2e workflow', () => {
 
     it('keeps the web-shell regression job building during its install', () => {
       // That job has no build step of its own: its tree comes solely from
-      // the prepare script that npm ci runs, so it must not carry the skip
+      // the prepare script that the install runs, so it must not carry the skip
       // the artifact-fed legs carry.
       const install = yml.jobs['web-shell-browser-regression'].steps.find(
         (step) => step.name === 'Install dependencies',
@@ -345,18 +445,183 @@ describe('e2e workflow', () => {
     it('keeps the docker sandbox image build on the leg', () => {
       // The image builds inside Docker from the checkout, so it is not part
       // of the archive; the leg still prepares it under the host locks.
-      const runStep = yml.jobs['e2e-test-linux'].steps.find(
-        (step) => step.name === 'Run E2E tests',
+      expect(e2eRunScript).toContain('npm run build:sandbox');
+    });
+  });
+
+  describe('install retry', () => {
+    // Run 34700339334 died at the build job's bare `npm ci` before any test
+    // ran — the same install reproduces clean at that commit, so the failure
+    // was a transient the tree could not explain — and every leg behind
+    // `needs: [build]` went down with it. repo-hygiene.yml and
+    // qwen-autofix.yml already wrap their installs in this exact bounded
+    // retry; a regression to a bare unretried install is silent until the next
+    // transient reddens a main run, so pin the shape on every install step.
+    const installSteps = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
+      (job.steps ?? [])
+        .filter((step) => step.name === 'Install dependencies')
+        .map((step) => [jobName, step]),
+    );
+
+    it('wraps every Install dependencies step in the bounded retry', () => {
+      // Six jobs install: the build, the three artifact-fed legs, the
+      // nightly legs, and the web-shell browser gate. A new job adding a
+      // bare install must fail here, not in a main-branch run.
+      expect(installSteps.map(([jobName]) => jobName).sort()).toEqual([
+        'build',
+        'e2e-interactive-opentui',
+        'e2e-test-linux',
+        'e2e-test-macos',
+        'isolated-nightly',
+        'web-shell-browser-regression',
+      ]);
+      // Fragment pins, not a byte-exact body: a formatting-only rewrite or
+      // a post-install line appended after `done` must stay green (the repo
+      // pins this same recipe in qwen-autofix.yml by fragment), while
+      // dropping the loop, the backoff, or the failure exit still reddens.
+      for (const [jobName, step] of installSteps) {
+        expect(step.run, jobName).toContain('for attempt in 1 2 3; do');
+        expect(step.run, jobName).toContain(
+          'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+        );
+        expect(step.run, jobName).toContain('exit 1');
+        expect(step.run, jobName).toContain('sleep $((attempt * 15))');
+        expect(step.run, jobName).toContain('break');
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" == "3" ]]; then',
+        );
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" != "1" ]]; then',
+        );
+        // The ::warning:: keeps an absorbed install transient countable even
+        // though the recovered job concludes green — the same rule the
+        // upload-artifact retry's announce step follows. Deleting the echo
+        // from any one copy must red this loop.
+        expect(step.run, jobName).toContain(
+          'echo "::warning::corepack pnpm install',
+        );
+        // The defect under test is a bare `corepack pnpm install` line outside the loop.
+        expect(step.run, jobName).not.toMatch(/^\s*corepack pnpm install/m);
+      }
+    });
+
+    // Fail closed on the mention, not on a recognised spelling: the ways
+    // shell can write one command cannot be enumerated against a regex. The
+    // previous pair exempted a whole body for carrying any retry loop — a
+    // trailing bare install rode the exemption — and saw only installs
+    // opening their line, so `cd … && pnpm install` and `time pnpm install` were
+    // invisible. The exemption is keyed on the line's shape, never the
+    // step's name: a name key pardons the six pinned bodies wholesale, so a
+    // bare install appended after `done` would ride the step's identity
+    // with its body never read. Require every executable line mentioning
+    // `pnpm install` to open with one of the two retry-loop lines pinned above,
+    // so an unrecognised shape reddens the suite for a human to judge
+    // instead of passing silently. Full-line `#` comments never execute, so
+    // a body quoting the recipe in prose is excluded rather than flagged.
+    const retriedInstallLines = [
+      'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+      'echo "::warning::corepack pnpm install',
+    ];
+    const findUnretriedInstalls = (jobs) =>
+      Object.entries(jobs).flatMap(([jobName, job]) =>
+        (job.steps ?? [])
+          .filter(
+            (step) =>
+              typeof step.run === 'string' &&
+              step.run
+                .split('\n')
+                .filter((line) => !line.trimStart().startsWith('#'))
+                .some(
+                  (line) =>
+                    line.includes('pnpm install') &&
+                    !retriedInstallLines.some((ok) =>
+                      line.trimStart().startsWith(ok),
+                    ),
+                ),
+          )
+          .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
       );
-      expect(runStep.run).toContain('npm run build:sandbox');
+
+    it('retries every pnpm install run body, whatever the step is named', () => {
+      // The name-keyed collection above misses an install hiding under any
+      // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
+      // 'Install dependencies and build' — so scan the command itself.
+      expect(findUnretriedInstalls(yml.jobs)).toEqual([]);
+    });
+
+    it('flags an unretried install however shell spells it', () => {
+      // Each synthetic body slipped the old regex pair — the loop exempting
+      // a trailing bare install was the filed escape; the rest never open
+      // their install line. The real bodies ride along under their own keys
+      // to pin that the allowlist recognises exactly the two retried lines,
+      // and `build` is overridden by a copy carrying a bare install appended
+      // after `done` — the shape a name-keyed exemption pardons unread. A
+      // comment-only mention stays unflagged because it never executes.
+      const jobs = {
+        ...Object.fromEntries(
+          installSteps.map(([jobName, step]) => [jobName, { steps: [step] }]),
+        ),
+        build: {
+          steps: [
+            {
+              name: 'Install dependencies',
+              run: [
+                'for attempt in 1 2 3; do',
+                '  if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+                '    if [[ "${attempt}" != "1" ]]; then',
+                '      echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s)"',
+                '    fi',
+                '    break',
+                '  fi',
+                '  if [[ "${attempt}" == "3" ]]; then',
+                '    exit 1',
+                '  fi',
+                '  sleep $((attempt * 15))',
+                'done',
+                'cd integration-tests && pnpm install',
+              ].join('\n'),
+            },
+          ],
+        },
+        synthetic: {
+          steps: [
+            {
+              name: 'Install dependencies and build',
+              run: [
+                'for attempt in 1 2 3; do',
+                '  npx playwright install --with-deps chromium && break',
+                'done',
+                'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
+              ].join('\n'),
+            },
+            {
+              name: 'Install integration dependencies',
+              run: 'cd integration-tests && pnpm install',
+            },
+            { name: 'Time the install', run: 'time pnpm install' },
+            {
+              name: 'Retry the install once',
+              run: 'for attempt in 1; do pnpm install --prefer-offline; done',
+            },
+            {
+              name: 'Mention the recipe',
+              run: '# pnpm install is retried elsewhere\necho done',
+            },
+          ],
+        },
+      };
+      expect(findUnretriedInstalls(jobs)).toEqual([
+        'build/Install dependencies',
+        'synthetic/Install dependencies and build',
+        'synthetic/Install integration dependencies',
+        'synthetic/Time the install',
+        'synthetic/Retry the install once',
+      ]);
     });
   });
 
   it('routes Linux E2E scratch files away from /tmp', () => {
-    const runStep = yml.jobs['e2e-test-linux'].steps.find(
-      (step) => step.name === 'Run E2E tests',
-    );
-    expect(runStep.run).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
-    expect(runStep.run).toContain('trap \'rm -rf "$TMPDIR"');
+    expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
+    expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
   });
 });

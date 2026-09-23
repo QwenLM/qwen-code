@@ -25,6 +25,10 @@ import type {
 } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
+import {
+  assertChannelControlWorkspaceCapacity,
+  ChannelControlWorkspaceLimitError,
+} from './channel-control-capacity.js';
 
 export type ChannelWorkerControlTransition =
   | 'idle'
@@ -114,6 +118,17 @@ export interface ChannelWorkerManager {
   setChannelEnabled(
     owner: ChannelWorkerRequiredOwner,
     enabled: boolean,
+  ): Promise<ChannelWorkerSetResult | ChannelWorkerStopResult>;
+  /**
+   * Adds names to the committed selection, reading that selection inside the
+   * control lane so the result builds on every change queued before it. Names
+   * already committed are left alone, and a committed `all` selection is never
+   * rewritten. `precondition` is evaluated in the lane too, immediately before
+   * anything is committed; when it returns false nothing changes.
+   */
+  addChannels(
+    names: readonly string[],
+    options?: { precondition?: () => boolean },
   ): Promise<ChannelWorkerSetResult | ChannelWorkerStopResult>;
   stopSelection(): Promise<ChannelWorkerStopResult>;
   reload(): Promise<ChannelWorkerSnapshot>;
@@ -324,7 +339,8 @@ export function createChannelWorkerManager(
   const classifyFailure = (
     error: unknown,
     fallbackCode: 'channel_worker_start_failed' | 'channel_worker_stop_failed',
-  ): ChannelWorkerControlError => {
+  ): ChannelWorkerControlError | ChannelControlWorkspaceLimitError => {
+    if (error instanceof ChannelControlWorkspaceLimitError) return error;
     if (error instanceof ChannelWorkerReconcileError) {
       return new ChannelWorkerControlError(
         error.stopFailed ? 'channel_worker_stop_failed' : fallbackCode,
@@ -373,6 +389,9 @@ export function createChannelWorkerManager(
         resolvedGroups ??
         (await opts.resolveGroups(selection, initial ? 'initial' : 'set'));
       if (hardKilled) throw drainingError();
+      assertChannelControlWorkspaceCapacity(
+        targetGroups.map((target) => target.workspaceCwd),
+      );
       reserve(selection);
     } catch (error) {
       setTransition('idle');
@@ -393,6 +412,12 @@ export function createChannelWorkerManager(
           }
         }
         setTransition('idle');
+        if (
+          error instanceof ChannelControlWorkspaceLimitError &&
+          !cleanupError
+        ) {
+          throw error;
+        }
         throw new ChannelWorkerControlError(
           'channel_worker_start_failed',
           errorMessage(error),
@@ -540,6 +565,25 @@ export function createChannelWorkerManager(
         assertRequiredOwner(targetGroups, requiredOwner);
         if (hardKilled) throw drainingError();
         return applySelection(selection, false, targetGroups);
+      });
+    },
+    addChannels(names, options = {}) {
+      if (draining) {
+        return Promise.reject(drainingError());
+      }
+      return enqueue(async () => {
+        const unchanged = () => ({ changed: false, state: snapshot() });
+        if (options.precondition && !options.precondition()) {
+          return unchanged();
+        }
+        if (committedSelection?.mode === 'all') return unchanged();
+        const committedNames = committedChannelNames();
+        const pending = names.filter((name) => !committedNames.includes(name));
+        if (pending.length === 0) return unchanged();
+        return applySelection(
+          { mode: 'names', names: [...committedNames, ...pending] },
+          false,
+        );
       });
     },
     setChannelEnabled(owner, enabled) {

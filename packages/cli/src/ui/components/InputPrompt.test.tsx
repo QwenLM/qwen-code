@@ -51,6 +51,7 @@ import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
+import { ScrollContext } from '../contexts/ScrollContext.js';
 import {
   clearPromptStash,
   savePromptStash,
@@ -6524,6 +6525,163 @@ describe('InputPrompt', () => {
       await wait(50);
       // Second ESC within the timeout: clear typed input.
       expect(props.buffer.text).toBe('');
+      unmount();
+    });
+  });
+
+  describe('VP-mode bare Up/Down scrolls the conversation (#10749)', () => {
+    // Terminals without SGR mouse reporting turn wheel events into bare ↑/↓.
+    // In VP mode (ui.useTerminalBuffer, on by default) those keys have to
+    // scroll the transcript while the composer is empty instead of rewriting
+    // the input with an old prompt.
+    const vpSettings = {
+      merged: { ui: { useTerminalBuffer: true } },
+    } as LoadedSettings;
+
+    const renderVp = (
+      scrollBy: (delta: number) => void,
+      hasScrollableTranscript: () => boolean = () => true,
+    ) =>
+      renderWithProviders(
+        <ScrollContext.Provider value={{ scrollBy, hasScrollableTranscript }}>
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+        { settings: vpSettings },
+      );
+
+    it('Up from an empty composer scrolls up instead of navigating history', async () => {
+      const scrollBy = vi.fn();
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(-1);
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer scrolls down instead of navigating history', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(1);
+      expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps history navigation when the composer has text', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('draft');
+      // Pre-position at col 0 so the two-step edge transition goes straight to
+      // history instead of consuming the first press to snap the cursor home.
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps history navigation when VP mode is off', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderWithProviders(
+        <ScrollContext.Provider
+          value={{ scrollBy, hasScrollableTranscript: () => true }}
+        >
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down still descends to the background-tasks pill instead of scrolling', async () => {
+      // ↓ from an empty composer is the only keyboard route into the pill, so
+      // the scroll fallback has to yield whenever a descend target is on
+      // screen — otherwise a workflow-only session could never open it.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up still recalls history when the transcript does not overflow', async () => {
+      // A short conversation has nothing to scroll. Consuming ↑ there would
+      // leave it dead — no scroll and no history — so it falls through.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy, () => false);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up at the top of a scrollable transcript does not replay history', async () => {
+      // The other half of the tradeoff: once the transcript overflows, ↑ stays
+      // owned by scrolling even at the top edge. A wheel spun past the top
+      // emits a burst of ↑ presses, and letting the first dead one fall through
+      // to history would reintroduce exactly the bug being fixed.
+      const scrollBy = vi.fn();
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(-1);
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       unmount();
     });
   });

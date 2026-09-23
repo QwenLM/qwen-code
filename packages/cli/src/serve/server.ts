@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -50,6 +51,7 @@ import {
   LocalControlService,
 } from './local-control/index.js';
 import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
+import { registerWebShellPairingRoutes } from './routes/web-shell-pairing.js';
 import type {
   DeviceFlowProvider,
   DeviceFlowRegistry,
@@ -69,6 +71,11 @@ import {
 } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import { createTerminalWsHandler } from './routes/terminal.js';
+import { registerSshWorkspaceBoundary } from './routes/ssh-workspace.js';
+import {
+  sshCommand,
+  quoteSshArgument,
+} from '@qwen-code/qwen-code-core/services/ssh-workspace.js';
 import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
@@ -134,6 +141,7 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
@@ -168,6 +176,7 @@ import {
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
+import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -205,6 +214,7 @@ import {
   type SendBridgeError,
 } from './server/error-response.js';
 import { resolveBridgeFsFactory } from './server/fs-factory.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
@@ -227,7 +237,10 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
-import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  installSelfOriginStripMiddleware,
+  installRemoteSelfOriginMiddleware,
+} from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
@@ -258,6 +271,7 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
+import { resolveMaxRegisteredWorkspaces } from './workspace-inputs.js';
 import {
   registerWorkspaceManagementRoutes,
   type WorkspaceManagementHandle,
@@ -285,6 +299,7 @@ import {
   registerWorkspaceGitBranchRoutes,
   registerWorkspaceQualifiedGitBranchRoutes,
 } from './routes/workspace-git-branches.js';
+import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -327,6 +342,7 @@ import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
+import { resolveLiveNativeHostEnabled } from './live/native-host-enabled.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
 import {
@@ -336,11 +352,11 @@ import {
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { StandaloneDeletionJournal } from './conversations/standalone-deletion-journal.js';
+import { checkLegacyConversationRuntimeOwner } from './conversations/conversation-runtime-ownership.js';
 import {
-  createConversationRuntimeOwnership,
-  type ConversationRuntimeOwnership,
-} from './conversations/conversation-runtime-ownership.js';
-import { getStableLiveDiscoveryBaseDir } from './live/discovery.js';
+  assertLiveDiscoveryPublisher,
+  getStableLiveDiscoveryBaseDir,
+} from './live/discovery.js';
 import {
   installServeAppLifecycle,
   type ServeAppLifecycleController,
@@ -351,7 +367,16 @@ import {
   resolveLiveProviderCredential,
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
-import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import type {
+  ChildHeapPolicy,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import type { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import {
+  createIdleAcpReclaimer,
+  type IdleAcpReclaimer,
+} from './idle-acp-reclamation.js';
+import { readWorkspaceActivity } from './workspace-activity.js';
 import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
@@ -548,6 +573,8 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  /** Advertise only when the injected channel controller enforces this limit. */
+  maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
@@ -584,6 +611,11 @@ export interface ServeAppDeps {
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  managedChildProcesses?: {
+    registry: ProcessRegistry;
+    policy: ChildHeapPolicy;
+    ownsBridge?: (bridge: AcpSessionBridge) => boolean;
+  };
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -615,6 +647,7 @@ export interface ServeAppDeps {
     }>,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
   sessionArtifactsPersistenceAvailable?: boolean;
   /**
    * Test/embed override for the native directory picker probe. Production
@@ -669,6 +702,7 @@ export interface ServeAppDeps {
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  modelSelectionBaseEnv?: Readonly<NodeJS.ProcessEnv>;
   runtimePlatform?: NodeJS.Platform;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
@@ -680,11 +714,7 @@ export interface ServeAppDeps {
     readonly DurableCronTask[]
   >;
   liveDiscoveryStableBaseDir?: string;
-  conversationRuntimeOwnershipFactory?: (
-    pid: number,
-    instanceNonce: string,
-    stableBaseDir: string,
-  ) => ConversationRuntimeOwnership;
+  checkLegacyConversationOwner?: () => Promise<void>;
   serveAppLifecycle?: ServeAppLifecycleController;
   validateLiveProviderCredential?: (
     credential: LiveProviderCredential,
@@ -782,6 +812,42 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (
+    (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== opts.childHeapMode
+  ) {
+    throw new TypeError('ACP admission requires managed child process wiring.');
+  }
+  if (
+    opts.childHeapMode === 'enforce' &&
+    ((deps.bridge && !deps.managedChildProcesses?.ownsBridge?.(deps.bridge)) ||
+      deps.workspaceRegistry
+        ?.listManaged()
+        .some(
+          (runtime) =>
+            !deps.managedChildProcesses?.ownsBridge?.(runtime.bridge),
+        ))
+  ) {
+    throw new TypeError(
+      'ACP heap enforcement requires managed bridge ownership.',
+    );
+  }
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
+    opts.maxRegisteredWorkspaces,
+    daemonEnvAtBoot,
+  );
+  opts = { ...opts, maxRegisteredWorkspaces };
+  if (
+    deps.workspaceRegistry &&
+    deps.workspaceRegistry.listAllEntries().filter((entry) => !entry.internal)
+      .length > maxRegisteredWorkspaces
+  ) {
+    throw new Error(
+      `Initial workspace registry exceeds the configured limit of ${maxRegisteredWorkspaces}.`,
+    );
+  }
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   if (opts.requireAuth === true && !tokenConfigured) {
@@ -794,6 +860,10 @@ export function createServeApp(
     tokenConfigured,
     requireAuth: opts.requireAuth === true,
   });
+  let runtimeStopReady = false;
+  let runtimeStopsClosing = false;
+  const scheduledActivity = new WeakMap<WorkspaceRuntime, () => boolean>();
+  const rehydratingWorkspaces = new Set<WorkspaceRuntime>();
   const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
   // The scheduled-task helpers retain an outer watchdog for injected bridges.
   // A value above the timer ceiling is their explicit no-watchdog sentinel.
@@ -837,6 +907,14 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  if (
+    readSshWorkspace(boundWorkspace) ||
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory.sshWorkspace
+  ) {
+    throw new Error(
+      'Start qwen serve in a local workspace, then add the SSH workspace in the workspace picker.',
+    );
+  }
   if (injectedWorkspaceRegistry) {
     const primary = injectedWorkspaceRegistry.primary;
     const registryConflictCandidates = [
@@ -948,8 +1026,6 @@ export function createServeApp(
   const primaryRuntimeEnvMetadata =
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
-  const daemonEnv = deps.daemonEnv ?? process.env;
-  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
   });
@@ -978,11 +1054,17 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
+  // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
+  // Shell page itself (`/live/web`) on every platform; the native macOS Host
+  // (`/live/host`) is opt-in through QWEN_SERVE_LIVE_NATIVE_HOST=1.
   const liveVoiceSurfaceAvailable =
-    runtimePlatform === 'darwin' &&
     opts.serveWebShell !== false &&
     typeof deps.webShellDir === 'string' &&
     acpHttpEnabledAtBoot;
+  const liveNativeHostAvailable =
+    liveVoiceSurfaceAvailable &&
+    runtimePlatform === 'darwin' &&
+    resolveLiveNativeHostEnabled(daemonEnvAtBoot);
   const primaryRuntimeTrustAuthoritative =
     deps.workspaceTrustHotReloadAvailable === true ||
     deps.primaryWorkspaceTrusted !== undefined ||
@@ -1082,7 +1164,13 @@ export function createServeApp(
               deps.managedScratchRoot!.canonicalRoot,
             ),
           ),
+      // `realtime_voice` keeps meaning "a native Host can attach": shipped
+      // clients answer it with a macOS install prompt.
       realtimeVoiceEnabled: () =>
+        liveNativeHostAvailable &&
+        (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
+          true,
+      realtimeVoiceWebEnabled: () =>
         (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
         true,
       standaloneSessionsAvailable: () => standaloneSessionsAvailable,
@@ -1092,6 +1180,8 @@ export function createServeApp(
       nativeDirectoryPickerAvailable:
         deps.nativeDirectoryPickerAvailable ??
         isNativeDirectoryPickerAvailable(),
+      workspaceRuntimeStopAvailable: () =>
+        runtimeStopReady && !runtimeStopsClosing,
       workspaceRuntimeAvailable: () => {
         const runtimes = workspaceRegistry.list();
         return (
@@ -1133,6 +1223,7 @@ export function createServeApp(
     createDaemonStatusProvider(
       primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
     );
+  let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
   const totalSessionAdmission =
     !deps.bridge && !injectedWorkspaceRegistry
@@ -1154,6 +1245,7 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
@@ -1177,9 +1269,21 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs
+      ...(acpChildArgs || deps.managedChildProcesses
         ? {
             channelFactory: createSpawnChannelFactory({
+              processRegistry: deps.managedChildProcesses?.registry,
+              childHeapPolicy: deps.managedChildProcesses?.policy,
+              ...(deps.managedChildProcesses
+                ? {
+                    reclaimIdleChild: async (signal?: AbortSignal) => {
+                      await reclaimIdleAcp?.(
+                        hashDaemonWorkspace(boundWorkspace),
+                        signal,
+                      );
+                    },
+                  }
+                : {}),
               extraArgs: acpChildArgs,
             }),
           }
@@ -1444,7 +1548,7 @@ export function createServeApp(
         'Live provider settings could not be loaded.',
       );
     }
-    return resolveLiveProviderCredential(settings);
+    return resolveLiveProviderCredential(settings, { env: daemonEnv });
   };
   const liveCoordinator =
     deps.liveCoordinator ??
@@ -1467,25 +1571,9 @@ export function createServeApp(
         }
       },
     });
-  const conversationRuntimeOwnership = deps.liveConversationWorkspace
-    ? (deps.conversationRuntimeOwnershipFactory?.(
-        process.pid,
-        liveCoordinator.daemonInstanceNonce,
-        path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      ) ??
-      createConversationRuntimeOwnership({
-        pid: process.pid,
-        instanceNonce: liveCoordinator.daemonInstanceNonce,
-        stableBaseDir: path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      }))
-    : undefined;
-  if (conversationRuntimeOwnership) {
-    serveAppLifecycle.setOwnership(conversationRuntimeOwnership);
-  }
+  const stableLiveDiscoveryBaseDir = path.resolve(
+    deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+  );
   liveCoordinator.setAppshotReadiness(
     liveVoiceEnabled && deps.liveConversationWorkspace
       ? {
@@ -1500,7 +1588,12 @@ export function createServeApp(
   let standaloneSessionService: StandaloneSessionService | undefined;
   const conversationRuntimeManager = deps.liveConversationWorkspace
     ? new ConversationRuntimeManager({
-        ownership: conversationRuntimeOwnership!,
+        checkLegacyOwner:
+          deps.checkLegacyConversationOwner ??
+          (() =>
+            checkLegacyConversationRuntimeOwner({
+              stableBaseDir: stableLiveDiscoveryBaseDir,
+            })),
         workspace: deps.liveConversationWorkspace,
         registry: workspaceRegistry,
         publishRuntime: async (canonicalRoot, validate) => {
@@ -1585,7 +1678,7 @@ export function createServeApp(
     liveBoundRuntime = runtime;
     try {
       setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
-        liveCoordinator.captureScreenContext(callerSessionId),
+        liveCoordinator.captureVisualContext(callerSessionId),
       );
       setTaskHandler.call(runtime.bridge, (info) =>
         liveTaskService.handle(info),
@@ -1715,6 +1808,7 @@ export function createServeApp(
       ),
     );
     standaloneSessionService = new StandaloneSessionService({
+      daemonLog,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);
@@ -1830,6 +1924,14 @@ export function createServeApp(
         liveTaskService.interruptWait(callerSessionId),
     });
   liveCoordinator.setHandlers({
+    beforeStart: async () => {
+      await ensureConversationRuntimeWithLifecycle();
+      await publishLiveVoiceEnabled(true);
+      await assertLiveDiscoveryPublisher(stableLiveDiscoveryBaseDir, {
+        pid: process.pid,
+        instanceNonce: liveCoordinator.daemonInstanceNonce,
+      });
+    },
     onHostReady: () => {
       if (!liveVoiceEnabled) return;
       void verifyLiveAppshotChannel();
@@ -1990,8 +2092,6 @@ export function createServeApp(
   // disable. Re-registering middleware at that point is not an option:
   // Express fixes middleware order when the app is built.
   const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
-  app.use(allowOriginCors(originAllowlist));
-  app.use(hostAllowlist(opts.hostname, getPort));
   const credentials = new CredentialStore(opts.token);
   const authenticate = bearerAuth(credentials);
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
@@ -1999,6 +2099,38 @@ export function createServeApp(
     workspaceQualifiedAcpEnabled,
   });
 
+  // Access logging and trace-id capture sit ahead of the origin wall and the
+  // same-origin credential check so their 403/401 short-circuits are recorded
+  // like every other reject (the pre-change chain logged them because
+  // bearerAuth ran below the access log). The access log excludes the exact
+  // paths GET /health and POST */heartbeat before attaching its finish
+  // logger, so those liveness probes stay unlogged at any mount position
+  // (HEAD /health and GET /health/ are logged like any request); wall
+  // rejects on those exempt paths are likewise not logged. Capture the
+  // caller trace id BEFORE authenticate / rate limiter / body parser: those
+  // layers short-circuit (401/429/400) before the telemetry middleware ever
+  // runs, and the access log still needs the captured id to join their log
+  // lines (and 404s) with the caller's trace.
+  installAccessLogMiddleware(app, daemonLog);
+  app.use(daemonInboundTraceIdCaptureMiddleware);
+
+  // The loopback Host allowlist stays ahead of the pre-auth health routes so
+  // the DNS-rebinding defense covers them. On non-loopback binds only the
+  // PRIMARY gate is a pass-through (the bearer gate authenticates there);
+  // the Local Control listener keeps its own Host gate whatever the primary
+  // bind is.
+  app.use(hostAllowlist(opts.hostname, getPort));
+
+  installRemoteSelfOriginMiddleware(
+    app,
+    opts.hostname,
+    opts.token ? credentials : undefined,
+  );
+  app.use(allowOriginCors(originAllowlist));
+
+  // Pre-auth health sits below the origin wall so matched cross-origin health
+  // probes carry CORS headers. It stays unlogged (path-exempt above), so the
+  // position costs nothing in log volume.
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,
@@ -2015,14 +2147,6 @@ export function createServeApp(
     });
     healthRoutes.register(app);
   }
-
-  installAccessLogMiddleware(app, daemonLog);
-
-  // Capture the caller trace id BEFORE authenticate / rate limiter / body
-  // parser: those layers short-circuit (401/429/400) before the telemetry
-  // middleware ever runs, and the access log still needs the captured id
-  // to join their log lines (and 404s) with the caller's trace.
-  app.use(daemonInboundTraceIdCaptureMiddleware);
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
@@ -2105,10 +2229,13 @@ export function createServeApp(
   // is on, the LAN listener accepts a revocable pairing token and rejects the
   // runtime token, and the primary listener does the reverse. With no Local
   // Control session this behaves exactly as `bearerAuth(opts.token)` did.
+  if (webShellDir) {
+    registerWebShellPairingRoutes(app, credentials, opts.hostname, rateLimiter);
+  }
   app.use(authenticate);
 
   // Rate limiter: after auth (only count authenticated requests), except
-  // webhook routes which use their own shared-secret auth before bearerAuth.
+  // webhook and pairing routes which mount their limiter before returning.
   if (rateLimiter) {
     app.use(rateLimiter.middleware);
   }
@@ -2160,8 +2287,10 @@ export function createServeApp(
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
+  registerSshWorkspaceBoundary(app, workspaceRegistry);
   const syncModelProvidersRuntime = async (
     route: string,
+    writeScope?: SettingScope,
   ): Promise<ServeModelProviderRuntimeSyncResult> => {
     const trusted = isPrimaryWorkspaceTrusted();
     const settings = loadSettings(primaryBoundWorkspace, {
@@ -2169,7 +2298,8 @@ export function createServeApp(
       skipWorkspaceSettings: !trusted,
       workspaceTrusted: trusted,
     });
-    const scope = getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+    const scope =
+      writeScope ?? getModelProvidersOwnerScope(settings) ?? SettingScope.User;
     const primaryContext = buildWorkspaceCtx(route);
     const secondaryRuntimes =
       scope === SettingScope.User
@@ -2237,11 +2367,20 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
-    getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+    getChildHeapPolicySnapshot: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.policy.snapshot()
+      : deps.getChildHeapPolicySnapshot,
+    getCommittedAcpChildCount: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.registry.committedProcessCount
+      : undefined,
+    childAdmissionEnforced:
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit' ||
+      deps.managedChildProcesses?.policy.snapshot().mode === 'enforce',
   });
 
   if (conversationRuntimeManager) {
@@ -2264,6 +2403,8 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     workspaceRegistry,
     permissionPolicy: primaryBridge.permissionPolicy,
+    maxRegisteredWorkspaces,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     maxSessionsPerWorkspace: opts.maxSessions,
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
@@ -2271,14 +2412,13 @@ export function createServeApp(
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
   });
+  registerBrandRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+  });
 
   if (liveVoiceSurfaceAvailable) {
     registerLiveRoutes(app, {
       coordinator: liveCoordinator,
-      ensureRuntimeReady: async () => {
-        await ensureConversationRuntimeWithLifecycle();
-        await publishLiveVoiceEnabled(true);
-      },
       mutate,
       ...(deps.persistSetting
         ? {
@@ -2305,6 +2445,8 @@ export function createServeApp(
       installer: liveHostInstaller,
       getEnabled: () => liveVoiceEnabled,
       setEnabled: setLiveVoiceEnabled,
+      env: daemonEnv,
+      nativeHost: liveNativeHostAvailable,
       ...(deps.persistSettings
         ? {
             persistSettings: async (writes) => {
@@ -2352,6 +2494,49 @@ export function createServeApp(
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
+  });
+  registerWorkspaceRuntimeStopRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    available: () => runtimeStopReady && !runtimeStopsClosing,
+    ownsBridge: (runtime) =>
+      deps.managedChildProcesses?.ownsBridge?.(runtime.bridge) ??
+      runtime.bridge === defaultBridgeForAdmission,
+    getCapacity: () => ({
+      committedAcpChildren:
+        deps.managedChildProcesses?.registry.committedProcessCount ?? 0,
+      maxConcurrentChildren:
+        deps.managedChildProcesses?.policy.snapshot().maxConcurrentChildren ??
+        null,
+    }),
+    getActivity: (runtime) =>
+      deps.workspaceRuntimeRemoval && acpHandleRef.current
+        ? readWorkspaceActivity(
+            runtime,
+            deps.workspaceRuntimeRemoval.getActivity(runtime),
+            acpHandleRef.current.getWorkspaceActivity(runtime.workspaceId),
+          )
+        : undefined,
+    scheduledWorkActive: (runtime) =>
+      rehydratingWorkspaces.has(runtime) ||
+      scheduledActivity.get(runtime)?.() === true,
+    stopKeepalive: (runtime) => {
+      (
+        app.locals['stopScheduledTaskKeepaliveForWorkspace'] as
+          | ((cwd: string) => void)
+          | undefined
+      )?.(runtime.workspaceCwd);
+    },
+    startKeepalive: (runtime) => {
+      if (!runtimeStopsClosing)
+        (
+          app.locals['startScheduledTaskKeepaliveForWorkspace'] as
+            | ((runtime: WorkspaceRuntime) => void)
+            | undefined
+        )?.(runtime);
+    },
   });
   registerWorkspaceRuntimeRoutes(app, {
     workspaceRegistry,
@@ -2408,6 +2593,11 @@ export function createServeApp(
     mutate,
   });
   registerWorkspaceQualifiedGitBranchRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitRemotesRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
     mutate,
@@ -2643,6 +2833,7 @@ export function createServeApp(
 
   // Dynamic workspace registration.
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
+    maxRegisteredWorkspaces,
     workspaceRegistry,
     mutate,
     safeBody,
@@ -2717,6 +2908,8 @@ export function createServeApp(
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
+      syncImageModel: (scope) =>
+        syncModelProvidersRuntime('POST /workspace/settings imageModel', scope),
       updateSessionWorkflow: (enabled) =>
         primaryBridge.invokeWorkspaceCommand(
           SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
@@ -2756,6 +2949,9 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      // Listed wherever Live Voice exists. The bundled Web Shell trims its
+      // setup card to what applies (`/live/setup` reports `nativeHost`), so
+      // off macOS it never offers to install the native Host.
       includeLiveVoice: liveVoiceSurfaceAvailable,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
@@ -2845,16 +3041,19 @@ export function createServeApp(
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      env: primaryRuntimeEffectiveEnv,
+      baseEnv: deps.modelSelectionBaseEnv ?? daemonEnvAtBoot,
       isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,
       safeBody,
       persistSettings: deps.persistSettings,
+      updateModelContextWindow: deps.updateModelContextWindow,
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
-      syncModelProvidersRuntime: () =>
-        syncModelProvidersRuntime('DELETE /workspace/models'),
+      syncModelProvidersRuntime: (writeScope, method) =>
+        syncModelProvidersRuntime(`${method} /workspace/models`, writeScope),
     });
   }
 
@@ -2897,6 +3096,7 @@ export function createServeApp(
   const virtualSubagentSessions = new VirtualSubagentSessions();
   const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
 
+  registerSessionCatalogRoutes(app, workspaceRegistry);
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
@@ -3191,6 +3391,7 @@ export function createServeApp(
     // reloads). Fire-and-forget so it never delays the server coming up; a
     // no-op when there are no bound tasks. Deliberately not awaited.
     const rehydrateWorkspace = (runtime: WorkspaceRuntime) => {
+      rehydratingWorkspaces.add(runtime);
       void runWithWorkspaceRuntimeStorage(runtime, () =>
         rehydrateScheduledTaskSessions({
           bridge: runtime.bridge,
@@ -3211,13 +3412,17 @@ export function createServeApp(
           // from the function entry itself. Log rather than swallow it — a silent
           // failure here leaves every bound task dormant with no diagnostic.
         }),
-      ).catch((err) => {
-        process.stderr.write(
-          `qwen serve: unexpected scheduled-task rehydration failure: ${
-            err instanceof Error ? err.message : String(err)
-          }\n`,
-        );
-      });
+      )
+        .catch((err) => {
+          process.stderr.write(
+            `qwen serve: unexpected scheduled-task rehydration failure: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`,
+          );
+        })
+        .finally(() => {
+          rehydratingWorkspaces.delete(runtime);
+        });
     };
 
     // Every trusted workspace gets its own keepalive + rehydration against its
@@ -3239,6 +3444,7 @@ export function createServeApp(
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
+      scheduledActivity.set(runtime, () => keepalive.activeWork);
       rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
@@ -3253,6 +3459,7 @@ export function createServeApp(
     (
       app.locals as { stopScheduledTaskKeepalive?: () => void }
     ).stopScheduledTaskKeepalive = () => {
+      runtimeStopsClosing = true;
       for (const stop of keepaliveStops.values()) stop();
       keepaliveStops.clear();
     };
@@ -3368,6 +3575,32 @@ export function createServeApp(
       ...(liveVoiceSurfaceAvailable
         ? [
             {
+              path: '/live/web',
+              onConnection: (ws, req) => {
+                if (!liveVoiceEnabled) {
+                  ws.close(4003, 'Live Voice is disabled.');
+                  return;
+                }
+                // Same bar as `/voice/stream`: an untrusted workspace never
+                // gets a microphone channel into the daemon.
+                if (!isPrimaryWorkspaceTrusted()) {
+                  ws.close(4003, 'Workspace is not trusted.');
+                  return;
+                }
+                liveCoordinator.attachBrowserHost(ws, {
+                  takeover:
+                    new URL(
+                      req.url ?? '/',
+                      'http://localhost',
+                    ).searchParams.get('takeover') === '1',
+                });
+              },
+            } satisfies ExtraWsRoute,
+          ]
+        : []),
+      ...(liveNativeHostAvailable
+        ? [
+            {
               path: '/live/host',
               onConnection: (ws, req) => {
                 if (!liveVoiceEnabled) {
@@ -3405,6 +3638,15 @@ export function createServeApp(
         return {
           workspaceCwd: runtime.workspaceCwd,
           env: getRuntimeEffectiveEnv(runtime.env) ?? daemonEnvAtBoot,
+          ...(runtime.routeFileSystemFactory.sshWorkspace
+            ? {
+                command: sshCommand(
+                  runtime.routeFileSystemFactory.sshWorkspace,
+                  `cd ${quoteSshArgument(runtime.routeFileSystemFactory.sshWorkspace.directory)} && exec "\${SHELL:-/bin/sh}" -l`,
+                  true,
+                ),
+              }
+            : {}),
         };
       }),
     ],
@@ -3417,6 +3659,44 @@ export function createServeApp(
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
+  }
+  runtimeStopReady = !!(
+    deps.managedChildProcesses &&
+    deps.workspaceRuntimeRemoval &&
+    acpHandleRef.current &&
+    deps.manageScheduledTaskSessions &&
+    workspaceRegistry
+      .listManaged()
+      .some(
+        (runtime) =>
+          typeof runtime.bridge.stopWorkspaceRuntime === 'function' &&
+          typeof runtime.bridge.getRuntimeStopCompletion === 'function' &&
+          typeof runtime.bridge.getRuntimeStopSnapshot === 'function',
+      )
+  );
+  if (deps.managedChildProcesses) {
+    reclaimIdleAcp = createIdleAcpReclaimer({
+      registry: workspaceRegistry,
+      processes: deps.managedChildProcesses.registry,
+      policy: deps.managedChildProcesses.policy,
+      ownsBridge:
+        deps.managedChildProcesses.ownsBridge ??
+        ((candidate) => candidate === defaultBridgeForAdmission),
+      getActivity: (runtime) => {
+        if (
+          !deps.workspaceRuntimeRemoval ||
+          !acpHandleRef.current ||
+          !supportsWorkspaceRuntimeLifecycle(runtime.bridge)
+        )
+          return undefined;
+        return readWorkspaceActivity(
+          runtime,
+          deps.workspaceRuntimeRemoval.getActivity(runtime),
+          acpHandleRef.current.getWorkspaceActivity(runtime.workspaceId),
+        );
+      },
+    });
+    app.locals['reclaimIdleAcp'] = reclaimIdleAcp;
   }
 
   // Local Control: the LAN listener serves THIS app, so the service is built

@@ -33,6 +33,48 @@ describe('extractAtPathCommands', () => {
     expect(extractAtPathCommands('@foo')).toEqual(['foo']);
     expect(extractAtPathCommands('@foo @bar')).toEqual(['foo', 'bar']);
   });
+
+  // The punctuation terminators exist to stop a filesystem path at a sentence
+  // boundary, but `?`/`&`/`,`/`;` are structural in a URL. A presigned
+  // OSS/S3 link carries its signature in the query string, so truncating at
+  // `?` produced a request that failed with HTTP 403 — and the truncation was
+  // invisible in the error, which named only the host.
+  it('keeps the whole query string of a URL ref', () => {
+    const presigned =
+      'https://bucket.oss-cn-wulanchabu.aliyuncs.com/dir/movie.mkv' +
+      '?x-oss-credential=LTAI%2F20260805%2Fcn-wulanchabu%2Foss%2Faliyun_v4_request' +
+      '&x-oss-date=20260805T064817Z&x-oss-expires=32400' +
+      '&x-oss-signature-version=OSS4-HMAC-SHA256&x-oss-signature=f1454dcb';
+    expect(extractAtPathCommands(`@${presigned} 视频里有什么`)).toEqual([
+      presigned,
+    ]);
+  });
+
+  it('does not let URL punctuation leak into filesystem path parsing', () => {
+    // The same characters must still terminate a plain path.
+    expect(extractAtPathCommands('Look at @src/a.ts, then @src/b.ts;')).toEqual(
+      ['src/a.ts', 'src/b.ts'],
+    );
+  });
+
+  it('strips trailing sentence punctuation from a URL ref', () => {
+    const url = 'https://example.com/clip.mp4';
+    // ASCII and CJK terminators, and the query-string case where `?` is
+    // structural but the final `。` is prose.
+    expect(extractAtPathCommands(`@${url}. Explain it`)).toEqual([url]);
+    expect(extractAtPathCommands(`@${url}。分析一下`)).toEqual([url]);
+    expect(extractAtPathCommands(`@${url}?v=2， 这是什么`)).toEqual([
+      `${url}?v=2`,
+    ]);
+  });
+
+  it('keeps whitespace as the delimiter between a URL ref and the prompt', () => {
+    const url = 'https://example.com/a.mp4?token=x&sig=y';
+    expect(extractAtPathCommands(`@${url} @src/notes.md`)).toEqual([
+      url,
+      'src/notes.md',
+    ]);
+  });
 });
 
 describe('handleAtCommand', () => {
@@ -2270,6 +2312,401 @@ describe('handleAtCommand', () => {
         signal: abortController.signal,
       });
       expect(JSON.stringify(result.processedQuery)).toContain('COLON BODY');
+    });
+  });
+
+  describe('URL media references (@https://…)', () => {
+    // The omni graph is imported dynamically inside the URL branch, so a
+    // module-registry mock is what intercepts it. Every export the branch
+    // touches is stubbed; the pipeline is exercised end to end from
+    // handleAtCommand down to the fileData part.
+    const omniMocks = vi.hoisted(() => ({
+      isOmniDeliveryActive: vi.fn(),
+      parseHttpUrlRef: vi.fn(),
+      downloadMediaUrl: vi.fn(),
+      processMediaForOmniDelivery: vi.fn(),
+      effectiveMaxDownloadFileBytes: vi.fn(),
+      sniffFileModality: vi.fn(),
+    }));
+
+    vi.mock('@qwen-code/qwen-code-core/omni', () => ({
+      ...omniMocks,
+      // Deterministic stand-ins for the shared formatters: the tests assert
+      // the WIRING (which formatter, which arguments, part ordering), while
+      // the formatters' own wording is covered by their core unit tests.
+      formatOmissionText: (name: string, reason: string) =>
+        `[omission ${name}: ${reason}]`,
+      formatDisclosureText: (name: string, disclosure: string) =>
+        `[disclosure ${name}: ${disclosure}]`,
+      formatResourceHandleText: (name: string, resourceId: string) =>
+        `[handle ${name}: ${resourceId}]`,
+      // Deterministic stand-in for the shared multi-output materializer:
+      // one marker part per extra. The real builder's output shape is
+      // covered by its core unit tests; these tests pin the wiring (that
+      // the funnel calls it and splices its parts after the primary slot).
+      buildAdditionalMediaParts: (name: string, extras?: unknown[]) =>
+        (extras ?? []).map((_, i) => ({ text: `[extra ${name} ${i}]` })),
+      // Same wiring-only stand-in for the shared transcript materializer.
+      buildTranscriptParts: (name: string, transcripts?: unknown[]) =>
+        (transcripts ?? []).map((_, i) => ({
+          text: `[transcript ${name} ${i}]`,
+        })),
+      OmniObjectStore: class {
+        getOmniRootDir() {
+          return path.join(os.tmpdir(), 'omni-at-test');
+        }
+      },
+    }));
+
+    function omniConfig(
+      enabled: boolean,
+      modalities: Record<string, boolean> = {
+        image: true,
+        audio: true,
+        video: true,
+      },
+    ): Config {
+      return {
+        ...mockConfig,
+        isOmniEnabled: () => enabled,
+        getContentGeneratorConfig: () => ({ modalities }),
+        storage: { getQwenDir: () => path.join(os.tmpdir(), 'omni-at-test') },
+      } as unknown as Config;
+    }
+
+    beforeEach(async () => {
+      omniMocks.isOmniDeliveryActive.mockReturnValue(true);
+      omniMocks.parseHttpUrlRef.mockImplementation((url: string) => ({ url }));
+      omniMocks.effectiveMaxDownloadFileBytes.mockReturnValue(1024 * 1024);
+      omniMocks.sniffFileModality.mockResolvedValue('video');
+      const partPath = path.join(testRootDir, 'downloaded.mp4');
+      await createTestFile(partPath, 'fake media bytes');
+      omniMocks.downloadMediaUrl.mockResolvedValue({ partPath });
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+      });
+    });
+
+    it('localizes a media URL into a fileData part when omni is active', async () => {
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 700,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(omniMocks.downloadMediaUrl).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'https://example.com/clip.mp4' }),
+      );
+      // Guard/error messages inside the pipeline must name the URL's file,
+      // not the opaque staging path the download landed under.
+      expect(omniMocks.processMediaForOmniDelivery).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.anything(),
+        expect.objectContaining({ displayName: 'clip.mp4' }),
+      );
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts).toContainEqual({
+        fileData: {
+          fileUri: 'oss://bucket/clip.mp4',
+          mimeType: 'video/mp4',
+          displayName: 'clip.mp4',
+        },
+      });
+      // The URL stays verbatim in the prompt text so the model can correlate
+      // it with the delivered part.
+      expect(parts[0]!['text']).toContain('https://example.com/clip.mp4');
+      expect(result.toolDisplays![0]).toMatchObject({
+        name: 'Fetch Media URL',
+        status: ToolCallStatus.Success,
+      });
+    });
+
+    it('falls through to text (no download) when omni is disabled', async () => {
+      const query = 'summarize @https://example.com/clip.mp4 please';
+      const result = await handleAtCommand({
+        query,
+        config: omniConfig(false),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 701,
+        signal: abortController.signal,
+      });
+
+      // Legacy behavior: the URL is left as text, nothing is fetched.
+      expect(omniMocks.downloadMediaUrl).not.toHaveBeenCalled();
+      expect(result.shouldProceed).toBe(true);
+      expect(result.processedQuery).toEqual([{ text: query }]);
+    });
+
+    it('does not hit the no-content early return for a URL-only prompt', async () => {
+      // urlMediaRefs must count as content; otherwise the pipeline runs and
+      // its parts/cards are discarded by the early return.
+      const result = await handleAtCommand({
+        query: '@https://example.com/clip.mp4',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 702,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts.some((p) => 'fileData' in p)).toBe(true);
+      expect(mockOnDebugMessage).not.toHaveBeenCalledWith(
+        'No valid file paths found in @ commands to read.',
+      );
+    });
+
+    it('skips store/upload when the sniffed modality is not in the model modalities', async () => {
+      // Mirrors the local-file path's per-modality gate: media the active
+      // model cannot consume must not be uploaded only to be replaced by an
+      // unsupported-modality placeholder in the converter.
+      omniMocks.sniffFileModality.mockResolvedValue('image');
+      const result = await handleAtCommand({
+        query: 'look @https://example.com/pic.jpg please',
+        config: omniConfig(true, { image: false, audio: true, video: true }),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 703,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(omniMocks.processMediaForOmniDelivery).not.toHaveBeenCalled();
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts.some((p) => 'fileData' in p)).toBe(false);
+      expect(result.toolDisplays![0]).toMatchObject({
+        name: 'Fetch Media URL',
+        status: ToolCallStatus.Error,
+      });
+      expect(
+        (result.toolDisplays![0] as { resultDisplay: string }).resultDisplay,
+      ).toContain('does not accept image input');
+    });
+
+    it('isolates a failing URL: error card shown, remaining URLs still delivered', async () => {
+      omniMocks.downloadMediaUrl
+        .mockRejectedValueOnce(new Error('URL host did not resolve'))
+        .mockResolvedValueOnce({
+          partPath: path.join(testRootDir, 'downloaded.mp4'),
+        });
+      const result = await handleAtCommand({
+        query: 'compare @https://bad.example/a.mp4 @https://good.example/b.mp4',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 704,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays).toHaveLength(2);
+      expect(result.toolDisplays![0]).toMatchObject({
+        status: ToolCallStatus.Error,
+      });
+      expect(
+        (result.toolDisplays![0] as { resultDisplay: string }).resultDisplay,
+      ).toContain('bad.example');
+      expect(result.toolDisplays![1]).toMatchObject({
+        status: ToolCallStatus.Success,
+      });
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts.filter((p) => 'fileData' in p)).toHaveLength(1);
+    });
+
+    it('replaces the media with an omission notice when the transport guard withholds it', async () => {
+      // Policy design §10.2: an omission is a successful delivery whose
+      // content IS the notice — no fileData part, no error card.
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        omission: { reason: 'video exceeds the 500MB transport limit' },
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 706,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts).toContainEqual({
+        text: '[omission clip.mp4: video exceeds the 500MB transport limit]',
+      });
+      expect(parts.some((p) => 'fileData' in p)).toBe(false);
+      expect(result.toolDisplays![0]).toMatchObject({
+        name: 'Fetch Media URL',
+        status: ToolCallStatus.Success,
+        resultDisplay: 'Media omitted by the omni transport guard: clip.mp4',
+      });
+    });
+
+    it('leads the part group with the session resource handle (M §5.2)', async () => {
+      // A delivery mints a registry binding and writes memory records for
+      // the file. If the funnel never tells the model the handle, active
+      // recall rejects it as never-issued and the passive selector finds no
+      // handles to consult — the session can never recall media it just
+      // paid an upload to collect.
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+        resourceId: 'media-3-9f2a',
+        disclosure: '原 1080p → 480p',
+      });
+
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 731,
+        signal: abortController.signal,
+      });
+
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const handleIdx = parts.findIndex(
+        (p) => p['text'] === '[handle clip.mp4: media-3-9f2a]',
+      );
+      expect(handleIdx).toBeGreaterThan(-1);
+      // Ahead of the disclosure, so the disclosure keeps its D8 adjacency
+      // to the media part it speaks for.
+      const disclosureIdx = parts.findIndex(
+        (p) => p['text'] === '[disclosure clip.mp4: 原 1080p → 480p]',
+      );
+      expect(disclosureIdx).toBe(handleIdx + 1);
+      expect(parts[disclosureIdx + 1]).toMatchObject({
+        fileData: { fileUri: 'oss://bucket/clip.mp4' },
+      });
+    });
+
+    it('still discloses the handle when the guard withholds the media', async () => {
+      // The withheld case is where recall matters MOST: the model cannot
+      // see the media, so a handle it can hand to omni_recall_media_memory
+      // (or a policy tool) is its only remaining route to the content.
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        recognized: { modality: 'video', sizeBytes: 900 * 1024 * 1024 },
+        omission: { reason: 'video exceeds the transport limit' },
+        resourceId: 'media-4-c1d0',
+      });
+
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 732,
+        signal: abortController.signal,
+      });
+
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const handleIdx = parts.findIndex(
+        (p) => p['text'] === '[handle clip.mp4: media-4-c1d0]',
+      );
+      expect(handleIdx).toBeGreaterThan(-1);
+      expect(parts[handleIdx + 1]).toEqual({
+        text: '[omission clip.mp4: video exceeds the transport limit]',
+      });
+    });
+
+    it('places the degradation disclosure text immediately before the fileData part (D8)', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+        degraded: true,
+        disclosure: '原 1080p → 480p，细节受损',
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 707,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const disclosureIdx = parts.findIndex(
+        (p) => p['text'] === '[disclosure clip.mp4: 原 1080p → 480p，细节受损]',
+      );
+      const fileDataIdx = parts.findIndex((p) => 'fileData' in p);
+      expect(disclosureIdx).toBeGreaterThan(-1);
+      expect(fileDataIdx).toBe(disclosureIdx + 1);
+      expect(
+        (result.toolDisplays![0] as { resultDisplay: string }).resultDisplay,
+      ).toContain('(degraded by media policy)');
+    });
+
+    it('splices additionalMedia parts after the primary fileData part (multi-output policies)', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+        additionalMedia: [
+          { fileUri: 'oss://bucket/frame2', mimeType: 'image/jpeg' },
+          { fileUri: 'oss://bucket/frame3', mimeType: 'image/jpeg' },
+        ],
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 708,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const fileDataIdx = parts.findIndex((p) => 'fileData' in p);
+      expect(fileDataIdx).toBeGreaterThan(-1);
+      // The materialized extras follow the primary media part directly.
+      expect(parts[fileDataIdx + 1]).toEqual({ text: '[extra clip.mp4 0]' });
+      expect(parts[fileDataIdx + 2]).toEqual({ text: '[extra clip.mp4 1]' });
+    });
+
+    it('splices additionalMedia parts after the omission notice when the primary is withheld', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        omission: { reason: 'video exceeds the transport limit' },
+        additionalMedia: [
+          { fileUri: 'oss://bucket/frame2', mimeType: 'image/jpeg' },
+        ],
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 709,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const omissionIdx = parts.findIndex(
+        (p) =>
+          p['text'] ===
+          '[omission clip.mp4: video exceeds the transport limit]',
+      );
+      expect(omissionIdx).toBeGreaterThan(-1);
+      expect(parts[omissionIdx + 1]).toEqual({ text: '[extra clip.mp4 0]' });
+    });
+
+    it('ends the turn quietly (shouldProceed=false) on a user abort mid-download', async () => {
+      omniMocks.downloadMediaUrl.mockImplementation(async () => {
+        abortController.abort();
+        throw new Error('aborted');
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 705,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(false);
+      expect(result.processedQuery).toBeNull();
+      expect(omniMocks.processMediaForOmniDelivery).not.toHaveBeenCalled();
     });
   });
 });

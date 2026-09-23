@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import {
+  createDaemonTranscriptState,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
@@ -9,7 +14,10 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { extractTodosFromToolCall } from '../utils/todos.js';
 import { groupParallelAgents } from './parallelAgentGrouping.js';
-import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
+import {
+  assistantBlockRendersAsSystemNotice,
+  transcriptBlocksToDaemonMessages,
+} from './transcriptToMessages.js';
 
 function textBlock(
   id: string,
@@ -30,6 +38,88 @@ function textBlock(
     ...overrides,
   };
 }
+
+it.each([true, false])(
+  'retains queue overflow summaries with background provenance: %s',
+  (withBackground) => {
+    const text =
+      'Dropped 1 background notification (queue full): 1 shell result (shell-0).';
+    const backgroundTurn = {
+      turnId: 'automatic-1',
+      taskId: 'shell-1',
+      kind: 'shell',
+      startedAt: 100,
+    };
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            _meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: { kind: 'queue', status: 'dropped' },
+              ...(withBackground ? { backgroundTurn } : {}),
+            },
+          },
+        },
+      }),
+    );
+    expect(transcriptBlocksToDaemonMessages(state.blocks)).toContainEqual(
+      expect.objectContaining({
+        role: 'system',
+        source: 'background_notification',
+        content: text,
+        data: { kind: 'queue', status: 'dropped' },
+      }),
+    );
+  },
+);
+
+it('preserves literal slash-command output and artifact references when a directory resembles insight JSON', () => {
+  const workspacePath = '{"insight_ready":{"path":"fixture"}}/export.md';
+  const descriptor = {
+    kind: 'file',
+    storage: 'workspace',
+    title: 'export.md',
+    workspacePath,
+  };
+  const text = `Session exported to Markdown: ${workspacePath}`;
+  const block = {
+    ...textBlock('export-result', 'assistant', text, 1),
+    meta: { source: 'slash_command', sessionArtifacts: [descriptor] },
+  };
+  const messages = transcriptBlocksToDaemonMessages([block]);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatchObject({
+    role: 'assistant',
+    content: text,
+    reportedArtifacts: [descriptor],
+  });
+});
+
+it('retains slash-command insight cards when no export descriptor is reported', () => {
+  const messages = transcriptBlocksToDaemonMessages([
+    {
+      ...textBlock(
+        'insight-result',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        1,
+      ),
+      meta: { source: 'slash_command' },
+    },
+  ]);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatchObject({
+    role: 'insight_ready',
+    path: '/tmp/report.md',
+  });
+});
 
 describe('Assistant branch anchors', () => {
   it('preserves the checkpoint on the rendered Assistant message', () => {
@@ -185,6 +275,8 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    subagentSessionReady: overrides.subagentSessionReady,
+    serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
@@ -192,6 +284,99 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps active shell input previews out of output while preserving actual content', () => {
+    const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
+      toolName: 'run_shell_command',
+      serverTimestamp: 500,
+      rawInput: { command: 'sleep 10' },
+      details: '{"command":"sleep 10"}',
+    });
+    const getTool = (value: typeof block) =>
+      transcriptBlocksToDaemonMessages([value]).find(
+        (m) => m.role === 'tool_group',
+      )?.tools[0];
+    expect(getTool(block)?.rawOutput).toBeUndefined();
+    expect(getTool(block)?.startTime).toBe(500);
+    expect(getTool({ ...block, rawOutput: 'actual output' })?.rawOutput).toBe(
+      'actual output',
+    );
+    expect(
+      getTool({ ...block, status: 'failed', details: 'Timed out' })?.rawOutput,
+    ).toBe('Timed out');
+  });
+
+  it('does not treat a historical background launch as agent completion', () => {
+    const block = toolBlock('agent-history', 'agent-1', 'completed', 1000, {
+      toolName: 'agent',
+      rawInput: { prompt: 'inspect history' },
+      rawOutput: {
+        type: 'task_execution',
+        status: 'background',
+        result: 'kept detail',
+      },
+      updatedAt: 1005,
+    });
+    const messages = transcriptBlocksToDaemonMessages([block]);
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      status: 'pending',
+      startTime: 1000,
+      endTime: undefined,
+      args: { prompt: 'inspect history' },
+      rawOutput: { result: 'kept detail' },
+    });
+    expect(tool?.endTime).toBeUndefined();
+  });
+
+  it.each(['completed', 'failed'] as const)(
+    'uses an in-range background notification for historical %s status',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('agent-history', 'agent-1', 'completed', 1000, {
+          toolName: 'agent',
+          rawInput: { prompt: 'inspect history' },
+          rawOutput: {
+            type: 'task_execution',
+            status: 'background',
+            result: 'kept detail',
+          },
+          updatedAt: 1005,
+        }),
+        textBlock(
+          'agent-result',
+          'assistant',
+          `agent ${status}`,
+          60000,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                taskId: 'task-1',
+                toolUseId: 'agent-1',
+                status,
+              },
+            },
+          },
+        ),
+      ]);
+      const tool = messages.find((message) => message.role === 'tool_group')
+        ?.tools[0];
+
+      expect(tool).toMatchObject({
+        status,
+        startTime: 1000,
+        endTime: 60000,
+        args: { prompt: 'inspect history' },
+        rawOutput: { result: 'kept detail' },
+      });
+    },
+  );
+
   it('preserves user source metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'scheduled prompt', 1, false, {
@@ -411,6 +596,298 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: 'Normal reply',
         isStreaming: false,
         timestamp: 2,
+      },
+    ]);
+  });
+
+  it('projects a compression result as a structured system row', () => {
+    const result = {
+      originalTokenCount: 263195,
+      newTokenCount: 99799,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('compression', 'assistant', 'Context compressed.', 1, false, {
+        meta: {
+          source: 'slash_command',
+          contextCompression: { phase: 'done', ...result },
+        },
+      }),
+    ]);
+
+    // The daemon's own English sentence is ignored in favour of the payload,
+    // which SystemMessage renders in this UI's language.
+    expect(messages).toEqual([
+      {
+        id: 'compression',
+        role: 'system',
+        content: 'Context compressed.',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'done', ...result },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('shows the compression row while it streams, on the id the result reuses', () => {
+    // The daemon streams one block: the progress frame creates it and the
+    // result merges into the same id, so the row is replaced in place.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('compression', 'assistant', 'Compressing context...', 1, true, {
+        meta: {
+          source: 'slash_command',
+          contextCompression: { phase: 'progress' },
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression',
+        role: 'system',
+        content: 'Compressing context...',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'progress' },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('hides a compression row whose turn ended without a result', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compressing context...',
+        1,
+        false,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompression: { phase: 'progress' },
+          },
+        },
+      ),
+      textBlock('assistant-1', 'assistant', 'Normal reply', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Normal reply',
+        isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
+  it('keeps a terminal no-op row after the turn ends', () => {
+    // /compress-fast with nothing to strip merges a terminal no-op payload into
+    // the progress block. Unlike a stray progress row it must survive, or the
+    // user never learns that nothing needed compressing.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compressing context (fast)...No compression needed.',
+        1,
+        false,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompression: { phase: 'noop' },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression',
+        role: 'system',
+        content: 'Compressing context (fast)...No compression needed.',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'noop' },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('splits a folded compression block into a notice row and a result row', () => {
+    // The reducer folds this turn's frames into one block and spreads `_meta`
+    // key by key, so the notice keeps its own key while the result overwrites
+    // the shared one. Both rows come out of that single block.
+    const result = {
+      originalTokenCount: 263195,
+      newTokenCount: 99799,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compression instructions were truncated to 2000 characters.\nCompressing context...\nContext compressed (263195 -> ~99799).',
+        1,
+        true,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompressionNotice: {
+              phase: 'notice',
+              instructionsLimit: 2000,
+            },
+            contextCompression: { phase: 'done', ...result },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression-notice',
+        role: 'system',
+        content:
+          'Compression instructions were truncated to 2000 characters.\nCompressing context...\nContext compressed (263195 -> ~99799).',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'notice', instructionsLimit: 2000 },
+        timestamp: 1,
+      },
+      {
+        id: 'compression',
+        role: 'system',
+        content:
+          'Compression instructions were truncated to 2000 characters.\nCompressing context...\nContext compressed (263195 -> ~99799).',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'done', ...result },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('shows a notice-only block when the compression never reported', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compression instructions were truncated to 2000 characters.\n',
+        1,
+        false,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompressionNotice: {
+              phase: 'notice',
+              instructionsLimit: 2000,
+            },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression-notice',
+        role: 'system',
+        content:
+          'Compression instructions were truncated to 2000 characters.\n',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'notice', instructionsLimit: 2000 },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it.each<[string, unknown, unknown]>([
+    [
+      'the notice parses and the result does not',
+      { phase: 'notice', instructionsLimit: 2000 },
+      { phase: 'done', originalTokenCount: 'many' },
+    ],
+    [
+      'the notice does not parse and the result does',
+      { phase: 'later' },
+      { phase: 'done', originalTokenCount: 263195, newTokenCount: 99799 },
+    ],
+  ])(
+    'falls back to the block text when %s',
+    (_label, contextCompressionNotice, contextCompression) => {
+      // Rendering only the half that parses would drop the other half's
+      // sentence; the block's own text carries both.
+      const messages = transcriptBlocksToDaemonMessages([
+        textBlock(
+          'compression',
+          'assistant',
+          'Compression instructions were truncated to 2000 characters.\nContext compressed (263195 -> 99799).',
+          1,
+          false,
+          {
+            meta: {
+              source: 'slash_command',
+              contextCompressionNotice,
+              contextCompression,
+            },
+          },
+        ),
+      ]);
+
+      expect(messages).toEqual([
+        {
+          id: 'compression',
+          role: 'assistant',
+          content:
+            'Compression instructions were truncated to 2000 characters.\nContext compressed (263195 -> 99799).',
+          isStreaming: false,
+          timestamp: 1,
+        },
+      ]);
+    },
+  );
+
+  it.each([
+    ['an unreadable count', { phase: 'done', originalTokenCount: 'many' }],
+    ['an unknown phase', { phase: 'later' }],
+  ])(
+    'keeps %s as plain slash-command text (older daemons ship no payload)',
+    (_label, contextCompression) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        textBlock('compression', 'assistant', 'Context compressed.', 1, false, {
+          meta: { source: 'slash_command', contextCompression },
+        }),
+      ]);
+
+      expect(messages).toEqual([
+        {
+          id: 'compression',
+          role: 'assistant',
+          content: 'Context compressed.',
+          isStreaming: false,
+          timestamp: 1,
+        },
+      ]);
+    },
+  );
+
+  it('keeps a slash-command block without any compression payload untouched', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('command', 'assistant', 'Plain command output.', 1),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'command',
+        role: 'assistant',
+        content: 'Plain command output.',
+        isStreaming: false,
+        timestamp: 1,
       },
     ]);
   });
@@ -3026,51 +3503,23 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('uses AskUserQuestion permission title for the completed tool block', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      {
-        id: 'perm-ask-1',
-        kind: 'permission',
-        requestId: 'req-ask-1',
-        sessionId: 'sess-1',
-        title: 'Ask user 4 questions',
-        options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
-        toolCall: {
-          toolCallId: 'ask-call-1',
-          kind: 'think',
-          status: 'pending',
+  it.each([false, true])(
+    'uses AskUserQuestion permission details regardless of block order (tool first=%s)',
+    (toolFirst) => {
+      const blocks: DaemonTranscriptBlock[] = [
+        {
+          id: 'perm-ask-1',
+          kind: 'permission',
+          requestId: 'req-ask-1',
+          sessionId: 'sess-1',
           title: 'Ask user 4 questions',
-          rawInput: {
-            questions: [
-              {
-                header: '姓名',
-                question: '请输入学生的姓名：',
-                options: [{ label: '张三', description: '示例姓名' }],
-              },
-            ],
-          },
-        },
-        preview: { kind: 'generic' as const },
-        clientReceivedAt: 1,
-        createdAt: 1,
-        updatedAt: 2,
-        resolved: 'selected:proceed_once',
-      },
-      toolBlock('ask-tool-1', 'ask-call-1', 'completed', 3, {
-        toolName: 'ask_user_question',
-        title: 'ask_user_question',
-        rawOutput: 'User has provided the following answers:\n\n**姓名**: 张三',
-      }),
-    ]);
-
-    expect(messages).toMatchObject([
-      {
-        role: 'tool_group',
-        tools: [
-          {
-            callId: 'ask-call-1',
+          options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
+          toolCall: {
+            toolCallId: 'ask-call-1',
+            kind: 'think',
+            status: 'pending',
             title: 'Ask user 4 questions',
-            args: {
+            rawInput: {
               questions: [
                 {
                   header: '姓名',
@@ -3079,13 +3528,49 @@ describe('transcriptBlocksToDaemonMessages', () => {
                 },
               ],
             },
-            rawOutput:
-              'User has provided the following answers:\n\n**姓名**: 张三',
           },
-        ],
-      },
-    ]);
-  });
+          preview: { kind: 'generic' as const },
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 2,
+          resolved: 'selected:proceed_once',
+        },
+        toolBlock('ask-tool-1', 'ask-call-1', 'completed', 3, {
+          toolName: 'ask_user_question',
+          title: 'ask_user_question',
+          rawInput: {},
+          rawOutput:
+            'User has provided the following answers:\n\n**姓名**: 张三',
+        }),
+      ];
+      const messages = transcriptBlocksToDaemonMessages(
+        toolFirst ? blocks.reverse() : blocks,
+      );
+
+      expect(messages).toMatchObject([
+        {
+          role: 'tool_group',
+          tools: [
+            {
+              callId: 'ask-call-1',
+              title: 'Ask user 4 questions',
+              args: {
+                questions: [
+                  {
+                    header: '姓名',
+                    question: '请输入学生的姓名：',
+                    options: [{ label: '张三', description: '示例姓名' }],
+                  },
+                ],
+              },
+              rawOutput:
+                'User has provided the following answers:\n\n**姓名**: 张三',
+            },
+          ],
+        },
+      ]);
+    },
+  );
 
   it('uses text content as raw output when a tool has no raw output', () => {
     const messages = transcriptBlocksToDaemonMessages([
@@ -4160,6 +4645,20 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('preserves cancellation duration for rendering', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        ...promptCancelledBlock('cancel-1', 20),
+        elapsedMs: 10999,
+        promptId: 'p1',
+      },
+    ]);
+    expect(messages[0]).toMatchObject({
+      source: 'prompt_cancelled',
+      data: { elapsedMs: 10999 },
+    });
+  });
+
   it('renders localized prompt cancellation messages', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [promptCancelledBlock('cancel-1', 20)],
@@ -4340,6 +4839,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
       },
     ]);
   });
+
+  it.each([false, undefined])(
+    'keeps merged readiness true when a later block supplies %s',
+    (subagentSessionReady) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('ready', 'agent-1', 'in_progress', 10, {
+          toolName: 'agent',
+          subagentSessionReady: true,
+        }),
+        toolBlock('later', 'agent-1', 'in_progress', 20, {
+          toolName: 'agent',
+          subagentSessionReady,
+        }),
+      ]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-1', subagentSessionReady: true }],
+      });
+      if (messages[0].role === 'tool_group')
+        expect(messages[0].tools).toHaveLength(1);
+    },
+  );
 
   it('mergeToolCall updates fields from completion block', () => {
     const messages = transcriptBlocksToDaemonMessages([
@@ -4859,5 +5381,604 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
     expect(agentA!.subContent).toBeUndefined();
     expect(agentB!.subContent).toBeUndefined();
+  });
+});
+
+describe('running subagent replay start time', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it.each([10_000, 20_000])(
+    'keeps the server start when reopened at %s',
+    (receivedAt) => {
+      const tool = firstTool([
+        toolBlock('agent', 'agent-1', 'in_progress', receivedAt, {
+          toolName: 'Agent',
+          serverTimestamp: 1_000,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(1_000);
+    },
+  );
+
+  it.each([
+    ['Agent', 'completed', 1_000],
+    ['Agent', 'failed', 1_000],
+    ['Read', 'in_progress', 1_000],
+    ['Agent', 'in_progress', undefined],
+  ])(
+    'preserves existing timing for %s/%s/%s',
+    (toolName, status, serverTimestamp) => {
+      const tool = firstTool([
+        toolBlock('tool', 'tool-1', status, 10_000, {
+          toolName,
+          serverTimestamp,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(10_000);
+    },
+  );
+});
+
+it.each(['selected:allow', 'selected:cancel'])(
+  'keeps permission merging compatible with the running clock (%s)',
+  (resolved) => {
+    const permission: DaemonTranscriptBlock = {
+      id: 'permission',
+      kind: 'permission',
+      requestId: 'req',
+      sessionId: 'session',
+      title: 'Agent',
+      options: [],
+      preview: { kind: 'generic' },
+      resolved,
+      toolCall: {
+        toolCallId: 'agent-1',
+        rawInput: { subagent_type: 'general-purpose' },
+      },
+      serverTimestamp: 1_000,
+      clientReceivedAt: 10_000,
+      createdAt: 10_000,
+      updatedAt: 11_000,
+    };
+    const real = toolBlock('real', 'agent-1', 'in_progress', 12_000, {
+      toolName: 'Agent',
+      serverTimestamp: 2_000,
+    });
+    for (const blocks of [
+      [permission],
+      [permission, real],
+      [real, permission],
+    ]) {
+      const tool = transcriptBlocksToDaemonMessages(blocks).find(
+        (message) => message.role === 'tool_group',
+      )?.tools[0];
+      if (tool?.endTime !== undefined) {
+        expect(tool.endTime).toBe(11_000);
+        expect(tool.startTime).toBe(blocks[0].createdAt);
+      } else {
+        expect(tool?.startTime).toBe(blocks.includes(real) ? 2_000 : 1_000);
+      }
+    }
+  },
+);
+
+it.each([true, false])(
+  'preserves subagent readiness with safeToolProjection=%s',
+  (safeToolProjection) => {
+    for (const subagentSessionReady of [false, true, undefined]) {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('agent', 'agent-1', 'running', 1, {
+            toolName: 'agent',
+            subagentSessionReady,
+          }),
+        ],
+        { safeToolProjection },
+      );
+      expect(messages).toMatchObject([
+        { role: 'tool_group', tools: [{ subagentSessionReady }] },
+      ]);
+    }
+  },
+);
+
+describe('background execution identity', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    toolUseId: 'tool-1',
+    sourceTurnId: 'user-1',
+    label: 'Explore',
+    startedAt: 10,
+  };
+  it.each([true, false])(
+    'retains a result marker and main replies (explicit start: %s)',
+    (withStart) => {
+      const meta = {
+        backgroundTurn,
+        source: 'background_notification_response',
+      };
+      const messages = transcriptBlocksToDaemonMessages([
+        textBlock('user', 'user', 'Another question', 1, false, {
+          promptId: 'user-2',
+        }),
+        textBlock('answer', 'assistant', 'User answer', 2, false, {
+          promptId: 'user-2',
+        }),
+        ...(withStart
+          ? [
+              textBlock('start', 'assistant', 'Continue', 10, false, {
+                meta: {
+                  ...meta,
+                  source: 'background_notification_turn_started',
+                  qwenDiscreteMessage: true,
+                },
+              }),
+            ]
+          : []),
+        textBlock('auto-answer', 'assistant', 'Background answer', 11, false, {
+          meta,
+        }),
+        textBlock('steering', 'user', 'Please verify', 12, false, {
+          meta: { ...meta, source: 'mid_turn_message_injected' },
+        }),
+        textBlock('auto-followup', 'assistant', 'Verified', 13, false, {
+          meta,
+        }),
+      ]);
+      expect(messages.map((message) => message.role)).toEqual([
+        'user',
+        'assistant',
+        'system',
+        'assistant',
+        'system',
+        'assistant',
+      ]);
+      expect(messages[2]).toMatchObject({
+        id: 'background-turn:auto-1',
+        source: 'background_notification_turn_started',
+        backgroundTurn,
+        timestamp: 10,
+      });
+      expect(messages[3]).toMatchObject({
+        content: 'Background answer',
+      });
+      expect(messages[4]).toMatchObject({
+        source: 'mid_turn_message_injected',
+      });
+      expect(messages[5]).toMatchObject({
+        content: 'Verified',
+      });
+    },
+  );
+  it.each(['completed', 'failed', 'cancelled'])(
+    'shows one result marker with %s status and preserves the main reply',
+    (status) => {
+      const task = {
+        taskId: 'task-1',
+        toolUseId: 'tool-1',
+        kind: 'agent',
+        status,
+      };
+      const source = toolBlock('source', 'tool-1', 'completed', 1, {
+        toolName: 'agent',
+        background: true,
+        preview: {
+          kind: 'subagent_delegation',
+          agentName: 'Explore',
+          task: 'Search',
+        },
+      });
+      const completed = textBlock(
+        'completed',
+        'assistant',
+        'Task done',
+        5,
+        false,
+        {
+          meta: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            backgroundTask: task,
+          },
+        },
+      );
+      const pending = transcriptBlocksToDaemonMessages([source, completed]);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ endTime: 5 }],
+      });
+      expect(
+        pending[0].role === 'tool_group' &&
+          pending[0].tools[0].backgroundResultPending,
+      ).toBe(true);
+      const messages = transcriptBlocksToDaemonMessages([
+        source,
+        completed,
+        textBlock('start', 'assistant', 'Continue', 10, false, {
+          meta: {
+            source: 'background_notification_turn_started',
+            backgroundTurn,
+          },
+        }),
+        textBlock('consumed', 'assistant', 'Raw notification', 11, false, {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTurn,
+            backgroundTask: task,
+          },
+        }),
+        textBlock('answer', 'assistant', 'Main agent summary', 12, false, {
+          backgroundTurn,
+        }),
+      ]);
+      expect(messages.map((message) => message.role)).toEqual([
+        'tool_group',
+        'system',
+        'assistant',
+      ]);
+      expect(
+        messages[0].role === 'tool_group' &&
+          messages[0].tools[0].backgroundResultPending,
+      ).toBe(false);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ endTime: 5 }],
+      });
+      expect(messages[1]).toMatchObject({
+        source: 'background_notification_turn_started',
+        data: { backgroundTask: { status } },
+      });
+      expect(messages[2]).toMatchObject({
+        content: 'Main agent summary',
+      });
+    },
+  );
+  it.each([false, true])(
+    'reconciles a persisted daemon notification before completion and automatic reply (tool first: %s)',
+    (toolFirst) => {
+      const task = {
+        taskId: 'task-1',
+        toolUseId: 'tool-1',
+        kind: 'agent',
+        status: 'completed',
+      };
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('source', 'tool-1', 'completed', 1, {
+          toolName: 'agent',
+          background: true,
+        }),
+        textBlock('persisted-notification', 'user', 'Task done', 4, false, {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: task,
+          },
+        }),
+        statusBlock('completed', 'Task done', 5, {
+          source: 'background_task_completed',
+          data: task,
+        }),
+        ...(toolFirst
+          ? [
+              {
+                ...toolBlock('automatic-tool', 'read-1', 'completed', 11, {
+                  toolName: 'read_file',
+                }),
+                backgroundTurn,
+              },
+            ]
+          : []),
+        textBlock('answer', 'assistant', 'Main agent summary', 12, false, {
+          backgroundTurn,
+        }),
+      ]);
+      expect
+        .soft(messages.map((message) => message.role))
+        .toEqual([
+          'tool_group',
+          'system',
+          ...(toolFirst ? ['tool_group'] : []),
+          'assistant',
+        ]);
+      expect.soft(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ backgroundResultPending: false }],
+      });
+      const marker = messages.find(
+        (message) =>
+          message.role === 'system' &&
+          message.source === 'background_notification_turn_started',
+      );
+      expect.soft(marker).toMatchObject({
+        data: { backgroundTask: { status: 'completed' } },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        role: 'assistant',
+        content: 'Main agent summary',
+      });
+    },
+  );
+  it('does not merge neighboring replies from different executions', () => {
+    expect(
+      transcriptBlocksToDaemonMessages([
+        textBlock('first', 'assistant', 'First', 1, false, { promptId: 'one' }),
+        textBlock('second', 'assistant', 'Second', 2, false, {
+          promptId: 'two',
+        }),
+      ]).map((message) => ('content' in message ? message.content : '')),
+    ).toEqual(['First', 'Second']);
+  });
+  it('shows completion before consumption without starting an automatic group', () => {
+    const completed = textBlock(
+      'completed',
+      'assistant',
+      'Explore done',
+      5,
+      false,
+      {
+        meta: {
+          source: 'background_task_completed',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'task-1',
+            kind: 'agent',
+            status: 'completed',
+            toolUseId: 'tool-1',
+          },
+        },
+      },
+    );
+    expect(transcriptBlocksToDaemonMessages([completed])).toMatchObject([
+      {
+        role: 'system',
+        source: 'background_task_completed',
+        data: { awaitingProcessing: true },
+      },
+    ]);
+    const consumed = textBlock(
+      'consumed',
+      'assistant',
+      'Result received',
+      8,
+      false,
+      {
+        meta: {
+          source: 'background_notification',
+          backgroundTask: { taskId: 'task-1' },
+        },
+      },
+    );
+    expect(transcriptBlocksToDaemonMessages([completed, consumed])).toEqual([]);
+  });
+});
+
+it('restores a background result marker before its first tool', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const messages = transcriptBlocksToDaemonMessages([
+    textBlock('user', 'user', 'New question', 1),
+    { ...toolBlock('tool', 'read-1', 'completed', 101), backgroundTurn },
+  ]);
+  expect(messages.map((message) => message.role)).toEqual([
+    'user',
+    'system',
+    'tool_group',
+  ]);
+  expect(messages[1]).toMatchObject({
+    source: 'background_notification_turn_started',
+    backgroundTurn,
+  });
+  expect(messages[2]).toMatchObject({ role: 'tool_group' });
+});
+
+it('does not mark a restarted task completion consumed by its previous run', () => {
+  const backgroundTask = {
+    taskId: 'reused-task',
+    kind: 'agent',
+    status: 'completed',
+  };
+  const completed = textBlock(
+    'completed',
+    'assistant',
+    'Finished again',
+    3,
+    false,
+    { meta: { source: 'background_task_completed', backgroundTask } },
+  );
+  const consumed = textBlock(
+    'consumed',
+    'assistant',
+    'Previous result received',
+    2,
+    false,
+    { meta: { source: 'background_notification', backgroundTask } },
+  );
+  expect(
+    transcriptBlocksToDaemonMessages([consumed, completed])[1],
+  ).toMatchObject({ data: { awaitingProcessing: true } });
+  expect(transcriptBlocksToDaemonMessages([completed, consumed])).toEqual([]);
+});
+
+it('does not let old execution output consume or relabel a newer result for the same task', () => {
+  const backgroundTurn = {
+    turnId: 'old-execution',
+    taskId: 'same-task',
+    kind: 'agent' as const,
+    startedAt: 2,
+  };
+  const firstTask = { taskId: 'same-task', kind: 'agent', status: 'completed' };
+  const secondTask = { ...firstTask, status: 'failed' };
+  const first = textBlock('first', 'assistant', 'First done', 1, false, {
+    meta: { source: 'background_task_completed', backgroundTask: firstTask },
+  });
+  const start = textBlock('start', 'assistant', 'Start', 2, false, {
+    backgroundTurn,
+    meta: { source: 'background_notification_turn_started', backgroundTurn },
+  });
+  const second = textBlock('second', 'assistant', 'Second done', 3, false, {
+    meta: { source: 'background_task_completed', backgroundTask: secondTask },
+  });
+  const oldOutput = textBlock(
+    'old-output',
+    'assistant',
+    'Still processing first',
+    4,
+    true,
+    { backgroundTurn },
+  );
+  const messages = transcriptBlocksToDaemonMessages([
+    first,
+    start,
+    second,
+    oldOutput,
+  ]);
+  expect(messages[0]).toMatchObject({ data: { backgroundTask: firstTask } });
+  expect(messages[1]).toMatchObject({
+    source: 'background_task_completed',
+    data: { ...secondTask, awaitingProcessing: true },
+  });
+  const consumed = textBlock(
+    'consumed-second',
+    'assistant',
+    'Received second',
+    5,
+    false,
+    {
+      meta: { source: 'background_notification', backgroundTask: secondTask },
+    },
+  );
+  const after = transcriptBlocksToDaemonMessages([
+    first,
+    start,
+    second,
+    oldOutput,
+    consumed,
+  ]);
+  expect(
+    after.some(
+      (message) =>
+        message.role === 'system' &&
+        message.source === 'background_task_completed',
+    ),
+  ).toBe(false);
+  expect(after[0]).toMatchObject({ data: { backgroundTask: firstTask } });
+});
+
+describe('transcript message prompt ids', () => {
+  it('carries the daemon-stamped prompt id onto the messages it built', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'hello', 1000, false, {
+        promptId: 'prompt-1',
+      }),
+      textBlock('assistant-2', 'assistant', 'hi', 1100),
+      textBlock('user-3', 'user', 'again', 2000, false, {
+        promptId: 'prompt-2',
+      }),
+      textBlock('assistant-4', 'assistant', 'sure', 2100, false, {
+        promptId: 'prompt-2',
+      }),
+    ]);
+    const promptIdOf = (id: string) =>
+      messages.find((message) => message.id === id)?.promptId;
+
+    // A replayed turn stamps the prompt's own block; a live turn may stamp the
+    // answer instead. Both carry the same value.
+    expect(promptIdOf('user-1')).toBe('prompt-1');
+    expect(promptIdOf('assistant-4')).toBe('prompt-2');
+    // A block without a stamp must not have one invented for it.
+    expect(promptIdOf('assistant-2')).toBeUndefined();
+  });
+});
+
+describe('assistantBlockRendersAsSystemNotice', () => {
+  // The predicate the settlement guard and the turn-notification scanner
+  // consult instead of each keeping a `meta.source` list, so a notice source
+  // added to the renderer reaches both without editing either. The compression
+  // rows are the case a list cannot express: their `meta.source` stays
+  // `slash_command` and the renderer decides from the payload keys (#12141).
+  const cases: Array<[string, Partial<DaemonTextTranscriptBlock>, boolean]> = [
+    [
+      'a background notification',
+      { meta: { source: 'background_notification' } },
+      true,
+    ],
+    [
+      'a vision bridge notice',
+      { meta: { source: 'vision_bridge_notice' } },
+      true,
+    ],
+    [
+      'a compression result',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 2123,
+            newTokenCount: 58,
+          },
+        },
+      },
+      true,
+    ],
+    [
+      'a compression invocation note',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompressionNotice: {
+            phase: 'notice',
+            instructionsLimit: 2000,
+          },
+        },
+      },
+      true,
+    ],
+    // An unreadable payload means this client and the daemon disagree on the
+    // schema, and the renderer lets the block's own text through as an answer.
+    [
+      'a compression payload this client cannot read',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompression: { phase: 'done' },
+        },
+      },
+      false,
+    ],
+    ['a plain answer', {}, false],
+    [
+      'another slash command answer',
+      { meta: { source: 'slash_command' } },
+      false,
+    ],
+  ];
+
+  for (const [label, overrides, expected] of cases) {
+    it(`reports ${label}`, () => {
+      expect(
+        assistantBlockRendersAsSystemNotice(
+          textBlock('b-1', 'assistant', 'text', 1, false, overrides),
+        ),
+      ).toBe(expected);
+    });
+  }
+
+  it('reports a block of another kind as no notice', () => {
+    expect(
+      assistantBlockRendersAsSystemNotice(textBlock('u-1', 'user', 'hi', 1)),
+    ).toBe(false);
   });
 });

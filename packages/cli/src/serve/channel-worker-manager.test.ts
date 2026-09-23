@@ -14,6 +14,7 @@ import {
   ChannelWorkerControlError,
   createChannelWorkerManager,
 } from './channel-worker-manager.js';
+import { ChannelControlWorkspaceLimitError } from './channel-control-capacity.js';
 import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
@@ -132,6 +133,39 @@ function setup(group = fakeGroup()) {
 }
 
 describe('createChannelWorkerManager', () => {
+  it('rejects 26 resolved owners before reserving a lease', async () => {
+    const test = setup();
+    test.resolveGroups.mockResolvedValue(
+      Array.from({ length: 26 }, (_, index) => ({
+        workspaceCwd: `/ws/${index}`,
+        selection: { mode: 'names', names: [`bot-${index}`] },
+      })),
+    );
+    await expect(
+      test.manager.setSelection({ mode: 'names', names: ['many'] }),
+    ).rejects.toMatchObject({
+      code: 'channel_control_workspace_limit_reached',
+    });
+    expect(test.reserveLease).not.toHaveBeenCalled();
+    expect(test.createGroup).not.toHaveBeenCalled();
+    expect(test.manager.committedChannelNames()).toEqual([]);
+  });
+
+  it('preserves capacity errors from reconciliation and retains committed selection', async () => {
+    const test = setup();
+    await test.manager.setSelection({ mode: 'names', names: ['existing'] });
+    vi.mocked(test.group.reconcile).mockRejectedValue(
+      new ChannelControlWorkspaceLimitError(),
+    );
+    await expect(
+      test.manager.setSelection({ mode: 'names', names: ['candidate'] }),
+    ).rejects.toMatchObject({
+      code: 'channel_control_workspace_limit_reached',
+    });
+    expect(test.manager.committedChannelNames()).toEqual(['existing']);
+    expect(test.group.stop).not.toHaveBeenCalled();
+  });
+
   it('exposes committed channel names in selection order', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
@@ -197,6 +231,105 @@ describe('createChannelWorkerManager', () => {
     ]);
 
     expect(manager.committedChannelNames()).toEqual(['secondary-bot']);
+  });
+
+  describe('addChannels', () => {
+    it('adds names to an empty selection and enables hosting', async () => {
+      const test = setup();
+
+      await test.manager.addChannels(['telegram']);
+
+      expect(test.manager.committedChannelNames()).toEqual(['telegram']);
+      expect(test.manager.state().enabled).toBe(true);
+      expect(test.reserveLease).toHaveBeenCalledOnce();
+    });
+
+    it('appends after the committed names and skips names already committed', async () => {
+      const test = setup();
+      await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+      await test.manager.addChannels(['feishu', 'telegram']);
+
+      expect(test.manager.committedChannelNames()).toEqual([
+        'telegram',
+        'feishu',
+      ]);
+    });
+
+    it('changes nothing when every name is already committed', async () => {
+      const test = setup();
+      await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+      const resolutions = test.resolveGroups.mock.calls.length;
+
+      const result = await test.manager.addChannels(['telegram']);
+
+      expect(result.changed).toBe(false);
+      expect(test.resolveGroups).toHaveBeenCalledTimes(resolutions);
+    });
+
+    it('leaves a committed all selection alone', async () => {
+      const test = setup();
+      await test.manager.setSelection({ mode: 'all' });
+
+      const result = await test.manager.addChannels(['feishu']);
+
+      expect(result.changed).toBe(false);
+      expect(test.manager.state().selection).toEqual({ mode: 'all' });
+    });
+
+    it('builds on every change queued before it', async () => {
+      const test = setup();
+
+      // Neither has committed when the second is queued; each must see what
+      // the one before it committed, because a commit replaces the selection.
+      await Promise.all([
+        test.manager.addChannels(['telegram']),
+        test.manager.addChannels(['feishu']),
+      ]);
+
+      expect(test.manager.committedChannelNames()).toEqual([
+        'telegram',
+        'feishu',
+      ]);
+    });
+
+    it('evaluates its precondition when its turn comes, not when it is queued', async () => {
+      const test = setup();
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      test.resolveGroups.mockImplementationOnce(async (selection) => {
+        await gate;
+        return workspaceGroups(selection);
+      });
+      const first = test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram'],
+      });
+      let allowed = true;
+      const second = test.manager.addChannels(['feishu'], {
+        precondition: () => allowed,
+      });
+      // Something turns hosting off while the addition waits in the lane.
+      allowed = false;
+      release?.();
+      await first;
+
+      const result = await second;
+
+      expect(result.changed).toBe(false);
+      expect(test.manager.committedChannelNames()).toEqual(['telegram']);
+    });
+
+    it('refuses once the manager is shutting down', async () => {
+      const test = setup();
+      await test.manager.shutdown();
+
+      await expect(
+        test.manager.addChannels(['telegram']),
+      ).rejects.toMatchObject({ code: 'daemon_draining' });
+    });
   });
 
   it('prunes a permanently removed workspace before starting another channel', async () => {

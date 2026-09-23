@@ -114,6 +114,9 @@ describe('readWorktreeSession', () => {
 });
 
 describe('readWorktreeSessionStrict', () => {
+  const differentIdentity = (value: number | bigint): number | bigint =>
+    typeof value === 'bigint' ? (value === 1n ? 2n : 1n) : value === 1 ? 2 : 1;
+
   it('distinguishes missing, valid, and malformed sidecars', async () => {
     await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
       state: 'missing',
@@ -189,9 +192,9 @@ describe('readWorktreeSessionStrict', () => {
     const statSpy = vi
       .spyOn(prototype, 'stat')
       .mockImplementationOnce(async function (this: typeof probe) {
-        const stats = await originalStat.call(this);
+        const stats = await originalStat.call(this, { bigint: true });
         return Object.assign(stats, {
-          ino: typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+          ino: differentIdentity(stats.ino),
         });
       });
 
@@ -215,12 +218,11 @@ describe('readWorktreeSessionStrict', () => {
     const statSpy = vi
       .spyOn(prototype, 'stat')
       .mockImplementation(async function (this: typeof probe) {
-        const stats = await originalStat.call(this);
+        const stats = await originalStat.call(this, { bigint: true });
         statCalls++;
         return statCalls === 2
           ? Object.assign(stats, {
-              ino:
-                typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+              ino: differentIdentity(stats.ino),
             })
           : stats;
       });
@@ -329,6 +331,42 @@ describe('writeWorktreeSession', () => {
     await writeWorktreeSession(nestedPath, sample);
     expect(await readWorktreeSession(nestedPath)).toEqual(sample);
   });
+
+  it('round-trips the supersede link fields used by worktree reset', async () => {
+    const linked: WorktreeSession = { ...sample, supersedes: 'session-old' };
+    await writeWorktreeSession(filePath, linked);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+      state: 'valid',
+      session: linked,
+    });
+
+    const superseded: WorktreeSession = {
+      ...sample,
+      supersededBy: 'session-new',
+    };
+    await writeWorktreeSession(filePath, superseded);
+    await expect(readWorktreeSession(filePath)).resolves.toEqual(superseded);
+  });
+
+  it('rejects sidecars with non-string supersede links', async () => {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ ...sample, supersededBy: 42 }),
+      'utf-8',
+    );
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ ...sample, supersedes: null }),
+      'utf-8',
+    );
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+  });
 });
 
 describe('clearWorktreeSession', () => {
@@ -434,6 +472,41 @@ describe('restoreWorktreeContext', () => {
     expect(result.contextMessage).toContain(live.worktreeBranch);
     // Sidecar should remain on disk so subsequent reads still see it.
     expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('refuses to restore a live worktree whose sidecar names a replacement session', async () => {
+    // A worktree reset moves ownership of the checkout to the replacement
+    // session but leaves the superseded sidecar (and transcript) on disk.
+    // Resuming the old id must not inject the "continue using this path"
+    // notice — that would put a second live writer in the replacement's
+    // worktree.
+    const supersededCwd = path.join(tmpDir, 'superseded-repo');
+    const supersededWorktree = path.join(
+      supersededCwd,
+      '.qwen',
+      'worktrees',
+      'my-feature',
+    );
+    await fs.mkdir(supersededWorktree, { recursive: true });
+    const superseded: WorktreeSession = {
+      ...sample,
+      originalCwd: supersededCwd,
+      worktreePath: supersededWorktree,
+      supersededBy: 'session-replacement',
+    };
+    await writeWorktreeSession(filePath, superseded);
+    const warnings: unknown[] = [];
+
+    const result = await restoreWorktreeContext(filePath, (e) =>
+      warnings.push(e),
+    );
+
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    // Unlike the stale cases, the sidecar survives: its supersede link is the
+    // daemon reset route's redirect and interrupted-transfer evidence.
+    expect(await readWorktreeSession(filePath)).toEqual(superseded);
+    expect(warnings).toHaveLength(1);
   });
 
   it('rejects and clears a sidecar whose worktreePath escapes the managed subtree', async () => {

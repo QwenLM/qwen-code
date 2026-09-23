@@ -26,7 +26,13 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "gitlab",
       "token": "$GITLAB_TOKEN",
       "pollInterval": 60000,
-      "senderPolicy": "open",
+      "operators": ["operator-gitlab-username"],
+      "groups": {
+        "*": {
+          "senders": "allowlist",
+          "allowedUsers": ["operator-gitlab-username"]
+        }
+      },
       "sessionScope": "chat_thread",
       "cwd": "/path/to/your/project",
       "groupPolicy": "open",
@@ -63,7 +69,6 @@ For self-hosted instances, set `baseUrl`:
 | `baseUrl`                | `https://gitlab.com`      | GitLab instance URL                                                                               |
 | `action_prompt_template` | (required for processing) | Maps GitLab action names to metadata templates                                                    |
 | `groupPolicy`            | `"disabled"`              | Must be `"open"`, `"allowlist"` with the project listed, or `"pairing"` with the project approved |
-| `senderPolicy`           | `"allowlist"`             | Who can trigger the bot                                                                           |
 
 ## action_prompt_template
 
@@ -128,11 +133,13 @@ You do **not** need a `%body%` variable — the comment/description text is alwa
 
 ## ⚠️ Security
 
-On a **public project**, setting `senderPolicy: "open"` allows **any GitLab user** who @mentions the bot to submit prompts that drive the agent in your `cwd`.
+On a **public project**, setting `groups: { "*": { "senders": "open" } }` allows **any GitLab user** who @mentions the bot to submit prompts that drive the agent in your `cwd`.
 
-Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public projects.
+Always use `groups["*"].senders: "allowlist"` with explicit group `allowedUsers` on public projects.
 
-Note that under `groupPolicy: "pairing"`, access is granted per project: once a project is approved, **any GitLab user** can drive the bot through that project's issues and merge requests. All GitLab traffic is group traffic, so `senderPolicy` and `allowedUsers` do not gate members of an approved project. Approvals are keyed by the project path (`owner/repo`), which changes on rename or transfer — revoke stale group approvals after any project rename, transfer, or deletion.
+All GitLab traffic is group traffic. Group members default to `open`; set `groups["*"].senders` to `allowlist` and populate its `allowedUsers` to restrict authors. Private policy and user pairing never restrict repository members. Set `operators` explicitly for shared-session management.
+
+Note that under `groupPolicy: "pairing"`, access is granted per project: once a project is approved, **any GitLab user** can by default drive the bot through that project's issues and merge requests. All GitLab traffic is group traffic, so `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved project; set `senders: "allowlist"` with `allowedUsers` on that project's `groups` entry to narrow it. Approvals are keyed by the project path (`owner/repo`), which changes on rename or transfer — revoke stale group approvals after any project rename, transfer, or deletion.
 
 ## Mention Detection
 

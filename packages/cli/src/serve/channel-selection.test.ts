@@ -30,6 +30,12 @@ describe('normalizeServeChannelSelection', () => {
     );
   });
 
+  it('identifies invalid persisted selections without changing CLI errors', () => {
+    expect(() =>
+      normalizeServeChannelSelection(['all', 'bot'], 'serve.channels'),
+    ).toThrow('serve.channels all cannot be combined with channel names.');
+  });
+
   it('rejects all mixed with explicit channel names', () => {
     expect(() => normalizeServeChannelSelection(['all', 'telegram'])).toThrow(
       '--channel all cannot be combined with channel names.',

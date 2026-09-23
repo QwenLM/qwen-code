@@ -153,6 +153,374 @@ function indexPage(
 }
 
 describe('createDaemonTurnNavigationStore', () => {
+  it('protects the legacy selected page when opening a sequential viewport', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0']));
+    getTranscriptPage
+      .mockResolvedValueOnce(transcriptPage('turn-0'))
+      .mockResolvedValueOnce(transcriptPage(['history-before-live']));
+    const store = createDaemonTurnNavigationStore({ maxHistoricalPages: 1 });
+    await ready(store, client);
+    const location = await store.locateOrdinal(0);
+    expect(store.getSnapshot().selected).toMatchObject({
+      status: 'ready',
+      location,
+    });
+    expect(store.getSnapshot().historicalPages.has(location.pageId!)).toBe(
+      true,
+    );
+
+    await expect(
+      store.openBeforeLive('live', { isCurrent: () => true }),
+    ).rejects.toThrow('window is full');
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.selected).toMatchObject({ status: 'ready', location });
+    expect(snapshot.historicalPages.has(location.pageId!)).toBe(true);
+  });
+
+  it('retains a viewport-pinned legacy selection under sequential capacity pressure', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0']));
+    getTranscriptPage
+      .mockResolvedValueOnce(transcriptPage('turn-0'))
+      .mockResolvedValueOnce(transcriptPage(['history-before-live']));
+    const store = createDaemonTurnNavigationStore({ maxHistoricalPages: 1 });
+    await ready(store, client);
+    const location = await store.locateOrdinal(0);
+    store.setViewportAnchor('legacy-view', location.pageId);
+
+    await expect(
+      store.openBeforeLive('live', { isCurrent: () => true }),
+    ).rejects.toThrow('window is full');
+
+    expect(store.getSnapshot().historicalPages.has(location.pageId!)).toBe(
+      true,
+    );
+    expect(store.getSnapshot().selected).toMatchObject({
+      status: 'ready',
+      location,
+    });
+  });
+
+  it.each([false, true])(
+    'releases a historical selection after moving to live with viewport pin=%s',
+    async (viewportPinned) => {
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0', 'turn-1']));
+      getTranscriptPage
+        .mockResolvedValueOnce(transcriptPage('turn-0'))
+        .mockResolvedValue(transcriptPage(['history-before-live']));
+      const store = createDaemonTurnNavigationStore({ maxHistoricalPages: 1 });
+      await ready(store, client);
+      const historical = await store.locateOrdinal(0);
+      if (viewportPinned) {
+        store.setViewportAnchor('historical-reader', historical.pageId);
+      }
+      store.observeLiveBlocks([userBlock('live-1', 'turn-1')]);
+      const live = await store.locateOrdinal(1);
+      expect(live).toMatchObject({ view: 'live', blockId: 'live-1' });
+      expect(store.getSnapshot().selected).toMatchObject({
+        status: 'ready',
+        location: live,
+      });
+
+      if (viewportPinned) {
+        await expect(
+          store.openBeforeLive('turn-1', { isCurrent: () => true }),
+        ).rejects.toThrow('window is full');
+        expect(store.getViewportSnapshot().pages.has(historical.pageId!)).toBe(
+          true,
+        );
+        store.setViewportAnchor('historical-reader');
+      }
+
+      const rangeId = await store.openBeforeLive('turn-1', {
+        isCurrent: () => true,
+      });
+
+      expect(store.getViewportSnapshot().pages.size).toBe(1);
+      expect(store.getViewportSnapshot().pages.has(historical.pageId!)).toBe(
+        false,
+      );
+      expect(store.getViewportSnapshot().ranges).toMatchObject([
+        { id: rangeId, beforeRecordId: 'turn-1' },
+      ]);
+      expect(store.getSnapshot().selected).toMatchObject({
+        status: 'ready',
+        location: live,
+      });
+    },
+  );
+
+  it('keeps the frozen viewport identity on disconnect but retires it for a new owner', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));
+    getTranscriptPage.mockResolvedValue(transcriptPage(['old']));
+    const store = createDaemonTurnNavigationStore();
+    await ready(store, client);
+    await store.openBeforeLive('live', { isCurrent: () => true });
+    const before = store.getViewportSnapshot();
+    store.configure({ sessionId: 'session-1', supported: true });
+    expect(store.getViewportSnapshot()).toMatchObject({
+      revision: before.revision,
+      connected: false,
+      pages: before.pages,
+      ranges: before.ranges,
+    });
+    store.configure({
+      sessionId: 'session-1',
+      supported: true,
+      client: { ...client, owner: {} },
+    });
+    expect(store.getViewportSnapshot().revision).toBeGreaterThan(
+      before.revision,
+    );
+    await flushInitialHead(store);
+  });
+
+  it('opens a sequential tool-only page with a fresh snapshot and no legacy range', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    client.materializeTranscriptEvents = (events, ordinal, excluded) => ({
+      ...materialize(events, ordinal, excluded),
+      blocks: materialize(events, ordinal, excluded).blocks.map((block) => ({
+        ...block,
+        kind: 'assistant' as const,
+      })),
+    });
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));
+    getTranscriptPage.mockResolvedValue(transcriptPage(['tool-only']));
+    const store = createDaemonTurnNavigationStore();
+    store.configure({ sessionId: 'session-1', supported: true, client });
+    await flushInitialHead(store);
+    getTurnIndexPage.mockResolvedValue(
+      turnPage(0, ['turn'], { snapshot: 'fresh' }),
+    );
+    const id = await store.openBeforeLive('live', { isCurrent: () => true });
+    expect(getTranscriptPage).toHaveBeenLastCalledWith({
+      beforeRecordId: 'live',
+      snapshot: 'fresh',
+      limit: 200,
+    });
+    expect(store.getViewportSnapshot().ranges[0]).toMatchObject({
+      id,
+      beforeRecordId: 'live',
+    });
+    expect(store.getSnapshot().historicalRanges).toEqual([]);
+    expect(store.getSnapshot().historicalPages.size).toBe(0);
+  });
+
+  it('rejects a cancelled bootstrap without admitting its response', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));
+    let current = true;
+    let resolve!: (value: DaemonSessionTranscriptPage) => void;
+    getTranscriptPage.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const store = createDaemonTurnNavigationStore();
+    store.configure({ sessionId: 'session-1', supported: true, client });
+    await flushInitialHead(store);
+    const pending = store.openBeforeLive('live', { isCurrent: () => current });
+    await vi.waitFor(() => expect(getTranscriptPage).toHaveBeenCalled());
+    current = false;
+    resolve(transcriptPage(['old']));
+    await expect(pending).rejects.toThrow('History view changed');
+    expect(store.getViewportSnapshot().pages.size).toBe(0);
+  });
+
+  it.each([true, false])(
+    'searches across a trimmed live boundary only when it can reopen (reachable=%s)',
+    async (reachable) => {
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      const originalMaterialize = client.materializeTranscriptEvents;
+      client.materializeTranscriptEvents = (...args) => {
+        const result = originalMaterialize(...args);
+        return {
+          ...result,
+          blocks: result.blocks.map((block) =>
+            block.sourceRecordIds?.includes('turn')
+              ? block
+              : { ...block, kind: 'assistant' as const },
+          ),
+        };
+      };
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));
+      getTranscriptPage.mockResolvedValue(
+        transcriptPage(['turn', 'a1'], { targetRecordId: 'turn' }),
+      );
+      const store = createDaemonTurnNavigationStore({
+        captureLiveBoundary: () => ({
+          beforeRecordId: 'a2',
+          reachable,
+          isCurrent: () => true,
+        }),
+      });
+      await ready(store, client);
+      store.observeLiveBlocks([assistantBlock('live-one', 'a1')]);
+      await store.locateOrdinal(0);
+      expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+      const revision = store.getViewportSnapshot().revision;
+      store.observeLiveBlocks([assistantBlock('live-two', 'a2')]);
+      expect(store.getViewportSnapshot().revision).toBe(revision);
+      getTranscriptPage.mockImplementation(async (options) =>
+        transcriptPage(
+          options.beforeRecordId ? ['turn', 'a1'] : ['turn', 'a1', 'a2'],
+          { targetRecordId: 'turn' },
+        ),
+      );
+      const hit = (
+        await store.scanConversation('a1', { isCurrent: () => true })
+      ).hits[0]!;
+      expect(hit).toMatchObject({
+        recordId: 'a1',
+        turnId: 'turn',
+        role: 'assistant',
+        revision,
+      });
+      getTranscriptPage.mockClear();
+      const location = store.locateViewportSearchHit(
+        hit,
+        { isCurrent: () => true },
+        () => {},
+      );
+      if (!reachable) {
+        await expect(location).rejects.toThrow(
+          'Conversation search message is unavailable',
+        );
+        expect(getTranscriptPage).not.toHaveBeenCalled();
+        return;
+      }
+      const located = await location;
+      expect(located.view).toBe('historical');
+      const block = store
+        .getViewportSnapshot()
+        .pages.get(located.pageId!)
+        ?.blocks.find((block) => block.id === located.blockId);
+      expect(block?.sourceRecordIds).toContain('a1');
+      expect(getTranscriptPage).toHaveBeenCalledOnce();
+      expect(getTranscriptPage).toHaveBeenCalledWith({
+        beforeRecordId: 'a2',
+        snapshot: 'snapshot-1',
+        limit: 200,
+      });
+    },
+  );
+
+  it('recovers a trimmed live connection for a globally located range before continuing', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn', 'live-1']));
+    getTranscriptPage.mockResolvedValue(
+      transcriptPage(['turn', 'live-1'], { targetRecordId: 'turn' }),
+    );
+    let beforeRecordId = 'live-1';
+    const store = createDaemonTurnNavigationStore({
+      captureLiveBoundary: () => ({
+        beforeRecordId,
+        reachable: true,
+        isCurrent: () => true,
+      }),
+    });
+    store.configure({ sessionId: 'session-1', supported: true, client });
+    await flushInitialHead(store);
+    store.observeLiveBlocks([userBlock('live-one', 'live-1')]);
+    const location = await store.locateOrdinal(0);
+    const rangeId = location.rangeId!;
+    expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+    beforeRecordId = 'live-2';
+    store.observeLiveBlocks([
+      { ...userBlock('live-two', 'live-2'), kind: 'assistant' },
+    ]);
+    getTurnIndexPage.mockResolvedValue(
+      turnPage(0, ['turn', 'live-1'], { snapshot: 'fresh' }),
+    );
+    getTranscriptPage.mockClear().mockImplementation(async (options) => {
+      if (options.atRecordId) throw new Error('invalid_turn_anchor');
+      return transcriptPage(
+        options.beforeRecordId === 'live-2'
+          ? ['late']
+          : options.beforeRecordId === 'late'
+            ? ['gap', 'live-1']
+            : ['turn'],
+      );
+    });
+    await store.loadViewportBoundary(rangeId, 'newer', {
+      isCurrent: () => true,
+    });
+    expect(getTranscriptPage).toHaveBeenNthCalledWith(1, {
+      beforeRecordId: 'live-2',
+      snapshot: 'fresh',
+      limit: 200,
+    });
+    expect(
+      [...store.getViewportSnapshot().pages.values()].flatMap((page) => [
+        ...page.recordIds,
+      ]),
+    ).toEqual(['turn', 'gap', 'live-1']);
+    expect(store.getViewportSnapshot().ranges[0]?.newer).toMatchObject({
+      kind: 'loadable',
+      request: { kind: 'gap', anchorRecordId: 'live-2', beforeAnchor: true },
+    });
+    await store.loadViewportBoundary(rangeId, 'newer', {
+      isCurrent: () => true,
+    });
+    expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+    expect(
+      getTranscriptPage.mock.calls.every(([options]) => !options.atRecordId),
+    ).toBe(true);
+    expect(
+      [...store.getViewportSnapshot().pages.values()].flatMap((page) => [
+        ...page.recordIds,
+      ]),
+    ).toEqual(['turn', 'gap', 'live-1', 'late']);
+  });
+
+  it('recovers the new live-trim gap from the fresh before-origin', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));
+    getTranscriptPage.mockResolvedValue(transcriptPage(['old']));
+    let beforeRecordId = 'live-1';
+    const store = createDaemonTurnNavigationStore({
+      captureLiveBoundary: () => ({
+        beforeRecordId,
+        reachable: true,
+        isCurrent: () => true,
+      }),
+    });
+    store.configure({ sessionId: 'session-1', supported: true, client });
+    await flushInitialHead(store);
+    const id = await store.openBeforeLive(beforeRecordId, {
+      isCurrent: () => true,
+    });
+    beforeRecordId = 'live-2';
+    store.observeLiveBlocks([userBlock('overlap', 'old')]);
+    expect(store.hasLiveOverlap(id)).toBe(true);
+    const reads = getTranscriptPage.mock.calls.length;
+    await store.loadViewportBoundary(id, 'newer', { isCurrent: () => true });
+    expect(getTranscriptPage).toHaveBeenCalledTimes(reads);
+    store.observeLiveBlocks([]);
+    expect(store.hasLiveOverlap(id)).toBe(false);
+    getTurnIndexPage.mockResolvedValue(
+      turnPage(0, ['turn'], { snapshot: 'fresh' }),
+    );
+    getTranscriptPage.mockResolvedValue(transcriptPage(['old', 'live-1']));
+    await store.loadViewportBoundary(id, 'newer', { isCurrent: () => true });
+    expect(getTranscriptPage).toHaveBeenLastCalledWith({
+      beforeRecordId: 'live-2',
+      snapshot: 'fresh',
+      limit: 200,
+    });
+    expect(
+      [...store.getViewportSnapshot().pages.values()].flatMap((page) => [
+        ...page.recordIds,
+      ]),
+    ).toEqual(['old', 'live-1']);
+    expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+  });
+
   it.each([
     ['admit', 'echo', 'index'],
     ['echo', 'admit', 'index'],
@@ -840,6 +1208,48 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getSnapshot().historicalPages.size).toBe(2);
   });
 
+  it.each(['current', 'cancel-before-response', 'cancel-in-callback'])(
+    'runs the pre-admission capture only for the current boundary: %s',
+    async (mode) => {
+      const store = createDaemonTurnNavigationStore();
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0']));
+      let resolveBoundary!: (page: DaemonSessionTranscriptPage) => void;
+      getTranscriptPage
+        .mockResolvedValueOnce(
+          transcriptPage('turn-0', { hasMore: true, nextCursor: 'next-1' }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveBoundary = resolve;
+            }),
+        );
+      await ready(store, client);
+      const location = await store.locateOrdinal(0);
+      let current = true;
+      const beforeAdmit = vi.fn(() => {
+        expect(store.getViewportSnapshot().pages.size).toBe(1);
+        if (mode === 'cancel-in-callback') current = false;
+      });
+      const loading = store.loadViewportBoundary(
+        location.rangeId!,
+        'newer',
+        { isCurrent: () => current },
+        beforeAdmit,
+      );
+      if (mode === 'cancel-before-response') current = false;
+      resolveBoundary(transcriptPage('turn-1'));
+      await loading;
+      expect(beforeAdmit).toHaveBeenCalledTimes(
+        mode === 'cancel-before-response' ? 0 : 1,
+      );
+      expect(store.getViewportSnapshot().pages.size).toBe(
+        mode === 'current' ? 2 : 1,
+      );
+    },
+  );
+
   it('releases a loading boundary when its session owner disconnects', async () => {
     const store = createDaemonTurnNavigationStore();
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();
@@ -1228,6 +1638,69 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getSnapshot().selected).toBeUndefined();
     expect(store.getSnapshot().error).toBeUndefined();
   });
+
+  it.each(['loading', 'ready'] as const)(
+    'does not clear a newer %s selection when an older viewport request is cancelled',
+    async (status) => {
+      const store = createDaemonTurnNavigationStore();
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0', 'turn-1']));
+      let resolveFirst!: (page: DaemonSessionTranscriptPage) => void;
+      let resolveSecond!: (page: DaemonSessionTranscriptPage) => void;
+      getTranscriptPage
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveFirst = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveSecond = resolve;
+            }),
+        );
+      store.configure({ sessionId: 'session-1', supported: true, client });
+      await flushInitialHead(store);
+      let firstCurrent = true;
+      const first = store.locateViewportOrdinal(
+        0,
+        { isCurrent: () => firstCurrent },
+        () => {},
+      );
+      await vi.waitFor(() =>
+        expect(getTranscriptPage).toHaveBeenCalledTimes(1),
+      );
+      const second = store.locateViewportOrdinal(
+        1,
+        { isCurrent: () => true },
+        () => {},
+      );
+      await vi.waitFor(() =>
+        expect(getTranscriptPage).toHaveBeenCalledTimes(2),
+      );
+      if (status === 'ready') {
+        resolveSecond(transcriptPage('turn-1'));
+        await second;
+      }
+      firstCurrent = false;
+      resolveFirst(transcriptPage('turn-0'));
+      await expect(first).rejects.toThrow('Selection changed');
+      expect(store.getSnapshot().selected).toMatchObject({
+        ordinal: 1,
+        status,
+      });
+      expect(store.getSnapshot().error).toBeUndefined();
+      if (status === 'loading') {
+        resolveSecond(transcriptPage('turn-1'));
+        await second;
+      }
+      expect(store.getSnapshot().selected).toMatchObject({
+        ordinal: 1,
+        status: 'ready',
+      });
+    },
+  );
 
   it('drops an older locate result after a later selection wins', async () => {
     const store = createDaemonTurnNavigationStore();

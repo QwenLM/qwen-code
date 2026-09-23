@@ -24,6 +24,10 @@ const {
     loadDelayMs: 0,
     files: [] as string[],
     getFilesError: false,
+    // The module resolves, but using it still throws - the shape of a native
+    // addon built against a different Node ABI.
+    throwOnConstruct: false,
+    throwOnHasFormat: false,
   },
 }));
 
@@ -37,29 +41,34 @@ vi.mock('@teddyzhu/clipboard', async () => {
   if (clipboardMockState.failLoad) {
     throw new Error('native clipboard module missing');
   }
-  mockClipboardHasFormat.mockImplementation(
-    (format: string) =>
-      format === 'files' && clipboardMockState.files.length > 0,
-  );
+  mockClipboardHasFormat.mockImplementation((format: string) => {
+    if (clipboardMockState.throwOnHasFormat) {
+      throw new Error('native clipboard addon ABI mismatch');
+    }
+    return format === 'files' && clipboardMockState.files.length > 0;
+  });
   mockClipboardGetFiles.mockImplementation(() => {
     if (clipboardMockState.getFilesError) {
       throw new Error('clipboard file read failed');
     }
     return clipboardMockState.files;
   });
-  return {
-    default: {
-      ClipboardManager: vi.fn().mockImplementation(() => ({
-        hasFormat: mockClipboardHasFormat,
-        getFiles: mockClipboardGetFiles,
-        getImageData: vi.fn().mockReturnValue({ data: null }),
-      })),
-    },
-    ClipboardManager: vi.fn().mockImplementation(() => ({
+  // Both exports share one implementation so the throw flags apply no matter
+  // which shape the caller destructures. The flags are read per call, not per
+  // factory evaluation.
+  const ClipboardManager = vi.fn().mockImplementation(() => {
+    if (clipboardMockState.throwOnConstruct) {
+      throw new Error('native clipboard addon ABI mismatch');
+    }
+    return {
       hasFormat: mockClipboardHasFormat,
       getFiles: mockClipboardGetFiles,
       getImageData: vi.fn().mockReturnValue({ data: null }),
-    })),
+    };
+  });
+  return {
+    default: { ClipboardManager },
+    ClipboardManager,
   };
 });
 
@@ -182,7 +191,7 @@ const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('clipboardUtils', () => {
-  let clipboardHasImage: () => Promise<boolean>;
+  let clipboardHasImage: (onUnavailable?: () => void) => Promise<boolean>;
   let readClipboardFiles: (onUnavailable?: () => void) => Promise<string[]>;
   let saveClipboardImage: (dir?: string) => Promise<string | null>;
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
@@ -203,6 +212,8 @@ describe('clipboardUtils', () => {
     clipboardMockState.loadDelayMs = 0;
     clipboardMockState.files = [];
     clipboardMockState.getFilesError = false;
+    clipboardMockState.throwOnConstruct = false;
+    clipboardMockState.throwOnHasFormat = false;
     vi.resetModules();
     vi.clearAllMocks();
 
@@ -291,6 +302,81 @@ describe('clipboardUtils', () => {
 
       const result = await clipboardHasImage();
       expect(result).toBe(false);
+    });
+  });
+
+  // ─── Linux clipboard unavailability must not be silent (#12488) ──
+
+  describe('clipboardHasImage onUnavailable on Linux', () => {
+    it('notifies when there is no display server to reach a tool through', async () => {
+      // getLinuxClipboardTool() exit (a): not a Wayland session, no
+      // XDG_SESSION_TYPE and no DISPLAY, so it returns null without ever
+      // probing for wl-paste/xclip.
+      vi.stubEnv('WAYLAND_DISPLAY', undefined as unknown as string);
+      vi.stubEnv('XDG_SESSION_TYPE', undefined as unknown as string);
+      vi.stubEnv('DISPLAY', undefined as unknown as string);
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+      expect(mockExecSync).not.toHaveBeenCalled();
+    });
+
+    it('notifies when the tool probe fails on X11', async () => {
+      // getLinuxClipboardTool() exit (b): display env is present so xclip is
+      // selected, but `command -v xclip` throws because it is not installed.
+      setupX11Env();
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the tool probe fails on Wayland', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('stays quiet when the clipboard holds an image', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('image/png\n', 0));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(true);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet when the clipboard holds only text', async () => {
+      // "no image on the clipboard" is benign and must not nag the user.
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('text/plain\n', 0));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('still notifies on the non-Linux native module path', async () => {
+      clipboardMockState.failLoad = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
     });
   });
 
@@ -631,6 +717,50 @@ describe('clipboardUtils', () => {
         [],
       );
       expect(onFilesUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the native module loads but constructing it throws', async () => {
+      clipboardMockState.throwOnConstruct = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the native module loads but hasFormat throws', async () => {
+      clipboardMockState.throwOnHasFormat = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('does not notify when the clipboard read succeeds but holds no image', async () => {
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
     });
 
     it('shares an in-flight native module load without false errors', async () => {

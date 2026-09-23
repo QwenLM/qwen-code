@@ -16,6 +16,7 @@ import {
   matchesPathPattern,
   matchesDomainPattern,
   resolveToolName,
+  getToolNameAliases,
   resolvePathPattern,
   getSpecifierKind,
   toolMatchesRuleToolName,
@@ -28,6 +29,7 @@ import {
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
+import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
 
@@ -39,9 +41,66 @@ const debugLoggerMock = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
+const shellTypeMock = vi.hoisted(() => ({
+  value: 'bash' as 'bash' | 'cmd' | 'powershell',
+}));
+
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => debugLoggerMock,
 }));
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () => ({
+      ...actual.getShellConfiguration(),
+      shell: shellTypeMock.value,
+    }),
+  };
+});
+
+// `shellTypeMock` backs the file-level `vi.mock` above, so it is a mutable
+// file-global that every describe building a real PermissionManager reads.
+// Reset it for the whole file rather than only inside
+// `describe('PermissionManager')`, so the later top-level describes cannot
+// inherit a shell type left behind by an earlier test's execution order.
+beforeEach(() => {
+  shellTypeMock.value = 'bash';
+});
+
+// ─── getToolNameAliases ──────────────────────────────────────────────────────
+
+describe('getToolNameAliases', () => {
+  it('lists every name that resolves to the tool', () => {
+    expect(getToolNameAliases('run_shell_command')).toEqual(
+      expect.arrayContaining([
+        'run_shell_command',
+        'Shell',
+        'ShellTool',
+        'Bash',
+      ]),
+    );
+    expect(getToolNameAliases('read_file')).toEqual(
+      expect.arrayContaining(['read_file', 'ReadFile', 'Read']),
+    );
+    for (const [alias, canonical] of Object.entries(TOOL_NAME_ALIASES)) {
+      expect(getToolNameAliases(canonical)).toContain(alias);
+    }
+  });
+
+  it('does not expand permission meta-categories', () => {
+    expect(getToolNameAliases('grep_search')).not.toContain('Read');
+    expect(getToolNameAliases('write_file')).not.toContain('Edit');
+    expect(getToolNameAliases('monitor')).not.toContain('Bash');
+  });
+
+  it('returns nothing for a name that is not a canonical tool name', () => {
+    expect(getToolNameAliases('mcp__server__tool')).toEqual([]);
+    expect(getToolNameAliases('Bash')).toEqual([]);
+  });
+});
 
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
@@ -612,6 +671,55 @@ describe('splitCompoundCommand', () => {
     },
   );
 
+  // #11851: bash only treats space, tab and newline as word separators. `\r`,
+  // `\v`, `\f` and `\u00a0` are ordinary word characters to bash, so in
+  // `echo x >\r& rm …` the redirection target is the `\r` and the `&` is the
+  // async operator — bash runs two commands. When the scan skipped those four
+  // as if they were whitespace, both halves stayed in one segment and the
+  // first command's allow rule covered the second.
+  // Titles carry the escaped spelling: the raw characters are invisible in a
+  // terminal and a `\v` or `\f` in a title collapses a line break in the XML of
+  // the JUnit report.
+  it.each([
+    ['\\r', 'echo x >\r& rm -rf /tmp/x', 'echo x >\r'],
+    ['\\v', 'echo x >\v& rm -rf /tmp/x', 'echo x >\v'],
+    ['\\f', 'echo x >\f& rm -rf /tmp/x', 'echo x >\f'],
+    ['\\u00a0', 'echo x >\u00a0& rm -rf /tmp/x', 'echo x >\u00a0'],
+    // Spaced variant: real separators around the non-IFS character.
+    ['\\r (spaced)', 'echo x > \r & rm -rf /tmp/x', 'echo x > \r'],
+  ])(
+    'splits a command with %s between the > and the &',
+    async (_label, command, first) => {
+      // The character is the redirect target, so it stays: trimming discards
+      // only the separators bash's lexer discards, not `String.prototype.trim`'s
+      // wider set.
+      expect(splitCompoundCommand(command)).toEqual([first, 'rm -rf /tmp/x']);
+    },
+  );
+
+  // A `\n` terminator drops the `\r` of a CRLF pair with it, so a
+  // Windows-pasted script still splits and still trims — unless that `\r` *is*
+  // the whole redirection target of the line, which bash names the file after.
+  it.each([
+    [
+      'a plain CRLF line ending',
+      'echo x\r\nrm -rf /tmp/x',
+      ['echo x', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a CR that is the whole redirect target',
+      'echo x >\r\necho y',
+      ['echo x >\r', 'echo y'],
+    ],
+    [
+      'a CR target on a command that takes arguments',
+      'cat >\r\necho hi',
+      ['cat >\r', 'echo hi'],
+    ],
+  ])('splits on a newline with %s', async (_label, command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
   // Over-correction guard: the longer operators must keep winning over the
   // bare `&`, so these two pass both before and after the change.
   it.each([
@@ -767,6 +875,35 @@ describe('matchesPathPattern', () => {
     expect(matchesPathPattern('*.env', '/project/.env', projectRoot, cwd)).toBe(
       true,
     );
+  });
+
+  // A line terminator is an ordinary word character to bash, so a redirection
+  // target can end in one — and picomatch compiles `**` to a `.`-based body
+  // that the four JS line terminators do not match. Before they were
+  // substituted, every one of these was `false` and a `deny` silently became an
+  // `allow` (#11865).
+  it.each([
+    ['\\r', '/project/out\r'],
+    ['\\n', '/project/out\n'],
+    ['\\u2028', '/project/out\u2028'],
+    ['\\u2029', '/project/out\u2029'],
+    ['a whole-target \\r', '/project/\r'],
+  ])('matches a path ending in %s against **', async (_label, filePath) => {
+    expect(matchesPathPattern('//project/**', filePath, projectRoot, cwd)).toBe(
+      true,
+    );
+    expect(matchesPathPattern('./out*', filePath, projectRoot, cwd)).toBe(
+      filePath !== '/project/\r',
+    );
+  });
+
+  it('still keeps * from crossing / for a line-terminator path', async () => {
+    expect(
+      matchesPathPattern('//project/*', '/project/a/out\r', projectRoot, cwd),
+    ).toBe(false);
+    expect(
+      matchesPathPattern('//project/*', '/project/out\r', projectRoot, cwd),
+    ).toBe(true);
   });
 
   it('** matches recursively across directories', async () => {
@@ -1722,6 +1859,17 @@ function makeConfig(
 describe('PermissionManager', () => {
   let pm: PermissionManager;
 
+  it('does not implicitly allow read-only shell commands under internal sandbox policy', async () => {
+    const manager = new PermissionManager({
+      ...makeConfig(),
+      getShellExecutionSandbox: () => ({}),
+    });
+    manager.initialize();
+    expect(await manager.isCommandAllowed('git status && ls', '/project')).toBe(
+      'ask',
+    );
+  });
+
   describe('basic rule evaluation', () => {
     beforeEach(() => {
       pm = new PermissionManager(
@@ -2312,6 +2460,235 @@ describe('PermissionManager', () => {
         }),
       ).toBe('allow');
     });
+
+    it.each([
+      ['bash', `echo 'a' # comment ; rm -rf /tmp/x`, 'allow'],
+      ['cmd', `echo 'a' # comment ; rm -rf /tmp/x`, 'deny'],
+      ['powershell', `echo 'a' # comment ; rm -rf /tmp/x`, 'deny'],
+      ['bash', 'echo $(date) # comment ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi # comment\nrm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi ; rm -rf /tmp/x # comment ; echo ignored', 'deny'],
+      ['bash', 'echo a#b ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a\v# comment ; rm -rf /tmp/x', 'deny'],
+      ['bash', '# noop ; rm -rf /tmp/x', 'deny'],
+      // Leading whitespace must not turn the line into one comment-only
+      // segment: Bash executes nothing for either spelling, but collapsing it
+      // leaves no text for an explicit `Bash(...)` rule to match. The guard is
+      // about the line, not about the `#` the scan stopped at, so a second
+      // word-start `#` inside the comment must not collapse either: testing
+      // `command.slice(0, i).trim() !== ''` instead of the line keeps only the
+      // whitespace-led spelling and lets `# noop # ; rm -rf /tmp/x` through.
+      ['bash', ' # noop ; rm -rf /tmp/x', 'deny'],
+      ['bash', '\t# noop ; rm -rf /tmp/x', 'deny'],
+      ['bash', '# noop # ; rm -rf /tmp/x', 'deny'],
+      ['bash', ' # a # b ; rm -rf /tmp/x', 'deny'],
+      ['bash', "echo 'a # b' ; rm -rf /tmp/x", 'deny'],
+      ['bash', 'echo "a # b" ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi > /tmp/o # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi | tee /tmp/o # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi # c\r; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi\t# comment ; rm -rf /tmp/x', 'allow'],
+      ['bash', ' echo hi # comment ; rm -rf /tmp/x', 'allow'],
+      // `\`, `$` and the backtick are disjuncts of their own on the bail line
+      // (permission-manager.ts:102), not members of the ';&|(){}<>' literal,
+      // so each one needs a row where it is the FIRST guard character the scan
+      // meets. Otherwise the scan bails on something else and deleting that
+      // single disjunct leaves the suite green: the `echo $(date)` row above
+      // cannot pin `$` for exactly that reason, because with `$` gone the scan
+      // still bails at `(`. The backtick row is the security-relevant one —
+      // without the bail, `allow` would cover a command whose substitution
+      // really does execute.
+      ['bash', 'echo `whoami` # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo $HOME # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a\\ b # c ; rm -rf /tmp/x', 'deny'],
+      // Same standard for the remaining single-deletion survivors: the six
+      // characters of the bail literal not yet pinned above — `&`, `<`, `(`,
+      // `)`, `{`, `}` — and the two quote cross-checks, `&& !inDouble` and
+      // `&& !inSingle`. Each row makes its target disjunct
+      // the FIRST guard the scan meets and, so that deleting that one disjunct
+      // really changes the verdict, carries no OTHER bail character ahead of
+      // its `#` either. That is why the `(` and `{` probes are unbalanced
+      // fragments: any closing counterpart would keep the mutated scan
+      // bailing and leave the row green.
+      ['bash', 'echo hi && rm -rf /tmp/x # c', 'deny'],
+      ['bash', 'sort < /etc/passwd # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo (a # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo {a # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a} # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo x) # c ; rm -rf /tmp/x', 'deny'],
+      // Mixed quote kinds ahead of the `#`, and the `;` deliberately after it:
+      // the intact scan returns at the `#`, while a scan missing either
+      // cross-check latches a quote, never sees the `#`, and bails at the `;`.
+      ['bash', `echo "don't" # c ; rm -rf /tmp/x`, 'allow'],
+      ['bash', `echo 'a"b' # c ; rm -rf /tmp/x`, 'allow'],
+      // Characterization rows for #11815's measured table: these reach `allow`
+      // only because the unterminated quote masks the in-comment separator, so
+      // they are expected to go red when #11765 changes the splitter.
+      ['bash', "echo 'a\\' # note: use ; carefully", 'allow'],
+      ['bash', "echo 'a\\' # trailing && touch /tmp/x", 'allow'],
+      ['bash', "echo 'a\\' # trailing | touch /tmp/x", 'allow'],
+    ] as const)(
+      'handles comments conservatively for %s: %s',
+      async (shell, command, expected) => {
+        shellTypeMock.value = shell;
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(echo *)'],
+            permissionsDeny: ['Bash(rm *)'],
+          }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command,
+          }),
+        ).toBe(expected);
+      },
+    );
+
+    // Row 6 of the same measured table, kept out of it because the segment
+    // starts with `git`: the table's `Bash(echo *)` rule cannot match, so the
+    // verdict there comes from the read-only default (`ask`) rather than from a
+    // rule. The split is asserted as well — a bare `echo B` also resolves to
+    // `allow`, so the verdict alone would stay green if the apostrophe in
+    // `don't` ever stopped masking the `;`.
+    it("keeps `git status # don't ; echo B` one allowed segment", async () => {
+      shellTypeMock.value = 'bash';
+      const command = "git status # don't ; echo B";
+      expect(splitCompoundCommand(command)).toEqual([command]);
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(git *)'] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('allow');
+    });
+
+    // The comment fast path is only sound when the scanned string is literally
+    // what the shell executes. That holds for run_shell_command, but not for
+    // monitor: normalizePermissionContext() analyses the quote-stripped
+    // `safetyCommand` reconstruction while monitor spawns `spawnCommand`, so a
+    // `#` that only exists inside the wrapper's inner quotes would swallow a
+    // separator the spawned command really runs.
+    it.each([
+      [
+        "bash -c 'echo hi # done' ; rm -rf /tmp/x",
+        ['Bash(echo *)'],
+        ['Bash(rm *)'],
+      ],
+      ['cmd /c "dir # & del C:\\temp\\x"', ['Bash(dir *)'], ['Bash(del *)']],
+    ] as const)(
+      'keeps splitting monitor commands whose comment is only apparent: %s',
+      async (command, permissionsAllow, permissionsDeny) => {
+        shellTypeMock.value = 'bash';
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: [...permissionsAllow],
+            permissionsDeny: [...permissionsDeny],
+          }),
+        );
+        pm.initialize();
+        expect(await pm.evaluate({ toolName: 'monitor', command })).toBe(
+          'deny',
+        );
+      },
+    );
+
+    // `splitCommandForRules` has to drive every Bash-rule consumer, not just
+    // `evaluate()`. Each of the three below re-splits the command on its own
+    // path, so reverting any one of them to `splitCompoundCommand` would leave
+    // it silently disagreeing with `evaluate()` — citing a deny rule evaluate
+    // never applied, or hiding "Always allow" for a command that is allowed —
+    // while the rest of the suite stayed green. Every assertion pairs the bash
+    // arm (comment recognised → one segment) with the cmd arm (no Bash
+    // comments → the conservative split is expected).
+    const commented = `echo 'a' # comment ; rm -rf /tmp/x`;
+
+    const buildPm = (
+      shell: 'bash' | 'cmd',
+      rules: {
+        permissionsAllow?: string[];
+        permissionsAsk?: string[];
+        permissionsDeny?: string[];
+      },
+    ) => {
+      shellTypeMock.value = shell;
+      const manager = new PermissionManager(makeConfig(rules));
+      manager.initialize();
+      return manager;
+    };
+
+    it('findMatchingDenyRule does not cite a rule the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(buildPm('bash', deny).findMatchingDenyRule(ctx)).toBeUndefined();
+      expect(buildPm('cmd', deny).findMatchingDenyRule(ctx)).toBe('Bash(rm *)');
+    });
+
+    it('hasRelevantRules drops the segment the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(buildPm('bash', deny).hasRelevantRules(ctx)).toBe(false);
+      expect(buildPm('cmd', deny).hasRelevantRules(ctx)).toBe(true);
+    });
+
+    it('hasMatchingAskRule does not ask for a rule the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const ask = { permissionsAsk: ['Bash(rm *)'] };
+      expect(buildPm('bash', ask).hasMatchingAskRule(ctx)).toBe(false);
+      expect(buildPm('cmd', ask).hasMatchingAskRule(ctx)).toBe(true);
+    });
+
+    // The three above pin the rule lookups; this pins the decision they add up
+    // to. Under a deny-only config the collapse demotes a hard `deny` to the
+    // tool default `ask`. That is the direction #11815 asks for — Bash runs
+    // only the pre-comment `echo`, so a rule about `rm` has nothing to match —
+    // and it cannot be gated away without also breaking the allow+deny arm,
+    // which must stay `allow`. It is pinned because `ask` is a behaviour change
+    // rather than a no-op: the confirmation dialog it lands on still segments
+    // with the legacy comment-blind splitter, so it lists the never-executed
+    // `rm -rf /tmp/x` and proposes `Bash(rm *)` from text inside the comment.
+    // See docs/design/safe-bash-comment-splitting.md, "Risks and constraints".
+    // Reverting `splitCommandForRules` to `splitCompoundCommand` reds the bash
+    // arm back to `deny`.
+    it('deny-only config: the commented command asks instead of denying', async () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(await buildPm('bash', deny).evaluate(ctx)).toBe('ask');
+      expect(await buildPm('cmd', deny).evaluate(ctx)).toBe('deny');
+    });
+
+    // The splitter's array is an intermediate result; the verdict is the
+    // guarantee. Before the fix the backward scan read these characters as
+    // whitespace, the `&` was not an async operator, and the whole command was
+    // one segment — so the `echo` allow rule covered the `rm`.
+    it.each([
+      ['\\r', 'echo x >\r& rm -rf /tmp/x'],
+      ['\\v', 'echo x >\v& rm -rf /tmp/x'],
+      ['\\f', 'echo x >\f& rm -rf /tmp/x'],
+      // The NBSP verdict-level row: the path-deny test below is already a
+      // `deny` without the splitter fix (base never splits the NBSP payload at
+      // all, and the write op is attributed either way), so this is the row
+      // that discriminates for `\u00a0` — `allow` at the merge base, `deny`
+      // here.
+      ['\\u00a0', 'echo x >\u00a0& rm -rf /tmp/x'],
+    ])(
+      'compound with %s inside the redirect target: deny in second → deny',
+      async (_label, command) => {
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(echo *)'],
+            permissionsDeny: ['Bash(rm *)'],
+          }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      },
+    );
 
     it('three-part compound: all must pass', async () => {
       pm = new PermissionManager(
@@ -3015,6 +3392,13 @@ describe('PermissionManager', () => {
         ['plan-mode ask_user_question', 'ask_user_question'],
         ['task_stop', 'task_stop'],
         ['tool_search', 'tool_search'],
+        // The bridge's other half, exempt since the bridge landed (#10410) and
+        // untested until now: deleting that arm of isExemptFromEagerAllowList
+        // left this whole suite green. Both halves are also alwaysLoad=true, so
+        // the declaration list does not move without this arm — what it protects
+        // is the permission-deferred state other readers consult (speculation's
+        // boundary check, the workflow-authoring skill's hidden-tool text).
+        ['tool_call', 'tool_call'],
       ];
 
       it.each(exempt)('%s', async (_label, toolName) => {
@@ -3146,6 +3530,20 @@ describe('PermissionManager', () => {
           command: 'git commit',
         }),
       ).toBe('allow');
+    });
+
+    it('clearSessionAllowRules drops live and AUTO-stashed session grants', async () => {
+      const call = { toolName: 'run_shell_command', command: 'npm test' };
+      pm.addSessionAllowRule('Bash(git *)');
+      pm.stripDangerousRulesForAutoMode();
+      pm.addSessionAllowRule('Bash(npm *)');
+      expect(pm.getStrippedDangerousRules()?.session).toHaveLength(1);
+
+      pm.clearSessionAllowRules();
+      pm.restoreDangerousRules();
+
+      expect(pm.getAllowRawStrings()).toEqual([]);
+      expect(await pm.evaluate(call)).not.toBe('allow');
     });
 
     it('addSessionAllowRule deduplicates identical rules', () => {
@@ -3847,6 +4245,38 @@ describe('PermissionManager.findMatchingDenyRule', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('cites the deny rule for a compound command segment', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(npm view *)'] }),
+    );
+    pm.initialize();
+
+    // evaluate() splits the compound command and denies on the `npm view`
+    // segment, so findMatchingDenyRule must cite that same rule (issue #11405).
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'run_shell_command',
+        command: 'cd /tmp && npm view foo',
+      }),
+    ).toBe('Bash(npm view *)');
+  });
+
+  it('cites the deny rule when a shell command is denied via a virtual file op', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Read(//**/node_modules/**)'] }),
+    );
+    pm.initialize();
+
+    // A `cat` of a node_modules file is denied through the shell virtual-op
+    // pass (Read rule), not a Bash rule. findMatchingDenyRule must cite it.
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'run_shell_command',
+        command: 'cat /app/node_modules/lodash/index.js',
+      }),
+    ).toBe('Read(//**/node_modules/**)');
+  });
 });
 
 // ─── AUTO mode dangerous-rule stash ────────────────────────────────────
@@ -4066,6 +4496,74 @@ describe('PermissionManager — compound shell write attribution', () => {
       }),
     ).toBe('deny');
   });
+
+  // #11865: a redirect target made of characters that are not bash word
+  // separators — a single NBSP here — is a real filename to bash, so it must
+  // survive into the virtual op. `String.prototype.trim` used to delete it,
+  // and the write disappeared from a verdict that was a `deny`.
+  it('attributes a write whose whole target is an invisible character', () => {
+    expect(
+      extractShellOperationsAcrossCommand('echo x >\r& echo y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+    expect(
+      extractShellOperationsAcrossCommand('echo x >\u00a0& echo y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+  });
+
+  it('does not invent a read op when an invisible target is followed by a word', () => {
+    // `cat >\u00a0` takes no argument, so a deleted target left the bare `>`
+    // in the positional args and `looksLikePath('>')` turned the real write
+    // into a spurious `read_file '/project/>'`.
+    expect(
+      extractShellOperationsAcrossCommand('cat >\u00a0& echo hi', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+  });
+
+  // Same defect on the `\n` spelling: the CR of a CRLF pair is dropped with the
+  // line ending, but when the CR *is* the whole redirection target that deleted
+  // the write and left the bare operator in the positional args, where
+  // `looksLikePath('>')` invented a `read_file` of a file nobody reads — and
+  // `/project/>` is matchable, so a `Read(//project/**)` deny fired on it.
+  it('attributes a CR redirect target across a newline instead of inventing a read', () => {
+    expect(
+      extractShellOperationsAcrossCommand('echo x >\r\necho y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+    expect(
+      extractShellOperationsAcrossCommand('cat >\r\necho hi', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+  });
+
+  // The verdict, not the intermediate op. Each target is a character bash keeps
+  // as part of the word, so the write really happens inside the denied tree;
+  // the `\r` rows were an `allow` until the path matcher stopped handing line
+  // terminators to picomatch (#11865).
+  it.each([
+    ['\\r (whole target)', 'echo x >\r& echo y'],
+    ['\\r (visible prefix)', 'echo x >out\r& echo y'],
+    ['\\v', 'echo x >\v& echo y'],
+    ['\\f', 'echo x >\f& echo y'],
+    ['\\u00a0', 'echo x >\u00a0& echo y'],
+  ])(
+    'denies an invisible write inside a denied directory: %s',
+    async (_label, command) => {
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Edit(//project/**)', 'Write(//project/**)'],
+          cwd: '/project',
+          projectRoot: '/project',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command,
+          cwd: '/project',
+        }),
+      ).toBe('deny');
+    },
+  );
 
   it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
     const pm = new PermissionManager(

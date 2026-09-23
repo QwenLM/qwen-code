@@ -76,7 +76,7 @@ These settings can be overridden by environment variables or CLI flags.
 | `otlpLogsEndpoint`                | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                  | -                                                        | Per-signal endpoint override for logs (HTTP only)                                                                                      | URL string        | -                       |
 | `otlpMetricsEndpoint`             | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`               | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                   | URL string        | -                       |
 | `outfile`                         | `QWEN_TELEMETRY_OUTFILE`                             | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides OTLP export)                                                                                         | file path         | -                       |
-| `logPrompts`                      | `QWEN_TELEMETRY_LOG_PROMPTS`                         | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                                                                                                      | `true`/`false`    | `true`                  |
+| `logPrompts`                      | `QWEN_TELEMETRY_LOG_PROMPTS`                         | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include user prompt content and API request/response text in telemetry logs                                                            | `true`/`false`    | `true`                  |
 | `userId`                          | `QWEN_TELEMETRY_USER_ID`                             | -                                                        | Stable end-user identifier written to GenAI spans as the ARMS extension `gen_ai.user.id`; prefer a pseudonymous value                  | string            | -                       |
 | `includeSensitiveSpanAttributes`  | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES`   | -                                                        | Include standard GenAI messages, instructions, tool definitions, tool arguments, and successful tool results as native span attributes | `true`/`false`    | `false`                 |
 | `sensitiveSpanAttributeMaxLength` | `QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH` | -                                                        | Maximum compact JSON string length for each sensitive native span attribute. Set lower if your backend rejects large attributes.       | `1..104857600`    | `1048576`               |
@@ -128,8 +128,9 @@ two things happen:
    therefore occupy more bytes after OTLP export.
 
 2. **Log-to-span bridge spans** (used when HTTP traces are exported without a
-   logs endpoint) keep their existing `prompt`, `function_args`, and
-   `response_text` fields, instead of being dropped.
+   logs endpoint) retain `function_args`, `error`, `error.message`, and
+   `error_message`, plus `prompt`, `request_text`, and `response_text` when
+   `logPrompts` is also enabled, instead of dropping these attributes.
 
 ⚠️ **Security warning:** enabling this flag streams full conversation history,
 file contents read by `read_file`, shell commands and their output (including
@@ -631,7 +632,7 @@ The following events are logged:
 #### Tool Events
 
 - `qwen-code.tool_call`: Each function/tool call. Terminal events are normalized so `status` is authoritative: success and cancelled events omit error fields, while error events always have a non-empty `error_type` (`unknown` when the producer did not classify the error). Blank tool names are emitted as `unknown_tool`. A missing `execution_status` is normalized to `unknown` and is never inferred from the terminal `status`.
-  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
+  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `started_at_ms` (int, optional — epoch ms at which `duration_ms` started counting, including any approval wait; absent when the call never ran), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
 
 - `qwen-code.file_operation`: Each file operation.
   - **Attributes**: `tool_name` (string), `operation` (string: "create", "read", "update"), `lines` (int, optional), `mimetype` (string, optional), `extension` (string, optional), `programming_language` (string, optional)
@@ -642,10 +643,10 @@ The following events are logged:
 #### API Events
 
 - `qwen-code.api_request`: Outgoing request to the LLM API.
-  - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, optional), `subagent_name` (string, optional)
+  - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, optional — contains request content only when `log_prompts_enabled` is true; log-to-span bridge spans additionally require `includeSensitiveSpanAttributes`; opaque `thoughtSignature` provider payload is included, with its policy decision tracked in #11682), `subagent_name` (string, optional)
 
 - `qwen-code.api_response`: Response received from LLM API.
-  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int/string, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional), `subagent_name` (string, optional)
+  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int/string, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional — contains visible response content only when `log_prompts_enabled` is true; log-to-span bridge spans additionally require `includeSensitiveSpanAttributes`; it carries no content for internal prompt ids or responses with no visible text), `subagent_name` (string, optional)
 
 - `qwen-code.api_error`: API request failed.
   - **Attributes**: `model` (string), `prompt_id` (string), `duration_ms` (int), `error_message` (string), `response_id` (string, optional), `auth_type` (string, optional), `error_type` (string, optional), `status_code` (int/string, optional), `subagent_name` (string, optional)
@@ -715,6 +716,12 @@ The following events are logged:
 - `qwen-code.subagent_execution`: Subagent lifecycle event.
   - **Attributes**: `subagent_name` (string), `status` ("started", "completed", "failed", "cancelled"), `terminate_reason` (optional), `result` (optional), `execution_summary` (optional)
 
+#### Goal Events
+
+- `qwen-code.goal_state`: A reported Goal runtime transition, not one event per transcript record. Emitted for `create`, `replace`, `edit`, `pause`, `resume`, `clear`, `complete`, `blocked`, `usage_limited`, and `verifier_reject`. Per-turn `turn_finished` and `checkpoint` are not reported, and neither is the state a resumed session recovers from its transcript. A checkpoint check following a verifier rejection may be journaled as `verifier_reject` while broadcasting the excluded `checkpoint` cause; only the rejection transition is reported. The objective, the stop reason, and checkpoint failure text are never included in this event, whatever `telemetry.logPrompts` is set to. Tool-call events can still carry objectives and model-authored reasons in `function_args`.
+  - **Scope**: `replace` describes the successor Goal and does not settle the outgoing Goal. `pause` includes both user and automatic no-progress pauses. `no_progress_turns` carries the raw consecutive no-progress count when available; it does not classify the stop or add a metric dimension. Outcome histograms include only `complete`, `blocked`, and `usage_limited`; they do not measure the final spend of every removed or paused Goal.
+  - **Attributes**: `cause` (string), `goal_id` (string), `revision` (int), `status` ("active", "paused", "blocked", "usage_limited", "complete"; absent on `clear`), `limit_kind` ("evidence_catalog", "checkpoint_request", "token_budget", "turn_budget", "time_budget"; optional; the first two are no longer produced and can appear only on a Goal an earlier build stopped, since the verifier reads the transcript tail and no evidence checkpoint runs), `turn_count` (int, optional), `tokens_used` (int, optional; legacy transcripts without spend tracking restore this as 0, not as an absent value), `no_progress_turns` (int, optional), `token_budget` (int, optional), `turn_budget` (int, optional), `active_time_ms` (int, optional), `active_time_budget_ms` (int, optional), `objective_length` (int, optional; code points)
+
 #### Arena Events
 
 - `qwen-code.arena_session_started`: Arena session begins.
@@ -731,7 +738,10 @@ The following events are logged:
 - `qwen-code.workflow_keyword`: Workflow keyword trigger fired.
 
 - `qwen-code.workflow_run`: Workflow run reached terminal state.
-  - **Attributes**: `status` (string), `agents_dispatched` (int), `agents_completed` (int), `phase_count` (int), `tokens_spent` (int), `duration_ms` (int)
+  - **Attributes**: `status` (string), `agents_dispatched` (int), `agents_completed` (int, all settled dispatches), `agents_failed` (int, settled dispatches with failed status), `agents_cached` (int, settled dispatches served from a prior run), `agents_respawned` (int, dispatched calls re-run after a prior failed or interrupted attempt), `phase_count` (int), `tokens_spent` (int), `duration_ms` (int). `agents_failed` and `agents_cached` are subsets of `agents_completed`, while `agents_respawned` describes provenance and is not an additional outcome count.
+
+- `qwen-code.workflow_size_warning`: A running workflow crossed its large-run threshold; emitted at most once per run.
+  - **Attributes**: `axis` (string: "agents"/"tokens", the threshold crossed first), `scheduled_agents` (int, dispatches excluding journal replays), `total_tokens` (int), `projected_tokens` (int), `agent_cap` (int), `token_cap` (int), `cap_from_guideline` (boolean, whether the agent threshold came from `tools.workflowSizeGuideline`)
 
 #### Auto-Memory Events
 
@@ -814,6 +824,19 @@ Metrics are numerical measurements of behavior over time. Metric names use the `
 - `qwen-code.chat.content_retry_failure.count` (Counter, Int): All content retries exhausted.
 
 - `qwen-code.chat.invalid_chunk.count` (Counter, Int): Invalid chunks from stream.
+
+#### Goal Metrics
+
+- `qwen-code.goal.transition.count` (Counter, Int): Goal state transitions, one per `qwen-code.goal_state` event.
+  - **Attributes**: `cause`, `status` (optional), `limit_kind` (optional)
+
+- `qwen-code.goal.tokens_used` (Histogram, `{token}`): Cumulative tokens spent at each completion, blocking, or usage-limit stop. Legacy transcripts without spend tracking restore an initial spend of 0; unknown prior spend is not distinguishable from measured zero.
+  - **Attributes**: `cause` ("complete", "blocked", "usage_limited"), `limit_kind` (optional)
+
+- `qwen-code.goal.turn_count` (Histogram, `{turn}`): Cumulative turns finished at each of the same three stops.
+  - **Attributes**: `cause` ("complete", "blocked", "usage_limited"), `limit_kind` (optional)
+
+A resumed Goal can contribute multiple stop observations, each containing its lifetime cumulative meters. Histogram `_count` counts stops, not distinct Goals, and `_sum` is not total Goal spend. Token buckets extend through 600 million and turn buckets through 50,000 to distinguish larger resumed runs. Values above those finite boundaries share the `+Inf` bucket; observation count and sum still retain those values.
 
 #### Arena Metrics
 

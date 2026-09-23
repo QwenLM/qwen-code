@@ -34,6 +34,7 @@ export interface RestoreStandaloneSessionRequest {
   approvalMode?: DaemonApprovalMode;
   historyPageSize?: number;
   liveReplayMode?: 'full' | 'summary';
+  compactedReplayMode?: 'full' | 'summary';
   hideInheritedHistory?: boolean;
   timeoutMs?: number;
 }

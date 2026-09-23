@@ -197,6 +197,41 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Run /context detail for per-item breakdown.');
     // MCP tools row is skipped at zero.
     expect(text).not.toContain('MCP tools');
+    // Parity with views/ContextUsage (#12033): the three optional rows are
+    // absent from this breakdown, so none of them may render. `totalTokens` is
+    // nonzero on purpose — `Cached prefix` and `Unattributed` are total-gated,
+    // so at 0 they cannot render with or without their own guard, and only the
+    // widened `startupContext` skip would be witnessed. This is also the shape
+    // of an older daemon payload and of the pre-first-turn estimated view.
+    expect(text).not.toContain('Cached prefix');
+    expect(text).not.toContain('Startup context');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('prints the cached prefix, startup context and unattributed rows when present (#12033)', () => {
+    const text = projectContextUsage({
+      modelName: 'qwen3-max',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 3000,
+        freeSpace: 94000,
+        autocompactBuffer: 1000,
+        startupContext: 1200,
+        unattributed: 900,
+        cachedTokens: 30000,
+      },
+      isEstimated: false,
+      showDetails: false,
+    });
+    expect(text).toContain('█ Cached prefix 30.0k tokens (30.0%)');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).toContain('█ Unattributed 900 tokens (0.9%)');
   });
 
   it('shows the no-API-response notice before the first turn', () => {
@@ -848,16 +883,68 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       { type: 'gemini_thought_content', text: 'g' },
       { type: 'help', timestamp: new Date() },
       { type: 'notification', text: 'n' },
-      { type: 'user_shell', text: 'u' },
-      { type: 'advisor', text: 'a' },
-      { type: 'arena_agent_complete', text: 'a' },
-      { type: 'arena_session_complete', text: 'a' },
-      { type: 'away_recap', text: 'a' },
       { type: 'tool_use_summary', text: 't' },
       { type: 'diff_stats', text: 'd' },
     ] as unknown as HistoryItemWithoutId[];
     for (const item of noOps) {
       expect(projectItemToStreamEvent(item, ctx)).toBeNull();
     }
+  });
+
+  it('carries the user_shell command row structurally (U-33)', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'user_shell', text: 'ls -la' }, ctx),
+    ).toEqual({ type: 'user-shell', text: 'ls -la' });
+  });
+
+  it('carries the four dedicated-component kinds structurally (U-34)', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'away_recap', text: ' Recap body ' },
+        ctx,
+      ),
+    ).toEqual({ type: 'away-recap', text: ' Recap body ' });
+    expect(
+      projectItemToStreamEvent(
+        { type: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+        ctx,
+      ),
+    ).toEqual({ type: 'advisor', text: 'Looks good', model: 'qwen3-max' });
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    };
+    expect(
+      projectItemToStreamEvent(
+        { type: 'arena_agent_complete', agent } as never,
+        ctx,
+      ),
+    ).toEqual({ type: 'arena-agent', agent });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'arena_session_complete',
+          sessionStatus: 'completed',
+          task: 'do it',
+          totalDurationMs: 2000,
+          agents: [agent],
+        } as never,
+        ctx,
+      ),
+    ).toEqual({
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
   });
 });

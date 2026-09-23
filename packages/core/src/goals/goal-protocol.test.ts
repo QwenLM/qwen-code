@@ -6,16 +6,23 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  goalLimitKindForReason,
+  isGoalLimitKind,
   GOAL_PAUSE_REASON_COMMAND,
   GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
   GOAL_PAUSE_REASON_MAX_CHARACTERS,
+  GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalActiveTimeBudgetReason,
   goalPauseReasonForFailure,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
+  goalTurnBudgetReason,
   validateGoalPauseReason,
 } from './goal-protocol.js';
 
@@ -34,6 +41,7 @@ describe('goal pause reasons', () => {
       GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
       GOAL_PAUSE_REASON_STOP_HOOK_CAP,
       GOAL_PAUSE_REASON_SESSION_DISPOSED,
+      GOAL_PAUSE_REASON_NO_PROGRESS,
     ]) {
       expect(validateGoalPauseReason(reason)).toBeNull();
     }
@@ -96,10 +104,12 @@ describe('goal pause reasons', () => {
     // so none of them may point at a slash command.
     for (const reason of [
       GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+      GOAL_PAUSE_REASON_NO_PROGRESS,
       goalPauseReasonForRunBudget('wall-time'),
       goalPauseReasonForHeadlessFailure('the model stream broke'),
     ]) {
       expect(reason).not.toContain('/goal resume');
+      expect(reason).not.toContain('/goal ');
     }
     expect(
       goalPauseReasonForHeadlessFailure('the model stream broke'),
@@ -109,5 +119,38 @@ describe('goal pause reasons', () => {
   it('names the budget that tripped', () => {
     expect(goalPauseReasonForRunBudget('wall-time')).toContain('wall-time');
     expect(goalPauseReasonForRunBudget('tool-calls')).toContain('tool-calls');
+  });
+});
+
+describe('legacy evidence limit reasons', () => {
+  it('recognises a record an earlier build stopped by its reason alone', () => {
+    // Records written before `limitKind` existed carry only the prose, and
+    // resume still has to give them a fresh evidence window.
+    expect(goalLimitKindForReason(GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON)).toBe(
+      'evidence_catalog',
+    );
+    expect(
+      goalLimitKindForReason(GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON),
+    ).toBe('checkpoint_request');
+    expect(goalLimitKindForReason('anything else')).toBeUndefined();
+  });
+
+  it('keeps the legacy limit kinds valid', () => {
+    expect(isGoalLimitKind('evidence_catalog')).toBe(true);
+    expect(isGoalLimitKind('checkpoint_request')).toBe(true);
+  });
+});
+
+describe('Goal cadence budget reasons', () => {
+  it('formats singular and plural turn budgets', () => {
+    expect(goalTurnBudgetReason(1)).toContain('(1 turn)');
+    expect(goalTurnBudgetReason(2)).toContain('(2 turns)');
+  });
+
+  it('reports sub-minute time budgets in seconds', () => {
+    expect(goalActiveTimeBudgetReason(500)).toContain('(1 second)');
+    expect(goalActiveTimeBudgetReason(30_000)).toContain('(30 seconds)');
+    expect(goalActiveTimeBudgetReason(60_000)).toContain('(1 minute)');
+    expect(goalActiveTimeBudgetReason(120_000)).toContain('(2 minutes)');
   });
 });
