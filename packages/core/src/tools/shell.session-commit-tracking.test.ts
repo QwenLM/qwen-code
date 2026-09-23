@@ -38,7 +38,9 @@ import { ApprovalMode, deriveApprovalModeConfig } from '../config/config.js';
 import {
   getShellAbortReasonKind,
   isSignalTermination,
+  type ShellExecutionConfig,
   type ShellExecutionResult,
+  type ShellExecuteOptions,
 } from '../services/shellExecutionService.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
@@ -90,6 +92,12 @@ describe.skipIf(process.platform === 'win32')(
     let shellTool: ShellTool;
     let mockConfig: Config;
     let mockAbortSignal: AbortSignal;
+    // When true, the fake executor resolves the handle with
+    // `promoted: true` (the Ctrl+B shape) and reports the child's settle
+    // through `postPromote.onSettle`, instead of returning a plain
+    // foreground result. The command itself still really runs.
+    let simulatePromote = false;
+    let otherRepoDirs: string[];
 
     /**
      * `isDestructiveCommand` returns `null` when it does not block, and a
@@ -111,15 +119,58 @@ describe.skipIf(process.platform === 'win32')(
       execSync(`git ${args}`, { cwd: repoDir, stdio: 'ignore' });
     }
 
-    async function runShellCommand(command: string): Promise<void> {
+    async function runShellCommand(command: string) {
       const invocation = shellTool.build({ command, is_background: false });
-      await invocation.execute(mockAbortSignal);
+      return invocation.execute(mockAbortSignal);
+    }
+
+    /**
+     * Creates a second real repository (with its own seed commit) so rows
+     * can pin that a commit landing *there* is never registered against
+     * `repoDir`. Cleaned up in `afterEach`.
+     */
+    function makeOtherRepo(): string {
+      const otherDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-12514-other-'),
+      );
+      execSync('git init -q --initial-branch=main', { cwd: otherDir });
+      execSync('git config user.email other@example.com', { cwd: otherDir });
+      execSync('git config user.name Other', { cwd: otherDir });
+      execSync('git config commit.gpgsign false', { cwd: otherDir });
+      fs.writeFileSync(path.join(otherDir, 'seed.txt'), 'other seed\n');
+      execSync('git add seed.txt && git commit -q -m "other seed"', {
+        cwd: otherDir,
+      });
+      otherRepoDirs.push(otherDir);
+      return otherDir;
+    }
+
+    /** Subject + trailer assertions shared by the loose-spelling rows. */
+    function expectFeatureCommitLanded(preHead: string): void {
+      expect(headSha()).not.toBe(preHead);
+      expect(
+        execSync('git log -1 --pretty=%s', {
+          cwd: repoDir,
+          encoding: 'utf-8',
+        }).trim(),
+      ).toBe('feature');
+      // Trailer alignment (issue #12514 constraint): a spelling that earns
+      // the amend exemption must also earn the Co-authored-by trailer, or
+      // the commit carries no provenance marker at all.
+      expect(
+        execSync('git log -1 --pretty=%B', {
+          cwd: repoDir,
+          encoding: 'utf-8',
+        }),
+      ).toContain('Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>');
     }
 
     beforeEach(() => {
       vi.clearAllMocks();
       clearSessionCommits();
       CommitAttributionService.resetInstance();
+      simulatePromote = false;
+      otherRepoDirs = [];
 
       // Every repo below is real and every commit really runs, so a
       // machine-wide hook manager (`core.hooksPath` in the host's or the
@@ -137,6 +188,10 @@ describe.skipIf(process.platform === 'win32')(
           commandToExecute: string,
           cwd: string,
           onOutputEvent: (event: { type: 'data'; chunk: string }) => void,
+          _signal: AbortSignal,
+          _usePty: boolean,
+          _config: ShellExecutionConfig,
+          options?: ShellExecuteOptions,
         ) => {
           const spawned = spawnSync('/bin/bash', ['-c', commandToExecute], {
             cwd,
@@ -157,6 +212,26 @@ describe.skipIf(process.platform === 'win32')(
             pid: 4242,
             executionMethod: 'child_process',
           };
+          if (simulatePromote) {
+            // Ctrl+B shape: the service resolves the handle with
+            // `promoted: true` instead of a terminal exit, and the child
+            // keeps running under the caller's ownership. Here the child
+            // really ran to completion above (spawnSync is blocking), so
+            // this models a promote whose child exits before
+            // handlePromotedForeground finishes wiring — the settle lands
+            // in `promoteArtifacts.settleQueued` and is drained
+            // synchronously, which is what keeps the witness assertion
+            // (registration happened) deterministic.
+            options?.postPromote?.onSettle?.({
+              exitCode: spawned.status,
+              signal: null,
+              endTime: Date.now(),
+            });
+            return {
+              pid: 4242,
+              result: Promise.resolve({ ...result, promoted: true }),
+            };
+          }
           return { pid: 4242, result: Promise.resolve(result) };
         },
       );
@@ -221,6 +296,9 @@ describe.skipIf(process.platform === 'win32')(
       clearSessionCommits();
       CommitAttributionService.resetInstance();
       fs.rmSync(repoDir, { recursive: true, force: true });
+      for (const otherDir of otherRepoDirs) {
+        fs.rmSync(otherDir, { recursive: true, force: true });
+      }
     });
 
     it('registers a commit the shell tool really landed, so the follow-up amend is exempt', async () => {
@@ -250,6 +328,163 @@ describe.skipIf(process.platform === 'win32')(
       // had no production caller, the registry stayed empty, and this was
       // `blocked: true` for every amend.
       expect(amendVerdict()).toBeNull();
+    });
+
+    it('registers a commit spelled behind shell control-flow keywords (issue #12514)', async () => {
+      // #12514-B: `splitCommands` has no shell-grammar notion, so
+      // `if true; then git commit -m "x"; fi` yields the segment
+      // `then git commit -m "x"`, whose tokens[0] is `then` — the strict
+      // recogniser (`program === 'git'` at tokens[0]) never fires, while
+      // the amend guard's token scan blocks the follow-up amend anyway.
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      rawGit('add feature.txt');
+      const preHead = headSha();
+
+      await runShellCommand('if true; then git commit -m "feature"; fi');
+
+      expectFeatureCommitLanded(preHead);
+      // Witness assertion: the commit really landed through the shell
+      // tool, so the follow-up amend of the agent's own commit must be
+      // exempt. Pre-fix this was blocked with the false reason "the
+      // target commit was not made by the agent in this session".
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('registers a commit spelled with an absolute git binary path (issue #12514)', async () => {
+      // #12514-B: `/usr/bin/git commit` tokenises with
+      // tokens[0] === '/usr/bin/git', which the strict recogniser misses
+      // — no keyword-skipping can fix this one; the program has to be
+      // matched on its basename (the `getCommandRoot` convention).
+      // Resolve the real path so the row doesn't depend on git living at
+      // a fixed location on the runner.
+      const gitPath = execSync('command -v git', { encoding: 'utf-8' }).trim();
+      expect(path.isAbsolute(gitPath)).toBe(true);
+
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      rawGit('add feature.txt');
+      const preHead = headSha();
+
+      await runShellCommand(`${gitPath} commit -m "feature"`);
+
+      expectFeatureCommitLanded(preHead);
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('registers a commit spelled with a leading `time` keyword (issue #12514)', async () => {
+      // #12514-B: `time git commit` is a single segment (no control
+      // operator), so this exercises the noise-keyword skip without any
+      // splitCommands involvement.
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      rawGit('add feature.txt');
+      const preHead = headSha();
+
+      await runShellCommand('time git commit -m "feature"');
+
+      expectFeatureCommitLanded(preHead);
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('does not register when a loosely-spelled commit never landed', async () => {
+      // Fail-closed pin for the loose recogniser: the spelling is
+      // recognised (so preHead is captured), but nothing is staged, the
+      // commit fails, HEAD never moves, and nothing may register.
+      const preHead = headSha();
+
+      await runShellCommand('if true; then git commit -m "nothing staged"; fi');
+
+      expect(headSha()).toBe(preHead);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
+    it('does not register a foreground commit that a `cd` segment lands in another repository', async () => {
+      // Regression pin: the loose recogniser must keep the cwd-shift
+      // guard. `cd /elsewhere && git commit` is `hasCommit` but not
+      // attributable/registrable in our cwd — the commit lands in the
+      // other repo and our registry must stay empty.
+      const otherDir = makeOtherRepo();
+      fs.writeFileSync(path.join(otherDir, 'work.txt'), 'work\n');
+      const repoHeadBefore = headSha();
+
+      await runShellCommand(
+        `cd ${otherDir} && git add work.txt && git commit -m "other work"`,
+      );
+
+      // The commit really landed — in the OTHER repository.
+      expect(
+        execSync('git log -1 --pretty=%s', {
+          cwd: otherDir,
+          encoding: 'utf-8',
+        }).trim(),
+      ).toBe('other work');
+      expect(headSha()).toBe(repoHeadBefore);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
+    it('registers a commit landed by a Ctrl+B-promoted foreground command once it settles (issue #12514)', async () => {
+      // #12514-A.3: `handlePromotedForeground` returns before the
+      // attribution/registration block in `execute()`, so a commit landed
+      // by a promoted command used to earn no exemption — unlike
+      // `executeBackground`, which refuses `git commit` outright.
+      simulatePromote = true;
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      const preHead = headSha();
+
+      const result = await runShellCommand(
+        'git add feature.txt && git commit -m "feature"',
+      );
+
+      // Load-bearing: the run really went through the promote handoff,
+      // not the plain foreground path (which registers anyway).
+      expect(result.llmContent).toContain('promoted to background as');
+      expect(headSha()).not.toBe(preHead);
+      expect(
+        execSync('git log -1 --pretty=%s', {
+          cwd: repoDir,
+          encoding: 'utf-8',
+        }).trim(),
+      ).toBe('feature');
+      // Witness assertion: registration happened at settle, so the
+      // follow-up amend of the agent's own commit is exempt.
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('does not register a promoted command whose commit lands in another repository', async () => {
+      // Regression pin for the promoted-path gate: it must not be the
+      // bare `hasCommit` flag. A promoted `cd /elsewhere && git commit`
+      // carries no preHead capture, so nothing may register — exactly as
+      // the foreground path leaves it.
+      simulatePromote = true;
+      const otherDir = makeOtherRepo();
+      fs.writeFileSync(path.join(otherDir, 'work.txt'), 'work\n');
+      const repoHeadBefore = headSha();
+
+      const result = await runShellCommand(
+        `cd ${otherDir} && git add work.txt && git commit -m "other work"`,
+      );
+
+      expect(result.llmContent).toContain('promoted to background as');
+      expect(
+        execSync('git log -1 --pretty=%s', {
+          cwd: otherDir,
+          encoding: 'utf-8',
+        }).trim(),
+      ).toBe('other work');
+      expect(headSha()).toBe(repoHeadBefore);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
+    it('does not register a promoted command whose commit never landed', async () => {
+      // The promoted-path analogue of regression ②: registration at
+      // settle still requires HEAD movement against the captured preHead,
+      // so a failed `git commit` (nothing staged) registers nothing.
+      simulatePromote = true;
+      const preHead = headSha();
+
+      const result = await runShellCommand('git commit -m "nothing staged"');
+
+      expect(result.llmContent).toContain('promoted to background as');
+      expect(headSha()).toBe(preHead);
+      expect(amendVerdict()?.blocked).toBe(true);
     });
 
     it('still blocks an amend of a commit the shell tool did not make', async () => {
