@@ -561,6 +561,33 @@ describe('parseChannelConfig', () => {
     );
   });
 
+  it('parses an operators list, keeping an empty one distinct from unset', async () => {
+    const listed = await parseChannelConfig('bot', {
+      type: 'bare',
+      operators: ['admin'],
+    });
+    const empty = await parseChannelConfig('bot', {
+      type: 'bare',
+      operators: [],
+    });
+    const unset = await parseChannelConfig('bot', { type: 'bare' });
+
+    expect(listed.operators).toEqual(['admin']);
+    expect(empty.operators).toEqual([]);
+    expect(unset.operators).toBeUndefined();
+  });
+
+  it('rejects a non-array operators list', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        operators: 'admin',
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "operators" must be an array of user IDs.',
+    );
+  });
+
   it('drops empty identity and memory scope objects', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',

@@ -71,6 +71,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `dmPolicy`          | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
 | `groupSenderPolicy` | No               | Who may use the bot inside an admitted group: `inherit` (default, follows `senderPolicy`), `open`, or `allowlist` (checked against `allowedGroupUsers`)                                                                 |
 | `allowedGroupUsers` | No               | Group-member IDs allowed when `groupSenderPolicy: "allowlist"`. Separate from `allowedUsers`                                                                                                                            |
+| `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset derives it. See [Shared-Session Operators](#shared-session-operators)                                                                      |
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
 | `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
@@ -95,9 +96,21 @@ Controls who can interact with the bot:
 
 This axis applies to `groupPolicy: "open"` and `"allowlist"` groups. Under `groupPolicy: "pairing"` an approved group authorizes all of its members and this axis is not consulted.
 
-Shared-session commands (`/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, and the loop tool) still follow `allowedUsers`: a member admitted only by the group axis can start a turn in a shared group session but cannot answer that turn's permission prompts or run those commands unless they are also in `allowedUsers`. Switching group traffic to `allowedGroupUsers` also re-authorizes already-stored group loops against that list, so every existing group-loop creator must appear in it or their jobs are permanently disabled on the next fire.
+The Web Shell channel editor does not show `groupSenderPolicy`, `allowedGroupUsers`, or `operators` yet. Set them in `settings.json`; saving the channel from the editor keeps them, because unrendered keys are carried through unchanged.
 
-The Web Shell channel editor does not show `groupSenderPolicy` or `allowedGroupUsers` yet. Set them in `settings.json`; saving the channel from the editor keeps them, because unrendered keys are carried through unchanged.
+### Shared-Session Operators
+
+In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+
+The operators are, in order:
+
+1. `operators`, when set. It is authoritative even when empty: `"operators": []` means nobody may operate a shared session.
+2. Otherwise `allowedUsers`, when it is not empty.
+3. Otherwise anyone who may speak in the conversation — with one exception. Under `groupSenderPolicy: "open"` the group admits members nobody vouched for by name, so in a group the direct-message axis decides instead: everyone under `senderPolicy: "open"`, paired users under `"pairing"`. Under `groupSenderPolicy: "allowlist"` the members in `allowedGroupUsers` are operators. An approved group under `groupPolicy: "pairing"` admits all of its members, and all of them may operate its sessions.
+
+For example, `senderPolicy: "pairing"` with `groupSenderPolicy: "open"` lets every group member start a turn, while only the users you approved through pairing may answer its permission prompts. Set `operators` when you want a different list.
+
+A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
 ### Session Scope
 

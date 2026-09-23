@@ -292,6 +292,13 @@ rather than `this.gate`, or the group axis is silently ignored on that lane.
 The group gate never carries `pairing`: an approval there would also unlock
 direct messages.
 
+**Operators:** commands that act on a shared session (`/approve`, `/cancel`,
+`/clear`, `/loop`, the loop tool, steering, ...) check
+`isSharedSessionOperator`, not the sender gates. `config.operators` decides
+when set; otherwise a non-empty `allowedUsers`; otherwise anyone who may speak,
+except that an `open` group axis defers to `this.gate` because it vouches for
+no one by name.
+
 ### GroupGate
 
 ```typescript

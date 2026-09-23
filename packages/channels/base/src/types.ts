@@ -74,6 +74,12 @@ export interface ChannelConfig {
   groupSenderPolicy?: GroupSenderPolicy;
   /** Member allowlist used when `groupSenderPolicy` is `allowlist`. */
   allowedGroupUsers?: string[];
+  /**
+   * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
+   * Authoritative when set, even when empty. Unset derives the operators from
+   * `allowedUsers` and the sender axes.
+   */
+  operators?: string[];
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
