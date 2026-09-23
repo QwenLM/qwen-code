@@ -1,5 +1,11 @@
-import { useMemo, useState } from 'react';
-import { Activity, Check, ListTodo, LoaderCircle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Activity,
+  Check,
+  ListTodo,
+  LoaderCircle,
+  ShieldQuestion,
+} from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { MessageList } from '../MessageList';
 import { ChatEditor } from '../ChatEditor';
@@ -16,15 +22,96 @@ import {
   useWebShellCustomization,
   WebShellCustomizationProvider,
 } from '../../customization';
+import { useI18n } from '../../i18n';
+import type { RunView } from './agents-view-logic';
 
-const progressLabels: Record<string, string> = {
-  starting: '正在启动…',
-  resuming: '正在继续原会话…',
-  waiting: '等待模型响应…',
-  thinking: '思考中…',
-  tool: '正在调用工具…',
-  responding: '正在回复…',
-};
+/** No agent activity for this long: say it may be stuck and offer Stop. */
+const STALL_NOTICE_MS = 5 * 60_000;
+
+/** A clock that ticks once a second while `active`, for elapsed times. */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+function formatElapsed(
+  ms: number,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const seconds = Math.max(0, Math.floor(ms / 1_000));
+  if (seconds < 60) return t('collab.elapsed.seconds', { count: seconds });
+  return t('collab.elapsed.minutes', {
+    minutes: Math.floor(seconds / 60),
+    seconds: seconds % 60,
+  });
+}
+
+/**
+ * One line saying what a live run is doing right now. Returns `stalled` so the
+ * caller can offer Stop; an approval is rendered as a card instead.
+ */
+function describeLiveRun(
+  run: RunView,
+  hostOffline: boolean,
+  now: number,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): { text: string; stalled: boolean } {
+  const agent = run.agentName;
+  if (run.status === 'queued') {
+    return {
+      text: hostOffline
+        ? t('collab.run.hostOffline', { agent })
+        : t('collab.run.queued', { agent }),
+      stalled: false,
+    };
+  }
+  if (run.status === 'cancelling') {
+    return { text: t('collab.run.stopping', { agent }), stalled: false };
+  }
+  const progress = run.progress;
+  if (!progress) {
+    return { text: t('collab.run.starting', { agent }), stalled: false };
+  }
+  const idle = now - progress.activityAt;
+  if (idle >= STALL_NOTICE_MS) {
+    return {
+      text: t('collab.run.stalled', { agent, elapsed: formatElapsed(idle, t) }),
+      stalled: true,
+    };
+  }
+  const elapsed = formatElapsed(now - (run.startedAt ?? now), t);
+  switch (progress.stage) {
+    case 'thinking':
+      return {
+        text: t('collab.run.thinking', { agent, elapsed }),
+        stalled: false,
+      };
+    case 'responding':
+      return {
+        text: t('collab.run.responding', { agent, elapsed }),
+        stalled: false,
+      };
+    case 'tool':
+      return {
+        text: progress.detail
+          ? t('collab.run.toolNamed', { agent, tool: progress.detail, elapsed })
+          : t('collab.run.tool', { agent, elapsed }),
+        stalled: false,
+      };
+    case 'stream_lost':
+      return { text: t('collab.run.streamLost', { agent }), stalled: false };
+    default:
+      return {
+        text: t('collab.run.working', { agent, elapsed }),
+        stalled: false,
+      };
+  }
+}
 
 export function ThreadChat({
   thread,
@@ -38,6 +125,7 @@ export function ThreadChat({
   onCancelRun,
   onMarkDone,
   onOpenThread,
+  onRespondPermission,
   activityOnly = false,
   onOpenActivity,
   headerActionsContainer,
@@ -63,10 +151,18 @@ export function ThreadChat({
   onCancelRun: (runId: string) => void;
   onMarkDone: () => void;
   onOpenThread: (threadId: string) => void;
+  onRespondPermission?: (
+    sessionId: string,
+    requestId: string,
+    optionId: string,
+  ) => Promise<unknown>;
 }) {
   const customization = useWebShellCustomization();
+  const { t } = useI18n();
   const [sending, setSending] = useState(false);
+  const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const { live, past } = buildRunRows(thread.runs);
+  const now = useNow(live.length > 0);
   const messages = useMemo<Message[]>(
     () =>
       [
@@ -260,42 +356,112 @@ export function ThreadChat({
                   aria-hidden="true"
                   className="size-4 animate-spin motion-reduce:animate-none"
                 />
-                正在发送消息…
+                {t('collab.sending')}
               </div>
             )}
-            {live
-              .filter(
-                ({ run }) =>
-                  run.status === 'queued' ||
-                  (run.status === 'running' &&
-                    !run.progress?.thoughtText &&
-                    !run.progress?.outputText),
-              )
-              .map(({ run }) => (
+            {live.map(({ run }) => {
+              const permission = run.progress?.permission;
+              if (
+                permission &&
+                run.sessionId &&
+                onRespondPermission &&
+                !answered.has(permission.requestId)
+              ) {
+                const sessionId = run.sessionId;
+                return (
+                  <div
+                    key={run.id}
+                    role="group"
+                    aria-label={t('collab.approval.title', {
+                      agent: run.agentName,
+                    })}
+                    className="mb-2 rounded-md border border-border bg-[var(--status-attention-bg)] p-3 text-sm"
+                  >
+                    <div className="mb-2 flex items-center gap-2 font-medium">
+                      <ShieldQuestion
+                        aria-hidden="true"
+                        className="size-4 shrink-0 text-[var(--status-attention-fg)]"
+                      />
+                      {t('collab.approval.title', { agent: run.agentName })}
+                    </div>
+                    {permission.title && (
+                      <code className="mb-2 block truncate rounded bg-muted px-2 py-1 text-xs">
+                        {permission.title}
+                      </code>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {permission.options.map((option) => (
+                        <Button
+                          key={option.optionId}
+                          size="sm"
+                          variant={
+                            option.kind?.startsWith('allow')
+                              ? 'default'
+                              : 'outline'
+                          }
+                          onClick={() => {
+                            setAnswered(
+                              (current) =>
+                                new Set([...current, permission.requestId]),
+                            );
+                            void onRespondPermission(
+                              sessionId,
+                              permission.requestId,
+                              option.optionId,
+                            ).catch(() =>
+                              setAnswered((current) => {
+                                const next = new Set(current);
+                                next.delete(permission.requestId);
+                                return next;
+                              }),
+                            );
+                          }}
+                        >
+                          {option.name}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+              const hostOffline =
+                agents.find((agent) => agent.id === run.agentId)?.runtime
+                  ?.status === 'offline';
+              const { text, stalled } = describeLiveRun(
+                run,
+                hostOffline,
+                now,
+                t,
+              );
+              return (
                 <div
                   key={run.id}
                   role="status"
-                  className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"
+                  className={`mb-2 flex items-center gap-2 text-sm ${
+                    stalled
+                      ? 'text-[var(--status-attention-fg)]'
+                      : 'text-muted-foreground'
+                  }`}
                 >
                   <LoaderCircle
                     aria-hidden="true"
-                    className="size-4 shrink-0 animate-spin motion-reduce:animate-none"
+                    className={`size-4 shrink-0 ${
+                      stalled ? '' : 'animate-spin motion-reduce:animate-none'
+                    }`}
                   />
-                  {run.agentName}{' '}
-                  {run.status === 'queued'
-                    ? agents.find((agent) => agent.id === run.agentId)?.runtime
-                        ?.status === 'offline'
-                      ? '执行主机离线，等待恢复…'
-                      : '消息已接收，排队等待启动…'
-                    : !run.progress
-                      ? '等待执行端确认…'
-                      : Date.now() - run.progress.receivedAt > 20000
-                        ? '连接中断，等待确认…'
-                        : Date.now() - run.progress.activityAt > 15000
-                          ? '等待新输出…'
-                          : (progressLabels[run.progress.stage] ?? '执行中…')}
+                  <span className="min-w-0 flex-1 truncate">{text}</span>
+                  {(stalled || run.status === 'queued') && !pending && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onCancelRun(run.id)}
+                    >
+                      {t('collab.run.stop')}
+                    </Button>
+                  )}
                 </div>
-              ))}
+              );
+            })}
             {preview && (
               <div role="status" className="mb-2 text-xs text-muted-foreground">
                 {summarizePreview(preview)}
@@ -333,7 +499,7 @@ export function ThreadChat({
                       })),
                 },
               ]}
-              placeholderText="Reply to the team, or @ an Agent…"
+              placeholderText={t('collab.composer.placeholder')}
               disabled={
                 pending ||
                 thread.status === 'done' ||

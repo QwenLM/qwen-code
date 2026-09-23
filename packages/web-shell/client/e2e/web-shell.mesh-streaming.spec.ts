@@ -133,11 +133,13 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await send(page, '@stream-worker Please explain streaming.');
   await expect.poll(() => sent).toBe(1);
   await expect(
-    page.getByRole('status').filter({ hasText: '正在发送消息…' }),
+    page.getByRole('status').filter({ hasText: '正在发送…' }),
   ).toBeVisible();
   releaseReply();
   await expect(
-    page.getByRole('status').filter({ hasText: 'stream-worker 执行主机离线' }),
+    page
+      .getByRole('status')
+      .filter({ hasText: 'stream-worker 所在的 Runtime 离线' }),
   ).toBeVisible();
   const activity = page.getByRole('region', {
     name: '智能体运行详情',
@@ -156,9 +158,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
   const initialProgress = run.progress!;
   run.progress = undefined;
   await expect(
-    page
-      .getByRole('status')
-      .filter({ hasText: 'stream-worker 等待执行端确认…' }),
+    page.getByRole('status').filter({ hasText: '正在唤起 stream-worker…' }),
   ).toBeVisible();
   await expect(activity).toContainText('等待执行端确认');
   await expect(activity).not.toContainText('暂无过程上报');

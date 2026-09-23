@@ -485,6 +485,28 @@ const EN: Messages = {
   'agent.view': 'View',
   'agents.closed': 'Agents panel closed.',
   'agents.title': 'Agents',
+  'collab.sending': 'Sending…',
+  'collab.composer.placeholder': 'Reply, or @ an agent to bring it in…',
+  'collab.elapsed.seconds': (v) => `${v?.count ?? 0}s`,
+  'collab.elapsed.minutes': (v) => `${v?.minutes ?? 0}m ${v?.seconds ?? 0}s`,
+  'collab.run.queued': (v) =>
+    `${v?.agent} is queued and starts when it is free`,
+  'collab.run.hostOffline': (v) =>
+    `${v?.agent} is waiting for its runtime to come back online`,
+  'collab.run.starting': (v) => `Starting ${v?.agent}…`,
+  'collab.run.stopping': (v) => `Stopping ${v?.agent}…`,
+  'collab.run.thinking': (v) => `${v?.agent} is thinking · ${v?.elapsed}`,
+  'collab.run.responding': (v) => `${v?.agent} is replying · ${v?.elapsed}`,
+  'collab.run.tool': (v) => `${v?.agent} is running a tool · ${v?.elapsed}`,
+  'collab.run.toolNamed': (v) =>
+    `${v?.agent} is running ${v?.tool} · ${v?.elapsed}`,
+  'collab.run.working': (v) => `${v?.agent} is working · ${v?.elapsed}`,
+  'collab.run.streamLost': (v) =>
+    `Lost the live view of ${v?.agent}; its result will still appear here`,
+  'collab.run.stalled': (v) =>
+    `${v?.agent} has shown no progress for ${v?.elapsed}. It may be stuck.`,
+  'collab.run.stop': 'Stop',
+  'collab.approval.title': (v) => `${v?.agent} wants to run a tool`,
   'agents.description':
     'Manage reusable agent definitions for tasks, Agent Teams, and shared-thread collaboration.',
   'subagent.result': 'Result',
@@ -4516,6 +4538,28 @@ const ZH: Messages = {
   'agent.view': '查看',
   'agents.closed': '智能体面板已关闭。',
   'agents.title': '智能体',
+  'collab.sending': '正在发送…',
+  'collab.composer.placeholder': '回复，或 @ 一个 Agent 让它加入…',
+  'collab.elapsed.seconds': (v) => `${v?.count ?? 0} 秒`,
+  'collab.elapsed.minutes': (v) =>
+    `${v?.minutes ?? 0} 分 ${v?.seconds ?? 0} 秒`,
+  'collab.run.queued': (v) => `${v?.agent} 排队中，空出来就开始`,
+  'collab.run.hostOffline': (v) =>
+    `${v?.agent} 所在的 Runtime 离线，回来后自动继续`,
+  'collab.run.starting': (v) => `正在唤起 ${v?.agent}…`,
+  'collab.run.stopping': (v) => `正在停止 ${v?.agent}…`,
+  'collab.run.thinking': (v) => `${v?.agent} 正在思考，${v?.elapsed}`,
+  'collab.run.responding': (v) => `${v?.agent} 正在回复，${v?.elapsed}`,
+  'collab.run.tool': (v) => `${v?.agent} 正在运行工具，${v?.elapsed}`,
+  'collab.run.toolNamed': (v) =>
+    `${v?.agent} 正在运行 ${v?.tool}，${v?.elapsed}`,
+  'collab.run.working': (v) => `${v?.agent} 正在工作，${v?.elapsed}`,
+  'collab.run.streamLost': (v) =>
+    `${v?.agent} 的实时输出中断了，结果出来后仍会显示在这里`,
+  'collab.run.stalled': (v) =>
+    `${v?.agent} 已经 ${v?.elapsed} 没有进展，可能卡住了`,
+  'collab.run.stop': '停止',
+  'collab.approval.title': (v) => `${v?.agent} 想运行一个工具`,
   'agents.description':
     '管理可复用的智能体定义，用于任务执行、Agent Team 或共享任务协作。',
   'subagent.result': '结果',

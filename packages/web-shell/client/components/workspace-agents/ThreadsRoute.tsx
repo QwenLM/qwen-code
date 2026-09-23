@@ -28,6 +28,12 @@ import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
 } from './agents-view-logic';
+import {
+  subscribeAgentStream,
+  type AgentLiveEvent,
+  type AgentRunProgressEvent,
+  type AgentStreamState,
+} from './agent-events';
 
 interface CreateThreadResult {
   id: string;
@@ -71,6 +77,17 @@ export interface ThreadsApi {
   postReply(id: string, text: string): Promise<unknown>;
   markDone(id: string): Promise<unknown>;
   cancelRun(threadId: string, runId: string): Promise<unknown>;
+  /** Live events; absent in tests and older daemons, which then poll. */
+  subscribe?(
+    onEvent: (event: AgentLiveEvent) => void,
+    onState: (state: AgentStreamState) => void,
+  ): () => void;
+  /** Answers a tool approval an agent is waiting on. */
+  respondToPermission?(
+    sessionId: string,
+    requestId: string,
+    optionId: string,
+  ): Promise<unknown>;
 }
 
 export function createThreadsHttpApi(
@@ -172,11 +189,62 @@ export function createThreadsHttpApi(
         `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
         {},
       ),
+    subscribe: (onEvent, onState) =>
+      subscribeAgentStream(`${root}/events`, token, onEvent, onState),
+    respondToPermission: async (sessionId, requestId, optionId) => {
+      const response = await fetch(
+        `${serverUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ outcome: { outcome: 'selected', optionId } }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`Approval failed (${response.status})`);
+      }
+    },
   };
 }
 
+/** Folds one streamed progress frame into the open thread, if it is that thread's. */
+function applyProgress(
+  detail: ThreadDetailView | undefined,
+  event: AgentRunProgressEvent,
+): ThreadDetailView | undefined {
+  if (!detail || detail.id !== event.threadId) return detail;
+  let changed = false;
+  const runs = detail.runs.map((run) => {
+    // A late frame from an earlier attempt of the same run is dropped.
+    if (run.id !== event.runId || (run.progress?.attempt ?? 0) > event.attempt)
+      return run;
+    changed = true;
+    return {
+      ...run,
+      status: run.status === 'queued' ? 'running' : run.status,
+      progress: {
+        attempt: event.attempt,
+        receivedAt: Date.now(),
+        activityAt: event.activityAt,
+        stage: event.stage,
+        detail: event.detail,
+        outputText: event.outputText,
+        thoughtText: event.thoughtText,
+        ...(event.permission ? { permission: event.permission } : {}),
+      },
+    };
+  });
+  return changed ? { ...detail, runs } : detail;
+}
+
 const PREVIEW_DEBOUNCE_MS = 250;
+/** Polling cadence while the live stream is down or unsupported. */
 const REFRESH_MS = 1_000;
+/** Bursts of store writes collapse into one refetch. */
+const CHANGE_REFETCH_MS = 150;
 
 export interface ThreadsRouteProps {
   initialCreateTask?: boolean;
@@ -308,11 +376,50 @@ export function ThreadsRoute({
     }
   }, [client, openId, scope]);
 
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), REFRESH_MS);
-    return () => clearInterval(timer);
   }, [refresh]);
+  // Live updates: refetch on `changed`, fold `progress` straight into the open
+  // thread so replies stream. Polls only while the stream is down.
+  useEffect(() => {
+    if (!client) return;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let pendingRefetch: ReturnType<typeof setTimeout> | undefined;
+    const startPolling = () => {
+      poll ??= setInterval(() => void refreshRef.current(), REFRESH_MS);
+    };
+    if (!client.subscribe) {
+      startPolling();
+      return () => clearInterval(poll);
+    }
+    const stop = client.subscribe(
+      (event) => {
+        if (event.type === 'progress') {
+          setDetail((current) => applyProgress(current, event));
+          return;
+        }
+        pendingRefetch ??= setTimeout(() => {
+          pendingRefetch = undefined;
+          void refreshRef.current();
+        }, CHANGE_REFETCH_MS);
+      },
+      (state) => {
+        if (state === 'closed') {
+          startPolling();
+          return;
+        }
+        clearInterval(poll);
+        poll = undefined;
+      },
+    );
+    return () => {
+      stop();
+      clearInterval(poll);
+      clearTimeout(pendingRefetch);
+    };
+  }, [client]);
 
   useEffect(() => {
     if (!client || !openId || !draft.trim()) {
@@ -448,6 +555,9 @@ export function ThreadsRoute({
               void mutate(() => client.cancelRun(openId, runId))
             }
             onMarkDone={() => void mutate(() => client.markDone(openId))}
+            {...(client.respondToPermission
+              ? { onRespondPermission: client.respondToPermission }
+              : {})}
             onOpenThread={(id) => {
               if (workspaceCwd && onOpenThreadChat)
                 onOpenThreadChat(id, workspaceCwd);

@@ -21,6 +21,8 @@
  *    machine that was already connected. Each refusal below names its own fix.
  */
 
+import type { AgentPermissionPromptView } from './agent-events';
+
 /** Wire shape of a thread row, as the REST layer returns it. */
 export interface ThreadSummaryView {
   id: string;
@@ -188,12 +190,16 @@ export function needsAttention(thread: ThreadSummaryView): boolean {
 /** Wire shape of one run, as the REST layer returns it. */
 export interface RunView {
   progress?: {
+    attempt?: number;
     receivedAt: number;
     activityAt: number;
+    /** A code: starting, thinking, responding, tool, awaiting_approval, stream_lost. */
     stage: string;
+    /** Raw text such as a tool title; never UI copy. */
     detail: string;
     outputText?: string;
     thoughtText?: string;
+    permission?: AgentPermissionPromptView;
   };
   id: string;
   agentId: string;

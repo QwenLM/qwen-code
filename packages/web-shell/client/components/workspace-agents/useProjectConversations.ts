@@ -21,8 +21,12 @@ export function useProjectConversations(cwds: readonly string[]) {
     if (!enabled) return;
     let disposed = false;
     let busy = false;
-    const refresh = async () => {
-      if (busy) return;
+    let again = false;
+    const refresh = async (): Promise<void> => {
+      if (busy) {
+        again = true;
+        return;
+      }
       busy = true;
       const results = await Promise.all(
         (JSON.parse(key) as string[]).map(async (cwd) => {
@@ -61,12 +65,36 @@ export function useProjectConversations(cwds: readonly string[]) {
           error: results.find((r) => r.error)?.error,
         });
       busy = false;
+      if (again && !disposed) {
+        again = false;
+        void refresh();
+      }
     };
     void refresh();
-    const timer = setInterval(() => void refresh(), 5000);
+    // Refetch when a workspace's store changes; poll only while a stream is down.
+    const down = new Set<string>();
+    let poll: ReturnType<typeof setInterval> | undefined;
+    const stops = (JSON.parse(key) as string[]).map((cwd) =>
+      createThreadsHttpApi(workspace.baseUrl, workspace.token, cwd).subscribe!(
+        (event) => {
+          if (event.type === 'changed') void refresh();
+        },
+        (state) => {
+          if (state === 'closed') down.add(cwd);
+          else down.delete(cwd);
+          if (down.size > 0) {
+            poll ??= setInterval(() => void refresh(), 5000);
+          } else {
+            clearInterval(poll);
+            poll = undefined;
+          }
+        },
+      ),
+    );
     return () => {
       disposed = true;
-      clearInterval(timer);
+      for (const stop of stops) stop();
+      clearInterval(poll);
     };
   }, [enabled, key, scope, workspace.baseUrl, workspace.token]);
   return useMemo(
