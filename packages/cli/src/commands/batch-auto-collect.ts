@@ -172,7 +172,13 @@ export function createBatchAutoCollector(
     } catch {
       return;
     }
-    if (!task.attempts.some(isAmbiguous)) return;
+    // Notify mode takes no lock, so an `uploaded` attempt there may be a
+    // `run` still submitting; only a recorded lost answer (`unknown`) counts.
+    const lost =
+      options.mode === 'notify'
+        ? task.attempts.some((attempt) => attempt.submitState === 'unknown')
+        : task.attempts.some(isAmbiguous);
+    if (!lost) return;
     warnedAmbiguous.add(taskId);
     options.notify(
       `Batch task ${taskId} has a submission that could not be matched to a provider batch — it may exist and be billing. ` +
@@ -276,6 +282,9 @@ export function createBatchAutoCollector(
         for (const task of due) {
           if (wrongEndpoint.get(task.id) === key) continue;
           wrongEndpoint.delete(task.id);
+          // Only a pass whose reconcile really ran and found nothing may
+          // warn "may be billing" — not a lock held by a `run` still
+          // submitting, not a transient network error.
           let reconciled = true;
           try {
             await collectOne(ep, task);
@@ -286,13 +295,8 @@ export function createBatchAutoCollector(
               // Pinned to another endpoint or key: wait for the session to
               // switch back instead of repeating the same refusal.
               wrongEndpoint.set(task.id, key);
-              reconciled = false;
             }
-            if (/is in use by another/.test(message)) {
-              // Another command (e.g. a `run` still submitting) holds the
-              // task; an `uploaded` attempt there is in flight, not lost.
-              reconciled = false;
-            }
+            reconciled = /has no submitted batch/.test(message);
             log(`batch auto-collect: ${task.id}: ${message}`);
           }
           if (reconciled) warnIfAmbiguous(task.id);

@@ -204,8 +204,6 @@ export function assembleRequests(
   return requests;
 }
 
-// A path that does not exist yet has nothing to follow; the read that
-// comes next reports it by name.
 /**
  * `p` is `root` or below it. Uses `path.relative`, so a root that already
  * ends in a separator (`/`, `C:\\`) and a different Windows drive both work.
@@ -218,6 +216,8 @@ export function isInsideRoot(root: string, p: string): boolean {
   return relative !== '..' && !relative.startsWith(`..${path.sep}`);
 }
 
+// A path that does not exist yet has nothing to follow; the read that
+// comes next reports it by name.
 function isRealPathInsideRoot(projectRoot: string, p: string): boolean {
   let real: string;
   try {

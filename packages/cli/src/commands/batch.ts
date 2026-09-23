@@ -612,11 +612,11 @@ const cancelCommand: CommandModule = {
     }),
 };
 
-/** Deps shared by the agent-prepared workflow subcommands. */
 // A session's auto-collector holds a task lock for a few seconds at most;
 // waiting beats failing a command the user or agent just ran.
 const LOCK_WAIT_MS = 15_000;
 
+/** Deps shared by the agent-prepared workflow subcommands. */
 const workflowDeps = (ep: BatchEndpoint): WorkflowDeps => ({
   ep,
   cwd: process.cwd(),

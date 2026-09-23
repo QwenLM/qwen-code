@@ -277,6 +277,22 @@ describe('batch auto-collect', () => {
     expect(h.api.listBatches.mock.calls.length).toBe(lists);
   });
 
+  it('does not warn about a lost submission on a transient provider error', async () => {
+    const h = setup();
+    h.api.createBatch.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('HTTP 502'), { status: 502 });
+    });
+    const taskId = await submit(h);
+    h.api.listBatches.mockRejectedValueOnce(new Error('ECONNRESET'));
+    const ac = collector(h);
+    await ac.tick(); // reconcile could not even look
+    expect(h.notices).toEqual([]);
+    h.clock.now += 10 * 60_000;
+    await ac.tick(); // it looked and found nothing: now it is worth saying
+    expect(h.notices).toHaveLength(1);
+    expect(h.notices[0]).toContain(`Batch task ${taskId} has a submission`);
+  });
+
   it('does not mistake a submission still in flight elsewhere for a lost one', async () => {
     const h = setup();
     h.api.createBatch.mockImplementationOnce(async () => {
