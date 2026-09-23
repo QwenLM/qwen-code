@@ -363,8 +363,9 @@ public final class HttpRuntimeTransport {
     }
 
     /**
-     * Stops reading once the cap is crossed and completes the body future, so
-     * the request timeout still covers the exchange.
+     * Stops reading once the cap is crossed. A body that stalls after the
+     * response headers is bounded by the stage deadline ({@code orTimeout}),
+     * not by {@code HttpRequest.timeout}.
      */
     private static final class BoundedBodySubscriber
             implements HttpResponse.BodySubscriber<BoundedBody> {

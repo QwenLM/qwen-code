@@ -11,13 +11,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
@@ -247,6 +250,53 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void closesTheConnectionOnTheDeadlineAndOnCallerCancel() throws Exception {
+        for (boolean callerCancels : new boolean[] {false, true}) {
+            CountDownLatch closed = new CountDownLatch(1);
+            HttpServer drip = HttpServer.create(
+                    new InetSocketAddress("127.0.0.1", 0), 0);
+            drip.setExecutor(Executors.newCachedThreadPool());
+            drip.createContext("/", exchange -> {
+                exchange.getRequestBody().readAllBytes();
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.getResponseHeaders().set("Content-Type",
+                        "application/json");
+                exchange.sendResponseHeaders(200, 1 << 20);
+                OutputStream out = exchange.getResponseBody();
+                try {
+                    for (int tick = 0; tick < 200; tick++) {
+                        out.write(' ');
+                        out.flush();
+                        Thread.sleep(25);
+                    }
+                } catch (IOException gone) {
+                    closed.countDown();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            drip.start();
+            try {
+                HttpRuntimeTransport client = new HttpRuntimeTransport(
+                        HttpClient.newBuilder()
+                                .version(HttpClient.Version.HTTP_1_1).build(),
+                        Duration.ofMillis(callerCancels ? 10_000 : 300));
+                java.util.concurrent.CompletableFuture<RuntimeAttestation> pending =
+                        attest(client, drip.getAddress().getPort())
+                                .toCompletableFuture();
+                if (callerCancels) {
+                    Thread.sleep(200);
+                    pending.cancel(true);
+                }
+                assertTrue(closed.await(2, TimeUnit.SECONDS),
+                        callerCancels ? "caller cancel" : "deadline");
+            } finally {
+                drip.stop(0);
+            }
+        }
+    }
+
+    @Test
     void treatsNotFoundAsIncompatible() {
         reply.set(json(404, "{}".getBytes(StandardCharsets.UTF_8)));
 
@@ -269,6 +319,11 @@ class HttpRuntimeTransportTest {
     }
 
     private java.util.concurrent.CompletionStage<RuntimeAttestation> attest() {
+        return attest(transport, server.getAddress().getPort());
+    }
+
+    private java.util.concurrent.CompletionStage<RuntimeAttestation> attest(
+            HttpRuntimeTransport client, int port) {
         JsonNode identity = suite.required("identity");
         RuntimeScope scope = new RuntimeScope(
                 identity.required("tenantId").textValue(),
@@ -279,8 +334,7 @@ class HttpRuntimeTransportTest {
                 identity.required("isolationClass").textValue());
         RuntimeLease lease = new RuntimeLease(
                 identity.required("runtimeInstanceId").textValue(),
-                URI.create("http://127.0.0.1:" + server.getAddress().getPort()
-                        + "/"),
+                URI.create("http://127.0.0.1:" + port + "/"),
                 identity.required("token").textValue(),
                 identity.required("leaseId").textValue(),
                 identity.required("epoch").longValue());
@@ -291,7 +345,7 @@ class HttpRuntimeTransportTest {
                 identity.required("leaseId").textValue(),
                 identity.required("epoch").longValue(),
                 identity.required("token").textValue());
-        return transport.attest(lease,
+        return client.attest(lease,
                 new RuntimeProvisionRequest(scope, "session-1"), seed);
     }
 
