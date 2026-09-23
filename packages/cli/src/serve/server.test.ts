@@ -43762,7 +43762,7 @@ describe('Live Appshot server integration', () => {
         app = createServeApp(baseOpts, undefined, {
           bridge: fakeBridge(),
           persistSetting: vi.fn(async () => undefined),
-          daemonEnv: optIn ? { QWEN_LIVE_NATIVE_HOST: '1' } : {},
+          daemonEnv: optIn ? { QWEN_SERVE_LIVE_NATIVE_HOST: '1' } : {},
           runtimePlatform,
           webShellDir: path.join(tmp, 'web-shell'),
         });

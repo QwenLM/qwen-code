@@ -523,6 +523,19 @@ describe('LiveSetupController', () => {
         expect(harness.launch).not.toHaveBeenCalled();
       },
     );
+
+    // With no Host to install, "turn Live on first" would send the user to a
+    // step that cannot help; the missing Host is reported even while Live is
+    // off.
+    it.each(['retryInstall', 'launchHost'] as const)(
+      'reports the missing Host before the disabled Live for %s',
+      async (method) => {
+        const harness = createHarness({ nativeHost: false });
+        await expect(harness.controller[method]()).rejects.toMatchObject({
+          code: 'live_native_host_unavailable',
+        });
+      },
+    );
   });
 
   describe('endpoint', () => {

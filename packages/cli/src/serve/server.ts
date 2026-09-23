@@ -1056,7 +1056,7 @@ export function createServeApp(
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
   // Shell page itself (`/live/web`) on every platform; the native macOS Host
-  // (`/live/host`) is opt-in through QWEN_LIVE_NATIVE_HOST=1.
+  // (`/live/host`) is opt-in through QWEN_SERVE_LIVE_NATIVE_HOST=1.
   const liveVoiceSurfaceAvailable =
     opts.serveWebShell !== false &&
     typeof deps.webShellDir === 'string' &&
