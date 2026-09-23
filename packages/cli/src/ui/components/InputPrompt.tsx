@@ -894,6 +894,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setBgPillFocused,
   ]);
 
+  // Mirror of descendFromComposer's target condition: the VP-mode scroll
+  // fallback must yield to it, because descending is the only keyboard route
+  // into the live agent panel, the Arena tab bar and the background-tasks pill.
+  const hasComposerDescendTarget = useCallback(
+    () => getVisibleBgAgents().length > 0 || hasAgents || bgEntries.length > 0,
+    [getVisibleBgAgents, hasAgents, bgEntries],
+  );
+
   // Single source of truth for "is there a suggestion the user can accept right
   // now": the live followup suggestion if visible, otherwise the persisted
   // `promptSuggestion` prop (type-then-delete / pre-show-delay). Tab/Right/Enter
@@ -1747,8 +1755,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         ) {
           // In VP mode with empty input, scroll the conversation instead of
           // navigating input history. This handles terminals that translate
-          // mouse wheel events to Up/Down arrow keys.
-          if (isVpMode && buffer.text.length === 0 && scrollActions) {
+          // mouse wheel events to Up/Down arrow keys. Descending into the live
+          // agent panel / tab bar / background-tasks pill still wins.
+          if (
+            isVpMode &&
+            buffer.text.length === 0 &&
+            scrollActions &&
+            !hasComposerDescendTarget()
+          ) {
             scrollActions.scrollBy(1);
             return true;
           }
@@ -1978,6 +1992,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgEntries,
       getVisibleBgAgents,
       descendFromComposer,
+      hasComposerDescendTarget,
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,
