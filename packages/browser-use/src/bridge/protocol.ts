@@ -7,9 +7,33 @@
 import { statSync } from 'node:fs';
 import { posix } from 'node:path';
 
-export const CHROME_BRIDGE_PROTOCOL_VERSION = 2;
-export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser';
+export const CHROME_BRIDGE_PROTOCOL_VERSION = 3;
+// Protocol 3 registers under its own host name and launcher. Qwen Code
+// releases speaking protocol 2 re-register `com.qwen.browser` (and its
+// `native-host.sh` launcher) on every first use, so sharing that name would
+// let any older CLI point Chrome back at a protocol 2 Host.
+export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser_use';
+// Bump whenever the Host changes without a protocol change. First use reuses
+// an installed Host of the same protocol, so without a higher revision a Host
+// fix would never reach a user who already installed one.
+export const CHROME_NATIVE_HOST_REVISION = 2;
+// The id an unpacked build keeps, pinned by the manifest key, and the id the
+// Chrome Web Store assigned the listing, which rejects that key. A user's
+// extension carries one or the other, so both reach the Host. Adding an id
+// here means bumping CHROME_NATIVE_HOST_REVISION in the same change: the Host
+// bundles this set, and an installed Host of the same revision is reused
+// rather than replaced, so without the bump it would keep rejecting the id.
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
+export const CHROME_WEB_STORE_EXTENSION_ID = 'hdhmmjclhibojdddmancfgbkleahfaph';
+// Where users install the extension. The store resolves any slug to the
+// listing's current one by id, so this link survives a rename.
+export const CHROME_WEB_STORE_URL =
+  'https://chromewebstore.google.com/detail/qwen-code/' +
+  CHROME_WEB_STORE_EXTENSION_ID;
+export const CHROME_EXTENSION_IDS: readonly string[] = [
+  CHROME_EXTENSION_ID,
+  CHROME_WEB_STORE_EXTENSION_ID,
+];
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
 
 // Operation deadlines (core/schemas.ts timeoutMs) may reach 120s, and every
@@ -83,10 +107,13 @@ export interface BridgeHello {
   protocolVersion: number;
   extensionId: string;
   extensionInstanceId: string;
+  hostInstanceId?: string;
+  browserSessionId?: string;
 }
 
 export interface BridgeRequest {
   type: 'request';
+  browserSessionId?: string;
   id: string;
   method: string;
   params: Record<string, unknown>;
@@ -94,6 +121,7 @@ export interface BridgeRequest {
 
 export interface BridgeResponse {
   type: 'response';
+  browserSessionId?: string;
   id: string;
   ok: boolean;
   result?: unknown;
@@ -107,6 +135,7 @@ export interface BridgeResponse {
  */
 export interface BridgeEvent {
   type: 'event';
+  browserSessionId?: string;
   tabId: number;
   method: string;
   params: unknown;

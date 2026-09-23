@@ -319,5 +319,10 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
 
   // File doesn't exist or has invalid content, create it with configured language behavior
   const resolved = resolveOutputLanguageOrPreserveAuto(outputLanguage);
-  writeOutputLanguageFile(resolved);
+  try {
+    writeOutputLanguageFile(resolved);
+  } catch {
+    // Creation is best-effort, like the migration above: the rule file is
+    // advisory, so an unwritable global dir must not crash startup.
+  }
 }
