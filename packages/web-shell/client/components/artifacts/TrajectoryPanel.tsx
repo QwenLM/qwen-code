@@ -528,10 +528,12 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   useLayoutEffect(() => {
     const key = pendingRevealRef.current;
     if (key === undefined) return;
-    const index = visualRows.findIndex((row) => row.key === key);
-    if (index < 0) return;
+    // One attempt, on the first render after the selection was dropped. A key
+    // left waiting would scroll the table to it at some unrelated later
+    // change, long after the press that asked for it.
     pendingRevealRef.current = undefined;
-    virtualizer.scrollToIndex(index, { align: 'auto' });
+    const index = visualRows.findIndex((row) => row.key === key);
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
   }, [virtualizer, visualRows]);
 
   // Named the way the row reads, which already says a failed request failed
