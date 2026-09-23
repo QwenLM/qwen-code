@@ -13375,7 +13375,15 @@ export class Session implements SessionContext {
           isTrustedLiveSpeakToUserTool;
         const toolEnabled =
           pm && !isTrustedLiveTool
-            ? await pm.isToolEnabled(policyToolName)
+            ? await pm.isToolEnabled(
+                policyToolName,
+                // Mirror the scheduler's L1 gate: a legacy-spelled MCP deny
+                // can only name the registered tool through its advertised
+                // aliases (#10199).
+                tool instanceof DiscoveredMCPTool
+                  ? tool.permissionAliases
+                  : undefined,
+              )
             : true;
         const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (enablementCancellation) return enablementCancellation;

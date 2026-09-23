@@ -160,8 +160,9 @@ export function isSubagentLikeExecutionContext(): boolean {
 /**
  * Whether `toolName` matches a per-agent `disallowedTools` blocklist, with
  * the exact match semantics AgentCore.prepareTools() applies at declaration
- * level: MCP server-level patterns via {@link matchesMcpPattern} for `mcp__`
- * tools, exact match otherwise. Shared so a fork's inherited execution
+ * level: delegates to {@link matchesToolPattern} — exact match for non-MCP
+ * names, MCP patterns via `matchesMcpPattern` with the caller-resolved alias
+ * channel. Shared so a fork's inherited execution
  * allowlist (tools/agent/agent.ts) cannot drift from the parent's own
  * declaration/invocation enforcement.
  *

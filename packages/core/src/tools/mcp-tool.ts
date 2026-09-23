@@ -1039,12 +1039,24 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     return 500_000;
   }
 
-  /** Keeps pre-normalization permission and disabled-tool entries effective. */
+  /**
+   * Keeps pre-normalization permission and disabled-tool entries effective.
+   *
+   * Publishes the exact raw identity `mcp__<server>__<tool>` first — the only
+   * spelling the permission matcher accepts as provenance for legacy unsafe
+   * rules — then the legacy `generateLegacyMcpToolName` reduction for
+   * settings persisted in that spelling. A verbatim provider-safe
+   * registration lost nothing, so it advertises no alias at all.
+   */
   get permissionAliases(): readonly string[] {
-    const legacyName = generateLegacyMcpToolName(
-      `mcp__${this.serverName}__${this.serverToolName}`,
-    );
-    return legacyName === this.name ? [] : [legacyName];
+    const rawName = `mcp__${this.serverName}__${this.serverToolName}`;
+    const legacyName = generateLegacyMcpToolName(rawName);
+    return [
+      ...(rawName === this.name ? [] : [rawName]),
+      ...(legacyName === this.name || legacyName === rawName
+        ? []
+        : [legacyName]),
+    ];
   }
 
   constructor(

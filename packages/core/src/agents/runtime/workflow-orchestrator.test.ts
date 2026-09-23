@@ -3590,6 +3590,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
      * the way the real manager treats them.
      */
     registeredTools?: Array<{ name: string; displayName?: string }>;
+    // What the session registry answers for getPermissionAliases, keyed by
+    // registered tool name.
+    permissionAliases?: Record<string, readonly string[]>;
     /**
      * Tools that background MCP discovery registers: absent from the registry
      * until `waitForMcpReady` settles.
@@ -3639,6 +3642,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const fakeRegistry = {
       copyDiscoveredToolsFrom: () => {},
       registerTool: () => {},
+      getPermissionAliases: (name: string) => opts.permissionAliases?.[name],
     };
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
@@ -4886,6 +4890,42 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       });
 
       expect(calls[0]!.config.tools).toEqual(['mcp__agentdb__query']);
+    });
+
+    // The session registry cannot vouch for an agent type's own MCP servers
+    // (their tools live in the per-agent registry), so the alias-dependent
+    // deny narrowing must not consult it for those names: a legacy-spelled
+    // deny is left to the agent's own declaration filter, which resolves
+    // aliases from the registry that actually serves the agent.
+    it('does not consult session-registry aliases when narrowing an own-MCP agent', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Db',
+          description: 'db agent',
+          systemPrompt: 'db',
+          level: 'project',
+          mcpServers: { 'own.srv': { command: 'owndb' } },
+          disallowedTools: ['mcp__own.srv'],
+        }),
+        // The session registry happens to answer an alias for the name —
+        // with the alias channel consulted here, the deny would narrow the
+        // tool away and the dispatch would refuse before provisioning.
+        permissionAliases: {
+          mcp__own_srv__search_documents_in_corpus_09ozidk: [
+            'mcp__own.srv__search_documents_in_corpus',
+          ],
+        },
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('query', {
+        agentType: 'Db',
+        tools: ['mcp__own_srv__search_documents_in_corpus_09ozidk'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual([
+        'mcp__own_srv__search_documents_in_corpus_09ozidk',
+      ]);
     });
 
     // A deny is resolved the way the agent's own config resolves it, so a

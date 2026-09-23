@@ -683,12 +683,42 @@ describe('createMemoryScopedAgentConfig', () => {
       ).resolves.toBe('disabled');
       expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH, undefined);
 
+      // The alias channel must reach the base PM: a legacy-spelled MCP deny
+      // can only name the registered tool through it (#10199).
+      await delegated.getToolRegistrationStatus('mcp__foo_bar__a_b_1aofxjh', [
+        'mcp__foo:bar__a.b',
+      ]);
+      expect(status).toHaveBeenCalledWith('mcp__foo_bar__a_b_1aofxjh', [
+        'mcp__foo:bar__a.b',
+      ]);
+
       const noBase = permissionManager(
         createMemoryScopedAgentConfig({} as Config, projectRoot),
       );
       await expect(
         noBase.getToolRegistrationStatus(ToolNames.WEB_FETCH),
       ).resolves.toBe('registered');
+    });
+
+    it('isToolEnabled forwards the alias channel to the base PM', async () => {
+      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      const delegated = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () =>
+              ({ isToolEnabled }) as unknown as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      await expect(
+        delegated.isToolEnabled('mcp__foo_bar__a_b_1aofxjh', [
+          'mcp__foo:bar__a.b',
+        ]),
+      ).resolves.toBe(false);
+      expect(isToolEnabled).toHaveBeenCalledWith('mcp__foo_bar__a_b_1aofxjh', [
+        'mcp__foo:bar__a.b',
+      ]);
     });
 
     it('gates the shell registration status on allowShell', async () => {

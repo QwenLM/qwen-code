@@ -1440,7 +1440,24 @@ describe('matchesRule', () => {
     const providerSafeName = normalizeToolNameForProvider(legacyName);
 
     expect(providerSafeName).not.toBe(legacyName);
-    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+    // Production supplies the tool's advertised `permissionAliases` with the
+    // evaluation; for this name the legacy reduction is lossless, so the
+    // alias IS the exact raw spelling the matcher compares literally
+    // (#10199). Without the alias channel the registered name alone cannot
+    // vouch for a legacy unsafe spelling.
+    expect(
+      matchesRule(
+        parseRule(legacyName),
+        providerSafeName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [legacyName],
+      ),
+    ).toBe(true);
   });
 
   it('keeps exact provider-safe MCP permission matches collision-safe', () => {
@@ -1450,7 +1467,19 @@ describe('matchesRule', () => {
     const slashedProviderName = normalizeToolNameForProvider(slashedName);
 
     expect(dottedProviderName).not.toBe(slashedProviderName);
-    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        dottedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [dottedName],
+      ),
+    ).toBe(true);
     expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
   });
 

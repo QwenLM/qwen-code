@@ -307,11 +307,11 @@ export class ToolRegistry {
   }
 
   /**
-   * The permission aliases a registered tool advertises (the MCP legacy
-   * spellings `DiscoveredMCPTool.permissionAliases` publishes), or
-   * `undefined` for tools that advertise none. Permission matchers thread
-   * these so a rule written in a legacy spelling still reaches the tool it
-   * names (#10199).
+   * The permission aliases a registered tool advertises (the exact raw
+   * identity followed by the MCP legacy spelling, as
+   * `DiscoveredMCPTool.permissionAliases` publishes), or `undefined` for
+   * tools that advertise none. Permission matchers thread these so a rule
+   * written in a legacy spelling still reaches the tool it names (#10199).
    */
   getPermissionAliases(name: string): readonly string[] | undefined {
     const tool = this.tools.get(name);

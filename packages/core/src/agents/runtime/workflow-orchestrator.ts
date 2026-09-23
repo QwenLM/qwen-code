@@ -1229,8 +1229,16 @@ async function runOverridePath(
         denies: await subagentMgr.resolveToolNames(
           augmented.disallowedTools ?? [],
         ),
-        toolAliasesFor: (toolName) =>
-          config.getToolRegistry().getPermissionAliases?.(toolName),
+        // When the agent type has its own MCP servers, their tools live in
+        // the registry built for the agent, not this session's registry
+        // (see checkMcpNames above), so the session registry cannot resolve
+        // their aliases — deny narrowing for those names is left to the
+        // agent's own declaration filter, which resolves aliases from the
+        // per-agent registry.
+        toolAliasesFor: agentHasOwnMcpServers
+          ? undefined
+          : (toolName) =>
+              config.getToolRegistry().getPermissionAliases?.(toolName),
         schema: opts.schema !== undefined,
       });
     } catch (error) {
