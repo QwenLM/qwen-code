@@ -182,6 +182,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // to re-issue another ToolSearch for them instead of silently
     // assuming they were reviewed.
     if (query.toLowerCase().startsWith('select:')) {
+      const knownNames = this.config.getToolRegistry().getAllToolNames();
       const seen = new Set<string>();
       const names: string[] = [];
       const truncated: string[] = [];
@@ -194,7 +195,21 @@ class ToolSearchInvocation extends BaseToolInvocation<
         // for a tool literally named `"foo"` (with quotes) and miss.
         const stripped = stripMatchingQuotes(raw.trim());
         if (!stripped) continue;
-        const key = stripped.toLowerCase();
+        // Dedupe on the RESOLVED tool, not on the raw lowercase spelling.
+        // resolveRegisteredToolName makes two names differing only by case two
+        // genuinely different tools, so collapsing them here would silently
+        // drop one: it lands in none of missing/truncated/ambiguous, is never
+        // handed to recordReviewedDeclaration, and then reaches tool_call,
+        // which resolves it exactly and takes the never-reviewed pass-through —
+        // the failure #11321 exists to close, via the path the ambiguity
+        // message below recommends. Repeat spellings of ONE resolved tool still
+        // collapse (exact match and a lone case variant resolve to the same
+        // registered name), and so do repeats that resolve to the same
+        // ambiguous candidate list.
+        const resolved = resolveRegisteredToolName(stripped, knownNames);
+        const key = Array.isArray(resolved)
+          ? `ambiguous\u0000${resolved.join('\u0000')}`
+          : (resolved ?? `unresolved\u0000${stripped.toLowerCase()}`);
         if (seen.has(key)) continue;
         seen.add(key);
         if (names.length >= maxResults) {
@@ -320,12 +335,12 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // that call invokes. Preserve the user-supplied casing in the error list
     // so the response matches what the model asked for.
     const knownNames = registry.getAllToolNames();
-    const ambiguous: string[] = [];
+    const ambiguous: Array<{ requested: string; candidates: string[] }> = [];
 
     for (const requested of names) {
       const canonical = resolveRegisteredToolName(requested, knownNames);
       if (Array.isArray(canonical)) {
-        ambiguous.push(`${requested} (${canonical.join(', ')})`);
+        ambiguous.push({ requested, candidates: canonical });
         continue;
       }
       if (!canonical) {
@@ -427,7 +442,19 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
     if (ambiguous.length > 0) {
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Ambiguous — several tools differ only by case; request the exact name: ${ambiguous.join('; ')}`;
+      // Mirror the twin refusal on the invocation half (tool-call.ts): quote
+      // the rejected spelling so the response still echoes what the model
+      // asked for, but keep the actionable slot holding names that actually
+      // resolve. Presenting the rejected spelling AS "the exact name" invited a
+      // byte-identical re-issue of the same select:, which loop detection
+      // counts as a duplicate call and can end the turn as a loop.
+      const entries = ambiguous.map(
+        ({ requested, candidates }) =>
+          `"${requested}" matches more than one registered tool by case. Re-run tool_search with one exact name, e.g. ${candidates
+            .map((name) => `select:${name}`)
+            .join(' or ')}.`,
+      );
+      llmContent += `${header}Ambiguous — ${entries.join('\n')}`;
     }
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {

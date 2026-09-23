@@ -53,16 +53,32 @@ export interface DeferredToolSummary {
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
 /**
- * What a deferred tool looked like when tool_search returned it: its
- * serialized declaration plus, for an MCP tool, the server it belongs to.
- * tool_call compares against this so a model cannot invoke a hidden tool
- * whose schema or server changed after it last reviewed it (#11321).
+ * What a deferred tool looked like when tool_search returned it: the parameter
+ * contract its arguments were written against plus, for an MCP tool, the server
+ * it belongs to. tool_call compares against this so a model cannot invoke a
+ * hidden tool whose schema or server changed after it last reviewed it
+ * (#11321).
+ *
+ * The free-text `description` is deliberately excluded. Shipped deferred tools
+ * rebuild it from mutable state on every `schema` access — `WebSearchTool`
+ * interpolates the current month/year (web-search.ts:997-1004 via
+ * `getWebSearchToolDescription`, web-search.ts:916-921) and `ReadFileTool`
+ * rebuilds it from `config.getEffectiveInputModalities()` (read-file.ts:628-637)
+ * — both intentionally, so a long-lived `qwen serve`/ACP process is not stale
+ * across a month boundary or a mid-session `/model` switch. Hashing that prose
+ * made an unchanged tool's fingerprint drift and refuse a legitimate call whose
+ * parameters were still byte-identical to the reviewed schema. Those getters
+ * must keep recomputing, so the fingerprint covers the invocation contract
+ * instead.
  */
 export function deferredDeclarationFingerprint(
   tool: AnyDeclarativeTool,
 ): string {
   const server = tool instanceof DiscoveredMCPTool ? tool.serverName : '';
-  return `${server}\u0000${JSON.stringify(tool.schema)}`;
+  const schema = tool.schema;
+  return `${server}\u0000${schema.name ?? tool.name}\u0000${JSON.stringify(
+    schema.parametersJsonSchema,
+  )}`;
 }
 
 class DiscoveredToolInvocation extends BaseToolInvocation<

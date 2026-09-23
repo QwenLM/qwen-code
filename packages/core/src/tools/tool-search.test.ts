@@ -15,6 +15,8 @@ import {
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import { resolveDeferredToolCall, ToolCallTool } from './tool-call.js';
+import { ToolErrorType } from './tool-error.js';
 import type { MediaPolicyToolDescriptor, ToolResult } from './tools.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
@@ -317,11 +319,20 @@ describe('ToolSearchTool', () => {
         .build({ query })
         .execute(new AbortController().signal);
 
-    // The ambiguous spelling is named with its candidates, not guessed.
+    // The ambiguous spelling is echoed back, and the actionable slot holds the
+    // names that actually resolve. Presenting the rejected spelling AS "the
+    // exact name" invited a byte-identical re-issue, which loop detection
+    // counts as a duplicate call.
     const ambiguous = await search('select:DEFERRED_TARGET');
     expect(String(ambiguous.llmContent)).not.toContain('<functions>');
     expect(String(ambiguous.llmContent)).toContain(
-      'request the exact name: DEFERRED_TARGET (Deferred_Target, deferred_target)',
+      '"DEFERRED_TARGET" matches more than one registered tool by case',
+    );
+    expect(String(ambiguous.llmContent)).toContain(
+      'e.g. select:Deferred_Target or select:deferred_target',
+    );
+    expect(String(ambiguous.llmContent)).not.toContain(
+      'exact name: DEFERRED_TARGET',
     );
     expect(ambiguous.returnDisplay).toBe('1 ambiguous');
 
@@ -329,6 +340,80 @@ describe('ToolSearchTool', () => {
     const exact = await search('select:Deferred_Target');
     expect(String(exact.llmContent)).toContain('"name":"Deferred_Target"');
     expect(String(exact.llmContent)).not.toContain('"name":"deferred_target"');
+  });
+
+  it('select: mode reviews both spellings when two registered tools differ only by case (#11321)', async () => {
+    const lower = new MockTool({ name: 'deferred_target', shouldDefer: true });
+    const upper = new MockTool({ name: 'Deferred_Target', shouldDefer: true });
+    registry.registerTool(lower);
+    registry.registerTool(upper);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:Deferred_Target,deferred_target' })
+      .execute(new AbortController().signal);
+
+    // Dedupe keys on the RESOLVED tool, not the raw lowercase spelling: a
+    // dropped spelling is reported in none of missing/truncated/ambiguous, is
+    // never recorded as reviewed, and then reaches tool_call, which resolves it
+    // exactly and takes the never-reviewed pass-through.
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"Deferred_Target"');
+    expect(content).toContain('"name":"deferred_target"');
+    expect(result.returnDisplay).toBe('Reviewed 2 tool(s)');
+    expect(registry.getReviewedDeclaration('deferred_target')).toBe(
+      deferredDeclarationFingerprint(lower),
+    );
+    expect(registry.getReviewedDeclaration('Deferred_Target')).toBe(
+      deferredDeclarationFingerprint(upper),
+    );
+  });
+
+  it('a re-review after a declaration change clears the tool_call refusal (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    registry.registerTool(
+      new MockTool({
+        name: 'alpha',
+        shouldDefer: true,
+        params: { type: 'object', properties: { id: { type: 'number' } } },
+      }),
+    );
+
+    const search = (query: string) =>
+      new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+    await search('select:alpha');
+
+    // The same name is re-declared with a different parameter contract.
+    registry.registerTool(
+      new MockTool({
+        name: 'alpha',
+        shouldDefer: true,
+        params: { type: 'object', properties: { id: { type: 'string' } } },
+      }),
+    );
+
+    const refused = await resolveDeferredToolCall(registry, {
+      name: 'alpha',
+      arguments: { id: 'x' },
+    });
+    expect(refused).toMatchObject({
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    });
+
+    // The recovery loop must close: re-reviewing OVERWRITES the recorded
+    // fingerprint. A record step that skipped an existing key would leave the
+    // model in a permanent refusal -> re-review -> refusal loop for the
+    // remainder of the session.
+    await search('select:alpha');
+    const resolved = await resolveDeferredToolCall(registry, {
+      name: 'alpha',
+      arguments: { id: 'x' },
+    });
+    expect(resolved).toMatchObject({
+      tool: expect.objectContaining({ name: 'alpha' }),
+      arguments: { id: 'x' },
+    });
   });
 
   it('select: mode records what it returned for a hidden tool, so tool_call can detect a later change (#11321)', async () => {
