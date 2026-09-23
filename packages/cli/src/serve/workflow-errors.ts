@@ -18,12 +18,16 @@
  * - `workflow_run_live_elsewhere`: the run's checkpoint records a process that
  *   has not been seen to exit, so a retry would be the second runner on its
  *   journal.
+ * - `workflow_not_recorded`: a retry could not record that the run is running
+ *   again, which is what keeps another process from starting it a second
+ *   time, so it did not start.
  */
 const WORKFLOW_REQUEST_ERROR_STATUS: Readonly<Record<string, number>> = {
   workflow_invalid_params: 400,
   workflow_args_unavailable: 409,
   workflow_journal_unavailable: 409,
   workflow_run_live_elsewhere: 409,
+  workflow_not_recorded: 503,
 };
 
 /** The HTTP status for a workflow `errorKind`, or `undefined` for any other. */

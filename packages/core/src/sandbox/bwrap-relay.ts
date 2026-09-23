@@ -8,8 +8,11 @@ import { spawn } from 'node:child_process';
 import {
   closeSync,
   constants,
+  createReadStream,
+  fstatSync,
   openSync,
   readFileSync,
+  readlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -50,10 +53,29 @@ const env = Object.fromEntries(
     return [key, value];
   }),
 );
+const input = fstatSync(0);
+let shareInput = input.isSocket() || input.isCharacterDevice();
+if (input.isFIFO()) {
+  try {
+    shareInput = readlinkSync('/proc/self/fd/0').startsWith('pipe:');
+  } catch {
+    shareInput = false;
+  }
+}
 const child = spawn(bwrap, ['--json-status-fd', '3', ...args], {
-  stdio: ['inherit', 'inherit', 'inherit', 'pipe'],
+  stdio: [shareInput ? 'inherit' : 'pipe', 'inherit', 'inherit', 'pipe'],
   env,
 });
+if (!shareInput && child.stdin) {
+  // Host-backed descriptors can bypass mount policy through fd operations.
+  // Copy their bytes through a relay-owned pipe instead of sharing the fd.
+  const sink = child.stdin;
+  const source = createReadStream('', { fd: 0, autoClose: false });
+  source.on('error', () => sink.end());
+  sink.on('error', () => source.destroy());
+  child.on('close', () => source.destroy());
+  source.pipe(sink);
+}
 let wire = '';
 let bytes = 0;
 let failed = false;

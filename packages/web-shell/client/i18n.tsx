@@ -17,6 +17,13 @@ type MessageValue =
 
 type Messages = Record<string, MessageValue>;
 
+/** English count plus its noun, pluralised the regular way. */
+function plural(count: string | number | undefined, noun: string): string {
+  const value = typeof count === 'number' ? count : Number(count ?? 0);
+  const safe = Number.isFinite(value) ? value : 0;
+  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
+}
+
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
@@ -1715,8 +1722,10 @@ const EN: Messages = {
     'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceRefreshError':
     'Workspace added, but the workspace list could not be refreshed',
-  'sidebar.addWorkspaceAbsError': 'Path must be absolute',
-  'sidebar.addWorkspaceHint': 'Enter the absolute path to a project directory.',
+  'sidebar.addWorkspaceAbsError':
+    'Enter an absolute path or an SSH workspace URL.',
+  'sidebar.addWorkspaceHint':
+    'Enter a local absolute path or ssh://user@host/absolute/project. SSH requires key authentication, a trusted host key and Python 3 on the remote computer. Shell commands also require Bash; Qwen is not required there.',
   'sidebar.addWorkspaceSuggestions': 'Directory suggestions',
   'sidebar.addWorkspacePersist': 'Keep after daemon restart',
   'sidebar.addWorkspacePersistHint':
@@ -2056,6 +2065,31 @@ const EN: Messages = {
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'shell.command': 'Shell Command',
+  'shell.result.timedOut': 'Timed out',
+  'shell.result.notices': 'Notices',
+  'shell.result.truncated': 'Output preview truncated',
+  'shell.result.outputFiles': 'Output files',
+  'shell.result.output': 'Output',
+  'shell.result.command': 'Command',
+  'shell.result.copy': 'Copy command',
+  'shell.result.details': 'Execution details',
+  'shell.result.directory': 'Directory',
+  'shell.result.timeout': 'Timeout',
+  'shell.result.timeoutMs': (v) => `${v?.milliseconds} ms`,
+  'shell.result.defaultTimeout': 'Use default',
+  'shell.result.exitCode': 'Exit code',
+  'shell.result.signal': 'Signal',
+  'shell.result.pending': 'Pending',
+  'shell.result.elapsed': 'Elapsed',
+  'shell.result.lines': 'Output lines',
+  'shell.result.bytes': 'Output bytes',
+  'shell.result.running': 'Running',
+  'shell.result.completed': 'Completed',
+  'shell.result.success': 'Succeeded',
+  'shell.result.cancelled': 'Cancelled',
+  'shell.result.waiting': 'Waiting for output…',
+  'shell.result.empty': 'No output',
+  'shell.result.exited': (v) => `Exited with code ${v?.code}`,
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
   'help.tab.custom': 'custom-commands',
@@ -3028,6 +3062,56 @@ const EN: Messages = {
   'tokenUsage.tools': 'Tools',
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  'trajectory.title': 'Trajectory',
+  'trajectory.description': 'See where a run spent its time and tokens',
+  'trajectory.empty': 'No records in this session yet.',
+  'trajectory.noTiming':
+    'No request or tool durations are recorded for these records.',
+  'trajectory.truncated':
+    'Showing the most recent records; earlier history is not loaded.',
+  'trajectory.loadingPages': (v) =>
+    `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
+  'trajectory.olderFailed': (v) =>
+    `Earlier records could not be read: ${v?.message ?? ''}`,
+  'trajectory.olderPartial':
+    'Earlier records could only be read in part, so they are left out.',
+  'trajectory.loadFailed': (v) =>
+    `Could not read the transcript: ${v?.message ?? ''}`,
+  'trajectory.partial':
+    'Part of this transcript could not be read, so some records are missing.',
+  'trajectory.totals': (v) =>
+    `${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
+  'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
+  'trajectory.turnSummary': (v) =>
+    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.request': 'Model request',
+  'trajectory.requestFailed': 'Request failed',
+  'trajectory.ttft': (v) => `TTFT ${v?.duration ?? ''}`,
+  'trajectory.subagentRollup': (v) =>
+    `subagent ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.badge.user': 'you',
+  'trajectory.badge.message': 'say',
+  'trajectory.badge.thought': 'think',
+  'trajectory.badge.tool': 'tool',
+  'trajectory.badge.subagent': 'sub',
+  'trajectory.badge.shell': 'shell',
+  'trajectory.badge.permission': 'ask',
+  'trajectory.badge.status': 'note',
+  'trajectory.badge.cancelled': 'stop',
+  'trajectory.badge.other': 'other',
+  'trajectory.cancelled': 'Turn cancelled',
+  'trajectory.overview.label': (v) =>
+    `Timeline of ${plural(v?.spans, 'timed record')}, ${v?.busy ?? ''} of activity`,
+  'trajectory.overview.busy': (v) => `${v?.duration ?? ''} active`,
+  'trajectory.range.status': (v) =>
+    `Showing ${v?.shown ?? 0} of ${v?.total ?? 0} rows in the selected time`,
+  'trajectory.range.clear': 'Clear time selection',
+  'trajectory.range.aria': (v) =>
+    `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
+  'trajectory.overview.lane.requests': 'req',
+  'trajectory.overview.lane.tools': 'tool',
+  'trajectory.overview.lane.subagents': 'sub',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -3262,6 +3346,8 @@ const EN: Messages = {
   'workflow.action.retry': 'Retry failed path',
   'workflow.action.rerun': 'Rerun all',
   'workflow.action.unavailable': 'Workflow state changed before the action.',
+  'workflow.action.argsUnavailable':
+    'No restart: its history does not have the args it was launched with.',
   'workflow.action.failed': 'Could not update the workflow.',
   'workflow.history.retry': (v) => `Retried from ${v?.runId ?? ''}`,
   'workflow.history.rerun': (v) => `Rerun from ${v?.runId ?? ''}`,
@@ -3651,13 +3737,6 @@ const EN: Messages = {
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
-  'channels.editor.field.github.senderPolicy': 'Sender Policy',
-  'channels.editor.field.github.senderPolicy.description':
-    'Use "Allowlist" with allowed users on public repos',
-  'channels.editor.field.github.allowedUsers':
-    'Allowed Users (comma-separated)',
-  'channels.editor.field.github.allowedUsers.description':
-    'GitHub usernames, used by Allowlist and Pairing policies',
   'channels.editor.field.github.reasonFilter': 'Reason Filter',
   'channels.editor.field.github.reasonFilter.description':
     'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
@@ -3670,13 +3749,6 @@ const EN: Messages = {
   'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
   'channels.editor.field.gitlab.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
-  'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
-  'channels.editor.field.gitlab.senderPolicy.description':
-    'Use "Allowlist" with allowed users on public projects',
-  'channels.editor.field.gitlab.allowedUsers':
-    'Allowed Users (comma-separated)',
-  'channels.editor.field.gitlab.allowedUsers.description':
-    'GitLab usernames, used by Allowlist and Pairing policies',
   'channels.editor.field.gitlab.action_prompt_template': 'Action Templates',
   'channels.editor.field.gitlab.action_prompt_template.description':
     'Only actions with a template are processed; others are skipped. Template variables: %project%, %project_url%, %author%, %target_type%, %iid%, %title%, %description%, %todo_id%. Use %% for a literal %. Example for "mentioned": Project: %project% | Author: %author% | Title: %title%',
@@ -3713,23 +3785,19 @@ const EN: Messages = {
   'channels.editor.field.shared.outputMode.option.per_response': 'Per response',
   'channels.editor.field.shared.outputMode.option.per_turn':
     'Per turn (default)',
-  'channels.editor.field.shared.senderPolicy': 'Direct message policy',
-  'channels.editor.field.dws.senderPolicy': 'Sender policy',
-  'channels.editor.field.dws.senderPolicy.description':
-    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
-  'channels.editor.field.dws.dmPolicy': 'Direct message access',
-  'channels.editor.field.dws.dmPolicy.description':
-    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
-  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
-  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
-  'channels.editor.field.shared.senderPolicy.description':
+  'channels.editor.field.shared.privatePolicy': 'Direct message policy',
+  'channels.editor.field.dws.privatePolicy': 'Direct message policy',
+  'channels.editor.field.dws.privatePolicy.description':
+    'Controls which users can start direct-message, document-notification, and native-todo tasks.',
+  'channels.editor.field.shared.privatePolicy.description':
     'Choose who can start a direct conversation with this Channel.',
-  'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
-  'channels.editor.field.shared.senderPolicy.option.allowlist': 'Allowlist',
-  'channels.editor.field.shared.senderPolicy.option.open': 'Open',
+  'channels.editor.field.shared.privatePolicy.option.disabled': 'Disabled',
+  'channels.editor.field.shared.privatePolicy.option.pairing': 'Pairing',
+  'channels.editor.field.shared.privatePolicy.option.allowlist': 'Allowlist',
+  'channels.editor.field.shared.privatePolicy.option.open': 'Open',
   'channels.editor.field.shared.allowedUsers': 'Allowed user IDs',
   'channels.editor.field.shared.allowedUsers.description':
-    'Comma-separated stable user IDs that can access the Channel without pairing.',
+    'Comma-separated stable user IDs that can start private conversations without pairing.',
   'channels.editor.field.shared.groupPolicy': 'Group policy',
   'channels.editor.field.shared.groupPolicy.description':
     'Choose which group conversations can use this Channel.',
@@ -3742,6 +3810,20 @@ const EN: Messages = {
     'Comma-separated stable chat or repository IDs allowed to use this Channel.',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
+  'channels.editor.field.shared.groupSenders': 'Who can talk in groups',
+  'channels.editor.field.shared.groupSenders.description':
+    'Applies to every admitted group. Set a single group differently in settings.json.',
+  'channels.editor.field.shared.groupSenders.option.open': 'Any group member',
+  'channels.editor.field.shared.groupSenders.option.allowlist':
+    'Listed members only',
+  'channels.editor.field.shared.groupAllowedUsers': 'Allowed group member IDs',
+  'channels.editor.field.shared.groupAllowedUsers.description':
+    'Comma-separated stable user IDs who can talk in groups. Separate from the allowed user IDs for direct messages.',
+  'channels.editor.field.shared.groupAllowedUsers.placeholder':
+    'user-a, user-b',
+  'channels.editor.field.shared.operators': 'Session operators',
+  'channels.editor.field.shared.operators.description':
+    'Comma-separated user IDs who can approve tool use and run /cancel, /clear or /loop in shared sessions. Leave empty to grant no shared-session operator permissions.',
   'channels.editor.field.shared.sessionScope': 'Conversation isolation',
   'channels.editor.field.shared.sessionScope.description':
     'Choose how conversations share persistent agent context.',
@@ -3765,6 +3847,12 @@ const EN: Messages = {
     'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
+  'channels.editor.policy.disabled.title': 'Disabled',
+  'channels.editor.policy.disabled.description':
+    'Disable private conversations.',
+  'channels.editor.policy.allowlist.title': 'Allowlist',
+  'channels.editor.policy.allowlist.description':
+    'Only listed users can start private conversations.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -3872,6 +3960,20 @@ const EN: Messages = {
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'localControl.open': 'Mobile access',
+  'localControl.expires': (v) =>
+    `One-time QR · Expires in ${v?.seconds ?? ''}s · Refreshes automatically`,
+  'localControl.expired': 'QR code expired. Getting a fresh code…',
+  'localControl.retry': 'Retry',
+  'localControl.noNetwork':
+    'No local network address is available. Open the Web Shell through an address your phone can reach.',
+  'localControl.securePairing':
+    'Scan to grant access until this daemon restarts.',
+  'localControl.insecurePairing':
+    'Scan to grant access until this daemon restarts. Traffic is unencrypted; use a trusted network.',
+  'localControl.securePairingDynamic':
+    "Scan to grant access to this daemon. The device that scans stays signed in until the daemon restarts or that device's tab is closed.",
+  'localControl.insecurePairingDynamic':
+    "Scan to grant access to this daemon. The device that scans stays signed in until the daemon restarts or that device's tab is closed. Traffic is unencrypted; use a trusted network.",
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
@@ -5606,8 +5708,9 @@ const ZH: Messages = {
   'sidebar.addWorkspaceBusyError': '另一个工作区操作正在进行中',
   'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceRefreshError': '工作区已添加，但无法刷新工作区列表',
-  'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',
-  'sidebar.addWorkspaceHint': '请输入项目目录的绝对路径。',
+  'sidebar.addWorkspaceAbsError': '请输入绝对路径或 SSH 工作区地址。',
+  'sidebar.addWorkspaceHint':
+    '请输入本地绝对路径或 ssh://user@host/absolute/project。SSH 需要密钥认证、已确认的主机密钥，以及远端 Python 3。Shell 命令还需要 Bash；远端无需安装 Qwen。',
   'sidebar.addWorkspaceSuggestions': '目录建议',
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
@@ -5914,6 +6017,31 @@ const ZH: Messages = {
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'shell.command': 'Shell 命令',
+  'shell.result.timedOut': '执行超时',
+  'shell.result.notices': '提示',
+  'shell.result.truncated': '输出预览已截断',
+  'shell.result.outputFiles': '输出文件',
+  'shell.result.output': '输出',
+  'shell.result.command': '命令',
+  'shell.result.copy': '复制命令',
+  'shell.result.details': '执行详情',
+  'shell.result.directory': '目录',
+  'shell.result.timeout': '超时设置',
+  'shell.result.timeoutMs': (v) => `${v?.milliseconds} 毫秒`,
+  'shell.result.defaultTimeout': '使用默认值',
+  'shell.result.exitCode': '退出码',
+  'shell.result.signal': '信号',
+  'shell.result.pending': '等待执行',
+  'shell.result.elapsed': '已运行',
+  'shell.result.lines': '输出行数',
+  'shell.result.bytes': '输出字节数',
+  'shell.result.running': '运行中',
+  'shell.result.completed': '已完成',
+  'shell.result.success': '执行成功',
+  'shell.result.cancelled': '已取消',
+  'shell.result.waiting': '等待输出…',
+  'shell.result.empty': '无输出',
+  'shell.result.exited': (v) => `退出码 ${v?.code}`,
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
   'help.tab.custom': '自定义命令',
@@ -6813,6 +6941,48 @@ const ZH: Messages = {
   'tokenUsage.tools': '工具',
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  'trajectory.title': '轨迹',
+  'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
+  'trajectory.empty': '这个会话还没有记录。',
+  'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
+  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
+  'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
+  'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
+  'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
+  'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
+  'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
+  'trajectory.totals': (v) =>
+    `${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
+  'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
+  'trajectory.turnSummary': (v) =>
+    `${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.request': '模型请求',
+  'trajectory.requestFailed': '请求失败',
+  'trajectory.ttft': (v) => `首字 ${v?.duration ?? ''}`,
+  'trajectory.subagentRollup': (v) =>
+    `子代理 ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.badge.user': '用户',
+  'trajectory.badge.message': '回复',
+  'trajectory.badge.thought': '思考',
+  'trajectory.badge.tool': '工具',
+  'trajectory.badge.subagent': '子代理',
+  'trajectory.badge.shell': '终端',
+  'trajectory.badge.permission': '询问',
+  'trajectory.badge.status': '提示',
+  'trajectory.badge.cancelled': '中断',
+  'trajectory.badge.other': '其他',
+  'trajectory.cancelled': '本轮已取消',
+  'trajectory.overview.label': (v) =>
+    `时间轴：${v?.spans ?? 0} 条有计时的记录，活跃 ${v?.busy ?? ''}`,
+  'trajectory.overview.busy': (v) => `活跃 ${v?.duration ?? ''}`,
+  'trajectory.range.status': (v) =>
+    `已筛选：区间内 ${v?.shown ?? 0} / ${v?.total ?? 0} 行`,
+  'trajectory.range.clear': '清除时间区间',
+  'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
+  'trajectory.overview.lane.requests': '请求',
+  'trajectory.overview.lane.tools': '工具',
+  'trajectory.overview.lane.subagents': '子代理',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
@@ -7021,6 +7191,7 @@ const ZH: Messages = {
   'workflow.action.retry': '重试失败路径',
   'workflow.action.rerun': '全部重跑',
   'workflow.action.unavailable': '操作前工作流状态已发生变化。',
+  'workflow.action.argsUnavailable': '无法重启：历史里没有它启动时用的参数。',
   'workflow.action.failed': '无法更新工作流状态。',
   'workflow.history.retry': (v) => `从 ${v?.runId ?? ''} 续跑`,
   'workflow.history.rerun': (v) => `从 ${v?.runId ?? ''} 全部重跑`,
@@ -7388,12 +7559,6 @@ const ZH: Messages = {
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
-  'channels.editor.field.github.senderPolicy': '发送者策略',
-  'channels.editor.field.github.senderPolicy.description':
-    '公开仓库建议使用 "Allowlist" 并指定允许的用户',
-  'channels.editor.field.github.allowedUsers': '允许的用户（逗号分隔）',
-  'channels.editor.field.github.allowedUsers.description':
-    'GitHub 用户名，用于 Allowlist 和 Pairing 策略',
   'channels.editor.field.github.reasonFilter': '通知原因过滤',
   'channels.editor.field.github.reasonFilter.description':
     '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
@@ -7406,12 +7571,6 @@ const ZH: Messages = {
   'channels.editor.field.gitlab.groupPolicy': '群组策略',
   'channels.editor.field.gitlab.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能处理 Todo',
-  'channels.editor.field.gitlab.senderPolicy': '发送者策略',
-  'channels.editor.field.gitlab.senderPolicy.description':
-    '公开项目建议使用 "Allowlist" 并指定允许的用户',
-  'channels.editor.field.gitlab.allowedUsers': '允许的用户（逗号分隔）',
-  'channels.editor.field.gitlab.allowedUsers.description':
-    'GitLab 用户名，用于 Allowlist 和 Pairing 策略',
   'channels.editor.field.gitlab.action_prompt_template': '动作模板',
   'channels.editor.field.gitlab.action_prompt_template.description':
     '仅配置了模板的动作会被处理，其余跳过。模板变量：%project%、%project_url%、%author%、%target_type%、%iid%、%title%、%description%、%todo_id%。用 %% 表示字面 %。示例（mentioned）：Project: %project% | Author: %author% | Title: %title%',
@@ -7446,23 +7605,19 @@ const ZH: Messages = {
   'channels.editor.field.shared.outputMode.option.per_task': '按任务',
   'channels.editor.field.shared.outputMode.option.per_response': '按回复',
   'channels.editor.field.shared.outputMode.option.per_turn': '按轮（默认）',
-  'channels.editor.field.shared.senderPolicy': '私聊策略',
-  'channels.editor.field.dws.senderPolicy': '发送者策略',
-  'channels.editor.field.dws.senderPolicy.description':
-    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
-  'channels.editor.field.dws.dmPolicy': '私聊访问',
-  'channels.editor.field.dws.dmPolicy.description':
-    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
-  'channels.editor.field.dws.dmPolicy.option.open': '开放',
-  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
-  'channels.editor.field.shared.senderPolicy.description':
+  'channels.editor.field.shared.privatePolicy': '私聊策略',
+  'channels.editor.field.dws.privatePolicy': '私聊策略',
+  'channels.editor.field.dws.privatePolicy.description':
+    '控制哪些用户可以通过私聊、文档通知和原生待办启动任务。',
+  'channels.editor.field.shared.privatePolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
-  'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
-  'channels.editor.field.shared.senderPolicy.option.allowlist': '白名单',
-  'channels.editor.field.shared.senderPolicy.option.open': '开放',
+  'channels.editor.field.shared.privatePolicy.option.disabled': '禁用',
+  'channels.editor.field.shared.privatePolicy.option.pairing': '配对',
+  'channels.editor.field.shared.privatePolicy.option.allowlist': '白名单',
+  'channels.editor.field.shared.privatePolicy.option.open': '开放',
   'channels.editor.field.shared.allowedUsers': '允许的用户 ID',
   'channels.editor.field.shared.allowedUsers.description':
-    '用英文逗号分隔稳定用户 ID；这些用户无需配对即可访问频道。',
+    '用英文逗号分隔稳定用户 ID；这些用户无需配对即可发起私聊。',
   'channels.editor.field.shared.groupPolicy': '群聊策略',
   'channels.editor.field.shared.groupPolicy.description':
     '选择哪些群聊可以使用此频道。',
@@ -7475,6 +7630,19 @@ const ZH: Messages = {
     '用英文逗号分隔允许使用此频道的稳定群聊或代码仓库 ID。',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
+  'channels.editor.field.shared.groupSenders': '群内谁能发言',
+  'channels.editor.field.shared.groupSenders.description':
+    '对所有已放行的群生效。如需单独设置某个群，请在 settings.json 中配置。',
+  'channels.editor.field.shared.groupSenders.option.open': '任何群成员',
+  'channels.editor.field.shared.groupSenders.option.allowlist': '仅名单内成员',
+  'channels.editor.field.shared.groupAllowedUsers': '允许发言的群成员 ID',
+  'channels.editor.field.shared.groupAllowedUsers.description':
+    '用英文逗号分隔可以在群内发言的稳定用户 ID；与私聊的允许用户 ID 相互独立。',
+  'channels.editor.field.shared.groupAllowedUsers.placeholder':
+    'user-a, user-b',
+  'channels.editor.field.shared.operators': '会话管理者',
+  'channels.editor.field.shared.operators.description':
+    '用英文逗号分隔可以在共享会话中批准工具调用、执行 /cancel、/clear 或 /loop 的用户 ID。留空则不授予共享会话管理权限。',
   'channels.editor.field.shared.sessionScope': '会话隔离方式',
   'channels.editor.field.shared.sessionScope.description':
     '选择不同对话如何共享持久化的智能体上下文。',
@@ -7498,6 +7666,10 @@ const ZH: Messages = {
     '注入到每个频道会话上下文中的指引。部分频道在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
+  'channels.editor.policy.disabled.title': '禁用',
+  'channels.editor.policy.disabled.description': '禁用私聊。',
+  'channels.editor.policy.allowlist.title': '白名单',
+  'channels.editor.policy.allowlist.description': '仅名单内用户可以发起私聊。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
@@ -7600,6 +7772,19 @@ const ZH: Messages = {
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'localControl.open': '手机访问',
+  'localControl.expires': (v) =>
+    `一次性二维码 · ${v?.seconds ?? ''} 秒后过期 · 自动刷新`,
+  'localControl.expired': '二维码已过期，正在获取新码…',
+  'localControl.retry': '重试',
+  'localControl.noNetwork':
+    '没有可用的局域网地址。请通过手机可访问的地址打开 Web Shell。',
+  'localControl.securePairing': '扫码将授予访问权限，直到 daemon 重启。',
+  'localControl.insecurePairing':
+    '扫码将授予访问权限，直到 daemon 重启。流量未加密，请使用受信任网络。',
+  'localControl.securePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。扫码的设备保持登录，直到 daemon 重启或该设备上的标签页关闭。',
+  'localControl.insecurePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。扫码的设备保持登录，直到 daemon 重启或该设备上的标签页关闭。流量未加密，请使用受信任网络。',
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
@@ -7674,7 +7859,7 @@ const ZH: Messages = {
     '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
   'settings.label.general.cleanupPeriodDays': '清理周期（天）',
   'settings.description.general.cleanupPeriodDays':
-    '~/.qwen/file-history/ 中用于 /rewind 的会话备份保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
+    '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
   'settings.label.general.gitCoAuthor.commit': '归因：commit',
   'settings.description.general.gitCoAuthor.commit':
     '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',
@@ -7725,7 +7910,7 @@ const ZH: Messages = {
     '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用。桥接的查看与调用保持工具声明列表稳定——桥接不会把 reveal 的工具重新声明——从而减少提示词大小且不触碰 prompt-cache 前缀。但声明列表并非不可变：会话仍会在以下情况重新声明——恢复会话时；工具集刷新（MCP 发现、会话中首次进入计划模式、子代理定义变更）在实时历史中发现对某个仍隐藏的 deferred 工具的直接调用时；子代理定义变更改写 agent 工具自身描述时；以及 MCP server 在会话中以 alwaysLoadTools: true 注册时。',
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
-    '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
+    '使用 node-pty 提供交互式 shell 体验。未设置时，明确的单次 prompt 默认使用 child_process；交互式和输入驱动模式默认使用 PTY。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',

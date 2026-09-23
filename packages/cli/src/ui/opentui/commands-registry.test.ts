@@ -123,14 +123,16 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
   it('maps each dialog kind onto its exact OpenTUI target', () => {
     // Pins the mapping itself, not just its existence: mis-routing one
     // dialog onto another (e.g. theme → settings) must fail here.
-    const targets: Array<[InkDialogKind, string]> = [
+    const targets: Array<[InkDialogKind, string, object?]> = [
       ['help', 'help'],
       ['theme', 'theme'],
       ['editor', 'editor'],
       ['settings', 'settings'],
       ['statusline', 'statusline'],
       ['memory', 'memory'],
-      ['auth', 'auth'],
+      // A command-opened auth dialog records its result; the boot auth-error
+      // open does not (ink useAuth's openedViaCommandRef).
+      ['auth', 'auth', { openedViaCommand: true }],
       ['trust', 'trust'],
       ['permissions', 'permissions'],
       ['approval-mode', 'approval-mode'],
@@ -145,13 +147,13 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
       ['diff', 'diff'],
       ['stats', 'stats'],
     ];
-    for (const [dialog, target] of targets) {
+    for (const [dialog, target, extras] of targets) {
       expect(
         routeDialogToOpenTui({
           type: 'dialog',
           dialog,
         } as OpenDialogActionReturn),
-      ).toEqual({ dialog: target });
+      ).toEqual({ dialog: target, ...extras });
     }
   });
 
