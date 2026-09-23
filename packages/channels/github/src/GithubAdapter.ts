@@ -24,6 +24,7 @@ import type {
 import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
+  lowercaseGroupAllowedUsers,
   PollingChannelBase,
   sanitizeDisplayText,
   sanitizeLogText,
@@ -622,6 +623,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     this.gate.replaceAllowedUsers(allowed);
+    // Per-group speaker lists are matched against the same lowercased login.
+    lowercaseGroupAllowedUsers(this.config.groups);
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
     this.migrateLegacyPublicationState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;
@@ -1348,13 +1354,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
-      // Approved paired groups bypass the sender gate in preflight, so the
-      // directed lane must mirror that or follow-ups fail mention gating.
-      const allowed =
-        this.gate.isAllowed(senderId) ||
-        (directed &&
-          this.config.groupPolicy === 'pairing' &&
-          this.groupGate.isGroupApproved(ctx.chatId));
+      // The same per-conversation gate preflight applies, so an approved
+      // paired group admits its members here too.
+      const allowed = this.senderGateFor({
+        isGroup: true,
+        chatId: ctx.chatId,
+      }).isAllowed(senderId);
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -1453,12 +1458,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await this.processCommentLane(ctx, false, true);
       return;
     }
+    const senderGate = this.senderGateFor({
+      isGroup: true,
+      chatId: ctx.chatId,
+    });
     const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        this.gate.isAllowed(sender)
+        senderGate.isAllowed(sender)
       );
     });
     for (const comment of newComments) {

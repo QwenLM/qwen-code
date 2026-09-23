@@ -47,3 +47,37 @@ describe('PWA pre-auth classification', () => {
     ).toBe(false);
   });
 });
+
+describe('page deep links', () => {
+  it.each(['/plugins', '/channels', '/scheduled-tasks', '/goals', '/settings'])(
+    'only exempts document GET/HEAD on exact %s',
+    (path) => {
+      for (const method of ['GET', 'HEAD']) {
+        for (const pathname of [path, `${path}/`, path.toUpperCase()]) {
+          expect(
+            isPreAuthWebShellRequest({
+              method,
+              path: pathname,
+              headers: { accept: 'text/html' },
+            } as Request),
+          ).toBe(true);
+        }
+      }
+      for (const request of [
+        { method: 'GET', path, headers: { accept: 'application/json' } },
+        { method: 'POST', path, headers: { accept: 'text/html' } },
+        {
+          method: 'GET',
+          path: `${path}/data`,
+          headers: { accept: 'text/html' },
+        },
+        {
+          method: 'GET',
+          path: `${path}%2fdata`,
+          headers: { accept: 'text/html' },
+        },
+      ])
+        expect(isPreAuthWebShellRequest(request as Request)).toBe(false);
+    },
+  );
+});

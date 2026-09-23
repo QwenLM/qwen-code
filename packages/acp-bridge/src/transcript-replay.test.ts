@@ -973,6 +973,93 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it.each([
+    ['file', '@README.md'],
+    ['mcp', '@mcp:o2'],
+    ['extension', '@ext:browser'],
+  ])('restores %s input annotations from saved user records', (kind, text) => {
+    const inputAnnotations = [
+      {
+        type: 'reference',
+        start: 0,
+        end: text.length,
+        text,
+        reference: { id: text, kind, value: text.slice(1), serialized: text },
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-tag', 'user', {
+        daemonPromptId: 'tag-prompt',
+        message: { role: 'user', parts: [{ text: 'expanded model input' }] },
+        systemPayload: { displayText: text, hookContext: '', inputAnnotations },
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text },
+        _meta: expect.objectContaining({
+          inputAnnotations,
+          promptId: 'tag-prompt',
+          qwenTranscript: {
+            sourceRecordIds: ['user-tag'],
+            segmentId: 'user-tag:0',
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it.each([undefined, null, 'invalid', {}, [null], ['x'], [[null]]])(
+    'ignores missing or non-array saved input annotations (%j)',
+    (inputAnnotations) => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-plain', 'user', {
+          message: { role: 'user', parts: [{ text: '@README.md' }] },
+          systemPayload: {
+            displayText: '@README.md',
+            hookContext: '',
+            inputAnnotations,
+          },
+        }),
+      );
+      expect(projected[0]._meta).not.toHaveProperty('inputAnnotations');
+      expect(projected[0]).toMatchObject({
+        content: { type: 'text', text: '@README.md' },
+      });
+    },
+  );
+
+  it('forwards only object elements from saved input annotations', () => {
+    const valid = {
+      type: 'reference',
+      start: 0,
+      end: 10,
+      text: '@README.md',
+      reference: {
+        id: '@README.md',
+        kind: 'file',
+        value: 'README.md',
+        serialized: '@README.md',
+      },
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-mixed', 'user', {
+        message: { role: 'user', parts: [{ text: '@README.md' }] },
+        systemPayload: {
+          displayText: '@README.md',
+          hookContext: '',
+          inputAnnotations: [valid, null, 'x'],
+        },
+      }),
+    );
+    expect(projected[0]._meta).toMatchObject({ inputAnnotations: [valid] });
+  });
+
   it('strips only a complete final tag-only context part', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -2778,14 +2865,46 @@ describe('ui_telemetry timing frames', () => {
     });
   });
 
-  it('gives a tool frame no start time, because none was recorded', () => {
+  it('derives no tool start time when the record carries none', () => {
     // logToolCall runs in one loop after the whole batch settles, so the
     // recorded timestamp is the batch's end for every tool in it. Subtracting
     // a fast tool's own duration from that would place it just before the
-    // batch ended rather than when it ran.
+    // batch ended rather than when it ran — so a record written before
+    // `started_at_ms` existed gets no start at all.
     const [toolTiming] = timings(
       timingMachine(),
       telemetry('tel-1', TOOL_CALL_EVENT),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });
+    expect(toolTiming).not.toHaveProperty('startedAt');
+  });
+
+  it('carries the start time a tool record measured', () => {
+    // The shape a scheduled batch leaves behind: this call started at :01 and
+    // took 16 ms, but was only logged at :06.560 when its batch settled. The
+    // start must be the recorded one, not the log time minus the duration.
+    const startedAtMs = Date.parse('2026-07-14T00:00:01.000Z');
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, started_at_ms: startedAtMs }),
+    );
+
+    expect(toolTiming).toMatchObject({
+      kind: 'tool',
+      durationMs: 16,
+      startedAt: startedAtMs,
+    });
+  });
+
+  it.each([
+    ['negative', -1],
+    ['not a number', Number.NaN],
+    ['a string', '2026-07-14T00:00:01.000Z'],
+  ])('drops a recorded tool start that is %s', (_label, value) => {
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, started_at_ms: value }),
     );
 
     expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });

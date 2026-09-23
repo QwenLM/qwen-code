@@ -18112,6 +18112,75 @@ describe('App session callbacks', () => {
     window.localStorage.removeItem('qwen-remote-connections');
   });
 
+  it('withholds the connected daemon affordances while browsing another location', async () => {
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+        'workspace_display_name',
+        'native_directory_picker',
+      ],
+      workspaceCwd: '/srv/local/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/srv/local/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify(['https://remote.example']),
+    );
+    const view = renderApp({}, undefined, true);
+    await flush();
+
+    act(() => {
+      view.container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')
+        ?.click();
+    });
+
+    // The connected location: every affordance describes this daemon, so all
+    // of them are offered and the browse seeds from this filesystem.
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      browseDirectories: true,
+      selectedLocation: window.location.origin,
+      initialPath: '/srv/local/',
+      persistenceSupported: true,
+      displayNameEnabled: true,
+    });
+    expect(testState.latestAddWorkspaceDialogProps?.onPick).toBeTypeOf(
+      'function',
+    );
+
+    act(() => {
+      testState.latestAddWorkspaceDialogProps?.onLocationChange?.(
+        'https://remote.example',
+      );
+    });
+    await flush();
+
+    // Browsing another computer in place: its capabilities are unknowable
+    // without querying it, so the affordances are withheld rather than assumed
+    // from the connected daemon — a native picker would open on the wrong
+    // machine, a Persist switch would draw the target's raw 501 or silently
+    // register a workspace that dies on its next restart, and a cwd from this
+    // filesystem seeds a browse the target answers with an empty list.
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      selectedLocation: 'https://remote.example',
+      initialPath: '/',
+      persistenceSupported: false,
+      displayNameEnabled: false,
+    });
+    expect(testState.latestAddWorkspaceDialogProps?.onPick).toBeUndefined();
+
+    view.unmount();
+    window.localStorage.removeItem('qwen-remote-connections');
+  });
+
   it('discards a return location an abandoned hand-over left behind', async () => {
     // The reload that abandoned the flow stripped the marker but not the key,
     // so a standalone boot with no marker must not carry it into the next
@@ -36865,6 +36934,135 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(mockWorkspace.client.startLive).toHaveBeenCalledOnce();
+    expect(mockWorkspace.client.startLive).toHaveBeenCalledWith('new');
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('opens an ordinary task from the sidebar New task in a Live chat', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/workspace',
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/internal/conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.clearSession.mockImplementation(async () => {
+      mockConnection.sessionId = undefined;
+      mockConnection.sessionContext = undefined;
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rerender();
+      await flush();
+    });
+
+    expect(mockWorkspace.client.startLive).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('task prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      }),
+    );
+  });
+
+  it('opens a standalone draft from a Live chat when no primary is trusted', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+        {
+          id: 'live',
+          cwd: '/internal/conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.clearSession.mockImplementation(async () => {
+      mockConnection.sessionId = undefined;
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rerender();
+      await flush();
+    });
+
+    expect(mockWorkspace.client.startLive).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('task prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
+    );
+  });
+
+  it('keeps the Live path for New task when no draft target exists', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+        {
+          id: 'live',
+          cwd: '/internal/conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
     expect(mockWorkspace.client.startLive).toHaveBeenCalledWith('new');
     expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
   });

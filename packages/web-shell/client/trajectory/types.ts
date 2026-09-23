@@ -47,9 +47,9 @@ export type TrajectoryEntry =
 export interface TrajectoryTiming {
   durationMs: number;
   /**
-   * Requests only. Tool calls are logged in one loop after their whole batch
-   * settles, so the recorded timestamp is the batch's end for every tool in it
-   * and no honest per-tool start can be derived.
+   * Epoch ms. Requests have one whenever their end was recorded; tool calls
+   * only when the session recorded the call's start, which older sessions did
+   * not.
    */
   startedAt?: number;
   /** Requests only: dispatch to first user-visible content. */

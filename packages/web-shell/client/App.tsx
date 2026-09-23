@@ -1,4 +1,6 @@
 import './styles/globals.css';
+import { useWebShellNavigation } from './navigation';
+import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
@@ -266,12 +268,13 @@ import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
+  addWorkspaceToDaemon,
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
   discardAbandonedRemoteWorkspaceAdd,
+  fetchRemotePathSuggestions,
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
-  selectRemoteWorkspaceLocation,
 } from './config/remote-workspace-add';
 import {
   clearInitialConnectionsSettingsCategory,
@@ -279,7 +282,11 @@ import {
   getInitialConnectionsSettingsCategory,
   listRemoteComputers,
 } from './config/remote-connections';
-import { getDaemonToken, isPageOriginDaemon } from './config/daemon';
+import {
+  getDaemonToken,
+  isPageOriginDaemon,
+  navigateToDaemon,
+} from './config/daemon';
 import { Button } from './components/ui/button';
 import {
   isPluginShadowPanel,
@@ -1513,7 +1520,13 @@ type SessionActionsWithCreate = {
 
 type NewSessionIntent =
   | { kind: 'global' }
-  | { kind: 'inherit' }
+  /**
+   * Stay in the current context. From a Live chat that means a fresh Live
+   * conversation, unless `leaveLive` sends the new chat to the trusted
+   * primary workspace the way a cold draft starts (or to a standalone draft
+   * when there is no trusted primary).
+   */
+  | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
 
 type StandaloneRecoveryResolution =
@@ -2447,7 +2460,11 @@ function updateCockpitLocation(open: boolean, replace = false): void {
   } else {
     url.searchParams.delete('view');
   }
-  window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
+  window.history[replace ? 'replaceState' : 'pushState'](
+    window.history.state,
+    '',
+    url,
+  );
 }
 
 function formatError(error: unknown, fallback: string): string {
@@ -3181,6 +3198,9 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  const navigation = useWebShellNavigation();
+  const navigationRef = useRef(navigation);
+  navigationRef.current = navigation;
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -8990,8 +9010,10 @@ export function App({
         | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
-      showChat();
+      if (navigationRef.current && isWebShellPage(panel)) setMainView('chat');
+      else showChat();
       setActivePanel(panel);
+      if (isWebShellPage(panel)) navigationRef.current?.openPage(panel);
     },
     [showChat],
   );
@@ -9002,8 +9024,9 @@ export function App({
     // deep link — the URL-sync removal branch only fires when the feature is
     // disabled, and a stale deep link would reopen the cockpit on reload or
     // Forward navigation instead of the view actually on screen.
-    showChat();
+    if (!navigationRef.current) showChat();
     setMainView('scheduledTasks');
+    navigationRef.current?.openPage('scheduled-tasks');
   }, [showChat]);
   const openWorkflows = useCallback(() => {
     if (!projectFeaturesAvailable || !workflowsEnabled) return;
@@ -9024,9 +9047,90 @@ export function App({
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
     // See openScheduledTasks: leaving the cockpit must strip its deep link.
-    showChat();
+    if (!navigationRef.current) showChat();
     setMainView('goals');
+    navigationRef.current?.openPage('goals');
   }, [showChat]);
+  const returnToChat = useCallback(() => {
+    if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
+      navigationRef.current.returnToChat();
+    } else {
+      closePanel();
+      showChat();
+    }
+  }, [closePanel, showChat]);
+  const navigationAppliedRef = useRef<number | undefined>(undefined);
+  const navigationExpectedPageRef = useRef<WebShellPage | undefined>(undefined);
+  const navigationSettledRef = useRef(false);
+  const visibleNavigationPage: WebShellPage | undefined =
+    activePanel && isWebShellPage(activePanel)
+      ? activePanel
+      : mainView === 'scheduledTasks'
+        ? 'scheduled-tasks'
+        : mainView === 'goals'
+          ? 'goals'
+          : undefined;
+  useEffect(() => {
+    if (!navigation || !workspaceCapabilitiesReady) return;
+    const page = navigation.route.page;
+    if (page === 'chat' && navigation.revision === 0) {
+      navigationAppliedRef.current = navigation.revision;
+      navigationSettledRef.current = true;
+      return;
+    }
+    const primaryItem = page === 'scheduled-tasks' ? 'scheduledTasks' : page;
+    const allowed =
+      page === 'chat' ||
+      (projectFeaturesAvailable &&
+        (page === 'settings'
+          ? sidebarOptions.footer !== false &&
+            (sidebarOptions.footer?.items?.includes('settings') ?? true)
+          : (sidebarOptions.primaryNav?.items?.some(
+              (item) => item === primaryItem,
+            ) ?? true)));
+    if (navigationAppliedRef.current === navigation.revision && allowed) return;
+    navigationAppliedRef.current = navigation.revision;
+    navigationSettledRef.current = false;
+    const nextPage = allowed && page !== 'chat' ? page : undefined;
+    navigationExpectedPageRef.current = nextPage;
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(
+      nextPage === 'plugins' ||
+        nextPage === 'channels' ||
+        nextPage === 'settings'
+        ? nextPage
+        : null,
+    );
+    setMainView(
+      nextPage === 'scheduled-tasks'
+        ? 'scheduledTasks'
+        : nextPage === 'goals'
+          ? 'goals'
+          : 'chat',
+    );
+    if (nextPage === 'settings') setSettingsInitialCategory(undefined);
+    if (!allowed) navigation.reconcilePage(undefined);
+  }, [
+    navigation,
+    projectFeaturesAvailable,
+    sidebarOptions.footer,
+    sidebarOptions.primaryNav?.items,
+    workspaceCapabilitiesReady,
+  ]);
+  useEffect(() => {
+    if (
+      !navigation ||
+      !workspaceCapabilitiesReady ||
+      navigationAppliedRef.current !== navigation.revision
+    )
+      return;
+    if (!navigationSettledRef.current) {
+      if (visibleNavigationPage !== navigationExpectedPageRef.current) return;
+      navigationSettledRef.current = true;
+      return;
+    }
+    navigation.reconcilePage(visibleNavigationPage);
+  }, [navigation, visibleNavigationPage, workspaceCapabilitiesReady]);
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
     splitClassificationGenerationRef.current += 1;
@@ -9316,7 +9420,7 @@ export function App({
     if (ids.length > 0) {
       const url = new URL(window.location.href);
       url.searchParams.delete('split');
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
       if (!externalSplitControlled) {
         openSplitView(ids);
       }
@@ -13086,6 +13190,24 @@ export function App({
                 cwd: connectionRef.current.workspaceCwd,
               }
             : undefined);
+        if (nextContext?.kind === 'live' && intent.leaveLive) {
+          // Clearing keeps the connection's live context, so an undefined
+          // pending context would send the first prompt back to Live. Without
+          // a trusted primary, leave for a standalone draft when the daemon
+          // offers one and otherwise keep the Live path.
+          const primaryCwd = workspacesRef.current.find(
+            (entry) => entry.primary && entry.trusted !== false,
+          )?.cwd;
+          if (primaryCwd) {
+            nextContext = { kind: 'workspace', cwd: primaryCwd };
+          } else if (
+            workspaceCapabilitiesRef.current?.features?.includes(
+              STANDALONE_SESSIONS_CAPABILITY,
+            )
+          ) {
+            nextContext = { kind: 'standalone' };
+          }
+        }
         if (nextContext?.kind === 'live') {
           pendingManualTitleRef.current = undefined;
           gitModeIntentRef.current = { mode: 'current' };
@@ -13146,6 +13268,8 @@ export function App({
       const targetWorkspaceCwd =
         nextContext?.kind === 'workspace' ? nextContext.cwd : undefined;
       const previousPendingContext = pendingSessionContextRef.current;
+      if (!opts?.keepView && !opts?.keepPanel)
+        navigationRef.current?.beginSessionNavigation();
       setPendingSessionContext(nextContext);
       setSidebarSwitchingSessionId(null);
       composerSourceVersionRef.current += 1;
@@ -13180,6 +13304,13 @@ export function App({
         ).clearSession();
         focusRequest = scheduleComposerFocus();
         await clearPromise;
+        if (
+          sessionOpenInvocationRef.current === invocation &&
+          !opts?.keepView &&
+          !opts?.keepPanel
+        ) {
+          navigationRef.current?.finishNewChat(nextContext);
+        }
         // Clear after successful clearSession — if it rejects, the old
         // session's worktree/branch state is preserved.
         setSessionWorktree(undefined);
@@ -13190,6 +13321,7 @@ export function App({
           sessionOpenInvocationRef.current === invocation &&
           pendingSessionContextRef.current === nextContext
         ) {
+          navigationRef.current?.cancelSessionNavigation();
           setPendingSessionContext(previousPendingContext);
         }
         if (composerFocusRequestRef.current === focusRequest) {
@@ -13349,24 +13481,11 @@ export function App({
       workspaceActions,
     ],
   );
-  const handleAddRemoteWorkspace = useCallback(
-    async (cwd: string, persist: boolean, displayName?: string) => {
-      await handleAddWorkspace(cwd, persist, displayName);
-      workspaceBrowseActiveRef.current = false;
-      completeRemoteWorkspaceAdd();
-    },
-    [handleAddWorkspace],
-  );
-
-  const closeAddWorkspaceDialog = useCallback(() => {
-    setShowAddWorkspaceDialog(false);
-    if (!workspaceBrowseActiveRef.current) return;
-    workspaceBrowseActiveRef.current = false;
-    leaveRemoteWorkspaceAdd();
-  }, []);
-
+  const [workspaceAddLocation, setWorkspaceAddLocation] = useState<
+    string | undefined
+  >(undefined);
   const workspaceAddSelectedLocation =
-    workspace.baseUrl || window.location.origin;
+    workspaceAddLocation || workspace.baseUrl || window.location.origin;
   const workspaceAddLocations = standalone
     ? [
         {
@@ -13382,14 +13501,102 @@ export function App({
       ]
     : undefined;
   const hasRemoteWorkspaceLocation = (workspaceAddLocations?.length ?? 0) > 1;
+  // Whether the location the dialog is browsing is the daemon this shell is
+  // actually connected to — the same comparison `handleAddRemoteWorkspace`
+  // uses to choose between a local add and the remote proxy.
+  //
+  // Every capability-driven affordance below reads `workspace.capabilities`,
+  // which describes the CONNECTED daemon only. While a different location is
+  // selected in place the target's answers are unknowable without querying it,
+  // so the honest UI withholds the affordance rather than assuming the
+  // connected daemon's: a native picker would open an OS dialog on the wrong
+  // machine and register its result on the target, a Persist switch would
+  // either surface the target's raw 501 or silently register a workspace that
+  // dies on its next restart, and a cwd from this filesystem seeds a browse
+  // the target answers with an empty (not failed) list. Before in-place browse
+  // the location switch navigated first, so all of these re-resolved against
+  // the target.
+  const workspaceAddLocationIsConnected =
+    workspaceAddSelectedLocation ===
+    (workspace.baseUrl || window.location.origin);
   const changeWorkspaceAddLocation = useCallback((origin: string) => {
-    return selectRemoteWorkspaceLocation(origin, getDaemonToken(origin));
+    setWorkspaceAddLocation(origin);
+    return true;
+  }, []);
+
+  // Suggest paths from the selected location's daemon, not necessarily the
+  // currently connected one. This lets the user browse a remote daemon's
+  // folders without navigating the page.
+  const suggestWorkspacePathsForLocation = useMemo(() => {
+    if (!hasRemoteWorkspaceLocation) {
+      return workspaceActions.suggestWorkspacePaths;
+    }
+    return async (prefix: string) => {
+      const location = workspaceAddSelectedLocation;
+      const currentOrigin = workspace.baseUrl || window.location.origin;
+      if (location === currentOrigin) {
+        return workspaceActions.suggestWorkspacePaths(prefix);
+      }
+      return fetchRemotePathSuggestions(location, prefix);
+    };
+  }, [
+    hasRemoteWorkspaceLocation,
+    workspaceAddSelectedLocation,
+    workspace.baseUrl,
+    workspaceActions,
+  ]);
+
+  const handleAddRemoteWorkspace = useCallback(
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      const currentOrigin = workspace.baseUrl || window.location.origin;
+      if (
+        workspaceAddSelectedLocation &&
+        workspaceAddSelectedLocation !== currentOrigin
+      ) {
+        // The user browsed a different daemon's folders in place. Register
+        // the workspace there via REST, then navigate to that daemon.
+        await addWorkspaceToDaemon(
+          workspaceAddSelectedLocation,
+          cwd,
+          persist,
+          displayName,
+        );
+        workspaceBrowseActiveRef.current = false;
+        completeRemoteWorkspaceAdd();
+        // Navigate to the target daemon so the user lands on the new
+        // workspace. Deliberately a plain switch, NOT
+        // selectRemoteWorkspaceLocation(): that helper arms the
+        // `addRemoteWorkspace=browse` continuation on the target URL, so the
+        // daemon we just registered on would boot into a fresh, empty Add
+        // Workspace dialog on top of the workspace the user already added.
+        // The add is finished — there is no flow left to continue.
+        navigateToDaemon(
+          workspaceAddSelectedLocation,
+          getDaemonToken(workspaceAddSelectedLocation),
+        );
+        return;
+      }
+      await handleAddWorkspace(cwd, persist, displayName);
+      workspaceBrowseActiveRef.current = false;
+      completeRemoteWorkspaceAdd();
+    },
+    [handleAddWorkspace, workspace.baseUrl, workspaceAddSelectedLocation],
+  );
+
+  const closeAddWorkspaceDialog = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    setWorkspaceAddLocation(undefined);
+    if (!workspaceBrowseActiveRef.current) return;
+    workspaceBrowseActiveRef.current = false;
+    leaveRemoteWorkspaceAdd();
   }, []);
 
   // Which computer the folder step is reading, for loading and error states.
-  const workspaceAddRemoteHost = isPageOriginDaemon(workspace.baseUrl)
+  const workspaceAddRemoteHost = isPageOriginDaemon(
+    workspaceAddSelectedLocation,
+  )
     ? undefined
-    : formatOriginHost(workspace.baseUrl);
+    : formatOriginHost(workspaceAddSelectedLocation);
   const workspaceAddLocationSubtitle = workspaceAddRemoteHost
     ? t('workspaceHost.folderOn', { address: workspaceAddRemoteHost })
     : t('workspaceHost.folderOnThisComputer');
@@ -13888,6 +14095,16 @@ export function App({
             ? ({ kind: 'live' } as const)
             : ({ kind: 'workspace', cwd: workspaceCwd } as const)
           : undefined);
+      const selectedWorkspace = workspacesRef.current.find(
+        (entry) => entry.cwd === workspaceCwd,
+      );
+      navigationRef.current?.beginSessionNavigation(
+        sessionId,
+        selectedWorkspace && !selectedWorkspace.primary
+          ? selectedWorkspace.id
+          : undefined,
+        targetContext,
+      );
       const previousSelectedWorkspaceCwd = selectedWorkspaceCwdRef.current;
       if (targetContext?.kind !== 'workspace') {
         selectedWorkspaceCwdRef.current = undefined;
@@ -13925,6 +14142,7 @@ export function App({
           pendingSessionContextRef.current === targetContext
         ) {
           setSidebarSwitchingSessionId(null);
+          navigationRef.current?.cancelSessionNavigation();
           setPendingSessionContext(previousPendingContext);
           if (targetContext?.kind !== 'workspace') {
             selectedWorkspaceCwdRef.current = previousSelectedWorkspaceCwd;
@@ -14573,6 +14791,8 @@ export function App({
     if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
   }, [activePanel, approvalOverlayActive, mainView]);
   useEffect(() => {
+    if (navigationRef.current && navigationRef.current.route.page !== 'chat')
+      return;
     if (!sessionWorkflowEnabled) {
       if (mainView !== 'cockpit') return;
       if (cockpitViewRequested()) {
@@ -14594,11 +14814,14 @@ export function App({
   }, [
     approvalOverlayActive,
     mainView,
+    navigation?.revision,
     sessionWorkflowEnabled,
     sessionWorkflowSettingsResolved,
   ]);
   useEffect(() => {
     const handlePopState = () => {
+      if (navigationRef.current && navigationRef.current.route.page !== 'chat')
+        return;
       if (cockpitViewRequested()) {
         if (sessionWorkflowEnabled && !approvalOverlayActive) {
           setMainView('cockpit');
@@ -14623,6 +14846,8 @@ export function App({
     sessionWorkflowSettingsResolved,
   ]);
   useEffect(() => {
+    if (navigationRef.current && navigationRef.current.route.page !== 'chat')
+      return;
     if (
       mainView === 'cockpit' &&
       sessionWorkflowEnabled &&
@@ -16906,7 +17131,7 @@ export function App({
     pendingApproval,
     interactionBlocked,
     activePanel,
-    closePanel,
+    returnToChat,
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
@@ -16917,7 +17142,7 @@ export function App({
     pendingApproval,
     interactionBlocked,
     activePanel,
-    closePanel,
+    returnToChat,
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
@@ -16986,7 +17211,7 @@ export function App({
         const target = e.target as HTMLElement | null;
         if (!target?.closest('[data-sidebar-shell]')) {
           e.preventDefault();
-          live.closePanel();
+          live.returnToChat();
         }
         return;
       }
@@ -18692,6 +18917,7 @@ export function App({
                 onClose={closeAddWorkspaceDialog}
               />
             ) : workspaceBrowseActiveRef.current &&
+              workspaceAddLocationIsConnected &&
               !dynamicWorkspaceRegistrationSupported ? (
               <WorkspaceAddStatusDialog
                 message={t('workspaceHost.unsupported')}
@@ -18703,14 +18929,20 @@ export function App({
               <AddWorkspaceDialog
                 browseDirectories={workspaceBrowseActiveRef.current}
                 initialPath={
-                  workspaceBrowseActiveRef.current
-                    ? workspace.capabilities?.workspaceCwd?.replace(
-                        /[^\\/]+[\\/]?$/,
-                        '',
-                      ) ||
-                      workspace.capabilities?.workspaceCwd ||
-                      '/'
-                    : undefined
+                  !workspaceBrowseActiveRef.current
+                    ? undefined
+                    : workspaceAddLocationIsConnected
+                      ? workspace.capabilities?.workspaceCwd?.replace(
+                          /[^\\/]+[\\/]?$/,
+                          '',
+                        ) ||
+                        workspace.capabilities?.workspaceCwd ||
+                        '/'
+                      : // The connected daemon's cwd is a path on a different
+                        // machine; seeding it here makes the target answer with
+                        // an empty list (or a 400 across platforms) instead of
+                        // a usable browse. Root is absolute on every platform.
+                        '/'
                 }
                 locations={workspaceAddLocations}
                 selectedLocation={workspaceAddSelectedLocation}
@@ -18721,8 +18953,9 @@ export function App({
                     ? handleAddRemoteWorkspace
                     : handleAddWorkspace
                 }
-                onSuggest={workspaceActions.suggestWorkspacePaths}
+                onSuggest={suggestWorkspacePathsForLocation}
                 onPick={
+                  workspaceAddLocationIsConnected &&
                   nativeDirectoryPickerSupported &&
                   (!workspace.baseUrl ||
                     new URL(workspace.baseUrl, window.location.origin)
@@ -18734,8 +18967,13 @@ export function App({
                       }
                     : undefined
                 }
-                persistenceSupported={persistentWorkspaceRegistrationSupported}
-                displayNameEnabled={workspaceDisplayNameSupported}
+                persistenceSupported={
+                  workspaceAddLocationIsConnected &&
+                  persistentWorkspaceRegistrationSupported
+                }
+                displayNameEnabled={
+                  workspaceAddLocationIsConnected && workspaceDisplayNameSupported
+                }
               />
             ))}
           {scratchOutcomeUnknown !== 'clear' && (
@@ -18855,12 +19093,14 @@ export function App({
                   // A cwd-less New task inherits the current context: a
                   // workspace chat stays in its workspace and a cold draft
                   // lands on the primary one. Projectless targets are chosen
-                  // in the composer's workspace picker instead.
+                  // in the composer's workspace picker instead. From a Live
+                  // chat it opens an ordinary task; a fresh voice conversation
+                  // comes from the Live controls.
                   onNewSession={(workspaceCwd) =>
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'inherit' },
+                        : { kind: 'inherit', leaveLive: true },
                     )
                   }
                   onNewStandaloneSession={() =>
@@ -18885,8 +19125,7 @@ export function App({
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
-                    showChat();
-                    closePanel();
+                    returnToChat();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
                   onSessionsDeleted={closeUsageTabs}
@@ -19248,7 +19487,7 @@ export function App({
                       data-testid="panel-back"
                       onClick={() => {
                         if (activePanel !== 'sessions') {
-                          closePanel();
+                          returnToChat();
                           return;
                         }
                         if (!workspaceContextActive) {
@@ -19449,13 +19688,13 @@ export function App({
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
-                        onClose={closePanel}
+                        onClose={returnToChat}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
-                        onClose={closePanel}
+                        onClose={returnToChat}
                         initialFocusRef={panelHeadingRef}
                       />
                     ) : activePanel === 'workspaces' ? (
@@ -19540,7 +19779,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={showChat}
+                      onClick={returnToChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -19642,7 +19881,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={showChat}
+                      onClick={returnToChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -19698,7 +19937,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={showChat}
+                      onClick={returnToChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >

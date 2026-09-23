@@ -210,3 +210,56 @@ describe('transcriptToEvents resumed tool calls', () => {
     ]);
   });
 });
+
+describe('transcriptToEvents assistant timestamps (#76)', () => {
+  const RECORDED = '2026-09-18T07:05:09.000Z';
+
+  function assistantLine(
+    parts: Array<Record<string, unknown>>,
+    extra: Record<string, unknown> = {},
+  ): string {
+    return JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', parts },
+      ...extra,
+    });
+  }
+
+  function replay(line: string) {
+    return transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+  }
+
+  it('stamps the first text run of the record, and only that one', () => {
+    // A leading thought must not consume the stamp: ink puts the clock label
+    // above the assistant message, not above the reasoning block.
+    const events = replay(
+      assistantLine(
+        [
+          { thought: true, text: 'READING' },
+          { text: 'FIRST' },
+          { text: 'SECOND' },
+        ],
+        { timestamp: RECORDED },
+      ),
+    );
+    expect(events).toEqual([
+      { type: 'thinking', delta: 'READING' },
+      { type: 'thinking-end' },
+      { type: 'text', delta: 'FIRST', timestamp: Date.parse(RECORDED) },
+      { type: 'text', delta: 'SECOND' },
+      { type: 'done' },
+    ]);
+  });
+
+  it('leaves text events unstamped when the record has no usable time', () => {
+    expect(replay(assistantLine([{ text: 'FIRST' }]))).toEqual([
+      { type: 'text', delta: 'FIRST' },
+      { type: 'done' },
+    ]);
+    expect(
+      replay(assistantLine([{ text: 'FIRST' }], { timestamp: 'not-a-date' })),
+    ).toEqual([{ type: 'text', delta: 'FIRST' }, { type: 'done' }]);
+  });
+});

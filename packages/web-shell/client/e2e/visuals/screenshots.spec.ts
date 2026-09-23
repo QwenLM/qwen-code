@@ -65,6 +65,9 @@ function trajectoryRecordMeta(recordId: string): Record<string, unknown> {
 function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
   const agentCallId = 'call_delegate01';
   const subagentId = `general-purpose-${agentCallId}`;
+  // Recorded start times, in ms from the first request. The second turn opens
+  // over a minute later, which the overview cuts out of its axis.
+  const at = (offset: number) => 1_760_000_000_000 + offset;
   return [
     trajectoryUpdate({
       sessionUpdate: 'user_message_chunk',
@@ -78,6 +81,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 1840,
+          startedAt: at(0),
           status: 'error',
           model: 'qwen3.8-max',
         },
@@ -91,6 +95,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 7823,
+          startedAt: at(2100),
           ttftMs: 3908,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -124,6 +129,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'tool',
           durationMs: 16,
+          startedAt: at(9923),
           callId: 'call_read01',
           toolName: 'read_file',
           toolStatus: 'success',
@@ -152,6 +158,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 4879,
+          startedAt: at(9960),
           ttftMs: 1102,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -168,12 +175,28 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'tool',
           durationMs: 31,
+          startedAt: at(14839),
           callId: 'call_subglob01',
           toolName: 'glob',
           toolStatus: 'success',
           promptId: `${sessionId}#${subagentId}#0`,
         },
         'qwen.session.recordId': 'rec-1-subtool',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 5101,
+          startedAt: at(9939),
+          callId: agentCallId,
+          toolName: 'agent',
+          toolStatus: 'success',
+        },
+        'qwen.session.recordId': 'rec-1-agenttiming',
       },
     }),
     trajectoryUpdate({
@@ -194,6 +217,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 3972,
+          startedAt: at(75_000),
           ttftMs: 1030,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -499,6 +523,10 @@ for (const theme of THEMES) {
       await expect(
         page.locator('[data-testid="trajectory-row-request"]').first(),
       ).toContainText('qwen3.8-max');
+      // The failed request and its retry, the read, the delegation, the
+      // subagent's own request and the second turn. The subagent's glob has
+      // no row in the window, so it has nowhere to be drawn.
+      await expect(page.getByTestId('trajectory-span')).toHaveCount(6);
       await captureScreenshot(page, `trajectory-${theme}`);
     });
 
@@ -1724,6 +1752,71 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-permission-panel]'),
       ).toBeVisible();
       await captureScreenshot(page, `permission-panel-${theme}`);
+    });
+
+    test(`edit approval diff`, async ({ page }, testInfo) => {
+      // Edit permission_request payloads carry the change as a `{ type: 'diff',
+      // path, oldText, newText }` content block alongside outside-workspace
+      // warnings. The Web Shell adapter used to drop the diff block, so the
+      // approval card showed only the warning and the user approved a file
+      // change without seeing it (#11966). Seed the exact shape
+      // `permissionUtils.buildPermissionRequestContent` emits so a regression
+      // in either the adapter or the approval card resurfaces here.
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          {
+            id: 1,
+            v: 1,
+            type: 'permission_request',
+            data: {
+              requestId: 'perm-edit-visual',
+              toolCall: {
+                toolCallId: 'perm-edit-visual',
+                title: 'Edit: /outside/example.txt',
+                kind: 'edit',
+                _meta: { toolName: 'replace' },
+                content: [
+                  {
+                    type: 'content',
+                    content: {
+                      type: 'text',
+                      text: 'Path is outside the workspace',
+                    },
+                  },
+                  {
+                    type: 'diff',
+                    path: '/outside/example.txt',
+                    oldText: 'hello world\nline two\n',
+                    newText: 'hello Qwen\nline two\nline three\n',
+                  },
+                ],
+              },
+              options: [
+                { optionId: 'allow_once', label: 'Allow once' },
+                { optionId: 'reject_once', label: 'Reject' },
+              ],
+            },
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await expect(
+        page.locator('[data-web-shell-permission-panel]'),
+      ).toBeVisible();
+      await expect(
+        page.getByText('Path is outside the workspace'),
+      ).toBeVisible();
+      // The diff renderer paints deletion/addition rows before any option is
+      // chosen — this is exactly what the pre-fix approval card was missing.
+      await expect(page.getByText('hello world')).toBeVisible();
+      await expect(page.getByText('hello Qwen')).toBeVisible();
+      await captureScreenshot(page, `edit-approval-diff-${theme}`);
     });
 
     test(`code review artifact`, async ({ page }, testInfo) => {

@@ -905,6 +905,25 @@ describe('AppContainer State Management', () => {
   };
 
   describe('worktree branch wiring', () => {
+    it('rejects direct worktree removal in tool sandbox', async () => {
+      vi.spyOn(mockConfig, 'getShellExecutionSandbox').mockReturnValue({
+        backend: 'bwrap',
+      } as never);
+      const harness = renderRewindHarness();
+      await act(async () => {
+        await (capturedUIActions.handleWorktreeExit(
+          'remove',
+        ) as unknown as Promise<void>);
+      });
+      expect(harness.addItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'Worktree removal is unavailable in tool sandbox.',
+        },
+        expect.any(Number),
+      );
+    });
+
     it('queries the branch from the worktree path during a worktree session', () => {
       mockedUseWorktreeSession.mockReturnValue({
         slug: 'feature',
@@ -9692,6 +9711,36 @@ describe('AppContainer State Management', () => {
         false,
         typedText,
       );
+    });
+
+    it.each(['code', 'both'] as const)(
+      'rejects %s file restore in tool sandbox',
+      async (option) => {
+        vi.spyOn(mockConfig, 'getShellExecutionSandbox').mockReturnValue({
+          backend: 'bwrap',
+        } as never);
+        const harness = renderRewindHarness();
+        await runRewind(harness.target, option);
+        expect(harness.rewind).not.toHaveBeenCalled();
+        expect(harness.truncateHistory).not.toHaveBeenCalled();
+        expect(harness.addItem).toHaveBeenCalledWith(
+          {
+            type: 'error',
+            text: 'File restore is unavailable in tool sandbox.',
+          },
+          expect.any(Number),
+        );
+      },
+    );
+
+    it('keeps conversation-only rewind available in tool sandbox', async () => {
+      vi.spyOn(mockConfig, 'getShellExecutionSandbox').mockReturnValue({
+        backend: 'bwrap',
+      } as never);
+      const harness = renderRewindHarness();
+      await runRewind(harness.target, 'conversation');
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).toHaveBeenCalled();
     });
 
     it('skips conversation truncation when both-mode file restore fails', async () => {
