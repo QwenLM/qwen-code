@@ -69,6 +69,8 @@ export interface OpenTuiCommandHost {
   setSessionName(name: string | null): void;
   /** Parity of `isIdleRef.current` — no model turn in flight. */
   isIdle(): boolean;
+  /** A model turn is streaming; ignores slash-command processing. */
+  isStreaming(): boolean;
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
   dispatchExtensionStateUpdate(action: ExtensionUpdateAction): void;
   addConfirmUpdateExtensionRequest(value: ConfirmationRequest): void;

@@ -364,6 +364,10 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
     return !this.processing && !this.streaming;
   }
 
+  isStreaming(): boolean {
+    return this.streaming;
+  }
+
   setIsProcessing(processing: boolean): void {
     this.processing = processing;
     this.notify();

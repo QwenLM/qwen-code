@@ -12,6 +12,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
@@ -23,9 +26,11 @@ import {
   type SlashCommandActionReturn,
 } from '../commands/types.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import { cdCommand } from '../commands/cdCommand.js';
 import type { HistoryItem } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { resetTrustedFoldersForTesting } from '../../config/trustedFolders.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import {
   OpenTuiSlashDispatcher,
@@ -140,6 +145,7 @@ function createFakeHost(): FakeHost {
       sessionNames.push(name);
     },
     isIdle: () => true,
+    isStreaming: () => false,
     extensionsUpdateState: new Map(),
     dispatchExtensionStateUpdate: () => push('dispatchExtensionStateUpdate'),
     addConfirmUpdateExtensionRequest: () =>
@@ -1378,5 +1384,265 @@ describe('extension refresh subscription (ink processor parity)', () => {
       [],
     ).dispose();
     expect(count(second)).toBe(0);
+  });
+});
+
+describe('isIdleRef parity (command actions see pre-dispatch idle state)', () => {
+  // Mirrors the REAL OpenTuiCommandHost (opentui-host.ts): `isIdle()` is
+  // computed from the same `processing`/`streaming` flags the setters change,
+  // unlike `createFakeHost()`, whose `isIdle` is a constant.
+  function createProcessingLinkedHost(initiallyIdle: boolean) {
+    let processing = !initiallyIdle;
+    let streaming = false;
+    return {
+      isIdle: () => !processing && !streaming,
+      isStreaming: () => streaming,
+      setIsProcessing: (flag: boolean) => {
+        processing = flag;
+      },
+      setStreaming: (flag: boolean) => {
+        streaming = flag;
+      },
+    };
+  }
+
+  // Services for the REAL cdCommand.ts action, so the guard's own error
+  // message is verified too.
+  function realCdServices(
+    relocateWorkingDirectory: ReturnType<typeof vi.fn>,
+    merged: object = {},
+  ) {
+    return {
+      config: {
+        getTargetDir: () => os.tmpdir(),
+        isRestrictiveSandbox: () => false,
+        relocateWorkingDirectory,
+        getLlmClient: () => ({
+          addWorkingDirectoryChangedContext: vi
+            .fn()
+            .mockResolvedValue(undefined),
+        }),
+      } as unknown as Config,
+      settings: { merged } as unknown as LoadedSettings,
+      logger: null,
+    };
+  }
+
+  it('real /cd relocates the working directory when the host was idle before dispatch', async () => {
+    const targetDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-cd-dispatch-'),
+    );
+    try {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(true));
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory),
+        [cdCommand],
+      );
+
+      const outcome = await dispatcher.handle(`/cd ${targetDir}`);
+
+      expect(outcome).toEqual({ kind: 'handled' });
+      expect(relocateWorkingDirectory).toHaveBeenCalled();
+    } finally {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  it('real /cd is refused and nothing relocates when the host was busy before dispatch', async () => {
+    const targetDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-cd-dispatch-'),
+    );
+    try {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(false));
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory),
+        [cdCommand],
+      );
+
+      const outcome = await dispatcher.handle(`/cd ${targetDir}`);
+
+      expect(outcome).toEqual({ kind: 'handled' });
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'error',
+        text: 'Cannot change directory while a response or tool call is in progress.',
+      });
+    } finally {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  // Folder trust on, backed by a throwaway trust file, so the real /cd asks
+  // before moving into the untrusted target.
+  const folderTrustOn = { security: { folderTrust: { enabled: true } } };
+  async function withUntrustedDir(
+    run: (targetDir: string) => Promise<void>,
+  ): Promise<void> {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cd-dispatch-'));
+    const prev = process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    try {
+      const targetDir = path.join(tmpDir, 'untrusted');
+      fs.mkdirSync(targetDir);
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
+        tmpDir,
+        'trustedFolders.json',
+      );
+      resetTrustedFoldersForTesting();
+      await run(targetDir);
+    } finally {
+      if (prev === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = prev;
+      }
+      resetTrustedFoldersForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  it('real /cd into an untrusted folder relocates once the user accepts the trust prompt', () =>
+    withUntrustedDir(async (targetDir) => {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(true));
+      setActionConfirmation(host, true);
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory, folderTrustOn),
+        [cdCommand],
+      );
+
+      await dispatcher.handle(`/cd ${targetDir}`);
+
+      const realTargetDir = await fs.promises.realpath(targetDir);
+      expect(host.actionConfirmations).toBe(1);
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'info',
+        text: `Moved to ${realTargetDir}.`,
+      });
+      expect(relocateWorkingDirectory).toHaveBeenCalledWith(
+        realTargetDir,
+        realTargetDir,
+      );
+    }));
+
+  it('real /cd is refused when a stream starts while the trust prompt is open', () =>
+    withUntrustedDir(async (targetDir) => {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      const linkedHost = createProcessingLinkedHost(true);
+      Object.assign(host, linkedHost);
+      let prompts = 0;
+      host.presentActionConfirmation = async () => {
+        prompts += 1;
+        linkedHost.setStreaming(true);
+        return true;
+      };
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory, folderTrustOn),
+        [cdCommand],
+      );
+
+      await dispatcher.handle(`/cd ${targetDir}`);
+
+      expect(prompts).toBe(1);
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'error',
+        text: 'Cannot change directory while a response or tool call is in progress.',
+      });
+    }));
+
+  // Asks for confirmation on the first pass, then reports what the
+  // confirmed re-run sees.
+  const confirmingProbe = (
+    confirmation: 'confirm_action' | 'confirm_shell_commands',
+  ) => {
+    let firstRun = true;
+    return stub({
+      name: 'probe',
+      action: (context): SlashCommandActionReturn => {
+        if (firstRun) {
+          firstRun = false;
+          return confirmation === 'confirm_action'
+            ? {
+                type: 'confirm_action',
+                prompt: 'Proceed?',
+                originalInvocation: { raw: '/probe' },
+              }
+            : {
+                type: 'confirm_shell_commands',
+                commandsToConfirm: ['ls'],
+                originalInvocation: { raw: '/probe' },
+              };
+        }
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: `isIdle=${context.ui.isIdleRef.current}`,
+        };
+      },
+    });
+  };
+
+  it.each([
+    ['confirm_action', true],
+    ['confirm_action', false],
+    ['confirm_shell_commands', true],
+    ['confirm_shell_commands', false],
+  ] as const)(
+    'the re-run after an accepted %s sees the pre-dispatch idle state (%s)',
+    async (confirmation, initiallyIdle) => {
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(initiallyIdle));
+      setActionConfirmation(host, true);
+      setShellResolution(host, {
+        outcome: ToolConfirmationOutcome.ProceedOnce,
+        approvedCommands: ['ls'],
+      });
+      const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+        confirmingProbe(confirmation),
+      ]);
+
+      await dispatcher.handle('/probe');
+
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'info',
+        text: `isIdle=${initiallyIdle}`,
+      });
+    },
+  );
+
+  it('renders a goal mutation card when the host was idle before dispatch', async () => {
+    const snapshot = { v: 2, goal: { objective: 'x' }, activity: 'idle' };
+    const pauseCommand = stub({
+      name: 'goal',
+      action: () =>
+        ({
+          type: 'goal_control',
+          operation: { kind: 'pause' },
+          response: { snapshot },
+          cause: 'pause',
+        }) as never,
+    });
+
+    const { host } = await dispatch(
+      '/goal pause',
+      [pauseCommand],
+      createProcessingLinkedHost(true),
+    );
+
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'goal_state',
+      snapshot,
+      cause: 'pause',
+    });
   });
 });

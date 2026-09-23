@@ -68,6 +68,7 @@ function createFakeHost(): OpenTuiCommandHost & {
       sessionNames.push(name);
     },
     isIdle: () => true,
+    isStreaming: () => false,
     extensionsUpdateState: new Map(),
     dispatchExtensionStateUpdate: record(
       'dispatchExtensionStateUpdate',
