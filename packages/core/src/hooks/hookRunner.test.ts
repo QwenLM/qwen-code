@@ -16,6 +16,7 @@ import {
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import {
   HookRunner,
   __resetPowerShellCacheForTests,
@@ -2227,6 +2228,46 @@ describe('HookRunner', () => {
       expect(process.listeners('SIGTERM')).toEqual(sigtermListenersBefore);
     });
 
+    it.each([0, 1, -1, -42, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+      'never signals a process group for invalid child PID %s',
+      async (pid) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+        const before = process.listeners('exit');
+        const child = createControllableMockProcess(pid);
+        mockSpawn.mockReturnValue(child);
+        const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+        const controller = new AbortController();
+        const result = hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput(),
+          controller.signal,
+        );
+        try {
+          const onExit = process
+            .listeners('exit')
+            .find((fn) => !before.includes(fn));
+          onExit?.(0);
+          controller.abort();
+        } finally {
+          child.emit('close', null);
+          await result;
+        }
+        expect(killSpy).not.toHaveBeenCalled();
+        expect(process.listeners('exit')).toEqual(before);
+        // A rejected pid leaves the group running, so the skip must not vanish
+        // without a trace. 0 and NaN are already short-circuited by the `!pid`
+        // branch in terminatePosixHookProcessTree and never reach this guard.
+        if (pid) {
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `hook process group ${pid}: not a safe integer greater than 1`,
+            ),
+          );
+        }
+      },
+    );
+
     it('kills active hooks while leaving parent signals to an application handler', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       const exitListenersBefore = process.listeners('exit');
@@ -2499,6 +2540,42 @@ describe('HookRunner', () => {
         expect(args[args.indexOf('--eval') + 3]).toBe(expectedArg);
       },
     );
+
+    it('rejects broadcast PIDs inside the detached supervisor too', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess());
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.SessionDelete,
+        createMockInput({ hook_event_name: HookEventName.SessionDelete }),
+      );
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      const source = args[args.indexOf('--eval') + 1];
+      const start = source.indexOf('const signalGroup =');
+      const end = source.indexOf('const waitForGroupExit =');
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      for (const pid of [
+        0,
+        1,
+        -1,
+        1.5,
+        NaN,
+        Infinity,
+        Number.MAX_SAFE_INTEGER + 1,
+      ]) {
+        const kill = vi.fn();
+        const childKill = vi.fn();
+        runInNewContext(
+          source.slice(start, end) + '\nsignalGroup("SIGKILL"); groupAlive();',
+          {
+            hook: { pid, kill: childKill },
+            process: { platform: 'linux', kill },
+          },
+        );
+        expect(kill).not.toHaveBeenCalled();
+        expect(childKill).not.toHaveBeenCalled();
+      }
+    });
 
     it('registers async hooks with the resolved millisecond timeout', async () => {
       mockSpawn.mockImplementation(() => createMockProcess());

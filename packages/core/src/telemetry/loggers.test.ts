@@ -1485,6 +1485,72 @@ describe('loggers', () => {
       expect(event.error_type).toBe(' ');
     });
 
+    it('records when the call started, as the scheduler measured it', () => {
+      const recordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        ...mockConfig,
+        getChatRecordingService: () => ({ recordUiTelemetryEvent }),
+      } as unknown as Config;
+      const call: CompletedToolCall = {
+        status: 'success',
+        request: {
+          name: 'glob',
+          args: {},
+          callId: 'call-started',
+          isClientInitiated: false,
+          prompt_id: 'prompt-started',
+        },
+        response: {
+          callId: 'call-started',
+          responseParts: [],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          executionStatus: 'success',
+        },
+        tool: new EditTool(mockConfig),
+        invocation: {} as AnyToolInvocation,
+        startTime: 1_760_000_000_000,
+        durationMs: 16,
+      };
+
+      logToolCall(configWithRecording, new ToolCallEvent(call));
+
+      const started = expect.objectContaining({
+        started_at_ms: 1_760_000_000_000,
+        duration_ms: 16,
+      });
+      expect(recordUiTelemetryEvent).toHaveBeenCalledWith(started);
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        started,
+        'test-session-id',
+      );
+    });
+
+    it('records no start for a call that never started', () => {
+      const call: CompletedToolCall = {
+        status: 'cancelled',
+        request: {
+          name: 'glob',
+          args: {},
+          callId: 'call-unstarted',
+          isClientInitiated: false,
+          prompt_id: 'prompt-unstarted',
+        },
+        response: {
+          callId: 'call-unstarted',
+          responseParts: [],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          executionStatus: 'not_started',
+        },
+        durationMs: 0,
+      };
+
+      expect(new ToolCallEvent(call).started_at_ms).toBeUndefined();
+    });
+
     it('clears call errors when cancellation is the final outcome', () => {
       const event = {
         'event.name': 'tool_call',

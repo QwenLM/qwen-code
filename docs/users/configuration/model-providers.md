@@ -69,6 +69,56 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
 
+### Live Voice routes
+
+Set `realtimeOnly: true` on a route that speaks the DashScope Realtime
+(speech-to-speech) protocol. Such a route is never offered as a chat, fast,
+vision, voice or image model; it can only be chosen as the Live Voice model
+through `experimental.liveVoice.model` (a `modelId`, or `provider:modelId` when
+the same id exists under more than one provider).
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3.5-omni-plus-realtime",
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "envKey": "DASHSCOPE_API_KEY",
+        "realtimeOnly": true
+      }
+    ]
+  },
+  "experimental": {
+    "liveVoice": {
+      "enabled": true,
+      "model": "qwen3.5-omni-plus-realtime",
+      "voice": "Tina"
+    }
+  }
+}
+```
+
+When the selected model names a `realtimeOnly` route, Live Voice reads the API
+key through the route's `envKey` (process environment first, then the `env`
+block of `settings.json`) and derives the WebSocket endpoint from its `baseUrl`
+(`https://<host>/compatible-mode/v1` becomes `wss://<host>/api-ws/v1/realtime`).
+The route must declare both `baseUrl` and `envKey`, and the host must be a
+DashScope endpoint.
+
+Two rules are deliberate:
+
+- Workspace settings are never consulted, only user- and system-level ones. A
+  project's `.qwen/settings.json` cannot add or redirect a Live Voice route.
+- A **bare** `modelId` that matches no `realtimeOnly` route uses the
+  free-standing `experimental.liveVoice.endpoint` and
+  `experimental.liveVoice.apiKey` fields as before, so existing setups keep
+  working unchanged. A `provider:modelId` selector whose provider exists but
+  has no such route is an error instead: a deleted or mistyped route never
+  falls back to a stored key silently.
+- While a route is selected, `experimental.liveVoice.apiKey` is unused, and the
+  setup API refuses to store a new one.
+
 ## Override reasoning capabilities
 
 Set `capabilities.reasoning` on a model entry to override its reasoning format,
@@ -287,6 +337,8 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
   }
 }
 ```
+
+When pointing an entry at a hosted OpenAI-compatible gateway, set `baseUrl` to the API's `/v1` root (for example, `https://gateway.example.com/v1`) rather than the full `/v1/chat/completions` path — the SDK appends the request path itself.
 
 ### OpenAI Responses API (`openai-responses`)
 

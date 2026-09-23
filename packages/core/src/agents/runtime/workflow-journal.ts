@@ -15,6 +15,11 @@
  * hash diverges, or that has no journaled result, runs live, and every call
  * after it runs live too.
  *
+ * A run's first line is `launched`, written once at its start and never on a
+ * resume, so the journal of a run that launched is never empty. A resume whose
+ * journal is not on disk is refused: there is nothing to replay, and running
+ * every agent again under the old run id would only read as a continuation.
+ *
  * Only `result` feeds the cache; `started` and `failed` are diagnostic. What
  * they buy on resume is the ability to say WHY a call is running live again:
  * `failed` means the previous run's dispatch settled without a value, while
@@ -86,11 +91,35 @@ export interface JournalFailedEntry {
   agentId: string;
 }
 
+/**
+ * The first record of every run, written once when the run starts and never on
+ * a resume. It carries nothing: its job is to make the journal of a run that
+ * launched non-empty before any agent settles, so "this run was interrupted
+ * before its first result" and "this run's journal is gone" are different
+ * files on disk.
+ */
+export interface JournalLaunchedEntry {
+  type: 'launched';
+  version: 1;
+}
+
 export type JournalEntry =
+  | JournalLaunchedEntry
   | JournalStartedEntry
   | JournalResultEntry
   | JournalFailedEntry
   | { type: 'source'; version: 1; sourceRef: WorkflowSourceRef };
+
+/**
+ * What reading a run's journal found. `missing` and `unreadable` are kept
+ * apart from an empty replay because a resume means something different for
+ * each: an empty journal belongs to a run that had nothing to cache yet, while
+ * a journal that is not there leaves nothing to resume at all.
+ */
+export type JournalLoadResult =
+  | { kind: 'loaded'; replay: JournalReplay }
+  | { kind: 'missing' }
+  | { kind: 'unreadable'; reason: string };
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
@@ -268,9 +297,13 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
   };
 }
 
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
- * Append-only JSONL journal for one workflow run. Reads tolerate a missing
- * file (fresh run); appends are fire-and-forget at the call site (the
+ * Append-only JSONL journal for one workflow run. A read says whether the file
+ * was there (see {@link JournalLoadResult}); appends are fire-and-forget at the call site (the
  * orchestrator does not await them on the hot path — a journal write
  * failure must not fail the dispatch).
  */
@@ -324,8 +357,16 @@ export class WorkflowJournal {
     }
   }
 
-  /** Remove a never-registered run's journal file, best-effort. */
+  /**
+   * Remove a never-registered run's journal file, best-effort.
+   *
+   * Waits for every append already queued first. An append still in flight
+   * would otherwise land after the delete and recreate the file, leaving a run
+   * id that never registered with a non-empty journal a later resume would
+   * accept.
+   */
   async remove(): Promise<void> {
+    await this.drain();
     try {
       if (await this.hasSymlinkedPath()) return;
       await fs.rm(this.path, { force: true });
@@ -340,15 +381,42 @@ export class WorkflowJournal {
     }
   }
 
-  /** Load + parse all entries into replay maps. Empty maps if no file. */
-  async load(): Promise<JournalReplay> {
+  /**
+   * Load and parse every entry into replay maps. A file that is not there and
+   * a file that cannot be read are reported as such rather than as an empty
+   * replay; a file that exists and holds no entries is `loaded`.
+   */
+  async load(): Promise<JournalLoadResult> {
     try {
-      const entries = await read<JournalEntry>(this.path);
-      return buildReplay(entries);
+      await fs.stat(this.path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { kind: 'missing' };
+      }
+      debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
+      return { kind: 'unreadable', reason: describeError(e) };
+    }
+    try {
+      const entries = await read<JournalEntry>(this.path, {
+        throwOnNonEnoentError: true,
+      });
+      return { kind: 'loaded', replay: buildReplay(entries) };
     } catch (e) {
       debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
-      return { results: new Map(), started: new Map(), failed: new Set() };
+      return { kind: 'unreadable', reason: describeError(e) };
     }
+  }
+
+  /**
+   * Record that the run launched. Best-effort: the record only sharpens what a
+   * later resume can say, so failing to write it must not fail the launch.
+   */
+  async markLaunched(): Promise<void> {
+    await this.append({ type: 'launched', version: 1 }).catch((error) =>
+      debugLogger.warn(
+        `WorkflowJournal.markLaunched failed for ${this.path}: ${error}`,
+      ),
+    );
   }
 
   /** Append one entry. Rejects only on I/O error (callers `.catch`). */

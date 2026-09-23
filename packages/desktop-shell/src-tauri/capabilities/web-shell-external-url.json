@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "web-shell-external-url",
-  "description": "Allows the daemon-served Web Shell to open browser-safe external URLs.",
+  "description": "Allows the daemon-served Web Shell to open browser-safe external URLs and to change the window zoom.",
   "local": false,
   "remote": { "urls": ["http://127.0.0.1:*"] },
   "windows": ["main"],
   "permissions": [
+    "core:window:allow-start-dragging",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
@@ -13,6 +14,7 @@
         { "url": "https://*" },
         { "url": "mailto:*" }
       ]
-    }
+    },
+    "allow-change-zoom"
   ]
 }
