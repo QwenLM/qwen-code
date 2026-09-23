@@ -1306,10 +1306,11 @@ export class SubagentManager {
       /**
        * Whether this agent's resolved tool policy declares the Skill tool —
        * {@link toolConfigAllowsSkill} on the ToolConfig the agent will run
-       * with. Decides whether its Config holds a SkillManager.
+       * with. Decides whether its Config holds a SkillManager. Defaults to
+       * an unrestricted agent, which keeps the inherited manager.
        */
       skillsAvailable: boolean;
-    },
+    } = { skillsAvailable: true },
   ): Promise<{
     context: Config;
     /**
