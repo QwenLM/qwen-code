@@ -4187,23 +4187,37 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Record the commit this command created in the session registry
-   * (`permissions/destructive-commands.ts`) so a later `git commit --amend`
-   * of it is exempt from the Auto-mode destructive-command block.
+   * Record HEAD in the session registry (`permissions/destructive-commands.ts`)
+   * when a `git commit` put it there, so a later `git commit --amend` of it is
+   * exempt from the Auto-mode destructive-command block.
    *
-   * The criterion is "a `git commit` put HEAD there", read from the HEAD
-   * reflog. Exit code is too strict (`git commit -m x && npm test` can land
-   * the commit and then fail). HEAD movement is too loose, and fail-open: in
-   * `git pull && git commit -m x` with nothing staged, the pull fast-forwards
-   * onto somebody else's commit and the commit then exits non-zero — and
-   * because `gitCommitContext` does not treat `pull`/`checkout`/`merge` as
-   * cwd-shifting and the call site has no exit-code gate, that chain really
-   * does reach here. A movement-only test would register a human's SHA,
-   * trading the deterministic Layer-0 block for the classifier.
+   * The criterion is "the newest HEAD reflog entry is a `commit` verb, and
+   * HEAD moved". Exit code is too strict (`git commit -m x && npm test` can
+   * land the commit and then fail). HEAD movement alone is too loose, and
+   * fail-open: in `git pull && git commit -m x` with nothing staged, the pull
+   * fast-forwards onto somebody else's commit and the commit then exits
+   * non-zero — and because `gitCommitContext` does not treat
+   * `pull`/`checkout`/`merge` as cwd-shifting and the call site has no
+   * exit-code gate, that chain really does reach here. A movement-only test
+   * would register a human's SHA, trading the deterministic Layer-0 block for
+   * the classifier.
    *
-   * Fail-closed when the reflog cannot answer (`core.logAllRefUpdates` off,
-   * reflog expired): nothing registers, which costs a blocked amend, never a
-   * lifted block.
+   * Where the reflog cannot answer at all (`core.logAllRefUpdates` off, reflog
+   * expired, git missing) nothing registers and the amend stays blocked, so
+   * that branch costs a blocked amend and never a lifted one.
+   *
+   * The reflog read does *not* establish that this command's own `git commit`
+   * created HEAD, and no local read can: `preHead` is taken before the spawn
+   * and the reflog after the whole command, so a commit another process lands
+   * in the same repository inside that window is the newest `commit:` entry
+   * and registers instead — degrading the next amend's deterministic Layer-0
+   * block to the L5.3 classifier, and costing the agent its own exemption,
+   * since the foreign entry is the newest one. Binding an entry to this child
+   * needs a signal not derivable from reflog shape, and the cheap candidate is
+   * unsound: a chain-level `GIT_REFLOG_ACTION` stamp rewrites the action of
+   * every reflog-writing git call in the single `/bin/bash -c` child, so a
+   * trailing `checkout` would write a `commit:` verb too. Per-invocation
+   * stamping means changing how the executor spawns. Tracked in #12523.
    *
    * No multi-commit guard, unlike {@link attachCommitAttribution}, which has
    * to *partition* per-file contribution and so bails. In `commit a &&
