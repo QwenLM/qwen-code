@@ -1583,15 +1583,27 @@ const PROVIDER_NAME_HASH_LENGTH = 8;
  * reduced to a registered name without also matching a *different* server's
  * tools (#10199). It is, however, verifiable: rebuild the candidate raw name
  * from the registered one and require its normalization to be exactly the
- * registered name. A registered name that never needed normalization carries
- * no hash suffix and can therefore never be verified, which is what keeps a
- * rule for the server `foo.bar` off the differently-registered server
- * `foo_bar`.
+ * registered name.
+ *
+ * This proves an existential — *some* raw name under `rawPrefix` normalizes to
+ * `registeredName` — not that this tool's own raw name is that one, so it is a
+ * consistency check rather than a provenance check. `rawTail` is sliced out of
+ * `registeredName` itself and `stableToolNameHash` is an unkeyed FNV-1a over a
+ * string the registering party chooses, so a server registered under the
+ * provider-safe key `foo_bar` can name a tool `evil_<hash of
+ * "mcp__foo.bar__evil">`, register verbatim with no alias to contradict it, and
+ * satisfy this check against a rule for the *different* server `foo.bar`. What
+ * this closes is the accidental collision — a `foo.bar` rule no longer reaches
+ * every `foo_bar` tool uncrafted — not a deliberate adversary; registry-backed
+ * ambiguity filtering would be needed for that and is out of scope (#10199).
  *
  * Returns false for prefixes that are already provider-safe (the caller's
  * literal comparison decides those) and for names whose sanitized form was
- * truncated, where the raw tail is unrecoverable. Both fall back to "no
- * match", i.e. the tool asks for confirmation instead of being authorized.
+ * truncated, where the raw tail is unrecoverable. Both fall back to "no match",
+ * and which way that falls is the *rule's* semantics, not this function's: on an
+ * `allow` rule a lost match degrades to a confirmation prompt (fail-closed),
+ * but on a `deny`/`ask` rule or a `disallowedTools` blocklist a lost match
+ * removes a restriction (fail-open).
  */
 function isNormalizedFromRawPrefix(
   registeredName: string,
@@ -1626,13 +1638,18 @@ function isNormalizedFromRawPrefix(
  *
  * `toolName` is the registered provider-safe name and `rawToolName` the
  * pre-normalization `mcp__<server>__<tool>` spelling when the caller knows it.
- * Server and wildcard prefixes are compared *literally* against those
- * spellings and, for legacy unsafe spellings, verified against the registered
- * name's hash — never reduced through `sanitizeToolNameForProvider`, which
- * cannot tell the server `foo.bar` from the server `foo_bar`. A pattern that
- * neither matches literally nor verifies does not match at all, so the tool
- * falls back to `ask` rather than being authorized by a rule for another
- * server.
+ * Server and wildcard prefixes are compared *literally* against those spellings
+ * and, for legacy unsafe spellings, verified against the registered name's hash
+ * instead of being reduced through `sanitizeToolNameForProvider`. The reduction
+ * is avoided in only one direction: a rule written in a legacy unsafe spelling
+ * (`mcp__foo.bar`) no longer reaches the differently-registered server
+ * `foo_bar`, but the registered spelling that a literal comparison runs against
+ * *is* that reduction, so a rule written provider-safe (`mcp__foo_bar`) still
+ * matches any server whose name sanitizes under that prefix (`foo.bar`,
+ * `foo:bar`, `foo/bar`). A pattern that neither matches literally nor verifies
+ * does not match at all; whether that removes a restriction depends on the
+ * rule's semantics — fail-closed on `allow` (the tool falls back to `ask`),
+ * fail-open on `deny`/`ask` rules and on `disallowedTools` blocklists.
  */
 export function matchesMcpPattern(
   pattern: string,
@@ -1668,6 +1685,16 @@ export function matchesMcpPattern(
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
     const prefix = pattern.slice(0, -1);
+    // A bare `*` has an empty prefix, and every string starts with `''`. Before
+    // patterns stopped being reduced through `sanitizeToolNameForProvider`, the
+    // empty prefix became `tool_` — which no `mcp__…` name starts with — so a
+    // bare `*` matched no MCP tool. Keep that: `*` is not an MCP pattern, and
+    // matching it here would authorize every MCP tool (the class whose own
+    // default is `ask`) while built-ins keep prompting. `mcp__*` still matches
+    // every MCP tool, and `mcp__server__*` still matches that server.
+    if (prefix === '') {
+      return false;
+    }
     return (
       matchesPrefixLiterally(prefix) ||
       isNormalizedFromRawPrefix(toolName, prefix)
@@ -1777,11 +1804,18 @@ export function matchesRule(
       (toolAliases ?? []).some(
         (alias) => rule.toolName === resolveToolName(alias),
       );
-    // An MCP tool whose registered name needed normalization advertises its
-    // pre-normalization `mcp__<server>__<tool>` spelling as a permission alias.
-    // The alias that normalizes to exactly this registered name *is* that raw
-    // identity, and it is the only spelling a legacy server or wildcard rule
-    // can be compared against without a lossy reduction (#10199).
+    // `DiscoveredMCPTool.permissionAliases` publishes
+    // `generateLegacyMcpToolName('mcp__<server>__<tool>')`, *not* the raw
+    // spelling: a second lossy reduction that keeps `.` and `-`, maps every
+    // other character to `_`, and middle-truncates names over 63 characters.
+    // The alias below is therefore found only when that legacy reduction was
+    // itself lossless. When it was not (an out-of-set character in either
+    // segment, or a raw name over 63 chars) no alias normalizes to the
+    // registered name, and a legacy server or wildcard rule is left with the
+    // registered spelling alone — which cannot recover an unsafe raw tail, so
+    // the rule stops matching its own server's tool. Carrying the raw identity
+    // losslessly at the source is the fix for that and is a wider change than
+    // this matcher (#10199).
     const rawMcpToolName = (toolAliases ?? []).find(
       (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,
     );
