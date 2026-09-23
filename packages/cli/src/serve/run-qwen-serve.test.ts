@@ -16132,6 +16132,84 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('reports only the names a failed late restore left down, until a PUT', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-failure-put-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+    });
+    // Also asks for `telegram`, which the primary already hosts by then.
+    writeWorkspaceSettings(daemon.secondary, {
+      channels: { feishu: { type: 'feishu' } },
+      serve: { channels: ['telegram', 'feishu'] },
+    });
+    const secondaryCwd = canonicalizeWorkspace(daemon.secondary);
+    daemon.factory.mockImplementation(
+      (opts: CreateChannelWorkerSupervisorOptions) => {
+        const channels =
+          opts.selection.mode === 'names' ? [...opts.selection.names] : [];
+        const failing = opts.workspace === secondaryCwd;
+        const worker = makeWorker({
+          enabled: true,
+          state: failing ? 'failed' : 'running',
+          channels: failing ? [] : channels,
+          requestedChannels: channels,
+        });
+        if (failing) {
+          worker.start.mockRejectedValue(new Error('feishu refused'));
+        } else {
+          worker.start.mockImplementation(async () => {
+            opts.onReady?.(worker.snapshot());
+          });
+        }
+        return worker;
+      },
+    );
+    const handle = await daemon.start();
+    const put = () =>
+      fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: daemon.headers,
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      });
+    const restoreIssues = async () =>
+      (
+        (await (
+          await fetch(`${handle.url}/daemon/status`, {
+            headers: daemon.headers,
+          })
+        ).json()) as { issues: Array<{ code: string; message: string }> }
+      ).issues.filter((issue) => issue.code === 'channel_restore_failed');
+
+    try {
+      await handle.runtimeReady;
+      expect((await put()).status).toBeLessThan(300);
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      // `telegram` was hosted before this restore and still is; only the name
+      // the restore itself failed to bring up is reported.
+      await vi.waitFor(async () =>
+        expect((await restoreIssues()).map((issue) => issue.message)).toEqual([
+          `serve.channels for workspace ${secondaryCwd} were not restored: feishu (feishu refused).`,
+        ]),
+      );
+
+      // The operator restating the selection supersedes it, even unchanged.
+      expect((await put()).status).toBeLessThan(300);
+      expect(await restoreIssues()).toEqual([]);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('forgets a restore failure when its workspace is removed', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-failure-rm-')),

@@ -82,7 +82,8 @@ time this daemon sees it — recorded as soon as it asks for anything — becaus
 later removal and re-registration, or a trust re-materialization, must not undo
 an operator who stopped one of those channels in between. Late restores run one
 at a time, each adding its names to the committed selection in one change, so
-one name it cannot attribute costs that workspace its whole list, unlike boot.
+one name it cannot attribute costs that workspace its whole list, unlike boot;
+each name left down is reported as described below.
 After `DELETE /workspace/channel` has stopped hosting, a registration restores
 nothing, because registering a workspace is not an instruction to turn hosting
 back on; that waits for a `PUT /workspace/channel` that commits, or the next
@@ -114,9 +115,16 @@ unconfirmed worker stops retain the existing startup-failure behavior. The
 service lease remains held while worker termination is unconfirmed.
 
 Channel management reports persisted startup settings and actual runtime state.
-Skipped or failed automatic restores are diagnosed through the daemon log;
-they do not replace the configured instances or startup toggles with a retained
-boot-failure snapshot.
+A `serve.channels` name the boot restore dropped, or that a late restore failed
+to bring up, is also reported rather than only logged: it never reaches the
+committed selection, so no worker snapshot carries it, and the channel list
+would otherwise call it `stopped`. The daemon keeps an in-memory record per
+workspace and channel; the channel list reports such a channel as `error` with
+the recorded `lastError`, and daemon status raises one `channel_restore_failed`
+warning per workspace. The record changes only the runtime state: the
+configured instances and startup toggles are still read from settings. It
+lasts until an operator acts on the channel or on the whole selection, the
+channel is committed, or the workspace is removed.
 
 Legacy `runtime.channelWorker`, grouped `runtime.channelWorkers`, pidfile
 fields, standalone `qwen channel start`, and `qwen channel reload` remain

@@ -805,7 +805,8 @@ warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
 `mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`,
-`channel_worker_partial_connect`, and `workspace_status_unavailable`. During
+`channel_worker_partial_connect`, `channel_restore_failed`, and
+`workspace_status_unavailable`. During
 the short window after the listener is ready but before the full runtime is
 mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
@@ -863,7 +864,8 @@ channel-service lease if nothing else has. That restore:
 - adds that workspace's names to the committed selection in one change, one
   late restore at a time. Unlike boot, which drops a name it cannot host and
   keeps the rest, a name that cannot be attributed leaves that workspace's
-  whole list unrestored, with the error logged.
+  whole list unrestored, with the error logged and reported as described
+  below.
 
 Registration does not wait on channel control at all. The restore is queued
 on the channel-control lane and the response is written without waiting for
@@ -872,7 +874,8 @@ channels the daemon already hosts. A worker that never becomes ready therefore
 delays only the channel work queued behind it, never another registration or a
 trust reconcile. The flip side is that a `201` from `POST /workspaces` does not
 mean that workspace's channels are up, or that an already-hosted channel it
-owns has finished restarting; read `GET /workspace/channel` for that.
+owns has finished restarting; read `GET /workspace/channel`, or that
+workspace's `GET /workspaces/:workspace/channels`, for that.
 
 Without an explicit selection, a boot-time `serve.channels` restore, or a
 registration like the one above, channel runtime loading stays lazy.
@@ -888,9 +891,28 @@ skips the automatic restore, with a log identifying `serve.channels`, while
 unrelated settings remain in effect. A failed worker startup allows the daemon
 to continue after cleanup succeeds. Global runtime startup timeouts and
 unconfirmed worker stops follow the existing startup-failure path; the lease
-remains held while worker termination is unconfirmed. Inspect daemon logs for
-skipped or failed restores. Channel management reports persisted startup
-settings and actual runtime state.
+remains held while worker termination is unconfirmed. Channel management
+reports persisted startup settings and actual runtime state.
+
+A `serve.channels` name the daemon did not bring up is reported, not only
+logged. That covers a name the boot restore dropped and every name of a late
+restore that failed. Such a name never joins the committed selection, so the
+worker snapshots do not show it; instead:
+
+- that workspace's `GET /workspaces/:workspace/channels` lists the channel with
+  `runtime: { state: "error", lastError }` instead of `stopped`, where
+  `lastError` is the adapter's own startup error when the worker reported one
+  for that channel, otherwise the restore's error;
+- `/daemon/status` reports one `channel_restore_failed` warning per workspace,
+  naming each channel with the same error.
+
+A boot name several workspaces listed is reported against each of them. The
+report lasts until an operator acts on the channel (start, stop, a
+configuration write or removal) or on the whole selection (`PUT` or
+`DELETE /workspace/channel`), until the channel is committed, or until its
+workspace is removed. It is kept in memory: a restarted daemon restores again
+and reports what that attempt did. The error text is credential-redacted and
+bounded the way the daemon log renders it.
 
 After a worker has reached ready, unexpected exits are restarted by the serve
 supervisor within a bounded policy: up to 3 restart attempts in a 5 minute

@@ -67,7 +67,7 @@ ready 后才报告启动成功的行为。不带频道参数启动时，daemon �
 本 daemon 第一次见到它时做一次——只要它要了任何名字就记下——因为之后的移除重注册、
 或信任重新物化，都不能撤销操作者在这期间停掉某个频道的决定。晚恢复逐个执行，每次
 以一次变更把该 workspace 的名字并入已提交选择，因此与启动不同，一个无法归属的名字
-会让该 workspace 整份名单都不恢复。`DELETE /workspace/channel` 停掉托管之后，注册
+会让该 workspace 整份名单都不恢复；没起来的每个名字都会按下文所述被报告。`DELETE /workspace/channel` 停掉托管之后，注册
 不恢复任何东西——注册一个 workspace 不等于要求把托管重新打开，要等一次提交成功的
 `PUT /workspace/channel` 或下次启动。这个停止是在发生处记录的：从未托管过任何东西的
 manager 与被停掉的 manager 状态相同，靠状态分辨不出来。显式 `--channel` 选择不会被
@@ -88,8 +88,14 @@ daemon 级闸门）。队列自己保证这些工作的先后，晚恢复在队�
 只有清理成功才允许 daemon 继续运行。全局 runtime 启动超时，以及无法确认 worker
 停止的情况，保留既有的启动失败行为。worker 终止尚未确认时，服务租约继续保留。
 
-频道管理报告持久化的启动设置和实际运行时状态。通过 daemon 日志诊断跳过或失败
-的自动恢复；这些失败不会用保留的启动失败快照替代已配置实例或启动开关。
+频道管理报告持久化的启动设置和实际运行时状态。启动恢复丢掉的 `serve.channels`
+名字、以及晚恢复没能拉起的名字，也会被报告，而不只是记日志：它们从未进入已提交
+选择，没有任何 worker 快照带着它们，频道列表原本会把它们显示为 `stopped`。daemon
+在内存里按 workspace 与频道记下这些失败；频道列表把这样的频道报告为 `error`，
+`lastError` 即记录的错误，daemon 状态为每个 workspace 发出一条
+`channel_restore_failed` 警告。记录只影响运行时状态：已配置实例和启动开关仍从
+设置读取。操作者对该频道或整份选择有所动作、该频道被提交、或该 workspace 被移除时，
+记录即清除。
 
 既有 `runtime.channelWorker`、分组后的 `runtime.channelWorkers`、pidfile
 字段、独立的 `qwen channel start` 和 `qwen channel reload` 保持兼容。新的 CLI

@@ -9573,15 +9573,6 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
-              for (const group of groups) {
-                if (group.selection.mode === 'all') {
-                  channelRestoreFailures.clearWorkspace(group.workspaceCwd);
-                  continue;
-                }
-                for (const name of group.selection.names) {
-                  channelRestoreFailures.clear(group.workspaceCwd, name);
-                }
-              }
               channelOwnerHints = new Map([
                 ...bootChannelOwnerHints,
                 ...groups.flatMap((group) =>
