@@ -1405,8 +1405,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return this.config.groupPolicy === 'pairing' ? 'unknown' : 'denied';
     }
     if (!this.dmGate.check(envelope).allowed) return 'denied';
-    if (isGroup && this.config.groupPolicy === 'pairing') return 'allowed';
-    const senderGate = this.senderGateFor(isGroup);
+    const senderGate = this.senderGateFor(envelope);
     if (senderGate.isAllowed(delivery.senderId)) return 'allowed';
     return senderGate === this.gate && this.config.senderPolicy === 'pairing'
       ? 'unknown'

@@ -88,7 +88,7 @@ export type {
   PairingRequest,
   PairingSubject,
 } from './PairingStore.js';
-export { GroupGate } from './GroupGate.js';
+export { GroupGate, lowercaseGroupAllowedUsers } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
 export { DmGate } from './DmGate.js';
 export type { DmCheckResult } from './DmGate.js';
