@@ -7,14 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BundledSkillLoader } from './BundledSkillLoader.js';
 import { skillArgsPath } from './skill-args-file.js';
-import {
-  mkdtempSync,
-  rmSync,
-  readFileSync,
-  existsSync,
-  mkdirSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
@@ -284,64 +277,6 @@ describe('BundledSkillLoader', () => {
       const text = await invoke('/review');
       expect(existsSync(skillArgsPath('review'))).toBe(false);
       expect(text).not.toContain('<skill-args>');
-    });
-
-    it('routes /batch --api to the api-mode instructions and strips the flag', async () => {
-      // Mode selection is a flag, resolved in code: the model never sees
-      // `--api`, so it cannot be talked into the wrong workflow.
-      mkdirSync(join(dir, 'batch'), { recursive: true });
-      writeFileSync(
-        join(dir, 'batch', 'api-mode.md'),
-        'API-MODE: prepare a plan file and call qwen batch run.',
-      );
-      const skill = makeSkill({
-        name: 'batch',
-        filePath: join(dir, 'batch', 'SKILL.md'),
-        body: 'PARALLEL-MODE: fan out worker agents.',
-      });
-      mockSkillManager.listSkills.mockResolvedValue([skill]);
-      const loader = new BundledSkillLoader(mockConfig);
-      const commands = await loader.loadCommands(signal);
-      const result = (await commands[0].action!(
-        {
-          invocation: {
-            raw: '/batch --api translate docs/zh',
-            args: '--api translate docs/zh',
-          },
-        } as never,
-        '--api translate docs/zh',
-      )) as { content: Array<{ text: string }> };
-      const text = result.content[0].text;
-      expect(text).toContain('API-MODE');
-      expect(text).not.toContain('PARALLEL-MODE');
-      // The flag itself is stripped from the arguments handed to the model.
-      expect(readFileSync(skillArgsPath('batch'), 'utf8')).toBe(
-        'translate docs/zh',
-      );
-    });
-
-    it('keeps the parallel-worker instructions for a plain /batch invocation', async () => {
-      mkdirSync(join(dir, 'batch'), { recursive: true });
-      writeFileSync(join(dir, 'batch', 'api-mode.md'), 'API-MODE body');
-      const skill = makeSkill({
-        name: 'batch',
-        filePath: join(dir, 'batch', 'SKILL.md'),
-        body: 'PARALLEL-MODE body',
-      });
-      mockSkillManager.listSkills.mockResolvedValue([skill]);
-      const loader = new BundledSkillLoader(mockConfig);
-      const commands = await loader.loadCommands(signal);
-      const result = (await commands[0].action!(
-        {
-          invocation: {
-            raw: '/batch add JSDoc src/**',
-            args: 'add JSDoc src/**',
-          },
-        } as never,
-        'add JSDoc src/**',
-      )) as { content: Array<{ text: string }> };
-      expect(result.content[0].text).toContain('PARALLEL-MODE body');
-      expect(result.content[0].text).not.toContain('API-MODE body');
     });
   });
 

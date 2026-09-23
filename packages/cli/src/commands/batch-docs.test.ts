@@ -115,6 +115,39 @@ describe('assembleRequests', () => {
       ),
     ).toThrow(/docs\/zh\/gone\.md/);
   });
+
+  it('refuses a source that symlinks out of the project', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-outside-'));
+    try {
+      fs.writeFileSync(path.join(outside, 'secret.txt'), 'do not upload');
+      fs.symlinkSync(
+        path.join(outside, 'secret.txt'),
+        path.join(root, 'docs', 'zh', 'secret.md'),
+      );
+      expect(() =>
+        assembleRequests(
+          plan,
+          [item({ source: 'docs/zh/secret.md' })],
+          1,
+          root,
+          'qwen-plus',
+        ),
+      ).toThrow(/resolves outside the project root/);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('turns thinking off unless the plan opts in', () => {
+    const bodyOf = (p: typeof plan) =>
+      assembleRequests(p, [item()], 1, root, 'qwen-plus')[0].line['body'] as {
+        enable_thinking?: boolean;
+      };
+    expect(bodyOf(plan).enable_thinking).toBe(false);
+    expect(bodyOf({ ...plan, enableThinking: true }).enable_thinking).toBe(
+      true,
+    );
+  });
 });
 
 describe('parseOutputJsonl', () => {
@@ -127,6 +160,15 @@ describe('parseOutputJsonl', () => {
 
   it('names the offending line on bad JSON', () => {
     expect(() => parseOutputJsonl('{"ok":1}\nnot json')).toThrow(/line 2/);
+  });
+
+  it('reports and skips a bad line when given a handler', () => {
+    const bad: string[] = [];
+    const lines = parseOutputJsonl('{"ok":1}\nnot json\n{"ok":2}', (m) =>
+      bad.push(m),
+    );
+    expect(lines).toHaveLength(2);
+    expect(bad).toEqual([expect.stringMatching(/line 2/)]);
   });
 });
 
@@ -179,13 +221,32 @@ describe('classifyResult', () => {
           choices: [
             {
               finish_reason: 'stop',
-              message: { content: '', tool_calls: [{ id: 'x' }] },
+              message: { content: '# Intro', tool_calls: [{ id: 'x' }] },
             },
           ],
         },
       },
     });
     expect(verdict.kind).toBe('failed');
+    if (verdict.kind === 'failed') expect(verdict.reason).toMatch(/tool calls/);
+  });
+
+  it('accepts an empty tool_calls array', () => {
+    const verdict = classifyResult({
+      custom_id: 'a#1',
+      response: {
+        status_code: 200,
+        body: {
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: { content: '# Intro', tool_calls: [] },
+            },
+          ],
+        },
+      },
+    });
+    expect(verdict).toEqual({ kind: 'ok', content: '# Intro' });
   });
 
   it('rejects empty content', () => {
@@ -215,6 +276,8 @@ describe('deliverResult', () => {
     expect(
       fs.readFileSync(path.join(root, 'docs', 'en', 'intro.md'), 'utf8'),
     ).toBe(content);
+    // The staging file is gone; only the target remains.
+    expect(fs.readdirSync(path.join(root, 'docs', 'en'))).toEqual(['intro.md']);
   });
 
   it('is idempotent: an identical existing target still counts as delivered', () => {

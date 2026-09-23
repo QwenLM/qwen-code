@@ -1,6 +1,17 @@
-# /batch --api — Agent-prepared Batch API workflow
+---
+name: batch-api
+description: Prepare a many-file, single-turn transform (translate, rewrite, extract) as a plan and submit it to the asynchronous, half-price DashScope Batch API; results are delivered as new files hours later. Invoke explicitly with /batch-api.
+argument-hint: '<task>'
+disable-model-invocation: true
+allowedTools:
+  - glob
+  - grep_search
+  - read_file
+---
 
-The user explicitly chose **async batch mode** by typing `--api`. This mode
+# /batch-api — Agent-prepared Batch API workflow
+
+The user explicitly chose **async batch mode** by typing `/batch-api`. This mode
 trades latency for price: the provider bills Batch requests at 50% of the
 realtime list price (with no context-cache benefit), and a job takes tens of
 minutes to hours to finish (completion window 24h or more). Your job is to
@@ -76,19 +87,23 @@ Rules:
 - Optional fields: `completionWindow` (default `24h`, max `14d`),
   `maxOutputTokens`, `expectedOutputTokensPerItem` (improves the cost
   estimate), `maxCostUsd` (hard budget — only enforceable when unit prices
-  are configured, see executor output), `enableThinking` (default off in the
-  executor only if you set it false explicitly; leave unset to use the
-  provider default).
+  are configured, see executor output), `enableThinking` (the executor sends
+  thinking off by default — set `true` only when the transform genuinely
+  needs reasoning, since thinking tokens are billed as output).
 - If you are unsure about model, prices, or provider limits, leave them to
   the executor — do not invent numbers.
 
 ## 4. Submit through the executor
 
-Run exactly this with the shell tool:
+Run exactly this with the shell tool — `QWEN_CODE_CLI` names the CLI running
+this session, so a plain `qwen` on PATH (possibly an older install without
+these subcommands) is only the fallback:
 
 ```
-qwen batch run .qwen/batch/plans/<slug>.json
+"${QWEN_CODE_CLI:-qwen}" batch run .qwen/batch/plans/<slug>.json
 ```
+
+Run every `qwen batch …` command below the same way when you run it yourself.
 
 Then report to the user, verbatim from the command output: the task id, item
 count, cost estimate, and the collect command. If the command fails, relay

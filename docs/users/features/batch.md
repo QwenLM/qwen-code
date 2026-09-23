@@ -171,14 +171,14 @@ qwen batch cancel batch_abc123
 
 Requests that already completed are still billed.
 
-## The agent-prepared workflow: `/batch --api`
+## The agent-prepared workflow: `/batch-api`
 
 The four verbs above are the transport. Most bulk work is easier through the
 workflow layer: you describe the task, the agent prepares a plan, and the
 executor submits, tracks, and delivers results as files.
 
 ```text
-/batch --api translate the Markdown docs in docs/zh into English,
+/batch-api translate the Markdown docs in docs/zh into English,
 writing them to docs/en with the same file names
 ```
 
@@ -214,11 +214,14 @@ local record, delivered items are never redone, and repeated collects never
 double-count usage. After results are safely on disk the remote input and
 output files are deleted (`--keep-remote` keeps them).
 
-Each item's state survives crashes in `.qwen/batch/tasks/<task-id>/`. If the
-create call's answer is lost (a 5xx or a dropped socket after the provider
-accepted it), the task is marked `submit-unknown` and `collect` reconciles
-against the provider's batch list instead of resubmitting — a duplicate
-submission would bill twice.
+Each item's state survives crashes in `.qwen/batch/tasks/<task-id>/`. The
+directory holds full copies of your sources and the generated outputs, so it
+gets its own `.gitignore` on first use. If the create call's answer is lost
+(a 5xx, a timeout, a dropped socket, or the process dying mid-call), the task
+is marked `submit-unknown` and `collect` reconciles against the provider's
+batch list instead of resubmitting — a duplicate submission would bill twice.
+Only one `qwen batch` command works on a task at a time; a second one exits
+with an "in use" message.
 
 Cost estimates are token-based unless you provide unit prices via
 `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` and `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`

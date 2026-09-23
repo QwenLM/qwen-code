@@ -35,8 +35,14 @@ import {
   refreshTaskStatus,
   parseCustomId,
   customIdOf,
+  isAmbiguous,
 } from './batch-task.js';
-import type { BatchTask, TaskAttempt } from './batch-task.js';
+import type {
+  BatchPlan,
+  BatchTask,
+  TaskAttempt,
+  TaskItem,
+} from './batch-task.js';
 import {
   assembleRequests,
   parseOutputJsonl,
@@ -197,6 +203,37 @@ function costLine(
   };
 }
 
+function enforceBudget(plan: BatchPlan, cost: { costUsd?: number }): void {
+  if (plan.maxCostUsd === undefined) return;
+  if (cost.costUsd === undefined) {
+    throw new Error(
+      `plan sets maxCostUsd=$${plan.maxCostUsd} but no unit prices are configured ` +
+        `(${ENV_PRICE_INPUT}, ${ENV_PRICE_OUTPUT}); the budget cannot be enforced, refusing to submit.`,
+    );
+  }
+  if (cost.costUsd > plan.maxCostUsd) {
+    throw new Error(
+      `estimated Batch cost $${cost.costUsd.toFixed(4)} exceeds the plan's ` +
+        `maxCostUsd=$${plan.maxCostUsd}; refusing to submit. Adjust the plan or its budget.`,
+    );
+  }
+}
+
+const ownedBy = (item: TaskItem, attempt: TaskAttempt) =>
+  (item.lastAttempt ?? attempt.attempt) === attempt.attempt;
+
+/** The attempt now owns these items: only its result lines count. */
+function markSubmitted(task: BatchTask, attempt: TaskAttempt): void {
+  for (const item of task.items) {
+    if (attempt.itemIds.includes(item.id)) {
+      item.state = 'submitted';
+      item.lastAttempt = attempt.attempt;
+      item.lastError = undefined;
+      item.heldReason = undefined;
+    }
+  }
+}
+
 /**
  * The upload→create dance with intent persisted between every step. The
  * ledger must always be able to answer "which remote objects might exist?"
@@ -239,19 +276,19 @@ async function submitAttempt(
     attempt.batchId = job.id;
     attempt.submitState = 'created';
     attempt.submittedAt = new Date().toISOString();
-    for (const item of task.items) {
-      if (attempt.itemIds.includes(item.id)) {
-        item.state = 'submitted';
-        item.lastError = undefined;
-        item.heldReason = undefined;
-      }
-    }
+    markSubmitted(task, attempt);
     refreshTaskStatus(task);
     store.save(task);
     deps.out(`batch job: ${job.id}`);
   } catch (error) {
     const status = (error as BatchApiError | undefined)?.status;
-    if (typeof status === 'number' && status >= 400 && status < 500) {
+    // 408 is a timeout, not a refusal: the create may still have landed.
+    if (
+      typeof status === 'number' &&
+      status >= 400 &&
+      status < 500 &&
+      status !== 408
+    ) {
       // Definite refusal: no job exists. The orphaned input file is deleted
       // best-effort and the attempt can be retried safely.
       await api.deleteFile(deps.ep, uploaded.id).catch(() => undefined);
@@ -301,35 +338,32 @@ export async function runPlan(
     submitState: 'intent',
   };
   task.attempts.push(attempt);
-  const assembly = assembleAttempt(task, attemptNumber, attempt.itemIds);
-  const cost = costLine(assembly.inputTokens, assembly.outputTokens, deps.env);
+  let assembly: AttemptAssembly;
+  let cost: { text: string; costUsd?: number };
+  try {
+    assembly = assembleAttempt(task, attemptNumber, attempt.itemIds);
+    cost = costLine(assembly.inputTokens, assembly.outputTokens, deps.env);
+    enforceBudget(plan, cost);
+  } catch (error) {
+    // Nothing reached the provider: leave no empty task behind in `list`.
+    store.remove(task.id);
+    throw error;
+  }
   task.estimate = {
     inputTokens: assembly.inputTokens,
     outputTokens: assembly.outputTokens,
     inputPricePer1MUsd: unitPrice(deps.env, ENV_PRICE_INPUT),
     outputPricePer1MUsd: unitPrice(deps.env, ENV_PRICE_OUTPUT),
   };
-  if (plan.maxCostUsd !== undefined) {
-    if (cost.costUsd === undefined) {
-      throw new Error(
-        `plan sets maxCostUsd=$${plan.maxCostUsd} but no unit prices are configured ` +
-          `(${ENV_PRICE_INPUT}, ${ENV_PRICE_OUTPUT}); the budget cannot be enforced, refusing to submit.`,
-      );
-    }
-    if (cost.costUsd > plan.maxCostUsd) {
-      throw new Error(
-        `estimated Batch cost $${cost.costUsd.toFixed(4)} exceeds the plan's ` +
-          `maxCostUsd=$${plan.maxCostUsd}; refusing to submit. Adjust the plan or its budget.`,
-      );
-    }
-  }
   store.save(task);
 
   deps.out(
     `task ${task.id}: ${task.items.length} item(s), window ${task.completionWindow}`,
   );
   deps.out(cost.text);
-  await submitAttempt(deps, task, attempt, store, assembly);
+  await store.withLock(task.id, () =>
+    submitAttempt(deps, task, attempt, store, assembly),
+  );
   deps.out(`collect later with: qwen batch collect ${task.id}`);
 }
 
@@ -354,6 +388,7 @@ async function reconcileUnknownAttempt(
     attempt.batchId = candidates[0].id;
     attempt.submitState = 'created';
     attempt.error = undefined;
+    markSubmitted(task, attempt);
     refreshTaskStatus(task);
     store.save(task);
     deps.out(
@@ -373,7 +408,7 @@ async function reconcileUnknownAttempt(
     deps.err(
       `[batch] no batch references input file ${attempt.inputFileId}. The create likely never landed; ` +
         `the provider's batch list is the source of truth. If you confirm none exists, ` +
-        `edit task.json to set this attempt's submitState back to "intent" and re-run collect, or start a new run.`,
+        `edit task.json to set this attempt's submitState back to "intent", then run \`qwen batch retry ${task.id}\`.`,
     );
   }
   return false;
@@ -398,21 +433,22 @@ const usageOfBody = (
   };
 };
 
+/** Poll until settled or the collect-wide `deadline` (epoch ms) passes —
+ * one --timeout covers every open batch, not each of them in turn. */
 async function waitForSettled(
   deps: WorkflowDeps,
   batchId: string,
-  timeoutSeconds: number,
+  deadline: number,
 ): Promise<BatchJob> {
   const api = deps.api ?? liveApi;
   const sleep = deps.sleep ?? realSleep;
-  const started = Date.now();
   let delay = 10_000;
   for (;;) {
     const job = await api.getBatch(deps.ep, batchId);
     if (SETTLED_STATUSES.has(job.status)) return job;
-    if ((Date.now() - started) / 1000 >= timeoutSeconds) {
+    if (Date.now() >= deadline) {
       throw new Error(
-        `${batchId} is still ${job.status} after waiting ${timeoutSeconds}s; run collect again later.`,
+        `${batchId} is still ${job.status} after the --wait timeout; run collect again later.`,
       );
     }
     deps.out(`waiting: ${batchId} is ${job.status} …`);
@@ -426,12 +462,24 @@ export async function collectTask(
   taskId: string,
   options: CollectOptions = {},
 ): Promise<void> {
-  const api = deps.api ?? liveApi;
   const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  await store.withLock(taskId, () =>
+    collectLocked(deps, store, taskId, options),
+  );
+}
+
+async function collectLocked(
+  deps: WorkflowDeps,
+  store: BatchTaskStore,
+  taskId: string,
+  options: CollectOptions,
+): Promise<void> {
+  const api = deps.api ?? liveApi;
   const task = store.load(taskId);
+  const deadline = Date.now() + (options.timeoutSeconds ?? 3600) * 1000;
 
   for (const attempt of task.attempts) {
-    if (attempt.submitState === 'unknown') {
+    if (isAmbiguous(attempt)) {
       await reconcileUnknownAttempt(deps, task, attempt, store);
     }
   }
@@ -449,27 +497,33 @@ export async function collectTask(
 
   for (const attempt of openAttempts) {
     const batchId = attempt.batchId as string;
-    let job = await api.getBatch(deps.ep, batchId);
-    if (!SETTLED_STATUSES.has(job.status)) {
-      if (!options.wait) {
-        deps.out(
-          `${batchId} is ${job.status} (${job.request_counts?.completed ?? 0}/${job.request_counts?.total ?? attempt.itemIds.length}); ` +
-            `re-run \`qwen batch collect ${taskId}\` later or add --wait.`,
-        );
-        continue;
+    // A collected attempt is fully local: re-reading it re-tries held
+    // deliveries without asking the provider about a batch it may have
+    // forgotten by now.
+    let job: BatchJob | undefined;
+    if (!attempt.collected) {
+      job = await api.getBatch(deps.ep, batchId);
+      if (!SETTLED_STATUSES.has(job.status)) {
+        if (!options.wait) {
+          deps.out(
+            `${batchId} is ${job.status} (${job.request_counts?.completed ?? 0}/${job.request_counts?.total ?? attempt.itemIds.length}); ` +
+              `re-run \`qwen batch collect ${taskId}\` later or add --wait.`,
+          );
+          continue;
+        }
+        job = await waitForSettled(deps, batchId, deadline);
       }
-      job = await waitForSettled(deps, batchId, options.timeoutSeconds ?? 3600);
     }
 
     const attemptDir = store.attemptDir(task.id, attempt.attempt);
     fs.mkdirSync(attemptDir, { recursive: true });
-    if (job.output_file_id && !attempt.outputPath) {
+    if (job?.output_file_id && !attempt.outputPath) {
       const target = path.join(attemptDir, 'output.jsonl');
       await api.downloadFile(deps.ep, job.output_file_id, target);
       attempt.outputPath = target;
       store.save(task);
     }
-    if (job.error_file_id && !attempt.errorPath) {
+    if (job?.error_file_id && !attempt.errorPath) {
       const target = path.join(attemptDir, 'error.jsonl');
       await api.downloadFile(deps.ep, job.error_file_id, target);
       attempt.errorPath = target;
@@ -478,9 +532,12 @@ export async function collectTask(
 
     const seen = new Set<string>();
     const usage = { promptTokens: 0, completionTokens: 0, requests: 0 };
+    const reportMalformed = (message: string) =>
+      deps.err(`[batch] attempt ${attempt.attempt}: skipping ${message}`);
     if (attempt.outputPath && fs.existsSync(attempt.outputPath)) {
       for (const line of parseOutputJsonl(
         fs.readFileSync(attempt.outputPath, 'utf8'),
+        reportMalformed,
       )) {
         const identity = line.custom_id
           ? parseCustomId(line.custom_id)
@@ -499,19 +556,22 @@ export async function collectTask(
           continue;
         }
         seen.add(item.id);
-        // Delivered is terminal: a later attempt already succeeded for this
-        // item, and replaying an earlier attempt's failure must not drag it
-        // back — re-collect is supposed to be idempotent.
-        if (item.state === 'delivered') {
-          continue;
-        }
-        const verdict = classifyResult(line);
+        // Billed whatever happens to the item next, so counted before any
+        // skip; recomputed from the whole file each time, so re-collecting
+        // neither double-counts nor erases it.
         if (line.response?.body !== undefined) {
           const perRequest = usageOfBody(line.response.body);
           usage.promptTokens += perRequest.promptTokens;
           usage.completionTokens += perRequest.completionTokens;
           usage.requests += 1;
         }
+        // Only the item's latest attempt may move it. Replaying an older
+        // attempt's failure while a retry runs would otherwise re-open it
+        // for another (billed) retry; a delivered item is terminal.
+        if (item.state === 'delivered' || !ownedBy(item, attempt)) {
+          continue;
+        }
+        const verdict = classifyResult(line);
         if (verdict.kind === 'failed') {
           item.state = 'failed';
           item.lastError = verdict.reason;
@@ -539,6 +599,7 @@ export async function collectTask(
     if (attempt.errorPath && fs.existsSync(attempt.errorPath)) {
       for (const line of parseOutputJsonl(
         fs.readFileSync(attempt.errorPath, 'utf8'),
+        reportMalformed,
       )) {
         const identity = line.custom_id
           ? parseCustomId(line.custom_id)
@@ -546,18 +607,20 @@ export async function collectTask(
         const item = identity
           ? task.items.find((candidate) => candidate.id === identity.itemId)
           : undefined;
-        if (!item || seen.has(item.id)) continue;
+        if (!item || identity?.attempt !== attempt.attempt) continue;
+        if (seen.has(item.id)) continue;
         seen.add(item.id);
-        // Same rule as the output loop: a later attempt's delivery wins over
-        // an earlier attempt's recorded failure.
-        if (item.state === 'delivered') continue;
+        // Same rule as the output loop.
+        if (item.state === 'delivered' || !ownedBy(item, attempt)) {
+          continue;
+        }
         item.state = 'failed';
         item.lastError = `provider reported failure: ${JSON.stringify(line.error ?? line).slice(0, 300)}`;
       }
     }
     for (const itemId of attempt.itemIds) {
       const item = task.items.find((candidate) => candidate.id === itemId);
-      if (item && item.state === 'submitted') {
+      if (item && item.state === 'submitted' && ownedBy(item, attempt)) {
         item.state = 'failed';
         item.lastError = 'no result line for this request in the settled batch';
       }
@@ -566,7 +629,7 @@ export async function collectTask(
     refreshTaskStatus(task);
     store.save(task);
 
-    if (!options.keepRemote && !attempt.remoteCleaned) {
+    if (job && !options.keepRemote && !attempt.remoteCleaned) {
       // Results are safely local now; uploaded files otherwise live on the
       // provider until somebody deletes them. Failure here must not fail
       // the collection — the report below stays truthful either way.
@@ -585,6 +648,9 @@ export async function collectTask(
         }
       }
       attempt.remoteCleaned = true;
+    }
+    if (job) {
+      attempt.collected = true;
       store.save(task);
     }
   }
@@ -626,15 +692,34 @@ export async function retryTask(
   taskId: string,
 ): Promise<void> {
   const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  await store.withLock(taskId, () => retryLocked(deps, store, taskId));
+}
+
+async function retryLocked(
+  deps: WorkflowDeps,
+  store: BatchTaskStore,
+  taskId: string,
+): Promise<void> {
   const task = store.load(taskId);
   const api = deps.api ?? liveApi;
 
-  if (task.attempts.some((attempt) => attempt.submitState === 'unknown')) {
+  if (task.attempts.some(isAmbiguous)) {
     throw new Error(
       `task ${taskId} has an ambiguous submission; run \`qwen batch collect ${taskId}\` to reconcile before retrying.`,
     );
   }
-  const retryItems = task.items.filter((item) => item.state === 'failed');
+  // Failed items, plus items whose only submission provably never became a
+  // batch (e.g. an unconfirmed create the user reset to "intent").
+  const createdIds = new Set(
+    task.attempts
+      .filter((attempt) => attempt.submitState === 'created')
+      .flatMap((attempt) => attempt.itemIds),
+  );
+  const retryItems = task.items.filter(
+    (item) =>
+      item.state === 'failed' ||
+      (item.state === 'pending' && !createdIds.has(item.id)),
+  );
   if (retryItems.length === 0) {
     deps.out(
       `task ${taskId}: nothing to retry — no failed items ` +
@@ -643,13 +728,21 @@ export async function retryTask(
     return;
   }
   for (const attempt of task.attempts) {
-    if (attempt.submitState === 'created' && attempt.batchId) {
+    if (
+      attempt.submitState === 'created' &&
+      attempt.batchId &&
+      !attempt.collected
+    ) {
       const job = await api.getBatch(deps.ep, attempt.batchId);
       if (!SETTLED_STATUSES.has(job.status)) {
         throw new Error(
           `batch ${attempt.batchId} is still ${job.status}; wait for it to settle (or cancel it) before retrying.`,
         );
       }
+      // Its results may already contain what we are about to pay for again.
+      throw new Error(
+        `batch ${attempt.batchId} has settled but is not collected yet; run \`qwen batch collect ${taskId}\` first.`,
+      );
     }
   }
   const attemptNumber = task.attempts.length + 1;
@@ -670,8 +763,10 @@ export async function retryTask(
     Math.round(perItem.output * retryItems.length),
     deps.env,
   );
+  // The plan's budget binds every submission, not just the first.
+  enforceBudget(task.plan, cost);
   deps.out(
-    `retrying ${retryItems.length} failed item(s) as attempt ${attemptNumber}: ${cost.text}`,
+    `retrying ${retryItems.length} item(s) as attempt ${attemptNumber}: ${cost.text}`,
   );
   await submitAttempt(deps, task, attempt, store);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
@@ -685,6 +780,9 @@ export async function listTasks(deps: WorkflowDeps): Promise<void> {
     return;
   }
   for (const task of tasks) {
+    // Derive rather than trust the stored rollup: a process that died
+    // mid-create never got to record `submit-unknown`.
+    refreshTaskStatus(task);
     const delivered = task.items.filter(
       (item) => item.state === 'delivered',
     ).length;
@@ -700,8 +798,16 @@ export async function cancelTask(
   deps: WorkflowDeps,
   taskId: string,
 ): Promise<void> {
-  const api = deps.api ?? liveApi;
   const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  await store.withLock(taskId, () => cancelLocked(deps, store, taskId));
+}
+
+async function cancelLocked(
+  deps: WorkflowDeps,
+  store: BatchTaskStore,
+  taskId: string,
+): Promise<void> {
+  const api = deps.api ?? liveApi;
   const task = store.load(taskId);
   const attempt = [...task.attempts]
     .reverse()
@@ -709,9 +815,7 @@ export async function cancelTask(
       (candidate) => candidate.submitState === 'created' && candidate.batchId,
     );
   if (!attempt) {
-    const hint = task.attempts.some(
-      (candidate) => candidate.submitState === 'unknown',
-    )
+    const hint = task.attempts.some(isAmbiguous)
       ? ` A submission is marked ambiguous — run \`qwen batch collect ${taskId}\` to reconcile it first.`
       : '';
     throw new Error(

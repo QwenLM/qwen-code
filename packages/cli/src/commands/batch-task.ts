@@ -120,12 +120,24 @@ export interface TaskItem {
   deliveredSha256?: string;
   lastError?: string;
   heldReason?: string;
+  /** The attempt this item's current state belongs to. Result lines from
+   * any other attempt are stale: replaying attempt 1's failure while
+   * attempt 2 runs must not flip the item back to `failed` (and re-bill it
+   * on the next retry). */
+  lastAttempt?: number;
 }
 
 /** Where one upload+create cycle stands. `unknown` means the create request
  * was sent but its answer never arrived: the batch may exist and be billing,
- * and only a provider-side listing can tell. */
+ * and only a provider-side listing can tell. `uploaded` persisted by a
+ * process that is gone means the same thing — it died with the create in
+ * flight. */
 export type SubmitState = 'intent' | 'uploaded' | 'created' | 'unknown';
+
+/** Commands only run under the task lock, so an `uploaded` attempt seen on
+ * load was left by a dead process and is exactly as ambiguous as `unknown`. */
+export const isAmbiguous = (attempt: TaskAttempt) =>
+  attempt.submitState === 'unknown' || attempt.submitState === 'uploaded';
 
 export interface TaskAttempt {
   attempt: number;
@@ -145,6 +157,9 @@ export interface TaskAttempt {
     requests: number;
   };
   remoteCleaned?: boolean;
+  /** Settled, downloaded and cleaned up: later collects only re-read the
+   * local files and never ask the provider about this batch again. */
+  collected?: boolean;
 }
 
 export type TaskStatus =
@@ -242,7 +257,55 @@ export class BatchTaskStore {
       attempts: [],
     };
     this.save(task);
+    // Inputs are full copies of the sources and outputs are generated text;
+    // neither belongs in the user's commits.
+    const ignore = path.join(this.homeDir, '.gitignore');
+    if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, '*\n');
     return task;
+  }
+
+  /** Drop a task that never reached the provider (e.g. refused by the
+   * budget gate) so it does not linger in `list`. */
+  remove(id: string): void {
+    fs.rmSync(this.dirOf(id), { recursive: true, force: true });
+  }
+
+  /**
+   * Run `fn` holding the task's lock. Two concurrent `retry`s would both
+   * submit (and bill) the same failed items; two `collect`s would race on
+   * the same downloads. A lock left by a crashed process is taken over.
+   */
+  async withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const lock = path.join(this.dirOf(id), 'lock');
+    if (!fs.existsSync(path.dirname(lock))) {
+      throw new Error(`no batch task "${id}" under ${this.homeDir}`);
+    }
+    for (let attempt = 0; ; attempt++) {
+      try {
+        fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        let holder = NaN;
+        try {
+          holder = Number(fs.readFileSync(lock, 'utf8'));
+        } catch {
+          // Released between our write and read; try again.
+        }
+        if (attempt > 0 || isProcessAlive(holder)) {
+          throw new Error(
+            `task "${id}" is in use by another \`qwen batch\` process` +
+              `${Number.isNaN(holder) ? '' : ` (pid ${holder})`}; wait for it to finish.`,
+          );
+        }
+        fs.rmSync(lock, { force: true });
+      }
+    }
+    try {
+      return await fn();
+    } finally {
+      fs.rmSync(lock, { force: true });
+    }
   }
 
   load(id: string): BatchTask {
@@ -266,13 +329,12 @@ export class BatchTaskStore {
     return task;
   }
 
-  /** Atomic write: a reader must never meet half a JSON document. A stale
-   * `.tmp` from a crashed writer is simply overwritten next time. */
+  /** Atomic write: a reader must never meet half a JSON document. */
   save(task: BatchTask): void {
     const file = this.fileOf(task.id);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     task.updatedAt = new Date().toISOString();
-    const tmp = `${file}.tmp`;
+    const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(task, null, 2) + '\n');
     fs.renameSync(tmp, file);
   }
@@ -308,9 +370,20 @@ export function refreshTaskStatus(task: BatchTask): void {
     return;
   }
   const last = task.attempts[task.attempts.length - 1];
-  if (last?.submitState === 'unknown') {
+  if (last && isAmbiguous(last)) {
     task.status = 'submit-unknown';
   } else if (last?.submitState === 'created') {
     task.status = 'running';
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: it exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }

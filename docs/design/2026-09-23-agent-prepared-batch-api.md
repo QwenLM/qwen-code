@@ -37,16 +37,19 @@ Two product promises, kept separate:
 
 ## 2. Entry points
 
-### `/batch --api <task>` (interactive)
+### `/batch-api <task>` (interactive)
 
-The existing `/batch` skill fans out realtime worker agents; this PR adds an
-explicit second mode to the same command. `BundledSkillLoader` resolves the
-`--api` flag in code — mode selection is a flag, not something the model can
-be talked into or out of — and swaps the skill body for
-`packages/core/src/skills/bundled/batch/api-mode.md`. Without the flag,
-`/batch` behaves exactly as before.
+A separate bundled skill, `packages/core/src/skills/bundled/batch-api/`,
+next to — not inside — the existing `/batch` (realtime parallel workers,
+unchanged). The two are not substitutes: `/batch` workers use tools and edit
+files in place within minutes; `/batch-api` requests are single-turn,
+tool-less, write only fresh targets, and take hours. The skill sets
+`disable-model-invocation: true`, so choosing Batch is always the user's
+explicit act — the model can neither enter nor leave this mode on its own.
+Its `allowedTools` grants read-only tools only; writing the plan and
+`qwen batch run` (which spends money) stay behind the approval prompt.
 
-The api-mode instructions make the model do the semantic work only:
+The skill makes the model do the semantic work only:
 
 1. Judge suitability honestly (independent single-turn transforms with all
    materials available now). Unsuitable → explain and stop; never silently
@@ -76,10 +79,10 @@ reused, delivered items are never redone, and held items are re-attempted
 ## 3. Architecture
 
 ```text
-user: /batch --api "translate docs/zh into docs/en"
+user: /batch-api "translate docs/zh into docs/en"
         │
-        ▼  (BundledSkillLoader resolves --api in code)
-prepare skill (api-mode.md) — semantic work only: suitability, sample read,
+        ▼
+prepare skill (batch-api/SKILL.md) — semantic work only: suitability, sample read,
 shared rules, plan file. Runs realtime, keeps its own cache benefits.
         │
         ▼  plan JSON (schema in §4)
@@ -97,11 +100,20 @@ Design invariants:
 
 - **The ledger answers "which remote objects might exist?" without
   guessing.** Submit intent is persisted before upload, the uploaded file id
-  before create. A lost create response becomes `submit-unknown`, reconciled
-  against the provider's batch list by `input_file_id` — never blindly
-  resubmitted, because the wrong answer bills twice.
+  before create. A lost create response — or a process that died with the
+  create in flight, leaving the attempt `uploaded` — becomes
+  `submit-unknown`, reconciled against the provider's batch list by
+  `input_file_id` — never blindly resubmitted, because the wrong answer
+  bills twice.
+- **One command per task at a time.** `collect`, `retry` and `cancel` (and
+  `run` while submitting) hold a per-task lock file; a lock whose pid is
+  dead is taken over. Two concurrent retries would otherwise both bill the
+  same items.
 - **custom_id = `<itemId>#<attempt>`**, so results map back unambiguously
   across retries; unknown/duplicate result lines are ignored with a warning.
+  Each item records the attempt that owns it, and only that attempt's
+  result lines may change it: replaying an older attempt's failure while a
+  retry runs must not re-open the item for another paid retry.
 - **Delivery is no-overwrite.** A target that exists with different content
   is a conflict to report; an identical existing target counts as delivered,
   which is what makes re-collection idempotent. Sources are re-hashed before
@@ -148,7 +160,9 @@ Enforced by `batch-task.ts`: item ids match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`
 (they ride inside provider custom_ids), ids and targets are unique, unknown
 fields are rejected (an agent's typo must fail loudly, not silently change
 behavior). Only the optional fields above are optional; `kind` is literal —
-new kinds get their own schema version.
+new kinds get their own schema version. `enableThinking` defaults to `false`
+in the executor: thinking tokens are billed as output and buy nothing in a
+one-shot transform, so a plan must opt in.
 
 The first product contract is **one source document → one complete target
 document**. The model returns content only; paths or commands inside its
@@ -158,34 +172,36 @@ is not semantic quality, which remains the user's acceptance call.
 
 ## 5. Boundary behaviors
 
-| Boundary                                   | Behavior                                                                                    |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| Unsuitable task (needs iterative feedback) | Skill explains and stops; no silent realtime fallback                                       |
-| Source path escapes project root           | Assembly refuses before anything is uploaded                                                |
-| Assembled line > 1 MB                      | Refused with a pointer to raw `qwen batch submit` (workflow cap, below the provider's 6 MB) |
-| Create returns definite 4xx                | Orphan upload deleted, items `failed`, `retry` is safe                                      |
-| Create answer lost (5xx / dropped socket)  | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                   |
-| Reconcile finds 0 or 2+ candidates         | Report and stop; the provider list is the source of truth                                   |
-| Batch not settled at collect               | Report status; `--wait` polls with 10s→60s backoff up to `--timeout`                        |
-| Result line truncated / tool calls / empty | Item `failed` with the reason; billed-failure costs stay visible                            |
-| Result custom_id unknown or duplicated     | Ignored with a warning, never mapped onto another item                                      |
-| Error-file line                            | Item `failed` with the provider's error                                                     |
-| Item missing from all result files         | Item `failed` ("no result line")                                                            |
-| Source changed after submission            | Delivery `held` with the reason; re-collect after reverting                                 |
-| Target exists with different content       | Delivery `held`; user resolves, re-collect delivers from the local record                   |
-| Target path symlinks out of the project    | Delivery `held`                                                                             |
-| `--task` cancel on a settled batch         | Points at `collect` instead of pretending to cancel                                         |
-| Remote cleanup after collect               | Input/output/error files deleted (after local persistence); `--keep-remote` opts out        |
+| Boundary                                             | Behavior                                                                                    |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Unsuitable task (needs iterative feedback)           | Skill explains and stops; no silent realtime fallback                                       |
+| Source path escapes project root (incl. via symlink) | Assembly refuses before anything is uploaded                                                |
+| Assembled line > 1 MB                                | Refused with a pointer to raw `qwen batch submit` (workflow cap, below the provider's 6 MB) |
+| Create returns definite 4xx                          | Orphan upload deleted, items `failed`, `retry` is safe                                      |
+| Create answer lost (5xx / dropped socket)            | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                   |
+| Reconcile finds 0 or 2+ candidates                   | Report and stop; the provider list is the source of truth                                   |
+| Batch not settled at collect                         | Report status; `--wait` polls with 10s→60s backoff up to `--timeout`                        |
+| Result line truncated / tool calls / empty           | Item `failed` with the reason; billed-failure costs stay visible                            |
+| Result custom_id unknown or duplicated               | Ignored with a warning, never mapped onto another item                                      |
+| Error-file line                                      | Item `failed` with the provider's error                                                     |
+| Item missing from all result files                   | Item `failed` ("no result line")                                                            |
+| Source changed after submission                      | Delivery `held` with the reason; re-collect after reverting                                 |
+| Target exists with different content                 | Delivery `held`; user resolves, re-collect delivers from the local record                   |
+| Target path symlinks out of the project              | Delivery `held`                                                                             |
+| `--task` cancel on a settled batch                   | Points at `collect` instead of pretending to cancel                                         |
+| Remote cleanup after collect                         | Input/output/error files deleted (after local persistence); `--keep-remote` opts out        |
 
-Retry semantics: only `failed` items, as a new attempt with fresh
-`#<attempt>` custom ids; refused while an ambiguous submission exists or an
-earlier batch is still running. Held items are never retried — they need a
+Retry semantics: only `failed` items (plus items whose only submission is
+confirmed never to have become a batch), as a new attempt with fresh
+`#<attempt>` custom ids, under the plan's `maxCostUsd` like `run`; refused
+while an ambiguous submission exists or an earlier batch is still running or
+settled-but-uncollected. Held items are never retried — they need a
 user decision, not a new request.
 
 ## 6. Cost model
 
 The executor compares nothing automatically — the user explicitly chose
-Batch by entering `--api` mode — but it must not lie about money:
+Batch by invoking `/batch-api` — but it must not lie about money:
 
 - Batch pricing: 50% of realtime list for successful requests, no context
   cache. Whether that beats realtime for a given job depends on the shared
@@ -210,8 +226,6 @@ Batch by entering `--api` mode — but it must not lie about money:
   classification, delivery conflict/change/idempotency, the full submit →
   settle → collect → retry lifecycle against a fake `WorkflowApi`, ambiguous
   create reconciliation, `--wait` backoff, budget gates.
-- `BundledSkillLoader.test.ts`: `/batch --api` swaps in api-mode.md and
-  strips the flag; plain `/batch` keeps the parallel-worker body.
 - Manual end-to-end (fake HTTP server, isolated HOME, real built CLI):
   `run → collect (running) → collect --wait → delivered files → idempotent
 re-collect → list → failure → retry → held → resolve → delivered →

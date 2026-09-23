@@ -140,12 +140,47 @@ describe('BatchTaskStore', () => {
     expect(() => store.load('../escape')).toThrow(/invalid task id/);
   });
 
-  it('leaves no half-written task file when interrupted mid-save', () => {
+  it('writes through a temp file and leaves only task.json behind', () => {
     const plan = validatePlan(validPlan, 'plan.json');
     const task = store.create(plan, root, 'qwen-plus');
-    // Simulate a crashed writer: a stale tmp file must not corrupt the load.
-    fs.writeFileSync(`${store.fileOf(task.id)}.tmp`, '{"truncated');
-    expect(store.load(task.id).id).toBe(task.id);
+    task.items[0].state = 'failed';
+    store.save(task);
+    expect(fs.readdirSync(path.dirname(store.fileOf(task.id)))).toEqual([
+      'task.json',
+    ]);
+    expect(store.load(task.id).items[0].state).toBe('failed');
+  });
+
+  it('keeps the ledger out of git', () => {
+    store.create(validatePlan(validPlan, 'plan.json'), root, 'qwen-plus');
+    expect(fs.readFileSync(path.join(root, '.gitignore'), 'utf8')).toBe('*\n');
+  });
+
+  it('refuses a second holder of the task lock and releases it after', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    await store.withLock(task.id, async () => {
+      await expect(
+        store.withLock(task.id, async () => undefined),
+      ).rejects.toThrow(/in use by another/);
+    });
+    await expect(store.withLock(task.id, async () => 'ok')).resolves.toBe('ok');
+  });
+
+  it('takes over a lock left by a process that no longer exists', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const lock = path.join(path.dirname(store.fileOf(task.id)), 'lock');
+    // Far above any real pid limit, so it cannot name a live process.
+    fs.writeFileSync(lock, '2147483646');
+    await expect(store.withLock(task.id, async () => 'ok')).resolves.toBe('ok');
+    expect(fs.existsSync(lock)).toBe(false);
   });
 
   it('lists tasks newest first and skips unreadable ones', () => {
@@ -206,6 +241,20 @@ describe('refreshTaskStatus', () => {
       attempt: 1,
       itemIds: ['intro'],
       submitState: 'unknown',
+    });
+    refreshTaskStatus(task);
+    expect(task.status).toBe('submit-unknown');
+  });
+
+  it('treats an attempt stuck in uploaded as ambiguous too', () => {
+    // A process that died with the create request in flight leaves the
+    // attempt `uploaded`; the batch may exist, so it must be reconciled.
+    const task = baseTask();
+    task.attempts.push({
+      attempt: 1,
+      itemIds: ['intro'],
+      submitState: 'uploaded',
+      inputFileId: 'file-1',
     });
     refreshTaskStatus(task);
     expect(task.status).toBe('submit-unknown');

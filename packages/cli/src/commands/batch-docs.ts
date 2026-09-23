@@ -56,6 +56,13 @@ export function assembleRequests(
         `item "${item.id}": source "${item.source}" escapes the project root`,
       );
     }
+    // The lexical check above does not see symlinks: a source like
+    // `docs/key.md -> ~/.ssh/id_rsa` would otherwise be read and uploaded.
+    if (!isRealPathInsideRoot(projectRoot, sourcePath)) {
+      throw new AssemblyError(
+        `item "${item.id}": source "${item.source}" resolves outside the project root`,
+      );
+    }
     let content: string;
     try {
       content = fs.readFileSync(sourcePath, 'utf8');
@@ -81,9 +88,9 @@ export function assembleRequests(
     if (plan.maxOutputTokens !== undefined) {
       body['max_tokens'] = plan.maxOutputTokens;
     }
-    if (plan.enableThinking !== undefined) {
-      body['enable_thinking'] = plan.enableThinking;
-    }
+    // Thinking tokens are billed as output and add nothing to a one-shot
+    // transform, so the executor turns thinking off unless the plan opts in.
+    body['enable_thinking'] = plan.enableThinking ?? false;
     const inputTokens = estimateTokens(JSON.stringify(messages));
     requests.push({
       customId: customIdOf(item.id, attempt),
@@ -99,6 +106,19 @@ export function assembleRequests(
     });
   }
   return requests;
+}
+
+// A path that does not exist yet has nothing to follow; the read that
+// comes next reports it by name.
+function isRealPathInsideRoot(projectRoot: string, p: string): boolean {
+  let real: string;
+  try {
+    real = fs.realpathSync(p);
+  } catch {
+    return true;
+  }
+  const realRoot = fs.realpathSync(projectRoot);
+  return real === realRoot || real.startsWith(realRoot + path.sep);
 }
 
 function resolveInsideRoot(
@@ -121,7 +141,15 @@ export interface OutputLine {
   error?: unknown;
 }
 
-export function parseOutputJsonl(text: string): OutputLine[] {
+/**
+ * Parse a provider result file. Without `onMalformed` a bad line throws;
+ * with it the line is reported and skipped, so one corrupt line cannot
+ * block every other item's delivery — its item then fails as "no result".
+ */
+export function parseOutputJsonl(
+  text: string,
+  onMalformed?: (message: string) => void,
+): OutputLine[] {
   const lines: OutputLine[] = [];
   let lineNo = 0;
   for (const raw of text.split('\n')) {
@@ -130,9 +158,9 @@ export function parseOutputJsonl(text: string): OutputLine[] {
     try {
       lines.push(JSON.parse(raw) as OutputLine);
     } catch (error) {
-      throw new Error(
-        `output line ${lineNo}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      const message = `output line ${lineNo}: ${error instanceof Error ? error.message : String(error)}`;
+      if (!onMalformed) throw new Error(message);
+      onMalformed(message);
     }
   }
   return lines;
@@ -186,7 +214,8 @@ export function classifyResult(line: OutputLine): ResultVerdict {
     };
   }
   const message = choice.message ?? {};
-  if (message.tool_calls !== undefined && message.tool_calls !== null) {
+  const toolCalls = message.tool_calls;
+  if (Array.isArray(toolCalls) ? toolCalls.length > 0 : toolCalls != null) {
     return {
       kind: 'failed',
       reason: 'model returned tool calls; this workflow executes none of them',
@@ -274,8 +303,26 @@ export function deliverResult(
       reason: `target "${item.target}" already exists with different content; kept both`,
     };
   }
-  const tmp = `${targetPath}.batch-tmp`;
+  // Publish without a check-then-overwrite window: link() fails if the
+  // target appeared since the existence check above (another collect, an
+  // editor save), where rename() would silently replace it.
+  const tmp = `${targetPath}.${process.pid}.batch-tmp`;
   fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, targetPath);
+  try {
+    fs.linkSync(tmp, targetPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      return {
+        kind: 'held',
+        reason: `target "${item.target}" appeared while delivering; kept both`,
+      };
+    }
+    // Filesystems without hard links: exclusive create still refuses to
+    // overwrite, at the cost of atomicity.
+    fs.writeFileSync(targetPath, content, { flag: 'wx' });
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
   return { kind: 'delivered', targetPath };
 }

@@ -20,7 +20,7 @@ R4/R5/R6/R8/R9 与 R7 的 SIGINT 部分随之删除；`fake-dashscope.mjs` 里
 `03-queue-timing.mjs::drain()` 的清理是 fire-and-forget 且紧接着
 `process.exit(0)`，实测会遗留文件，需要在退出前 `await Promise.allSettled(...)`。
 
-## 工作流 E2E（`/batch --api` 的确定性执行层）
+## 工作流 E2E（`/batch-api` 的确定性执行层）
 
 `workflow-e2e.mjs` 验证 agent-prepared 工作流（`qwen batch run|collect|retry|list`、
 `cancel --task`）：自带假 Batch API、隔离 `HOME`，驱动构建产物 `dist/cli.js`

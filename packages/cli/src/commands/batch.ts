@@ -608,7 +608,7 @@ const runWorkflowCommand: CommandModule = {
   builder: (yargs) =>
     yargs.positional('plan', {
       describe:
-        'Plan JSON (usually written by the /batch --api skill): shared rules + source/target items',
+        'Plan JSON (usually written by the /batch-api skill): shared rules + source/target items',
       type: 'string',
       demandOption: true,
     }),
@@ -646,7 +646,12 @@ const collectWorkflowCommand: CommandModule = {
         describe: 'Keep the uploaded input/output files on the provider',
         type: 'boolean',
         default: false,
-      }),
+      })
+      .check((argv) =>
+        Number.isFinite(argv['timeout']) && (argv['timeout'] as number) > 0
+          ? true
+          : '--timeout must be a positive number of seconds',
+      ),
   handler: (argv) =>
     run(async () => {
       await collectTask(

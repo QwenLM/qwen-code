@@ -216,6 +216,8 @@ describe('runPlan', () => {
       /cannot be enforced/,
     );
     expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+    // A refused plan leaves no empty task behind.
+    expect(h.store.list()).toHaveLength(0);
   });
 
   it('refuses to submit when the estimate exceeds the budget', async () => {
@@ -314,9 +316,18 @@ describe('collectTask', () => {
 
     const downloads = h.api.downloadFile.mock.calls.length;
     const deletes = h.api.deleteFile.mock.calls.length;
+    const polls = h.api.getBatch.mock.calls.length;
     await collectTask(h.deps, taskId); // re-collect: pure replay
     expect(h.api.downloadFile.mock.calls.length).toBe(downloads);
     expect(h.api.deleteFile.mock.calls.length).toBe(deletes);
+    // A collected batch is never asked about again (the provider may have
+    // forgotten it), and its billed usage survives the replay.
+    expect(h.api.getBatch.mock.calls.length).toBe(polls);
+    expect(h.store.load(taskId).attempts[0].usage).toEqual({
+      promptTokens: 200,
+      completionTokens: 100,
+      requests: 2,
+    });
     expect(
       fs.readFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'utf8'),
     ).toBe('# B\n\nBeta.');
@@ -425,6 +436,116 @@ describe('collectTask', () => {
     ).toBe('# A\n\nAlpha.');
   });
 
+  it('does not let an older attempt re-open an item a running retry owns', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${JSON.stringify({ custom_id: 'a#1', response: { status_code: 500, body: {} } })}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    await retryTask(h.deps, taskId); // batch-2, still in_progress
+
+    // Collecting while attempt 2 runs replays attempt 1's failure for a.
+    h.out.length = 0;
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items[0]).toMatchObject({ state: 'submitted', lastAttempt: 2 });
+    expect(h.out.join('\n')).not.toMatch(/qwen batch retry/);
+
+    // Attempt 2 settles; a retry before collecting finds nothing to pay for.
+    const job2 = h.jobs.get('batch-2');
+    if (!job2) throw new Error('expected batch-2');
+    job2.status = 'completed';
+    job2.output_file_id = 'file-out-2';
+    h.files.set('file-out-2', `${outputLine('a#2', '# A\n\nAlpha.')}\n`);
+    await retryTask(h.deps, taskId);
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(2);
+
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).items[0].state).toBe('delivered');
+  });
+
+  it('reconciles an attempt left in "uploaded" by a crash during create', async () => {
+    const h = (harness = setup());
+    h.files.set(
+      'file-out-1',
+      `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    );
+    // The create lands provider-side, then the process dies before the
+    // answer is recorded: the ledger still says `uploaded`, items pending.
+    h.api.createBatch.mockImplementationOnce(
+      async (_ep: unknown, inputFileId: string) => {
+        h.jobs.set(
+          'batch-lost',
+          jobOf('batch-lost', 'completed', {
+            input_file_id: inputFileId,
+            output_file_id: 'file-out-1',
+          }),
+        );
+        return new Promise<BatchJob>(() => undefined);
+      },
+    );
+    void runPlan(h.deps, h.planPath);
+    await vi.waitFor(() => expect(h.jobs.has('batch-lost')).toBe(true));
+    const taskId = taskIdOf(h);
+    expect(h.store.load(taskId).attempts[0].submitState).toBe('uploaded');
+    // The "dead" process's lock would be stale; this test process is alive.
+    fs.rmSync(path.join(path.dirname(h.store.fileOf(taskId)), 'lock'));
+    h.out.length = 0;
+    await listTasks(h.deps);
+    expect(h.out.join('\n')).toMatch(/submit-unknown/);
+
+    // A retry must not resubmit what may already be billing.
+    await expect(retryTask(h.deps, taskId)).rejects.toThrow(/reconcile/);
+    await collectTask(h.deps, taskId);
+    const collected = h.store.load(taskId);
+    expect(collected.attempts[0].batchId).toBe('batch-lost');
+    expect(collected.items.map((item) => item.state)).toEqual([
+      'delivered',
+      'delivered',
+    ]);
+    expect(h.api.createBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails an item whose line is missing after a reconcile', async () => {
+    const h = (harness = setup());
+    h.files.set('file-out-1', `${outputLine('a#1', '# A\n\nAlpha.')}\n`);
+    h.api.createBatch.mockImplementationOnce(
+      async (_ep: unknown, inputFileId: string) => {
+        h.jobs.set(
+          'batch-lost',
+          jobOf('batch-lost', 'completed', {
+            input_file_id: inputFileId,
+            output_file_id: 'file-out-1',
+          }),
+        );
+        throw Object.assign(new Error('HTTP 502'), { status: 502 });
+      },
+    );
+    await runPlan(h.deps, h.planPath);
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    // b was never marked submitted before the fix and stayed pending forever.
+    expect(task.items[1]).toMatchObject({ state: 'failed' });
+    expect(task.items[1].lastError).toMatch(/no result line/);
+  });
+
+  it('skips a malformed result line instead of blocking the whole task', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n{"custom_id":"b#1",\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual([
+      'delivered',
+      'failed',
+    ]);
+    expect(h.err.join('\n')).toMatch(/skipping output line 2/);
+  });
+
   it('holds delivery when the source changed after submission', async () => {
     const h = (harness = setup());
     await runAndSettle(h, {
@@ -506,6 +627,37 @@ describe('retryTask', () => {
     task.items[0].state = 'failed';
     h.store.save(task);
     await expect(retryTask(h.deps, task.id)).rejects.toThrow(/reconcile/);
+  });
+
+  it('refuses to retry while a settled batch is still uncollected', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const task = h.store.load(taskIdOf(h));
+    task.items[0].state = 'failed';
+    h.store.save(task);
+    await expect(retryTask(h.deps, task.id)).rejects.toThrow(/not collected/);
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the plan budget to retries too', async () => {
+    const h = (harness = setup({ maxCostUsd: 5 }));
+    h.deps.env = {
+      ...h.deps.env,
+      QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
+      QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD: '6',
+    };
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${JSON.stringify({ custom_id: 'b#1', response: { status_code: 500, body: {} } })}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    h.deps.env = { QWEN_BATCH_HOME: h.home }; // prices gone
+    await expect(retryTask(h.deps, taskId)).rejects.toThrow(
+      /cannot be enforced/,
+    );
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
   });
 
   it('reports when nothing is retryable', async () => {
