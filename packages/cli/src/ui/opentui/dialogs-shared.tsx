@@ -82,6 +82,13 @@ export function dialogContentWidth(terminalWidth: number): number {
 export function DialogFrame(props: {
   children?: ReactNode;
   borderColor?: string;
+  /**
+   * Stretch to the whole popup region, as the ink dialogs that take an
+   * explicit `clampDialogHeight(availableTerminalHeight)` do. Only those may
+   * set it: ink leaves every other dialog content-height at the top of the
+   * region, with the unused rows blank below it.
+   */
+  fill?: boolean;
 }) {
   return (
     <box
@@ -89,6 +96,7 @@ export function DialogFrame(props: {
       borderStyle="rounded"
       borderColor={props.borderColor ?? C.borderDefault}
       padding={1}
+      flexGrow={props.fill ? 1 : 0}
     >
       {props.children}
     </box>

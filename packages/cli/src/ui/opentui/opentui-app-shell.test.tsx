@@ -2061,6 +2061,30 @@ describe('OpenTuiApp transcript scroll region', () => {
     expect(chrome?.textContent).toContain('dialog:theme');
   });
 
+  it("gives the dialog region ink's fixed, clipped row budget", async () => {
+    // ink renders every popup inside a region of exactly
+    // `rows - staticExtraHeight(3) - MAIN_CONTENT_HEIGHT_RESERVATION(2)` rows,
+    // clipped and top-aligned, with the composer swapped out. A content-height
+    // region bottom-anchors the popup instead: a dialog ink stretches to fill
+    // the viewport stayed short, and a picker taller than the region pushed the
+    // composer off screen.
+    await renderWithTranscript();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'theme' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/theme');
+    // The mount stub returns a bare string, so its parent is the region box.
+    expect(layoutOf(screen.getByText('dialog:theme'))).toMatchObject({
+      flexDirection: 'column',
+      height: 35,
+      overflow: 'hidden',
+    });
+    // The same budget has to reach the dialogs: a list that sized itself to the
+    // full terminal would push its footer hint out of the clipped region.
+    expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(35);
+  });
+
   it('shows queued prompts in the chrome, above the composer itself', async () => {
     // ink prints them inside the Composer column, so they must share the
     // non-scrolling rows rather than scroll away with the conversation.

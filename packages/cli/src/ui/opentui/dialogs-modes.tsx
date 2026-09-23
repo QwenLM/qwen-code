@@ -208,9 +208,9 @@ export function OpenTuiApprovalModeDialog(props: {
     otherScopeModifiedMessage.toLowerCase().includes('workspace');
 
   return (
-    <DialogFrame>
+    <DialogFrame fill>
       {view === 'mode' ? (
-        <box flexDirection="column">
+        <box flexDirection="column" flexGrow={1}>
           <DialogTitle
             title={t('Approval Mode')}
             subtitle={otherScopeModifiedMessage}

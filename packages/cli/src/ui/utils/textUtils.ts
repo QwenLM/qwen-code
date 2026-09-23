@@ -201,6 +201,31 @@ export function truncateToWidth(text: string, maxWidth: number): string {
   return `${result}${ellipsis}`;
 }
 
+/**
+ * The first `maxWidth` display columns of `text`, with no ellipsis. Same
+ * grapheme- and width-awareness as `truncateToWidth`, for the case where the
+ * clipped text is followed by something that owns the next column.
+ */
+export function clipToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > maxWidth) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return result;
+}
+
 export interface VisualHeightSlice {
   text: string;
   hiddenLinesCount: number;

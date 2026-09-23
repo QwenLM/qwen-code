@@ -1664,6 +1664,38 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
     expect(text).toContain('Diagnose a hung session');
   });
 
+  it('truncates an over-long argument hint to the label column', async () => {
+    // Column is min(5 + 1 + 60, 39) = 39; the label keeps 5, so the hint gets
+    // 34 and truncateToWidth leaves the leading space plus 32 h's.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      argumentHint: 'h'.repeat(60),
+    });
+    expect(text).toContain(` ${'h'.repeat(32)}…`);
+    expect(text).not.toContain('h'.repeat(33));
+  });
+
+  it('shrinks the hint and the badge in proportion when both overflow', async () => {
+    // ink leaves both to Yoga, which measures each against the 39-column label
+    // column: the hint shrinks from a basis of 39 rather than its 61 columns and
+    // the badge from 8, so the 13-column overflow splits 10.79/2.21. Both widths
+    // stay fractional and ink's renderer floors the badge's start column, which
+    // puts the badge over the hint's ellipsis — the hint shows 28 plain columns
+    // and the badge the 6 that are left. Fitted against ink across 23
+    // hint/badge/column combinations.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      argumentHint: 'h'.repeat(60),
+      source: 'bundled-skill',
+    });
+    expect(text).toContain(` ${'h'.repeat(27)}`);
+    expect(text).toContain(' [Ski…');
+    expect(text).not.toContain('h'.repeat(28));
+    expect(text).not.toContain('[Skil');
+  });
+
   // The wrap alignment measured on a real terminal only holds while these stay
   // three separate flex children: concatenated into one text run, a long hint
   // word-wraps the whole run and the row grows to three lines instead of ink's
