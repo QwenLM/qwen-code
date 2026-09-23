@@ -233,3 +233,55 @@ test('browser Back restores the legacy cockpit after a page @smoke', async ({
   await expect(page).toHaveURL(/\/\?view=cockpit$/);
   await expect(page.getByTestId('cockpit-empty')).toBeVisible();
 });
+
+test('failed sidebar session keeps its URL and retry targets that session @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installMockDaemon(page, scenario, { baseURL });
+  let failLoad = true;
+  const attempts: string[] = [];
+  await page.route('**/session/previous-session/load', async (route) => {
+    attempts.push(route.request().url());
+    if (failLoad) {
+      await route.fulfill({
+        status: 503,
+        json: { error: 'Target session temporarily unavailable' },
+      });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto(
+    `/session/${scenario.sessionId}?language=en-US&instanceId=kept`,
+  );
+  await completeReplay(
+    page,
+    daemon,
+    scenario.sessionId,
+    scenario.events.length,
+  );
+  const target = page
+    .locator('[data-sidebar-shell]')
+    .getByText('Previous Session', { exact: true });
+  await target.click();
+  await expect(page).toHaveURL(/\/session\/previous-session\?instanceId=kept$/);
+  await expect(
+    page.getByText(/Target session temporarily unavailable/).first(),
+  ).toBeVisible();
+  expect(attempts).toHaveLength(1);
+  failLoad = false;
+  await target.click();
+  await completeReplay(
+    page,
+    daemon,
+    'previous-session',
+    scenario.events.length,
+  );
+  expect(attempts).toHaveLength(2);
+  await expect(page).toHaveURL(/\/session\/previous-session\?instanceId=kept$/);
+  expect(
+    daemon.requests.filter((r) => r.method === 'POST' && r.path === '/session'),
+  ).toHaveLength(0);
+});

@@ -222,7 +222,8 @@ function createSendIndex(
  *
  *  - `GET /assets/*` — hashed, immutable build chunks (long-cache).
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
- *  - `GET /session/:id` document navigations — the HTML shell, so a browser
+ *  - `GET /session/:id` and exact page paths in `WEB_SHELL_PAGE_PATHS`
+ *    document navigations — the HTML shell, so a browser
  *    refresh can load before the front-end adds its bearer header.
  *  - `GET /manifest.webmanifest` and `GET /sw.js` — public PWA metadata and
  *    the origin-scoped worker, revalidated on every request.

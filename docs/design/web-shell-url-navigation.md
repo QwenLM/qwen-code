@@ -27,6 +27,18 @@ constraint. Standalone enables the same owner and infers its existing deployment
 `/agentic-code`; parameters such as instanceId and instanceType remain opaque and
 are preserved, along with unrelated query parameters and fragments.
 
+## Host integration
+
+URL ownership covers the shell's own page navigation and browser history. It
+currently exposes no controlled `page` prop, `onPageChange` callback, or public
+page navigation hook. Session target props and `onSessionIdChange` remain
+supported; pages are not controlled through an equivalent host API. A host can
+open a page with a normal deep link (document navigation), but synchronizing
+host-owned breadcrumbs or navigation without a reload is outside this change.
+Do not use manual history writes or synthetic popstate events as a substitute
+for a supported page API. A page control/notification API can be designed in a
+separate change when an embedding host requires it.
+
 ## State and history
 
 A shared navigation boundary above WorkspaceSessionProvider owns route replay
@@ -42,7 +54,9 @@ replays without writing. Pending route restoration is protected from initial
 empty-session callbacks. Page availability is checked after capabilities load;
 unavailable pages fall back to chat. Existing session resolution, missing-session,
 workspace and standalone gates stay authoritative. Navigation during asynchronous
-loading must not allow an older completion to overwrite a newer target.
+loading must not allow an older completion to overwrite a newer target. A failed
+sidebar session load retains the requested target and its error state, so its URL
+also remains on that target for retry; it does not restore the previous session.
 
 ## Compatibility and deployment
 
@@ -76,3 +90,13 @@ and retain hidden split controls. No Console files or submodule pins change here
 The browser smoke test captures Settings after reloading its page URL:
 
 ![Settings restored after reload](images/web-shell-url-navigation.png)
+
+## Review regression coverage
+
+The review follow-up preserves host and navigation history state across remote
+workspace cleanup and failed daemon switching. Its focused unit suite passed
+49 tests; five real createServeApp route cases passed, checking public document
+GET/HEAD against protected API requests and API-only response parity. The URL
+navigation and remote-workspace browser suites passed all 17 tests, including
+a failed sidebar session load followed by a successful retry of that same target.
+These focused results do not replace or claim a green full-repository preflight.

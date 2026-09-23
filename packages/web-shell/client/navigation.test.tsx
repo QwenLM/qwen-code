@@ -7,6 +7,7 @@ import {
   useWebShellNavigation,
   type NavigationSessionProps,
 } from './navigation';
+import { clearRemoteWorkspaceAddStep } from './config/remote-workspace-add';
 import type { WebShellProps } from './App';
 import {
   buildNavigationUrl,
@@ -118,6 +119,43 @@ describe('navigation ownership', () => {
     expect(window.location.pathname).toBe('/agentic-code/session/a');
     expect(window.location.search).toBe('?instanceId=i&workspace=w');
   });
+  it('returns to the source session after remote workspace flow cleanup', () => {
+    window.history.replaceState(
+      { host: 'kept' },
+      '',
+      '/agentic-code/session/a?workspace=w',
+    );
+    render();
+    act(() => notify('a', 'w'));
+    act(() => controller!.openPage('plugins'));
+    const url = new URL(location.href);
+    url.searchParams.set('addRemoteWorkspace', 'browse');
+    history.replaceState(history.state, '', url);
+    clearRemoteWorkspaceAddStep();
+    act(() => controller!.returnToChat());
+    expect(location.pathname).toBe('/agentic-code/session/a');
+    expect(location.search).toBe('?workspace=w');
+    expect(history.state.host).toBe('kept');
+  });
+  it.each(['standalone', 'live'] as const)(
+    'keeps %s draft context out of the URL and retains the daemon',
+    (kind) => {
+      window.history.replaceState(
+        null,
+        '',
+        '/agentic-code?daemon=https%3A%2F%2Fremote.example',
+      );
+      render();
+      act(() => notify(undefined, undefined, undefined, { kind }));
+      expect(location.pathname).toBe('/agentic-code');
+      expect(new URL(location.href).searchParams.has('context')).toBe(false);
+      act(() => controller!.openPage('settings'));
+      act(() => controller!.returnToChat());
+      expect(new URL(location.href).searchParams.get('daemon')).toBe(
+        'https://remote.example',
+      );
+    },
+  );
   it('keeps the requested origin while session loading is pending', () => {
     window.history.replaceState(null, '', '/agentic-code/session/a');
     render();

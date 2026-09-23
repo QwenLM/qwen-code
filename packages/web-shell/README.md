@@ -357,6 +357,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 | 属性                   | 类型                                  | 说明                                                                                                                                           |
 | ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `urlNavigation`        | `WebShellUrlNavigationOptions`        | 可选 URL 管理，含 `basePath`；默认关闭。详见 [URL 导航](#url-导航可选)。                                                                       |
 | `browserNotifications` | `WebShellBrowserNotificationsOptions` | 可选接入通知；`appName` 默认 QwenCode，`iconUrl` 默认内联 PNG（支持 CDN），`defaultEnabled` 默认 false；已保存偏好优先；不传时停用，不重建会话 |
 | `baseUrl`              | `string`                              | daemon API 地址，未传时使用 `window.location.origin`                                                                                           |
 | `token`                | `string`                              | daemon API Bearer token                                                                                                                        |
@@ -697,7 +698,7 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
 
-### URL 导航（可选）
+## URL 导航（可选）
 
 `WebShellWithProviders` 支持 `urlNavigation={{ basePath: '/agentic-code' }}`。
 独立入口默认启用同一实现，并推断既有部署基础路径（默认根路径）。嵌入组件默认不启用，原有受控
