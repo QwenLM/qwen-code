@@ -27,6 +27,12 @@ export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
+  /**
+   * 当前消息的生成态；历史或静态内容为 false。所属 MessageList 空闲
+   * （isResponding=false）时，恢复 replay 中残留的 streaming 标记也会被
+   * 收口为 false，且已收口的行在会话重新响应时、内容不变的前提下保持收口。
+   */
+  isStreaming: boolean;
 }
 
 export interface WebShellCodeBlockRenderInfo {
@@ -195,7 +201,8 @@ export type WebShellRightPanelItem =
   | 'review'
   | 'sideTask'
   | 'terminal'
-  | 'webPreview';
+  | 'webPreview'
+  | 'trajectory';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -297,6 +304,23 @@ export interface WebShellAssistantMessageInfo {
   timestamp?: number;
 }
 
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Final visible assistant message when retained in the mounted transcript. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
 export interface WebShellAssistantTurnFooterRenderInfo {
   /** User-message id for the head of the completed turn. */
   turnId: string;
@@ -316,6 +340,51 @@ export interface WebShellSessionArtifactsChange {
 export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
+
+export type WebShellAssistantFeedbackRating = 'up' | 'down';
+
+/** The prompt that started a marked turn. */
+export interface WebShellAssistantFeedbackUserMessage {
+  /**
+   * The prompt's most recent characters, or a placeholder naming what the
+   * prompt carried when it had no text at all.
+   */
+  text: string;
+  /** Wall-clock epoch ms of the prompt, when the transcript knows it. */
+  timestamp?: number;
+}
+
+export interface WebShellAssistantFeedbackInfo {
+  /** The new mark; `null` when the user cleared it by clicking the lit icon. */
+  rating: WebShellAssistantFeedbackRating | null;
+  /** The mark the turn carried before this change, when there was one. */
+  previousRating?: WebShellAssistantFeedbackRating;
+  /** The session the marked turn belongs to. */
+  sessionId?: string;
+  /**
+   * Admitted prompt id of the marked turn. This is the daemon's own per-turn
+   * identity: unlike a transcript block id it survives a reload, and it is
+   * what the daemon addresses a turn by (`/session/:id/turns/:promptId`).
+   */
+  promptId: string;
+  /** The prompt that started the marked turn. */
+  userMessage: WebShellAssistantFeedbackUserMessage;
+}
+
+export type AssistantFeedbackHandler = (
+  info: WebShellAssistantFeedbackInfo,
+) => void;
+
+export interface WebShellAssistantFeedbackOptions {
+  /** Passing the object shows the icons; `false` hides them again. */
+  enabled?: boolean;
+  /**
+   * Notified after every change, including clearing a mark. This is a
+   * notification, not a gate: the icon is already lit (or dark) when it runs,
+   * and neither a throw nor a later rejection changes that.
+   */
+  onRate?: AssistantFeedbackHandler;
+}
 
 /** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
 export type ArtifactImageRenderer = (
@@ -640,6 +709,11 @@ export interface WebShellCustomization {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  /**
+   * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
+   * object to leave Web Shell's answer footer unchanged.
+   */
+  assistantFeedback?: WebShellAssistantFeedbackOptions;
   getAssistantSourcesIcon?: WebShellSourceIconResolver;
   sourceReferences?: readonly WebShellSourceReference[];
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;

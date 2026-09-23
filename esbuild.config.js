@@ -179,7 +179,10 @@ const external = [
 const BUNDLE_CHUNK_DIR = 'chunks';
 
 const mainBuild = esbuild.build({
-  entryPoints: { cli: 'packages/cli/src/cli.ts' },
+  entryPoints: {
+    cli: 'packages/cli/src/cli.ts',
+    'execution-worker': 'packages/core/src/services/execution-worker-main.ts',
+  },
   bundle: true,
   outdir: 'dist',
   entryNames: '[name]',
@@ -290,7 +293,19 @@ const codeModeHostBuild = esbuild.build({
   keepNames: true,
 });
 
-Promise.all([mainBuild, workerBuild, codeModeHostBuild])
+const sandboxWorkersBuild = esbuild.build({
+  entryPoints: {
+    sandboxBwrapRelay: 'packages/core/src/sandbox/bwrap-relay.ts',
+    sandboxFileWorker: 'packages/core/src/sandbox/file-worker.ts',
+  },
+  bundle: true,
+  outdir: 'dist',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+});
+
+Promise.all([mainBuild, workerBuild, codeModeHostBuild, sandboxWorkersBuild])
   .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));

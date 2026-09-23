@@ -31,6 +31,12 @@ import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  clampInlineMediaPart,
+  getMaxInlineMediaBytes,
+  TOOL_RESULT_MEDIA_REMEDY,
+} from '../core/inlineMediaLimit.js';
+import { boundImageBuffer, ImageViewError } from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   getAllMCPServerStatuses,
@@ -104,6 +110,21 @@ function isMcpRequestTimeout(error: unknown): boolean {
     error !== null &&
     'code' in error &&
     (error as { code?: unknown }).code === MCP_REQUEST_TIMEOUT_CODE
+  );
+}
+
+// The v2 SDK (`@modelcontextprotocol/client`) reports its own request
+// timeouts as `SdkError` with a string code, never as JSON-RPC `-32001` —
+// that code now only ever arrives from the server, so attributing it to the
+// host's own limit misstates the failure. Structural check (like
+// `isMcpRequestTimeout`) to keep the SDK import contained in mcp-client.ts.
+const MCP_SDK_REQUEST_TIMEOUT_CODE = 'REQUEST_TIMEOUT';
+
+function isMcpSdkRequestTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === 'SdkError' &&
+    (error as { code?: unknown }).code === MCP_SDK_REQUEST_TIMEOUT_CODE
   );
 }
 
@@ -682,13 +703,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, {
-          name: this.serverToolName,
-          args: this.params,
-        });
+        return await this.buildMcpToolError(
+          rawResponseParts,
+          {
+            name: this.serverToolName,
+            args: this.params,
+          },
+          signal,
+        );
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.boundInlineParts(
+        transformMcpContentToParts(rawResponseParts),
+        signal,
+      );
       const truncated = await this.truncateTextParts(transformedParts);
       const fallbackText = getDisplayFromPartsWithPersistedOutput(
         transformedParts,
@@ -734,24 +762,28 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<McpAppResultDisplay | undefined> {
     if (!this.appResourceUri || !this.mcpClient?.readResource) return undefined;
 
+    const timeoutMs = Math.min(
+      this.mcpTimeout ?? MCP_APP_RESOURCE_TIMEOUT_MS,
+      MCP_APP_RESOURCE_TIMEOUT_MS,
+    );
+    const timeoutSignal = AbortSignal.timeout(MCP_APP_RESOURCE_TIMEOUT_MS);
     try {
       const resource = await this.mcpClient.readResource(
         { uri: this.appResourceUri },
         {
-          timeout: Math.min(
-            this.mcpTimeout ?? MCP_APP_RESOURCE_TIMEOUT_MS,
-            MCP_APP_RESOURCE_TIMEOUT_MS,
-          ),
-          signal: AbortSignal.any([
-            signal,
-            AbortSignal.timeout(MCP_APP_RESOURCE_TIMEOUT_MS),
-          ]),
+          timeout: timeoutMs,
+          signal: AbortSignal.any([signal, timeoutSignal]),
         },
       );
       const content = resource.contents.find(
         (entry) => entry.uri === this.appResourceUri,
       );
-      if (!content || content.mimeType !== MCP_APP_RESOURCE_MIME_TYPE) {
+      if (!content) {
+        throw new Error(
+          `resource ${this.appResourceUri} was not returned by the server`,
+        );
+      }
+      if (content.mimeType !== MCP_APP_RESOURCE_MIME_TYPE) {
         throw new Error(
           `resource must return ${MCP_APP_RESOURCE_MIME_TYPE} for ${this.appResourceUri}`,
         );
@@ -763,8 +795,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             ? Buffer.from(content.blob, 'base64').toString('utf8')
             : undefined;
       if (!html) throw new Error('resource did not return HTML content');
-      if (Buffer.byteLength(html, 'utf8') > MCP_APP_RESOURCE_MAX_BYTES) {
-        throw new Error('resource HTML exceeds the 1 MiB host limit');
+      const htmlBytes = Buffer.byteLength(html, 'utf8');
+      if (htmlBytes > MCP_APP_RESOURCE_MAX_BYTES) {
+        throw new Error(
+          `resource HTML is ${htmlBytes} bytes, exceeding the ${MCP_APP_RESOURCE_MAX_BYTES} byte (1 MiB) host limit`,
+        );
       }
 
       const metadata = getMcpAppResourceMetadata(
@@ -783,10 +818,29 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       };
     } catch (error) {
       if (signal.aborted) return undefined;
+      const cause = getErrorMessage(error);
+      const reason =
+        timeoutSignal.aborted ||
+        (error instanceof Error && error.name === 'TimeoutError') ||
+        isMcpSdkRequestTimeout(error)
+          ? `resource read timed out (limit: ${timeoutMs} ms)`
+          : cause;
+      const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
+      // On the timeout branch `reason` replaces the underlying message, so
+      // keep it on the log line; on the passthrough branch it is the same
+      // string and appending it again would just duplicate it.
       debugLogger.warn(
-        `Failed to load MCP App '${this.appResourceUri}' from '${this.serverName}': ${getErrorMessage(error)}`,
+        reason === cause ? warning : `${warning} (cause: ${cause})`,
       );
-      return undefined;
+      return {
+        type: 'mcp_app',
+        serverName: this.serverName,
+        resourceUri: this.appResourceUri,
+        html: '',
+        toolResult,
+        toolArguments: this.params,
+        fallbackText: [warning, fallbackText].filter(Boolean).join('\n\n'),
+      };
     }
   }
 
@@ -822,10 +876,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const rawResponseParts = outcome;
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
+        return await this.buildMcpToolError(
+          rawResponseParts,
+          functionCalls[0],
+          signal,
+        );
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.boundInlineParts(
+        transformMcpContentToParts(rawResponseParts),
+        signal,
+      );
       const truncated = await this.truncateTextParts(transformedParts);
 
       return {
@@ -852,13 +913,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private async buildMcpToolError(
     rawResponseParts: Part[],
     functionCall: FunctionCall,
+    signal: AbortSignal,
   ): Promise<ToolResult> {
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
     let persistedOutputFiles: string[] | undefined;
     if (imageContent) {
-      const truncatedContent = await this.truncateTextParts(imageContent);
+      const truncatedContent = await this.truncateTextParts(
+        await this.boundInlineParts(imageContent, signal),
+      );
       llmContent = truncatedContent.parts;
       persistedOutputFiles = truncatedContent.persistedOutputFiles;
       errorMessage = `MCP tool '${
@@ -884,6 +948,31 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
     };
+  }
+
+  private async boundInlineParts(
+    parts: Part[],
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    return boundInlineImageParts(
+      parts,
+      signal,
+      `${this.serverName}/${this.serverToolName}`,
+      await this.isOmniMediaDeliveryActive(),
+    );
+  }
+
+  /**
+   * Whether the omni funnel (`processToolResultOmniMedia`) takes over this
+   * result's media. It uploads by reference under its own ceilings and bounds
+   * any image it declines to upload, so the inline clamp must not pre-empt it.
+   * `isOmniEnabled()` runs first so non-omni sessions skip the dynamic import,
+   * as in `fileUtils`.
+   */
+  private async isOmniMediaDeliveryActive(): Promise<boolean> {
+    if (!this.cliConfig?.isOmniEnabled?.()) return false;
+    const omni = await this.cliConfig.loadOmniMediaReader();
+    return omni.isOmniDeliveryActive(this.cliConfig);
   }
 
   /**
@@ -985,7 +1074,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       parameterSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput — enables streaming progress for MCP tools
-      true, // shouldDefer — MCP tools are discovered via ToolSearch to keep the
+      true, // shouldDefer — MCP tools use ToolSearch + ToolCall to keep the
       //   initial tool-declaration list small when many MCP servers are attached.
       alwaysLoad,
       // searchHint: server name boosts fuzzy matching when the user references
@@ -1241,6 +1330,75 @@ function transformImageAudioBlock(
       },
     },
   ];
+}
+
+/**
+ * Shrink oversized inline images to the same visual budget `read_file`
+ * applies, so a full-resolution screenshot does not enter the conversation
+ * verbatim. Images that already fit, and any the renderer cannot handle, are
+ * forwarded unchanged; images still over the inline limit become a text
+ * placeholder. `subject` names the server and tool in renderer errors, since
+ * these bytes have no file path.
+ *
+ * Under omni delivery the inline limit is skipped: the funnel uploads the part
+ * by reference or applies the same bound itself before keeping it inline.
+ */
+async function boundInlineImageParts(
+  parts: Part[],
+  signal: AbortSignal,
+  subject: string,
+  omniDeliveryActive: boolean,
+): Promise<Part[]> {
+  // One ceiling read shared by the renderer and the clamp, so its adopt
+  // decision and the clamp cannot disagree within a single result.
+  const inlineByteCeiling = getMaxInlineMediaBytes();
+  const boundedParts: Part[] = [];
+  for (const part of parts) {
+    const inline = part.inlineData;
+    if (!isImagePart(part) || !inline?.mimeType || !inline.data) {
+      boundedParts.push(part);
+      continue;
+    }
+    let boundedPart = part;
+    try {
+      const view = await boundImageBuffer(
+        Buffer.from(inline.data, 'base64'),
+        `${subject} ${inline.mimeType}`,
+        signal,
+        inlineByteCeiling,
+      );
+      if (view) {
+        boundedPart = {
+          inlineData: {
+            ...inline,
+            data: view.bytes.toString('base64'),
+            mimeType: view.mimeType,
+          },
+        };
+      }
+    } catch (error) {
+      if (!(error instanceof ImageViewError)) {
+        throw error;
+      }
+      const message = `Unable to bound MCP image from ${subject} (${inline.mimeType}): ${getErrorMessage(error)}`;
+      // A missing renderer fails every image of every call, so surface it.
+      if (error.code === 'renderer_unavailable') {
+        debugLogger.warn(message);
+      } else {
+        debugLogger.debug(message);
+      }
+    }
+    boundedParts.push(
+      omniDeliveryActive
+        ? boundedPart
+        : clampInlineMediaPart(
+            boundedPart,
+            inlineByteCeiling,
+            TOOL_RESULT_MEDIA_REMEDY,
+          ),
+    );
+  }
+  return boundedParts;
 }
 
 function transformResourceBlock(

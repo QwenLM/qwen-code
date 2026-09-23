@@ -49,12 +49,14 @@ function Harness({
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
+  expanded = false,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
+  expanded?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -85,6 +87,18 @@ function Harness({
       ) : (
         <div ref={composer.containerRef} data-web-shell-composer-editor />
       )}
+      {expanded && composer.mobileComposer && (
+        <textarea
+          ref={composer.mobileComposer.expandedTextareaRef}
+          value={composer.mobileComposer.value}
+          onChange={composer.mobileComposer.onChange}
+          onPasteCapture={composer.imageTransferHandlers.onPasteCapture}
+          data-expanded
+        />
+      )}
+      {composer.searchState.searchMode && (
+        <input ref={composer.searchState.searchInputRef} data-history-search />
+      )}
     </div>
   );
 }
@@ -95,12 +109,14 @@ async function mount({
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
+  expanded = false,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
+  expanded?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -115,6 +131,7 @@ async function mount({
             onInputTextChange={onInputTextChange}
             sessionId={sessionId}
             atWorkspaceCwd={atWorkspaceCwd}
+            expanded={expanded}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -321,6 +338,24 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.searchState.searchMatches).toContain('first message');
   });
 
+  it('focuses history search when timers run before the input mounts', async () => {
+    mockTouchDevice();
+    await mount();
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        latest!.searchState.openHistorySearch();
+        vi.runOnlyPendingTimers();
+        expect(container!.querySelector('[data-history-search]')).toBeNull();
+      });
+      const search = container!.querySelector('[data-history-search]');
+      expect(search).not.toBeNull();
+      expect(document.activeElement).toBe(search);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('submits a selected history-search match through the pipeline', async () => {
     mockTouchDevice();
     const { onSubmit } = await mount();
@@ -427,6 +462,152 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(textPreventDefault).not.toHaveBeenCalled();
     expect(latest!.pastedImages).toHaveLength(1);
     expect(latest!.pendingImageBatchCount).toBe(0);
+  });
+
+  it.each([
+    { draft: 'old draft', from: 0, to: 9, text: 'x'.repeat(8000) },
+    { draft: '', from: 0, to: 0, text: '!echo ' + 'x'.repeat(8000) },
+    { draft: '', from: 0, to: 0, text: '/fork ' + 'x'.repeat(8000) },
+    { draft: '/fork ', from: 6, to: 6, text: 'x'.repeat(8000) },
+    { draft: '/clear', from: 0, to: 0, text: 'x'.repeat(8000) },
+    { draft: '/fork do something', from: 0, to: 0, text: 'x'.repeat(8000) },
+    { draft: '!echo hi', from: 0, to: 0, text: 'x'.repeat(8000) },
+  ])(
+    'leaves replacement and command pastes to the textarea: $draft',
+    async ({ draft, from, to, text }) => {
+      mockTouchDevice();
+      await mount();
+      act(() => latest!.setText(draft));
+      const textarea = container!.querySelector('textarea')!;
+      textarea.setSelectionRange(from, to);
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: { getData: () => text },
+      });
+      act(() => textarea.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+      expect(latest!.pastedFiles).toEqual([]);
+    },
+  );
+
+  it('folds an oversized paste in the touch textarea', async () => {
+    mockTouchDevice();
+    await mount();
+    const preventDefault = vi.fn();
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      event.preventDefault = preventDefault;
+      container!.querySelector('textarea')!.dispatchEvent(event);
+    });
+
+    expect(preventDefault).toHaveBeenCalled();
+    expect(latest!.mobileComposer!.value).toBe('');
+    expect(latest!.pastedFiles).toHaveLength(1);
+    expect(latest!.pastedFiles[0].name).toBe('line line line line line….txt');
+    expect(latest!.pastedFiles[0].text).toBe(text);
+  });
+
+  it('inserts into the expanded caret and restores its caret without replacing the collapsed selection', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('hello world');
+    const collapsed = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    const expanded =
+      container!.querySelector<HTMLTextAreaElement>('[data-expanded]')!;
+    act(() => {
+      collapsed.setSelectionRange(3, 5);
+      expanded.focus();
+      expanded.setSelectionRange(11, 11);
+      latest!.insertText(' dictated words ');
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(expanded.value).toBe('hello world dictated words ');
+    expect(document.activeElement).toBe(expanded);
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([27, 27]);
+    act(() => {
+      expanded.setSelectionRange(0, 5);
+      latest!.insertText('Hi');
+      latest!.focus();
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(expanded.value).toBe('Hi world dictated words ');
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([2, 2]);
+    expect(document.activeElement).toBe(expanded);
+  });
+
+  it('uses the expanded selection for long paste exemptions and folds only once', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('draft');
+    const expanded =
+      container!.querySelector<HTMLTextAreaElement>('[data-expanded]')!;
+    const collapsed = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    const paste = () => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [],
+          items: [],
+          types: ['text/plain'],
+          getData: () => 'line\n'.repeat(250),
+        },
+      });
+      act(() => expanded.dispatchEvent(event));
+      return event;
+    };
+    expanded.setSelectionRange(0, 5);
+    collapsed.setSelectionRange(0, 0);
+    expect(paste().defaultPrevented).toBe(false);
+    expect(latest!.pastedFiles).toHaveLength(0);
+    expanded.setSelectionRange(0, 0);
+    collapsed.setSelectionRange(0, 5);
+    expect(paste().defaultPrevented).toBe(true);
+    expect(latest!.pastedFiles).toHaveLength(1);
+    expect(expanded.value).toBe('draft');
+  });
+
+  it('moves a folded paste into the touch textarea on request', async () => {
+    mockTouchDevice();
+    await mount();
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+    act(() => {
+      container!.querySelector('textarea')!.dispatchEvent(event);
+    });
+    expect(latest!.pastedFiles).toHaveLength(1);
+
+    act(() => latest!.expandPastedText(0));
+
+    // The touch backend inserts the text as a plain controlled-value write and
+    // has no undo step of its own (see the design doc's Risks).
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(latest!.mobileComposer!.value).toBe(text);
   });
 
   it('saves the draft immediately on blur before the debounce timer fires', async () => {

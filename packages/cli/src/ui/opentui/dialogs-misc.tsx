@@ -21,8 +21,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { useRenderer, useKeyboard } from '@opentui/react';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
+import { useRenderer, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
@@ -38,9 +37,20 @@ import {
   editorSettingsManager,
 } from '../editors/editorSettingsManager.js';
 import { getScopeItems } from '../../config/dialogScopeUtils.js';
-import { toOriginalKey } from './key-map.js';
-import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
+import { t } from '../../i18n/index.js';
+import type { DialogListItem } from './dialogs-core.js';
+import {
+  DialogFrame,
+  DialogSelect,
+  dialogContentWidth,
+  useDialogFrameKeys,
+  useDialogSelect,
+} from './dialogs-shared.js';
+import { truncateToWidth } from '../utils/textUtils.js';
 import { C } from './theme.js';
+import { useGitBranchName } from '../hooks/useGitBranchName.js';
+import { useDeleteCommand } from '../hooks/useDeleteCommand.js';
+import { OpenTuiSessionPicker } from './session-picker.js';
 
 function useEsc(onClose: () => void) {
   const renderer = useRenderer();
@@ -58,29 +68,29 @@ function useEsc(onClose: () => void) {
 export function Shell({
   title,
   children,
+  borderStyle = 'rounded',
 }: {
   title: string;
   onClose?: () => void;
   children?: ReactNode;
+  /** ink's AuthDialog frames itself with `borderStyle="single"`; the rest round. */
+  borderStyle?: 'rounded' | 'single';
 }) {
   return (
     <box
       flexDirection="column"
-      border
-      borderColor={C.dim}
-      paddingLeft={2}
-      paddingRight={2}
+      borderStyle={borderStyle}
+      borderColor={C.borderDefault}
+      paddingLeft={1}
+      paddingRight={1}
       paddingTop={1}
       paddingBottom={1}
       marginTop={1}
       flexShrink={0}
     >
-      <box flexDirection="row" justifyContent="space-between">
-        <text fg={C.accent} attributes={1}>
-          {title}
-        </text>
-        <text fg={C.dim}>{'esc to close'}</text>
-      </box>
+      <text fg={C.text} attributes={1}>
+        {title}
+      </text>
       {children}
     </box>
   );
@@ -102,31 +112,12 @@ type P = {
   settings: LoadedSettings;
   onClose: () => void;
   /** Delete/Resume report their outcome as a command-style message. */
-  notify?: (text: string) => void;
+  notify?: (text: string, level?: 'info' | 'error') => void;
   /** Resume: sessions pre-filtered by the command (multiple title matches). */
   matchedSessions?: SessionListItem[];
   /** Resume: selection runs the real session switch (host.handleResume). */
   onSelect?: (sessionId: string) => void;
 };
-
-/**
- * ink BaseSelectionList navigation parity: arrow keys clamp at the edges and
- * skip disabled entries (keeps walking in the same direction; stays put when
- * no enabled entry remains in that direction).
- */
-export function nextEnabledIndex(
-  items: ReadonlyArray<{ disabled?: boolean }>,
-  current: number,
-  delta: 1 | -1,
-): number {
-  let next = current;
-  for (let i = 0; i < items.length; i++) {
-    next = Math.min(items.length - 1, Math.max(0, next + delta));
-    if (!items[next]?.disabled) return next;
-    if (next === 0 || next === items.length - 1) break;
-  }
-  return current;
-}
 
 /**
  * ink EditorSettingsDialog parity: two-pane dialog — left a radio list of
@@ -136,78 +127,92 @@ export function nextEnabledIndex(
  * settings.setValue (useEditorSettings.handleEditorSelect guard included).
  */
 export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
-  useEsc(onClose);
+  const { width } = useTerminalDimensions();
   const editors = useMemo(
     () => editorSettingsManager.getAvailableEditorDisplays(),
     [],
   );
   const [mode, setMode] = useState<'editor' | 'scope'>('editor');
   const [scope, setScope] = useState<SettingScope>(SettingScope.User);
+  const [error, setError] = useState<string | null>(null);
   const scopeIndexOf = (s: SettingScope) => {
     const pref = settings.forScope(s).settings.general?.preferredEditor;
     const idx = pref ? editors.findIndex((e) => e.type === pref) : 0;
     return idx >= 0 ? idx : 0;
   };
-  const [sel, setSel] = useState(() => scopeIndexOf(SettingScope.User));
-  const scopeItems = useMemo(() => getScopeItems(), []);
-  const [scopeSel, setScopeSel] = useState(0);
 
-  // ink: highlighting a scope previews that scope's current preference.
-  const highlightScope = (idx: number) => {
-    const item = scopeItems[idx];
-    if (!item) return;
-    setScope(item.value);
-    setSel(scopeIndexOf(item.value));
-  };
-  const applyScope = () => {
-    const item = scopeItems[scopeSel];
-    if (!item) return;
-    setScope(item.value);
-    setSel(scopeIndexOf(item.value));
-    setMode('editor');
-  };
-
-  const moveEditor = (d: 1 | -1) =>
-    setSel((s) => nextEnabledIndex(editors, s, d));
-
-  const pick = () => {
-    const item = editors[sel];
-    if (!item || item.disabled) return;
-    const editorType = item.type === 'not_set' ? undefined : item.type;
-    if (
-      editorType &&
-      (!checkHasEditorType(editorType) || !allowEditorTypeInSandbox(editorType))
-    ) {
-      return;
+  const editorItems: Array<
+    DialogListItem<EditorType | 'not_set'> & {
+      label: string;
     }
-    try {
-      settings.setValue(scope, 'general.preferredEditor', editorType);
-      notify?.(
-        `Editor preference ${editorType ? `set to "${editorType}"` : 'cleared'} in ${scope} settings.`,
-      );
-    } catch {
-      return;
-    }
-    onClose();
-  };
-
-  useKeyboard((key) => {
-    const o = toOriginalKey(key);
-    if (o.name === 'tab') {
-      setMode((m) => (m === 'editor' ? 'scope' : 'editor'));
-    } else if (o.name === 'up' || o.name === 'down') {
-      const d = o.name === 'up' ? -1 : 1;
-      if (mode === 'editor') {
-        moveEditor(d);
-      } else {
-        const next = Math.min(scopeItems.length - 1, Math.max(0, scopeSel + d));
-        setScopeSel(next);
-        highlightScope(next);
+  > = editors.map((e) => ({
+    key: e.type,
+    value: e.type,
+    label: e.name,
+    disabled: e.disabled,
+  }));
+  const editorList = useDialogSelect({
+    items: editorItems,
+    initialIndex: scopeIndexOf(scope),
+    focused: mode === 'editor',
+    numbers: mode === 'editor',
+    // ink keys its editor list by the selected scope, so coming back from the
+    // scope step re-seats the cursor on that scope's stored preference.
+    resyncKey: scope,
+    onSelect: (picked) => {
+      const editorType = picked === 'not_set' ? undefined : picked;
+      // useEditorSettings.handleEditorSelect's guard: an editor that is not
+      // installed, or not allowed in a sandbox, is not persisted.
+      if (
+        editorType &&
+        (!checkHasEditorType(editorType) ||
+          !allowEditorTypeInSandbox(editorType))
+      ) {
+        return;
       }
-    } else if (o.name === 'return') {
-      if (mode === 'editor') pick();
-      else applyScope();
-    }
+      try {
+        settings.setValue(scope, 'general.preferredEditor', editorType);
+        notify?.(
+          `Editor preference ${editorType ? `set to "${editorType}"` : 'cleared'} in ${scope} settings.`,
+        );
+      } catch (err) {
+        setError(`Failed to set editor preference: ${err}`);
+        return;
+      }
+      onClose();
+    },
+  });
+
+  const scopeItems = useMemo(
+    () =>
+      getScopeItems().map((item) => ({
+        key: item.value,
+        value: item.value,
+        label: t(item.label),
+      })),
+    [],
+  );
+  const initialScopeIndex = scopeItems.findIndex(
+    (item) => item.value === scope,
+  );
+  const scopeList = useDialogSelect({
+    items: scopeItems,
+    initialIndex: initialScopeIndex >= 0 ? initialScopeIndex : 0,
+    focused: mode === 'scope',
+    numbers: mode === 'scope',
+    // ink's handleScopeSelect only records the scope and steps back; the
+    // editor row's Enter is what persists.
+    onSelect: (next) => {
+      setScope(next);
+      setMode('editor');
+    },
+    // ink: highlighting a scope previews that scope's current preference.
+    onHighlight: (next) => setScope(next),
+  });
+
+  useDialogFrameKeys({
+    onTab: () => setMode((m) => (m === 'editor' ? 'scope' : 'editor')),
+    onEscape: onClose,
   });
 
   const otherScope =
@@ -227,83 +232,115 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
       ? EDITOR_DISPLAY_NAMES[merged as EditorType]
       : 'None';
 
+  // ink's left column is 45% of the dialog's content width and pads two more
+  // columns, and its hint is `wrap="truncate"` inside that box, so the budget
+  // is the column's own rather than the dialog's.
+  const hintWidth = Math.floor(dialogContentWidth(width) * 0.45) - 2;
+
   return (
-    <Shell title="Editor" onClose={onClose}>
-      <box flexDirection="row" marginTop={1}>
-        <box flexDirection="column" width="45%" paddingRight={2}>
-          {mode === 'editor' ? (
-            <box flexDirection="column">
-              <box flexDirection="row">
+    <box flexDirection="column">
+      {error && (
+        <box marginBottom={1}>
+          <text fg={C.red}>{error}</text>
+        </box>
+      )}
+      <DialogFrame>
+        <box flexDirection="row">
+          <box flexDirection="column" width="45%" paddingRight={2}>
+            {mode === 'editor' ? (
+              <box flexDirection="column">
+                <box flexDirection="row">
+                  <text fg={C.text} attributes={1}>
+                    {'> '}
+                    {t('Select Editor')}{' '}
+                  </text>
+                  <text fg={C.dim}>{scopeMessage}</text>
+                </box>
+                <box flexDirection="column" marginTop={1}>
+                  <DialogSelect
+                    items={editorList.items}
+                    activeIndex={editorList.activeIndex}
+                    scrollOffset={editorList.scrollOffset}
+                    showNumbers={mode === 'editor'}
+                    focused={mode === 'editor'}
+                    onHover={editorList.setActiveIndex}
+                    onSelectIndex={editorList.selectIndex}
+                    onWheel={(direction) =>
+                      editorList.setActiveIndex(
+                        editorList.activeIndexRef.current +
+                          (direction === 'down' ? 1 : -1),
+                      )
+                    }
+                    renderLabel={(item, { titleColor }) => (
+                      <text fg={titleColor}>{item.label}</text>
+                    )}
+                  />
+                </box>
+              </box>
+            ) : (
+              <box flexDirection="column">
                 <text fg={C.text} attributes={1}>
-                  {'> Select Editor '}
+                  {'> '}
+                  {t('Apply To')}
                 </text>
-                <text fg={C.dim}>{scopeMessage}</text>
+                <box flexDirection="column" marginTop={1}>
+                  <DialogSelect
+                    items={scopeList.items}
+                    activeIndex={scopeList.activeIndex}
+                    scrollOffset={scopeList.scrollOffset}
+                    showNumbers={mode === 'scope'}
+                    focused={mode === 'scope'}
+                    onHover={scopeList.setActiveIndex}
+                    onSelectIndex={scopeList.selectIndex}
+                    onWheel={(direction) =>
+                      scopeList.setActiveIndex(
+                        scopeList.activeIndexRef.current +
+                          (direction === 'down' ? 1 : -1),
+                      )
+                    }
+                    renderLabel={(item, { titleColor }) => (
+                      <text fg={titleColor}>{item.label}</text>
+                    )}
+                  />
+                </box>
               </box>
-              <box flexDirection="column" marginTop={1}>
-                {editors.map((e, i) => (
-                  <box key={e.type} flexDirection="row">
-                    <text fg={i === sel ? C.accent : C.dim}>
-                      {i === sel ? '› ' : '  '}
-                    </text>
-                    <text
-                      fg={e.disabled ? C.dim : i === sel ? C.text : C.dim}
-                      attributes={!e.disabled && i === sel ? 1 : 0}
-                    >
-                      {e.name}
-                    </text>
-                  </box>
-                ))}
-              </box>
-            </box>
-          ) : (
-            <box flexDirection="column">
-              <text fg={C.text} attributes={1}>
-                {'> Apply To'}
+            )}
+            <box marginTop={1}>
+              <text fg={C.dim}>
+                {truncateToWidth(
+                  mode === 'editor'
+                    ? t('(Use Enter to select, Tab to configure scope)')
+                    : t('(Use Enter to apply scope, Tab to go back)'),
+                  hintWidth,
+                )}
               </text>
-              <box flexDirection="column" marginTop={1}>
-                {scopeItems.map((s, i) => (
-                  <box key={s.value} flexDirection="row">
-                    <text fg={i === scopeSel ? C.accent : C.dim}>
-                      {i === scopeSel ? '› ' : '  '}
-                    </text>
-                    <text fg={i === scopeSel ? C.text : C.dim}>{s.label}</text>
-                  </box>
-                ))}
-              </box>
             </box>
-          )}
-          <box marginTop={1}>
-            <text fg={C.dim}>
-              {mode === 'editor'
-                ? '(Use Enter to select, Tab to configure scope)'
-                : '(Use Enter to apply scope, Tab to go back)'}
-            </text>
           </box>
-        </box>
-        <box flexDirection="column" width="55%" paddingLeft={2}>
-          <text fg={C.text} attributes={1}>
-            {'Editor Preference'}
-          </text>
-          <box marginTop={1} flexDirection="column">
-            <text fg={C.dim}>
-              {
-                'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.'
-              }
+          <box flexDirection="column" width="55%" paddingLeft={2}>
+            <text fg={C.text} attributes={1}>
+              {t('Editor Preference')}
             </text>
-            <box flexDirection="row">
-              <text fg={C.dim}>{'Your preferred editor is: '}</text>
-              <text
-                fg={mergedName === 'None' ? C.red : C.accent}
-                attributes={1}
-              >
-                {mergedName}
+            <box marginTop={1} flexDirection="column">
+              <text fg={C.dim}>
+                {t(
+                  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.',
+                )}
               </text>
-              <text fg={C.dim}>{'.'}</text>
+              <box flexDirection="row" marginTop={1}>
+                <text fg={C.dim}>{`${t('Your preferred editor is:')} `}</text>
+                <text
+                  fg={mergedName === 'None' ? C.red : C.purple}
+                  attributes={1}
+                >
+                  {mergedName}
+                </text>
+                <text fg={C.dim}>{'.'}</text>
+              </box>
             </box>
           </box>
         </box>
-      </box>
-    </Shell>
+      </DialogFrame>
+    </box>
   );
 }
 
@@ -323,129 +360,51 @@ export function OpenTuiTrustDialog({ config, onClose }: P) {
 }
 
 /**
- * Real session deletion (audit 01 G-10): a session picker over
- * `SessionService.listSessions` (the current session is disabled, ink
- * parity) whose Enter runs `removeSession` + the SessionDelete hook —
- * the same services ink's useDeleteCommand drives.
+ * Session deletion: the same picker ink's `/delete` mounts, driven by ink's own
+ * `useDeleteCommand` so the single-delete guard, the batch-delete mutex and
+ * every outcome message are shared rather than re-worded. The live session is
+ * disabled in place instead of filtered out, matching ink.
  */
 export function OpenTuiDeleteDialog({ config, onClose, notify }: P) {
-  useEsc(onClose);
-  const [rows, setRows] = useState<SessionListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [cursor, setCursor] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const currentSessionId = config?.getSessionId?.() ?? '';
-  useEffect(() => {
-    let alive = true;
-    const svc = config?.getSessionService?.();
-    if (!svc) {
-      setLoading(false);
-      return;
-    }
-    svc
-      .listSessions({ size: 20 })
-      .then((res) => {
-        if (!alive) return;
-        setRows(res.items ?? []);
-        setLoading(false);
-      })
-      .catch(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [config]);
-  const isDisabled = (row: SessionListItem) =>
-    row.sessionId === currentSessionId;
-  const move = (dir: 1 | -1) => {
-    setCursor((prev) => {
-      let next = prev;
-      for (let i = 0; i < rows.length; i++) {
-        next = (next + dir + rows.length) % rows.length;
-        const row = rows[next];
-        if (row && !isDisabled(row)) return next;
+  const currentBranch = useGitBranchName(config?.getTargetDir() ?? '');
+  const currentSessionId = config?.getSessionId() ?? '';
+  const { handleDelete, handleDeleteMany } = useDeleteCommand({
+    config: config ?? null,
+    addItem: (item) => {
+      if ('text' in item) {
+        notify?.(String(item.text), item.type === 'error' ? 'error' : 'info');
       }
-      return prev;
-    });
-  };
-  useKeyboard((key) => {
-    const o = toOriginalKey(key);
-    if (busy || loading) return;
-    if (o.name === 'up') {
-      move(-1);
-      return;
-    }
-    if (o.name === 'down') {
-      move(1);
-      return;
-    }
-    if (o.name === 'return') {
-      const row = rows[cursor];
-      if (!row || isDisabled(row) || !config) return;
-      setBusy(true);
-      const svc = config.getSessionService();
-      void svc
-        .removeSession(row.sessionId)
-        .then((success) => {
-          if (success) {
-            fireSessionDeleteHook(config, row.sessionId);
-            notify?.('Session deleted successfully.');
-          } else {
-            notify?.('Failed to delete session. Session not found.');
-          }
-          onClose();
-        })
-        .catch(() => {
-          notify?.('Failed to delete session.');
-          setBusy(false);
-        });
-    }
+      return 0;
+    },
   });
+  const disabledIds = useMemo(
+    () => (currentSessionId ? [currentSessionId] : undefined),
+    [currentSessionId],
+  );
   return (
-    <Shell title="Delete Session" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>
-          {'Select a session to delete · enter to delete · esc to cancel'}
-        </text>
-        <scrollbox height={12} marginTop={1} stickyScroll={false}>
-          {loading ? (
-            <text fg={C.dim}>{'loading sessions…'}</text>
-          ) : rows.length === 0 ? (
-            <text fg={C.dim}>{'no previous sessions'}</text>
-          ) : (
-            rows.map((r, i) => {
-              const disabled = isDisabled(r);
-              const selected = i === cursor;
-              const title = r.customTitle || r.prompt || '(untitled)';
-              return (
-                <box key={r.sessionId} flexDirection="row">
-                  <text fg={selected ? C.accent : C.dim}>
-                    {selected ? '› ' : '  '}
-                  </text>
-                  <text fg={disabled ? C.dim : selected ? C.accent : C.text}>
-                    {title.length > 40 ? `${title.slice(0, 40)}…` : title}
-                  </text>
-                  <text fg={C.dim}>{`  ${r.sessionId.slice(0, 8)}${
-                    disabled ? ' (current)' : ''
-                  }`}</text>
-                </box>
-              );
-            })
-          )}
-        </scrollbox>
-        {busy && <text fg={C.dim}>{'deleting…'}</text>}
-      </box>
-    </Shell>
+    <OpenTuiSessionPicker
+      sessionService={config?.getSessionService() ?? null}
+      currentBranch={currentBranch}
+      title={t('Delete Session')}
+      onSelect={(sessionId) => {
+        onClose();
+        handleDelete(sessionId);
+      }}
+      onCancel={onClose}
+      enableMultiSelect
+      onConfirmMulti={(sessionIds) => {
+        onClose();
+        handleDeleteMany(sessionIds);
+      }}
+      disabledIds={disabledIds}
+    />
   );
 }
 
 /**
- * Interactive resume picker (audit 01 G-5 / 05 G-04): ↑↓ navigation + Enter
- * selects, running the real session switch through `onSelect`
- * (host.handleResume). `matchedSessions` is the command's pre-filtered list
- * (`/resume <fuzzy-title>` with multiple matches); without it the 10 most
- * recent sessions are listed, like ink's SessionPicker default.
+ * Interactive resume picker: ink mounts the same `SessionPicker` here, with the
+ * command's pre-filtered list when `/resume <fuzzy-title>` matched more than one
+ * session and the paginated listing otherwise.
  */
 export function OpenTuiResumeDialog({
   config,
@@ -453,91 +412,19 @@ export function OpenTuiResumeDialog({
   matchedSessions,
   onSelect,
 }: P) {
-  useEsc(onClose);
-  const [rows, setRows] = useState<SessionListItem[]>(matchedSessions ?? []);
-  const [loading, setLoading] = useState(!matchedSessions);
-  const [cursor, setCursor] = useState(0);
-  useEffect(() => {
-    if (matchedSessions) {
-      setRows(matchedSessions);
-      setLoading(false);
-      return;
-    }
-    let alive = true;
-    const svc = config?.getSessionService?.();
-    if (!svc) {
-      setLoading(false);
-      return;
-    }
-    svc
-      .listSessions({
-        size: 10,
-        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
-      })
-      .then((res) => {
-        if (!alive) return;
-        setRows(res.items ?? []);
-        setLoading(false);
-      })
-      .catch(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [config, matchedSessions]);
-  useKeyboard((key) => {
-    const o = toOriginalKey(key);
-    if (loading) return;
-    if (o.name === 'up') {
-      setCursor((prev) => Math.max(0, prev - 1));
-      return;
-    }
-    if (o.name === 'down') {
-      setCursor((prev) => Math.min(rows.length - 1, prev + 1));
-      return;
-    }
-    if (o.name === 'return') {
-      const row = rows[cursor];
-      if (!row) return;
-      onClose();
-      onSelect?.(row.sessionId);
-    }
-  });
+  const currentBranch = useGitBranchName(config?.getTargetDir() ?? '');
   return (
-    <Shell title="Resume" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>
-          {'↑↓ to navigate · enter to resume · esc to cancel'}
-        </text>
-        <scrollbox height={12} marginTop={1} stickyScroll={false}>
-          {loading ? (
-            <text fg={C.dim}>{'loading sessions…'}</text>
-          ) : rows.length === 0 ? (
-            <text fg={C.dim}>{'no previous sessions'}</text>
-          ) : (
-            rows.map((r, i) => {
-              const selected = i === cursor;
-              const title = r.customTitle || r.prompt || '(untitled)';
-              const when = r.startTime ? r.startTime.slice(0, 10) : '';
-              return (
-                <box key={r.sessionId} flexDirection="row">
-                  <text fg={selected ? C.accent : C.dim}>
-                    {selected ? '› ' : '  '}
-                  </text>
-                  <text fg={selected ? C.accent : C.text}>
-                    {title.length > 40 ? `${title.slice(0, 40)}…` : title}
-                  </text>
-                  <text fg={C.dim}>{`  ${r.sessionId.slice(0, 8)}${
-                    when ? ` · ${when}` : ''
-                  }`}</text>
-                </box>
-              );
-            })
-          )}
-        </scrollbox>
-      </box>
-    </Shell>
+    <OpenTuiSessionPicker
+      sessionService={config?.getSessionService() ?? null}
+      currentBranch={currentBranch}
+      initialSessions={matchedSessions}
+      enablePreview
+      onSelect={(sessionId) => {
+        onClose();
+        onSelect?.(sessionId);
+      }}
+      onCancel={onClose}
+    />
   );
 }
 
@@ -585,13 +472,16 @@ export function OpenTuiRewindDialog({ onClose }: P) {
   );
 }
 
-export function OpenTuiDiffDialog({ onClose }: P) {
+export function OpenTuiDiffDialog({ config, onClose }: P) {
   useEsc(onClose);
+  const sandboxed = Boolean(config?.getShellExecutionSandbox?.());
   const [lines, setLines] = useState<string[]>([]);
   useEffect(() => {
+    if (sandboxed) return;
     let alive = true;
     import('node:child_process')
       .then(({ execFile }) => {
+        if (!alive) return;
         execFile(
           'git',
           [
@@ -614,7 +504,17 @@ export function OpenTuiDiffDialog({ onClose }: P) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [sandboxed]);
+  if (sandboxed) {
+    return (
+      <Shell title="Diff" onClose={onClose}>
+        <text fg={C.dim}>
+          Diff preview unavailable in tool sandbox. Run git diff through the
+          Shell tool.
+        </text>
+      </Shell>
+    );
+  }
   return (
     <Shell title="Diff" onClose={onClose}>
       <scrollbox height={14} marginTop={1} stickyScroll={false}>

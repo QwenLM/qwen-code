@@ -41,6 +41,75 @@ describe('package asset scripts', () => {
     }
   });
 
+  it('copies the manifest and service worker into the published shell', () => {
+    const rootDir = createFixtureRoot();
+    stubConsole();
+    writeFile(rootDir, 'packages/web-shell/dist/index.html', '<!doctype html>');
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/assets/index-abc.js',
+      'export {};',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/manifest.webmanifest',
+      '{"name":"Qwen Code"}',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/sw.js',
+      'self.addEventListener("fetch", () => {});',
+    );
+    copyBundleAssets({ root: rootDir });
+    for (const file of ['manifest.webmanifest', 'sw.js']) {
+      expect(
+        readFileSync(path.join(rootDir, 'dist/web-shell', file), 'utf8'),
+      ).toBe(
+        readFileSync(
+          path.join(rootDir, 'packages/web-shell/dist', file),
+          'utf8',
+        ),
+      );
+    }
+  });
+
+  it('warns and skips a missing service worker from a stale shell build', () => {
+    const rootDir = createFixtureRoot();
+    stubConsole();
+    writeFile(rootDir, 'packages/web-shell/dist/index.html', '<!doctype html>');
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/assets/index-abc.js',
+      'export {};',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/manifest.webmanifest',
+      '{"name":"Qwen Code"}',
+    );
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist/web-shell/manifest.webmanifest'),
+        'utf8',
+      ),
+    ).toBe('{"name":"Qwen Code"}');
+    expect(existsSync(path.join(rootDir, 'dist/web-shell/sw.js'))).toBe(false);
+    expect(
+      console.warn.mock.calls
+        .map(([message]) => String(message))
+        .some(
+          (message) =>
+            message.includes('PWA asset not found') &&
+            message.includes(
+              path.join(rootDir, 'packages/web-shell/dist/sw.js'),
+            ),
+        ),
+    ).toBe(true);
+  });
+
   it('emits an executable dist/cli.js — shebang plus the exec bit, once', () => {
     // shellContextEnv blanks a QWEN_CODE_CLI a POSIX shell cannot exec (no
     // shebang, or no exec bit), and `"${QWEN_CODE_CLI:-qwen}"` then silently
@@ -596,6 +665,7 @@ describe('package asset scripts', () => {
     );
     expect(distPackageJson.files).toContain('export-transcript-document.js');
     expect(distPackageJson.files).toContain('export-transcript-document.css');
+    expect(distPackageJson.files).toContain('execution-worker.js');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -634,32 +704,65 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  it('fails packaging when the published stylesheet is missing', () => {
-    const rootDir = createFixtureRoot();
-    createBundleArtifacts(rootDir);
-    rmSync(path.join(rootDir, 'dist', 'export-transcript-document.css'));
-    stubConsole();
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    // verifyBundleArtifacts reports with console.error + process.exit(1), not a
-    // throw, so the exit has to become one to keep the rest of the suite alive.
-    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('process.exit(1)');
-    });
+  it.each(['execution-worker.js', 'export-transcript-document.css'])(
+    'fails packaging when the published %s is missing',
+    (missingArtifact) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      rmSync(path.join(rootDir, 'dist', missingArtifact));
+      stubConsole();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+      // throw, so the exit has to become one to keep the rest of the suite alive.
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit(1)');
+      });
 
-    expect(() =>
-      preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow('process.exit(1)');
-    expect(exit).toHaveBeenCalledWith(1);
-    expect(
-      console.error.mock.calls
-        .map(([message]) => String(message))
-        .some(
-          (message) =>
-            message.includes('Required package artifact not found') &&
-            message.includes('export-transcript-document.css'),
-        ),
-    ).toBe(true);
-  });
+      expect(() =>
+        preparePackage({ rootDir, requireNativeAudioCapture: false }),
+      ).toThrow('process.exit(1)');
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(
+        console.error.mock.calls
+          .map(([message]) => String(message))
+          .some(
+            (message) =>
+              message.includes('Required package artifact not found') &&
+              message.includes(missingArtifact),
+          ),
+      ).toBe(true);
+    },
+  );
+
+  it.each(['manifest.webmanifest', 'sw.js'])(
+    'rejects a published shell missing %s',
+    (file) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      rmSync(path.join(rootDir, 'dist', 'web-shell', file));
+      stubConsole();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+      // throw, so the exit has to become one to keep the rest of the suite alive.
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit(1)');
+      });
+
+      expect(() =>
+        preparePackage({ rootDir, requireNativeAudioCapture: false }),
+      ).toThrow('process.exit(1)');
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(
+        console.error.mock.calls
+          .map(([message]) => String(message))
+          .some(
+            (message) =>
+              message.includes('Required package artifact not found') &&
+              message.includes(file),
+          ),
+      ).toBe(true);
+    },
+  );
 
   it('copies Computer Use platform references to both CLI and core distributions', () => {
     const rootDir = createFixtureRoot();
@@ -903,6 +1006,7 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.private).not.toBe(true);
     expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
@@ -927,19 +1031,12 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+  it('falls back to the hoisted sharp when core has no nested copy', () => {
     const rootDir = createFixtureRoot();
-    writeFile(
-      rootDir,
-      'package-lock.json',
-      JSON.stringify({
-        packages: {
-          'node_modules/sharp': {
-            version: '0.35.3',
-          },
-        },
-      }),
-    );
+    rmSync(path.join(rootDir, 'packages/core/node_modules'), {
+      recursive: true,
+      force: true,
+    });
     writeFile(
       rootDir,
       'packages/core/package.json',
@@ -1017,7 +1114,7 @@ describe('package asset scripts', () => {
 
     expect(() =>
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
+    ).toThrow(/installed 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1339,6 +1436,7 @@ describe('package asset scripts', () => {
           name: '@qwen-code/qwen-code',
           version: '0.17.0',
           description: 'Qwen Code',
+          private: true,
           repository: {
             type: 'git',
             url: 'https://github.com/QwenLM/qwen-code.git',
@@ -1358,21 +1456,13 @@ describe('package asset scripts', () => {
 
     writeFile(
       rootDir,
-      'package-lock.json',
-      JSON.stringify(
-        {
-          packages: {
-            'node_modules/sharp': {
-              version: '0.35.3',
-            },
-            'packages/core/node_modules/sharp': {
-              version: '0.35.4',
-            },
-          },
-        },
-        null,
-        2,
-      ),
+      'node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.3' }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.4' }),
     );
 
     writeFile(
@@ -1469,6 +1559,7 @@ describe('package asset scripts', () => {
 
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/cli.js', '');
+    writeFile(rootDir, 'dist/execution-worker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,
@@ -1476,6 +1567,12 @@ describe('package asset scripts', () => {
     // Web Shell release gate (prepare-package.js verifyBundleArtifacts): the
     // published package must ship the UI, so the fixture provides it too.
     writeFile(rootDir, 'dist/web-shell/index.html', '<!doctype html>');
+    writeFile(rootDir, 'dist/web-shell/manifest.webmanifest', '{}');
+    writeFile(
+      rootDir,
+      'dist/web-shell/sw.js',
+      'self.addEventListener("fetch", () => {});',
+    );
     mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });

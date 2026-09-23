@@ -2674,9 +2674,11 @@ export function WebShellSidebar({
 
   const copyWorkspacePath = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
-      void writeClipboardText(candidate.cwd).catch((error: unknown) => {
-        onError(error, t('sidebar.copyWorkspacePathFailed'));
-      });
+      void writeClipboardText(candidate.ssh?.directory ?? candidate.cwd).catch(
+        (error: unknown) => {
+          onError(error, t('sidebar.copyWorkspacePathFailed'));
+        },
+      );
     },
     [onError, t],
   );
@@ -6058,6 +6060,7 @@ export function WebShellSidebar({
                         additionalSessions={collaborationSessions.filter(
                           (session) => session.workspaceCwd === ws.cwd,
                         )}
+                        remote={!isPageOriginDaemon(workspace.baseUrl)}
                         renderHeader={
                           lockedWorkspaceCwd && lockedWorkspaceOptions?.render
                             ? (expanded) =>
@@ -6233,7 +6236,10 @@ export function WebShellSidebar({
                                         copyPath: () => copyWorkspacePath(ws),
                                       }
                                     : {}),
-                                  ...(localOpenEnabled && ws.trusted && realPath
+                                  ...(localOpenEnabled &&
+                                  ws.trusted &&
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openFolder: () => {
                                           void openWorkspaceFolderLocally(
@@ -6244,7 +6250,8 @@ export function WebShellSidebar({
                                     : {}),
                                   ...(localTerminalEnabled &&
                                   ws.trusted &&
-                                  realPath
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openTerminal: () => {
                                           void openWorkspaceTerminalLocally(
@@ -6263,6 +6270,7 @@ export function WebShellSidebar({
                                   // branch the composer never shows the armed
                                   // intent and the daemon rejects the session.
                                   ...(ws.trusted &&
+                                  !ws.ssh &&
                                   onNewWorktreeSession &&
                                   gitBranch
                                     ? {
