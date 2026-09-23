@@ -38,22 +38,215 @@ PR #12492 的后续提交未在本地运行过这个脚本，需要在可构建�
 
 ## 阶段 B：真实付费闭环（待执行，会产生费用）
 
-对应设计 §10 阶段 B。以下都**没有**做过，任何"省钱"结论在这之前都只是估算。
-先冻结样本和质量规则再跑，不要看到结果后调整门槛。
+对应设计 §10 阶段 B 与 §5.2 的两层比较。以下都**没有**做过；在跑完之前，任何
+"省钱"都只是估算。**第 1 步写下的判定规则在跑之前冻结，看到结果后不许改。**
 
-1. **准备**：选一组 20–50 篇独立文档（例如 `docs/zh` 下的若干篇），写好术语表和
-   质量抽查规则（抽查比例、判定标准）。设置 `QWEN_BATCH_INPUT_PRICE_PER_1M_USD`、
-   `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`，并用 `QWEN_BATCH_PRICE_SOURCE` 记下价格页
-   URL 与核对日期。
-2. **Batch 路径**：交互会话里 `/batch-api <任务>`，全程记录：准备阶段主会话的
-   token 用量（`/stats` 或会话 JSONL，执行器看不到这部分）、`run` 输出的估算与
-   盈亏点、`collect` 输出的 Batch 用量、等待时长、失败/held 项和人工补救次数。
-3. **实时对照**：同一模型、同一冻结设置（`qwen batch check` 显示的那组）、同一
-   样本，用普通 `/batch` 或逐篇实时完成，记录总 token（含缓存命中）与质量抽查。
-4. **账单核对**：以控制台账单为准，对比两条路径的完整费用（准备 + 生成 + 补救），
-   与 `run` 的估算、盈亏点比较。
-5. **回贴**：把以上数字、质量抽查结果、用户介入次数写进本目录 `results-stage-b.md`；
-   结论按设计 §10 标注"更省 / 收益未确认 / 更贵"，不外推到其他任务类型。
+### 要回答的两个问题
+
+| 层     | 比什么                                         | 对照组                                      |
+| ------ | ---------------------------------------------- | ------------------------------------------- |
+| 第一层 | 同一批已组织好的请求，Batch 与实时的生成费用   | 臂 A 的生成 vs 臂 B（原样重放 A 的请求）    |
+| 第二层 | 完整工作流：准备 + 生成 + 补救，同等质量下总价 | 臂 A 全流程 vs 臂 C（普通实时会话做同一事） |
+
+### 0. 前置（不花钱）
+
+1. 在 PR 分支构建：`npm run build && npm run bundle`，跑
+   `node docs/verification/batch-api/workflow-e2e.mjs "$(pwd)/dist/cli.js"`，
+   必须 27/27。不通过就停，先修代码。
+2. 让实验里的 `qwen` 一定是这次构建的版本。skill 执行的是
+   `"${QWEN_CODE_CLI:-qwen}"`，回落到 PATH 上的 `qwen` 时，旧的全局安装没有
+   `batch run` 等子命令：
+
+   ```sh
+   export REPO=$(pwd)
+   mkdir -p ~/stage-b/bin && printf '#!/bin/sh\nexec node %s/dist/cli.js "$@"\n' "$REPO" > ~/stage-b/bin/qwen
+   chmod +x ~/stage-b/bin/qwen && export PATH=~/stage-b/bin:$PATH
+   qwen batch --help | grep -q 'batch check' && echo "qwen 指向 PR 构建"   # 旧版本没有 check
+   ```
+
+   后面所有步骤都在这个 shell 里做。
+
+3. 准备一个仓库外的实验目录，臂 A 与臂 C 各一份干净副本（避免互相覆盖、避免
+   git 噪音；臂 B 只重放请求，不需要项目目录）：
+
+   ```sh
+   export SB=~/stage-b && mkdir -p $SB/src
+   ls docs/users/features/*.md | sort | head -30 | xargs -I{} cp {} $SB/src/
+   for arm in a c; do mkdir -p $SB/$arm && cp -r $SB/src $SB/$arm/src; done
+   ```
+
+   样本是 30 篇英文用户文档（约 1.5–31 KB），任务是译成简体中文。**样本清单
+   一旦选定不再更换。**
+
+4. 固定设置并记录：模型、地域、思考开关、输出上限。在 `$SB/a` 里执行
+   `qwen batch check`，把输出整段抄进记录表；臂 C 用同一份 settings（同一
+   `~/.qwen/settings.json`，不要中途改）。如果 `check` 显示
+   `max output provider default`，在 settings 里设
+   `model.generationConfig.samplingParams.max_tokens: 16384`（最大的文档约
+   31 KB，避免截断），再跑一次 `check`。
+5. 价格：从百炼价格页查该模型的实时输入/输出单价（元或美元均可，全程同一币种），
+
+   ```sh
+   export QWEN_BATCH_INPUT_PRICE_PER_1M_USD=<输入单价/百万>
+   export QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD=<输出单价/百万>
+   export QWEN_BATCH_PRICE_SOURCE="<价格页 URL>, checked <日期>"
+   ```
+
+   同时记下隐式缓存命中价（默认假设为输入价的 20%，若价格页不同，以价格页为准，
+   下面公式里的 r 随之修改）。
+
+6. 共同的任务指令与术语表写成一个文件 `$SB/brief.md`（术语对照 20–40 条、
+   "代码块与链接目标原样保留"、"只输出完整译文"），再复制进两个项目目录，
+   让 agent 不必读项目外的文件：`cp $SB/brief.md $SB/a/ && cp $SB/brief.md $SB/c/`。
+   之后不再修改。
+
+### 1. 预注册（跑之前写进 `results-stage-b.md`）
+
+复制文末模板，填好"预注册"一节并提交到 PR 分支，然后才开始第 2 步。建议默认值
+（可以改，但只能在跑之前改）：
+
+- **语义抽查样本**：排序后的第 3、6、9 … 30 篇，共 10 篇。
+- **结构通过**：`stage-b-structure-check.mjs` 判为 pass。
+- **"更省"**：第二层 A 总价 ≤ C 总价 × 0.8，且 A 的结构通过数 ≥ C − 1，
+  且抽查中"需返工"篇数 ≤ C + 1，且除第一句指令外用户介入 ≤ 2 次。
+- **"更贵"**：A 总价 ≥ C 总价。
+- 其他情况一律记为 **"收益未确认"**，不宣传任何节省比例。
+- **中止条件**：`run` 的估算超过预算上限；或 A 的结构失败 > 6 篇（说明准备/
+  指令有问题，停下分析，不做循环重试）。
+
+### 2. 臂 A：`/batch-api` 全流程
+
+1. `cd $SB/a && qwen`，**记下开始时间（UTC）**。输入一句话：
+
+   ```
+   /batch-api 按 brief.md 把 src/ 下所有 .md 译成简体中文，写到 out/ 下同名文件；maxCostUsd 设为 <预算>
+   ```
+
+2. 照常审批 agent 写计划和执行 `qwen batch run`。`run` 打印的整段输出（任务 ID、
+   冻结设置行、估算、盈亏平衡命中率）原样抄进记录表。**记下准备结束时间**
+   （`run` 打印 `collect later with` 的时刻）。
+3. 等待期间不要在这个会话里做别的事（否则准备用量里会混进无关调用）。可以退出
+   会话。每隔一段时间执行 `qwen batch collect <task-id>`，记录**提交到可收取的
+   时长**。
+4. 收取后：
+   - 失败项：只允许一轮 `qwen batch retry <task-id>`（截断项加
+     `--max-output-tokens`），记为补救；
+   - held 项：说明原因，按真实用户会做的方式处理，记入"介入次数"；
+   - 需要人工或实时修改的译文：在新的会话里修，**该会话的用量计入补救**。
+5. 记录 `collect` 最后一行的 "Batch usage, all attempts"（若有 INCOMPLETE，照抄
+   并以控制台账单为准）。
+6. 准备用量：
+
+   ```sh
+   ls -t ~/.qwen/projects/*/chats/*.jsonl | head   # 找到臂 A 的会话文件
+   node docs/verification/batch-api/stage-b-session-usage.mjs <会话.jsonl> \
+     --from <开始时间> --to <准备结束时间>
+   ```
+
+   与会话里 `/stats` 的数字交叉核对；差异写进记录表。
+
+### 3. 臂 B：原样实时重放（第一层）
+
+```sh
+# 与臂 A 同一账号、同一地域：base URL 取 `qwen batch check` 显示的那个
+DASHSCOPE_API_KEY=... DASHSCOPE_BASE_URL=https://<check 显示的 host>/compatible-mode/v1 \
+  node docs/verification/batch-api/stage-b-realtime-replay.mjs \
+  ~/.qwen/batch/tasks/<task-id>/attempt-001/input.jsonl --concurrency 4
+```
+
+在仓库根目录运行（脚本从 workspace 的 node_modules 解析 `openai`）。
+请求体与臂 A 第一次提交逐字节相同（同模型、同冻结参数）。`summary.json` 的
+`promptTokens / cachedTokens / completionTokens` 抄进记录表。**`cacheHitRate`
+就是第一层公式里的 h 的实测值**——这是 `run` 只能给出盈亏平衡点、给不出结论的
+那个未知数。
+
+### 4. 臂 C：普通实时会话（第二层对照）
+
+1. 换一个时间段（和臂 A/B 的账单错开至少 1 小时，便于在控制台按时间区分），
+   `cd $SB/c && qwen`，记下开始时间，输入同一句任务（去掉 `/batch-api` 和
+   `maxCostUsd`）：
+
+   ```
+   按 brief.md 把 src/ 下所有 .md 译成简体中文，写到 out/ 下同名文件
+   ```
+
+2. 让它用自己的方式完成（可以自行调用子 agent），审批按真实用户的习惯；记录
+   介入次数和墙钟时长。
+3. 完成后同样修正到"可交付"，修正也在这个会话里做。
+4. 用 `stage-b-session-usage.mjs` 汇总整个会话（子 agent 记录在同一文件里）。
+
+### 5. 质量评分（每个臂同一套规则）
+
+```sh
+node docs/verification/batch-api/stage-b-structure-check.mjs $SB/src $SB/a/out
+node docs/verification/batch-api/stage-b-structure-check.mjs $SB/src \
+  docs/verification/batch-api/out/stage-b-realtime/out   # 臂 B，路径随计划的 target
+node docs/verification/batch-api/stage-b-structure-check.mjs $SB/src $SB/c/out
+```
+
+语义抽查：对预注册的 10 篇，把 A 与 C 的译文随机标成 X/Y（不告诉评审是哪个臂），
+按"准确 / 通顺 / 术语一致"各 1–5 分打分，并判断"可直接交付 / 需返工"。B 只做
+结构检查（它和 A 的请求相同，差异只来自采样随机性）。
+
+### 6. 算钱
+
+单价 Pin、Pout（每百万 token），命中价系数 r（默认 0.2），Batch 系数 b = 0.5：
+
+```text
+实时调用费 = [(prompt − cached) + cached × r] × Pin + (output + thought) × Pout
+Batch 费   = b × (prompt × Pin + completion × Pout)        # 只计成功请求，以账单为准
+
+第一层： Batch(A 生成，所有尝试) 对比 实时调用费(B)
+第二层： A 总价 = 实时调用费(A 准备会话) + Batch(A 生成) + 实时调用费(A 补救会话)
+         C 总价 = 实时调用费(C 会话)
+```
+
+最后到控制台核对账单：能按时间段分开的，以账单为准并注明；分不开的，写明
+"按 usage × 单价推算"。
+
+### 7. 结论与回贴
+
+按预注册规则给出"更省 / 收益未确认 / 更贵"，只对"30 篇英译中文档"这一场景成立，
+不外推。把 `results-stage-b.md` 与三个脚本的 JSON 输出（去掉正文）提交到 PR 分支，
+并在 PR 里评论一句结论 + 链接。
+
+### 记录表模板（`results-stage-b.md`）
+
+```markdown
+# 阶段 B 结果：30 篇英译中
+
+## 预注册（跑之前填写并提交）
+
+- 提交 SHA / 日期：
+- 模型 / 地域 / `qwen batch check` 输出：
+- 单价 Pin / Pout / r、价格来源与核对日期：
+- 抽查样本：
+- "更省 / 更贵 / 收益未确认"规则与中止条件：
+- 预算上限：
+
+## 记录
+
+| 项目                       | 臂 A（/batch-api） | 臂 B（重放） | 臂 C（实时会话） |
+| -------------------------- | ------------------ | ------------ | ---------------- |
+| 开始 / 结束（UTC）         |                    |              |                  |
+| 准备用量 prompt/cached/out |                    | —            | —                |
+| 生成用量 prompt/cached/out |                    |              | （含在会话里）   |
+| 补救用量                   |                    | —            |                  |
+| 实测缓存命中率             | 0（Batch）         |              |                  |
+| 提交到可收取 / 总墙钟时长  |                    |              |                  |
+| 用户介入次数               |                    | —            |                  |
+| 结构通过 / 30              |                    |              |                  |
+| 抽查"需返工" / 10          |                    | —            |                  |
+| 推算总价                   |                    |              |                  |
+| 账单核对（能否分开、差异） |                    |              |                  |
+
+## 结论
+
+- 第一层：
+- 第二层：
+- 判定（按预注册规则）：
+- 偏离预注册的地方及原因：
+```
 
 ## 准备
 
