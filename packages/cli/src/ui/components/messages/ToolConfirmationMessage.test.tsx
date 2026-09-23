@@ -11,12 +11,28 @@ import { Box } from 'ink';
 
 // Capture launches of the external editor so the full-plan viewer (#7001)
 // can be asserted without spawning a real editor process.
-const { launchEditorMock } = vi.hoisted(() => ({
+const { launchEditorMock, isEditorAvailableMock } = vi.hoisted(() => ({
   launchEditorMock: vi.fn((_filePath: string) => Promise.resolve()),
+  // Editor availability probes PATH for a real binary (`command -v code`),
+  // so leaving it unstubbed would make these tests depend on whether the
+  // host happens to have the configured editor installed. Default to
+  // "configured means available" and opt out per test. The detection itself
+  // is covered by packages/core/src/utils/editor.test.ts.
+  isEditorAvailableMock: vi.fn((editor: string | undefined) => Boolean(editor)),
 }));
 vi.mock('../../hooks/useLaunchEditor.js', () => ({
   useLaunchEditor: () => launchEditorMock,
 }));
+vi.mock('@qwen-code/qwen-code-core/utils/editor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/editor.js')
+    >();
+  return {
+    ...actual,
+    isEditorAvailable: isEditorAvailableMock,
+  };
+});
 
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import type {
@@ -24,7 +40,10 @@ import type {
   Config,
 } from '@qwen-code/qwen-code-core';
 import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 describe('ToolConfirmationMessage', () => {
@@ -727,12 +746,23 @@ describe('ToolConfirmationMessage', () => {
       newContent: 'b',
       onConfirm: vi.fn(),
     };
+    const execConfirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+    const preferredEditorSettings = {
+      merged: { general: { preferredEditor: 'vscode' } },
+    } as unknown as LoadedSettings;
 
     it('should show "Modify with external editor" when preferredEditor is set', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -741,14 +771,64 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
       expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledWith('vscode');
+    });
+
+    it('probes editor availability once for the dialog lifetime', () => {
+      isEditorAvailableMock.mockClear();
+
+      const component = (height: number) => (
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={height}
+          contentWidth={80}
+        />
+      );
+      const { lastFrame, rerender } = renderWithProviders(component(30), {
+        settings: preferredEditorSettings,
+      });
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+
+      // A terminal resize re-renders the dialog; the availability probe shells
+      // out, so it must not run again.
+      rerender(
+        withProviders(component(31), { settings: preferredEditorSettings }),
+      );
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+    });
+
+    // #10745: the option was offered whenever `preferredEditor` was merely
+    // set, so picking it tried to launch a binary that is not installed and
+    // the modify flow failed. Offer it only when the editor is available.
+    it('should NOT show "Modify with external editor" when the configured editor is unavailable', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+      isEditorAvailableMock.mockClear();
+      isEditorAvailableMock.mockReturnValueOnce(false);
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
     it('should NOT show "Modify with external editor" when preferredEditor is not set', () => {
@@ -756,6 +836,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -771,6 +852,7 @@ describe('ToolConfirmationMessage', () => {
         },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
@@ -779,6 +861,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -787,14 +870,47 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability in compactMode', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
+      expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability for a non-edit confirmation', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={execConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
     });
 
     it('renders edit warnings and honors hideAlwaysAllow on small terminals', () => {

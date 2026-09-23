@@ -27,6 +27,7 @@ import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import type { ScrollActions } from '../contexts/ScrollContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import {
@@ -130,9 +131,13 @@ const virtualIsStaticItem = (item: VpItem) =>
 
 interface MainContentProps {
   footerRef?: RefObject<DOMElement | null>;
+  scrollActionsRef?: React.MutableRefObject<ScrollActions | null>;
 }
 
-export const MainContent = ({ footerRef }: MainContentProps) => {
+export const MainContent = ({
+  footerRef,
+  scrollActionsRef,
+}: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
   const { allExpanded: fullDetail } = useThoughtExpanded();
@@ -164,6 +169,30 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
   const selectionQueryRef = useRef<SelectionQuery | null>(null);
   const { menu: contextMenuOpen } = useContextMenu();
+
+  // Expose the transcript's scroll controls to sibling components (e.g.
+  // InputPrompt) so bare Up/Down keys can scroll the conversation in VP mode
+  // when the input is empty. The ref is populated here but the
+  // ScrollContext.Provider lives in DefaultAppLayout so it wraps both
+  // MainContent and Composer.
+  useEffect(() => {
+    if (!scrollActionsRef) return;
+    scrollActionsRef.current = {
+      scrollBy: (delta: number) => scrollRef.current?.scrollBy(delta),
+      hasScrollableTranscript: () => {
+        const state = scrollRef.current?.getScrollState();
+        // innerHeight is 0 until the viewport has been measured.
+        return (
+          !!state &&
+          state.innerHeight > 0 &&
+          state.scrollHeight > state.innerHeight
+        );
+      },
+    };
+    return () => {
+      scrollActionsRef.current = null;
+    };
+  }, [scrollActionsRef]);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {

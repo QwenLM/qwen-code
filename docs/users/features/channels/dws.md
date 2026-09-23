@@ -73,7 +73,7 @@ and workspace.
 qwen channel pairing approve dws-work CODE
 ```
 
-`senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
+`senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group admits all of its members by default; other groups follow `senderPolicy` unless their `senders` setting says otherwise. To let every member of an admitted group talk to the bot while direct messages stay restricted, set `groups: { "*": { "senders": "open" } }` (or `"allowlist"` with that group's `allowedUsers`); see [Group Senders](./overview.md#group-senders).
 
 Group and direct-message access can be configured independently. For a group-only channel, set `dmPolicy: "disabled"` and choose an enabled `groupPolicy`. For a direct-message-only channel, set `groupPolicy: "disabled"` and `dmPolicy: "open"`. Direct-message access also controls document notifications. Native todo polling remains controlled separately by `watchTodos`.
 

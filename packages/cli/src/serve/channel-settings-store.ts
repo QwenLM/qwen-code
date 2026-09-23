@@ -140,6 +140,11 @@ function assertSharedField(
     }
     return true;
   }
+  if (key === 'groupSenderPolicy' || key === 'allowedGroupUsers') {
+    throw invalidConfig(
+      `Channel field "${key}" moved to groups["*"].${key === 'groupSenderPolicy' ? 'senders' : 'allowedUsers'}.`,
+    );
+  }
   const enumValues: Record<string, ReadonlySet<string>> = {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
@@ -159,7 +164,7 @@ function assertSharedField(
     }
     return true;
   }
-  if (key === 'allowedUsers') {
+  if (key === 'allowedUsers' || key === 'operators') {
     if (
       !Array.isArray(value) ||
       value.some((item) => typeof item !== 'string')
@@ -191,6 +196,8 @@ function assertSharedField(
           'requireMention',
           'dispatchMode',
           'groupHistoryLimit',
+          'senders',
+          'allowedUsers',
         ].includes(nestedKey);
         const valid =
           (nestedKey === 'requireMention' &&
@@ -200,7 +207,13 @@ function assertSharedField(
             ['collect', 'steer', 'followup'].includes(nestedValue)) ||
           (nestedKey === 'groupHistoryLimit' &&
             typeof nestedValue === 'number' &&
-            Number.isFinite(nestedValue));
+            Number.isFinite(nestedValue)) ||
+          (nestedKey === 'senders' &&
+            typeof nestedValue === 'string' &&
+            ['inherit', 'open', 'allowlist'].includes(nestedValue)) ||
+          (nestedKey === 'allowedUsers' &&
+            Array.isArray(nestedValue) &&
+            nestedValue.every((item) => typeof item === 'string'));
         if (
           known &&
           !valid &&

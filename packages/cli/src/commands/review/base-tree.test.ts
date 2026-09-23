@@ -51,6 +51,7 @@ import {
   clearReviewWorktreeLease,
   createReviewWorktreeLease,
   recordReviewWorktreeLeaseMergeBase,
+  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
 import type { BuildTestReport } from './build-test.js';
 
@@ -119,6 +120,7 @@ describe('runBaseTree', () => {
   let worktree: string;
   let baseSha: string;
   let headSha: string;
+  let home: string;
 
   const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -187,7 +189,11 @@ describe('runBaseTree', () => {
     writeLease();
   };
 
-  beforeEach(() => init());
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+    vi.stubEnv('QWEN_HOME', home);
+    init();
+  });
 
   /**
    * The lease fetch-pr holds for the whole review, at the host-side path —
@@ -232,10 +238,7 @@ describe('runBaseTree', () => {
    * sibling shard was mid-A/B in — with one `utimes`.
    */
   const nextRun = (): void => {
-    rmSync(
-      join(repo, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      { force: true },
-    );
+    rmSync(reviewLeasePath(repo, 'pr-1'), { force: true });
     writeLease('prompt-next');
   };
 
@@ -367,7 +370,11 @@ describe('runBaseTree', () => {
     writeFileSync(config, readFileSync(config, 'utf8') + lines);
   };
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
 
   itWhereContainmentExists(
     'reports BUSY and leaves the tree standing when a tree THIS RUN built fails a reuse check (tracked dirt)',
@@ -1531,7 +1538,7 @@ describe('runBaseTree', () => {
       // builds, certifies and pins — on exactly the rounds where the capture
       // could not record one. The whole of the original hole, on a branch
       // that merely looked like an edge case.
-      rmSync(join(repo, '.qwen', 'review-leases'), {
+      rmSync(dirname(reviewLeasePath(repo, 'pr-1')), {
         recursive: true,
         force: true,
       });

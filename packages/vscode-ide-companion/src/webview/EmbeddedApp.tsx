@@ -1598,8 +1598,14 @@ export function EmbeddedApp() {
                 throw new Error(t('composer.editExpired'));
               }
               try {
+                // No X-Qwen-Client-Id on purpose: the daemon registers a
+                // session-bound id (`client_<uuid>`) at create/load that the
+                // raw DaemonClient here never learns, and the extension's own
+                // `vscode-<uuid>` is not registered either — sending it makes
+                // the rewind 400 `invalid_client_id`. Like the host's other
+                // session mutations (rename, delete), the rewind is
+                // unattributed and still token-authenticated.
                 await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                  clientId: runtime.clientId,
                   rewindFiles: false,
                 });
               } catch (err) {
