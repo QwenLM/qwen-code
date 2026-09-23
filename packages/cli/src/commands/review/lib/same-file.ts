@@ -5,23 +5,25 @@
  */
 
 import { realpathSync, statSync } from 'node:fs';
-import type { Stats } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-// Verifiability is the shared strict predicate from the conversation
-// identity module — tighter than core's canonical `hasVerifiableInode`
-// (`Number(ino) !== 0`) on purpose: `Stats.ino` carries the 64-bit NTFS
-// file index rounded at the JS boundary, so two DISTINCT Windows files
-// whose indices land in one double-rounding bucket surface with equal
-// `ino` and would compare as one file here. Only safe positive values are
-// exact identity proof; everything else degrades to the canonical-spelling
-// comparison below. Core's looser predicate is deliberately left alone —
-// tightening it would also flip `assertVerifiableTranscriptIdentity` on
-// >2^53 Windows transcript inodes.
-import { hasVerifiableInode } from '../../../utils/conversation-directory-identity.js';
 
-function tryStat(path: string): Stats | undefined {
+// `tryStat` asks for `{ bigint: true }` so a 64-bit NTFS file index arrives
+// EXACT rather than rounded at the JS boundary. With a number-backed
+// `Stats`, an id above 2^53 loses precision — two distinct files can
+// surface with an equal `ino` — which is why this comparison used to refuse
+// such ids (via the shared `hasVerifiableInode` safe-integer predicate) and
+// degrade to canonical spellings: a fail-open for hard-link aliases, which
+// no spelling comparison can see through (#11848). Under bigint stats the
+// id is exact end to end, so dev/ino decides whenever the volume reports an
+// id at all. The shared predicate module is deliberately left untouched —
+// its number-typed contract is still what the conversation-identity checks
+// consume, and core's looser predicate (`Number(ino) !== 0`) stays as-is so
+// `assertVerifiableTranscriptIdentity` does not flip on >2^53 Windows
+// transcript inodes.
+function tryStat(path: string): BigIntStats | undefined {
   try {
-    return statSync(path);
+    return statSync(path, { bigint: true });
   } catch {
     return undefined;
   }
@@ -52,24 +54,25 @@ function identityOfAbsent(path: string): string {
 
 /**
  * True when two paths name the same file. Where both exist and the
- * filesystem exposes verifiable inode numbers, filesystem identity (dev/ino)
- * decides: hard links and case-variant spellings are one file under names no
- * string compare sees through, and statSync follows a symlinked directory
- * component on the way to the file. Where inodes are unverifiable
- * (`hasVerifiableInode`: FAT/exFAT-style volumes reporting `ino === 0`, or
- * Windows file IDs rounded past the safe-integer range), dev/ino would
- * collapse unrelated files onto one identity, so the
- * comparison falls back to canonical spellings — losing hard-link identity
- * there, but never equating distinct files. Where a side is absent, the
- * deepest existing ancestor is canonicalised instead, keeping the comparison
- * honest for files a command is about to create.
+ * filesystem exposes inode numbers, filesystem identity (dev/ino) decides:
+ * hard links and case-variant spellings are one file under names no string
+ * compare sees through, and statSync follows a symlinked directory
+ * component on the way to the file. Stats are taken with `{ bigint: true }`,
+ * so a 64-bit NTFS file index is exact and verifiable; the only
+ * unverifiable case left is a volume reporting no id at all (`ino === 0`:
+ * FAT/exFAT/SMB-style), where comparing ids would collapse unrelated files
+ * onto one identity — there the comparison falls back to canonical
+ * spellings, losing hard-link identity but never equating distinct files.
+ * Where a side is absent, the deepest existing ancestor is canonicalised
+ * instead, keeping the comparison honest for files a command is about to
+ * create.
  */
 export function isSameFile(left: string, right: string): boolean {
   if (left === right) return true;
   const leftStat = tryStat(left);
   const rightStat = tryStat(right);
   if (leftStat !== undefined && rightStat !== undefined) {
-    if (hasVerifiableInode(leftStat.ino) && hasVerifiableInode(rightStat.ino)) {
+    if (leftStat.ino !== 0n && rightStat.ino !== 0n) {
       return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
     }
     // realpathSync.native canonicalises case the way the volume does
