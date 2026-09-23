@@ -72,6 +72,7 @@ export const HOOK_EVENT_DISPLAY: Readonly<
   [HookEventName.PermissionDenied]: ORDINARY,
   [HookEventName.StopFailure]: ORDINARY,
   [HookEventName.InstructionsLoaded]: ORDINARY,
+  [HookEventName.MemoryChanged]: ORDINARY,
 });
 
 /**

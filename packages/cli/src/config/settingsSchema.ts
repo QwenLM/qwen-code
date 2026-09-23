@@ -4082,6 +4082,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      MemoryChanged: {
+        type: 'array',
+        label: 'Memory Changed Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after managed-memory documents are created, updated, or deleted, or when managed auto-memory is turned on or off. paths is one absolute path, or several when those files changed together. They do not roll back the change.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
     },
   },
 

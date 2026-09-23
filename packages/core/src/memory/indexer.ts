@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { notifyMemoryFileChange } from './memory-file-change.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import {
   getAutoMemoryIndexPath,
@@ -241,9 +242,7 @@ export async function rebuildManagedAutoMemoryIndex(
     readAutoMemoryMetadata(projectRoot),
   ]);
   const content = buildManagedAutoMemoryIndex(docs, metadata);
-  await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
-    encoding: 'utf-8',
-  });
+  await writeMemoryIndex(projectRoot, getAutoMemoryIndexPath(projectRoot), content);
   return content;
 }
 
@@ -255,9 +254,7 @@ export async function rebuildManagedAutoMemoryIndex(
 export async function rebuildUserAutoMemoryIndex(): Promise<string> {
   const docs = await scanUserAutoMemoryTopicDocuments();
   const content = buildManagedAutoMemoryIndex(docs);
-  await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
-    encoding: 'utf-8',
-  });
+  await writeMemoryIndex('', getUserAutoMemoryIndexPath(), content);
   return content;
 }
 
@@ -346,9 +343,24 @@ export async function rebuildTeamAutoMemoryIndex(
   }
   // noFollow: never follow a symlink at MEMORY.md itself — replace the link with
   // the regular index instead of writing through it to an attacker path.
+  await writeMemoryIndex(projectRoot, indexPath, content, { noFollow: true });
+  return content;
+}
+
+async function writeMemoryIndex(
+  projectRoot: string,
+  indexPath: string,
+  content: string,
+  options: { noFollow?: boolean } = {},
+): Promise<void> {
+  const existed = existsSync(indexPath);
   await atomicWriteFile(indexPath, content, {
     encoding: 'utf-8',
-    noFollow: true,
+    ...(options.noFollow ? { noFollow: true } : {}),
   });
-  return content;
+  await notifyMemoryFileChange(
+    indexPath,
+    projectRoot,
+    existed ? 'update' : 'create',
+  );
 }

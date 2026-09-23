@@ -5,6 +5,7 @@
  */
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { notifyMemoryEnabledChange } from '@qwen-code/qwen-code-core/memory/memory-file-change.js';
 import {
   buildHooksListing,
   type ContentGeneratorConfig,
@@ -9540,6 +9541,9 @@ class QwenAgent implements Agent {
         // possibly-stale cached `this.settings` and reading it back.
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
+        const previousEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        let enabledChange: boolean | undefined;
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -9548,9 +9552,18 @@ class QwenAgent implements Agent {
               `Invalid memory setting '${key}': expected boolean`,
             );
           }
+          if (
+            key === 'enableManagedAutoMemory' &&
+            updates[key] !== previousEnabled
+          ) {
+            enabledChange = updates[key];
+          }
           settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
         this.adoptRequestSettings(settings, settingsCwd);
+        if (enabledChange !== undefined) {
+          await notifyMemoryEnabledChange(settingsCwd, enabledChange);
+        }
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
         };

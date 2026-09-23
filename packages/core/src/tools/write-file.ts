@@ -12,6 +12,7 @@ import {
   captureRuntimeFileVersion,
   writeRuntimeFile,
 } from '../sandbox/runtime-file.js';
+import { notifyMemoryFileChange } from '../memory/memory-file-change.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
@@ -659,6 +660,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         newContent: content,
         diffStat,
       };
+
+      await notifyMemoryFileChange(
+        file_path,
+        this.config.getProjectRoot(),
+        operation === FileOperation.CREATE ? 'create' : 'update',
+      );
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),

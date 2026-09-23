@@ -17,6 +17,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+import { notifyMemoryFileChange } from '../memory/memory-file-change.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
@@ -741,6 +742,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
         llmSuccessMessageParts.push(snippetText);
       }
+
+      await notifyMemoryFileChange(
+        this.params.file_path,
+        this.config.getProjectRoot(),
+        editData.isNewFile ? 'create' : 'update',
+      );
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),

@@ -1504,6 +1504,11 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     description: 'When an instruction or context file is loaded',
     matcherKind: 'filePath',
   },
+  MemoryChanged: {
+    description:
+      'After managed memory documents change, or memory is turned on or off',
+    matcherKind: 'filePath',
+  },
 };
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ import type {
   InstructionMemoryType,
   InstructionLoadReason,
 } from './types.js';
+import type { MemoryChangedNotice } from '../memory/memory-file-change.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
 
@@ -185,6 +186,13 @@ export class HookSystem {
     return result.finalOutput
       ? createHookOutput('InstructionsLoaded', result.finalOutput)
       : undefined;
+  }
+
+  async fireMemoryChangedEvent(
+    change: MemoryChangedNotice,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireMemoryChangedEvent(change, signal);
   }
 
   /**

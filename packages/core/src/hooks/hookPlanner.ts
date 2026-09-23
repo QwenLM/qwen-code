@@ -76,6 +76,7 @@ export function getHookMatcherTarget(
       };
 
     case HookEventName.InstructionsLoaded:
+    case HookEventName.MemoryChanged:
       return { kind: 'filePath', target: context?.filePath ?? '' };
 
     case HookEventName.UserPromptExpansion:
@@ -166,7 +167,8 @@ export class HookPlanner {
     eventName: HookEventName,
     context?: HookEventContext,
   ): boolean {
-    if (!entry.matcher || !context) {
+    const matcher = entry.matcher;
+    if (!matcher || !context) {
       return true; // No matcher means match all
     }
 
@@ -175,12 +177,18 @@ export class HookPlanner {
       return true;
     }
 
-    return matchesHookPattern(
-      entry.matcher,
-      matcherTarget.target,
-      matcherTarget.kind === 'toolName'
-        ? { aliases: getToolMatcherTargets(matcherTarget.target) }
-        : {},
+    const subjects =
+      matcherTarget.kind === 'filePath' && context.filePaths?.length
+        ? context.filePaths
+        : [matcherTarget.target];
+    return subjects.some((subject) =>
+      matchesHookPattern(
+        matcher,
+        subject,
+        matcherTarget.kind === 'toolName'
+          ? { aliases: getToolMatcherTargets(matcherTarget.target) }
+          : {},
+      ),
     );
   }
 
@@ -219,4 +227,9 @@ export interface HookEventContext {
   error?: string;
   /** Loaded instruction/context file path for InstructionsLoaded matcher filtering */
   filePath?: string;
+  /**
+   * Relative paths for MemoryChanged. A matcher matches when any path matches.
+   * The on/off toggle has no path, so every MemoryChanged hook receives it.
+   */
+  filePaths?: readonly string[];
 }

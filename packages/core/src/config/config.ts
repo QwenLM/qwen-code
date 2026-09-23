@@ -335,6 +335,7 @@ import {
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from '../memory/paths.js';
+import { registerMemoryChangedListener } from '../memory/memory-file-change.js';
 import {
   type AutoMemoryIndexRead,
   readAutoMemoryIndexWithStats,
@@ -3051,6 +3052,7 @@ export class Config {
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
+  private unregisterMemoryChanged?: () => void;
   private messageBus?: MessageBus;
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
@@ -3887,6 +3889,17 @@ export class Config {
     if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
+      this.unregisterMemoryChanged?.();
+      this.unregisterMemoryChanged = registerMemoryChangedListener(
+        this.getProjectRoot(),
+        async (change) => {
+          const hookSystem = this.hookSystem;
+          if (!hookSystem?.hasHooksForEvent('MemoryChanged')) {
+            return;
+          }
+          await hookSystem.fireMemoryChangedEvent(change);
+        },
+      );
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution

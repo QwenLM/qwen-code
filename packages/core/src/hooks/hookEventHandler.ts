@@ -55,6 +55,7 @@ import type {
   InstructionsLoadedInput,
   InstructionMemoryType,
   InstructionLoadReason,
+  MemoryChangedInput,
   BackgroundTaskInfo,
   CronJobInfo,
 } from './types.js';
@@ -74,6 +75,7 @@ import { approvalModeToPermissionMode } from './permission-mode.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { MemoryChangedNotice } from '../memory/memory-file-change.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
 import type { CronJob } from '../services/cronScheduler.js';
@@ -333,6 +335,41 @@ export class HookEventHandler {
       input,
       {
         filePath,
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a MemoryChanged event after managed-memory documents are written or
+   * deleted, or after managed auto-memory is toggled. Relative paths are
+   * matcher targets. Hook output does not undo the change.
+   */
+  async fireMemoryChangedEvent(
+    change: MemoryChangedNotice,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: MemoryChangedInput = {
+      ...this.createBaseInput(HookEventName.MemoryChanged),
+      paths: [...change.paths],
+      relative_paths: [...change.relativePaths],
+    };
+    if ('enabled' in change) {
+      input.workspace = change.workspace;
+      input.enabled = change.enabled;
+    } else {
+      input.memory_scope = change.scope;
+      input.operation = change.operation;
+      if (change.workspace !== undefined) {
+        input.workspace = change.workspace;
+      }
+    }
+    return this.executeHooks(
+      HookEventName.MemoryChanged,
+      input,
+      {
+        filePath: change.relativePaths[0] ?? '',
+        filePaths: [...change.relativePaths],
       },
       signal,
     );

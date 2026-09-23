@@ -287,6 +287,58 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('fireMemoryChangedEvent', () => {
+    it('omits workspace for user memory and operation for the on/off toggle', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireMemoryChangedEvent({
+        scope: 'user',
+        operation: 'update',
+        paths: ['/memories/user/role.md'],
+        relativePaths: ['user/role.md'],
+      });
+      await hookEventHandler.fireMemoryChangedEvent({
+        paths: [],
+        relativePaths: [],
+        workspace: '/repo',
+        enabled: false,
+      });
+
+      const inputs = (
+        mockHookRunner.executeHooksParallel as Mock
+      ).mock.calls.map((call) => call[2] as Record<string, unknown>);
+      expect(inputs[0]).toMatchObject({
+        hook_event_name: HookEventName.MemoryChanged,
+        paths: ['/memories/user/role.md'],
+        relative_paths: ['user/role.md'],
+        memory_scope: 'user',
+        operation: 'update',
+      });
+      expect(inputs[0]).not.toHaveProperty('workspace');
+      expect(inputs[0]).not.toHaveProperty('enabled');
+      expect(inputs[1]).toMatchObject({
+        hook_event_name: HookEventName.MemoryChanged,
+        paths: [],
+        relative_paths: [],
+        workspace: '/repo',
+        enabled: false,
+      });
+      expect(inputs[1]).not.toHaveProperty('operation');
+      expect(inputs[1]).not.toHaveProperty('memory_scope');
+    });
+  });
+
   describe('fireUserPromptExpansionEvent', () => {
     it('should execute hooks for UserPromptExpansion event', async () => {
       const mockPlan = createMockExecutionPlan([]);

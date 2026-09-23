@@ -17,6 +17,7 @@ import {
   getUserAutoMemoryRoot,
   AUTO_MEMORY_INDEX_FILENAME,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { notifyMemoryEnabledChange } from '@qwen-code/qwen-code-core/memory/memory-file-change.js';
 import { getAllMemoryFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -327,7 +328,8 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       newValue,
     );
     setAutoMemoryOn(newValue);
-  }, [autoMemoryOn, loadedSettings]);
+    void notifyMemoryEnabledChange(config.getProjectRoot(), newValue);
+  }, [autoMemoryOn, config, loadedSettings]);
 
   const handleToggleAutoDream = useCallback(() => {
     const newValue = !autoDreamOn;
