@@ -1016,6 +1016,7 @@ pub fn with_x11_foreground<T>(
     let retry_at = started + timeout / 2;
     let mut retried = false;
     let target = xid as x11::xlib::Window;
+    let target_pid = crate::x11::window_owner_pid(xid);
     let target_owner = x11_transient_owner(display, target);
     let restore_focus = prior != Some(target) || !x11_focus_is_within(display, target);
     prepare_x11_focus(display, target);
@@ -1047,6 +1048,9 @@ pub fn with_x11_foreground<T>(
     };
 
     let restored = (|| -> Result<()> {
+        if !focused && prior_core_focus != 0 && x11_focus_is_within(display, target) {
+            restore_x11_core_focus(display, prior_core_focus, prior_revert);
+        }
         if !restore_focus {
             return Ok(());
         }
@@ -1054,12 +1058,19 @@ pub fn with_x11_foreground<T>(
             return Ok(());
         };
         let current = ewmh_active_window(display);
+        if current == Some(prior) && x11_focus_is_within(display, prior) {
+            return Ok(());
+        }
         let owned = current.is_some_and(|active| {
             active == target
                 || Some(active) == target_owner
                 || x11_transient_reaches(display, active, target)
         });
         if !owned {
+            if target_pid.is_some() && current.and_then(crate::x11::window_owner_pid) == target_pid
+            {
+                bail!("focus_restore_unconfirmed: another window of the app took focus; input may have been dispatched; observe before retrying");
+            }
             return Ok(());
         }
         ewmh_activate_window(display, prior, target);
@@ -1075,6 +1086,11 @@ pub fn with_x11_foreground<T>(
                     && Some(active) != target_owner
                     && !x11_transient_reaches(display, active, target)
             }) {
+                if target_pid.is_some()
+                    && active.and_then(crate::x11::window_owner_pid) == target_pid
+                {
+                    bail!("focus_restore_unconfirmed: another window of the app took focus; input may have been dispatched; observe before retrying");
+                }
                 return Ok(());
             }
             if std::time::Instant::now() >= restore_deadline {
@@ -1083,17 +1099,7 @@ pub fn with_x11_foreground<T>(
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         if prior_core_focus != 0 && ewmh_active_window(display) == Some(prior) {
-            unsafe {
-                let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
-                x11::xlib::XSetInputFocus(
-                    display,
-                    prior_core_focus,
-                    prior_revert,
-                    x11::xlib::CurrentTime,
-                );
-                x11::xlib::XSync(display, 0);
-                x11::xlib::XSetErrorHandler(previous_handler);
-            }
+            restore_x11_core_focus(display, prior_core_focus, prior_revert);
         }
         Ok(())
     })();
@@ -1101,6 +1107,15 @@ pub fn with_x11_foreground<T>(
         x11::xlib::XCloseDisplay(display);
     }
     result.and_then(|value| restored.map(|()| value))
+}
+
+fn restore_x11_core_focus(display: *mut x11::xlib::Display, focus: x11::xlib::Window, revert: i32) {
+    unsafe {
+        let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+        x11::xlib::XSetInputFocus(display, focus, revert, x11::xlib::CurrentTime);
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+    }
 }
 
 fn x11_transient_owner(

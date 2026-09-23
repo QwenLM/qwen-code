@@ -773,20 +773,14 @@ impl Tool for ListAppsTool {
             let t3 = std::time::Instant::now();
             let installed = crate::win32::list_installed_apps();
             tracing::debug!(target: "list_apps", "step 4 list_installed_apps: {} installed ({}ms)", installed.len(), t3.elapsed().as_millis());
-            // Lowercase-exe-basename → installed-app indices. We match running
-            // processes by basename rather than full path because the process
-            // table's executable name is `notepad.exe` while the Start-Menu
-            // shortcut target is `C:\Windows\System32\notepad.exe` — both
-            // sides need to be normalised to compare. Multiple Start-Menu
-            // shortcuts often target the same basename (different `chrome.exe`
-            // launchers, multiple `code.exe` profiles, …), so we bucket as
-            // `Vec<usize>` and let `disambiguate_installed_match` pick a
-            // winner per running pid rather than letting the last write win.
+            // Process discovery supplies a basename. Retain ambiguous launchers
+            // separately rather than attributing a running pid to a profile by
+            // shortcut mtime or enumeration order.
             let mut by_exe: std::collections::HashMap<String, Vec<usize>> =
                 std::collections::HashMap::new();
             for (i, app) in installed.iter().enumerate() {
                 if app.kind == "desktop" {
-                    let basename = std::path::Path::new(&app.launch_path)
+                    let basename = std::path::Path::new(&app.bundle_id)
                         .file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or("")
@@ -805,7 +799,7 @@ impl Tool for ListAppsTool {
                 let name = pid_to_name.get(&pid).cloned().unwrap_or_else(|| "<unknown>".into());
                 let key = name.to_ascii_lowercase();
                 let candidates = by_exe.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-                let merged = disambiguate_installed_match(candidates, &installed, &name);
+                let merged = disambiguate_installed_match(candidates, &installed);
                 if let Some(idx) = merged { consumed_installed.insert(idx); }
                 let (display_name, bundle_id, launch_path, kind, last_used) = match merged {
                     Some(idx) => {
@@ -879,37 +873,20 @@ impl Tool for ListAppsTool {
     }
 }
 
-/// Pick which of several Start-Menu / UWP-derived installed apps best matches
-/// a running pid whose exe basename collided. Precedence:
-///   1. exact case-insensitive equality between `proc_exe_basename` and the
-///      installed app's launch_path basename (always true here; left for
-///      future per-path matches if we ever bucket on something coarser)
-///   2. most recently modified launcher (`last_used` desc — RFC3339 strings
-///      are lexicographically ordered the same as chronologically)
-///   3. first candidate (deterministic by source order)
 fn disambiguate_installed_match(
     candidates: &[usize],
     installed: &[crate::win32::InstalledApp],
-    _proc_exe_basename: &str,
 ) -> Option<usize> {
-    if candidates.is_empty() {
-        return None;
-    }
-    if candidates.len() == 1 {
-        return Some(candidates[0]);
-    }
-
+    let first = *candidates.first()?;
     candidates
         .iter()
-        .copied()
-        .max_by(|&a, &b| {
-            installed[a]
-                .last_used
-                .as_deref()
-                .unwrap_or("")
-                .cmp(installed[b].last_used.as_deref().unwrap_or(""))
+        .all(|&index| {
+            installed[index]
+                .bundle_id
+                .eq_ignore_ascii_case(&installed[first].bundle_id)
+                && installed[index].launch_path == installed[first].launch_path
         })
-        .or_else(|| candidates.first().copied())
+        .then_some(first)
 }
 
 // ── list_windows ─────────────────────────────────────────────────────────────
@@ -1261,7 +1238,7 @@ impl Tool for GetWindowStateTool {
         .await
         .ok()
         .flatten();
-        let Some(target_window) = target_window else {
+        let Some(mut target_window) = target_window else {
             if let Some(owner_pid) = crate::win32::windows::window_owner_pid(hwnd) {
                 return ToolResult::error(format!(
                     "window_id {hwnd} belongs to pid {owner_pid}, not pid {pid}. Call \
@@ -1377,6 +1354,21 @@ impl Tool for GetWindowStateTool {
             None
         };
         let do_shot = include_screenshot != Some(false) || screenshot_out_file.is_some();
+
+        if app_context && do_shot {
+            match tokio::task::spawn_blocking(move || {
+                crate::win32::windows::restore_minimized_app_window(pid, hwnd)?;
+                crate::win32::windows::find_window_by_pid_and_handle(pid, hwnd).ok_or_else(|| {
+                    anyhow::anyhow!("app_window_unavailable: target identity changed")
+                })
+            })
+            .await
+            {
+                Ok(Ok(restored)) => target_window = restored,
+                Ok(Err(error)) => return ToolResult::error(error.to_string()),
+                Err(error) => return ToolResult::error(format!("Task error: {error}")),
+            }
+        }
 
         let state = self.state.clone();
         let observation_revisions = state.observation_revisions.clone();
@@ -1554,7 +1546,8 @@ impl Tool for GetWindowStateTool {
                     // node whose msaa_role is Some came from the MSAA
                     // walker, so the entire snapshot must Drop via
                     // IAccessible and click must dispatch through MSAA.
-                    let bindings_transferred = !observation_only && tr.complete;
+                    let bindings_transferred =
+                        !observation_only && (tr.complete || (!is_msaa && tr.read_complete()));
                     if bindings_transferred {
                         if is_msaa {
                             state.element_cache.update_msaa(pid, hwnd, &tr.nodes);
@@ -1576,7 +1569,7 @@ impl Tool for GetWindowStateTool {
                     // stores u32 — truncate (HWND fits in 32-bit on
                     // every supported edition; the upper 32 bits are
                     // zero in user-space).
-                    let snapshot_id = (!observation_only && tr.complete).then(|| {
+                    let snapshot_id = bindings_transferred.then(|| {
                         cua_driver_core::element_token::global().register_snapshot(
                             pid as i32,
                             hwnd as u32,
@@ -1589,7 +1582,7 @@ impl Tool for GetWindowStateTool {
                     let revision_capture_complete = observation_revision
                         .as_ref()
                         .is_some_and(|revision| revision.stable_element_ids)
-                        && tr.complete
+                        && tr.read_complete()
                         && !is_msaa;
                     if let (Some(revision), Some(snapshot_id)) = (
                         observation_revision
@@ -6482,6 +6475,7 @@ impl Tool for ScrollTool {
                     "element_token": cua_driver_core::tool_schema::element_token_schema(),
                     "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),
                     "scope":{"type":"string","enum":["window","desktop"],"default":"window"},
+                    "app_context":{"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                     "delivery_mode": crate::input::delivery::delivery_mode_schema()
                 },"additionalProperties":false
             }),
@@ -11043,5 +11037,151 @@ mod value_write_readback_tests {
             classify_value_write_readback(Some("unchanged"), "unchanged", "unchanged"),
             "pending"
         );
+    }
+}
+
+#[cfg(test)]
+mod app_observation_tests {
+    use super::*;
+    use std::process::{Child, Command};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn installed_launcher_merge_does_not_guess_between_profiles() {
+        let app = |command: &str| crate::win32::InstalledApp {
+            name: "Fixture".into(),
+            bundle_id: r"C:\Fixture\fixture.exe".into(),
+            kind: "desktop".into(),
+            launch_path: command.into(),
+            last_used: None,
+        };
+        let installed = vec![
+            app("fixture.exe --profile=A"),
+            app("fixture.exe --profile=B"),
+            app("fixture.exe --profile=A"),
+        ];
+        assert_eq!(disambiguate_installed_match(&[], &installed), None);
+        assert_eq!(disambiguate_installed_match(&[0], &installed), Some(0));
+        assert_eq!(disambiguate_installed_match(&[0, 1], &installed), None);
+        assert_eq!(disambiguate_installed_match(&[0, 2], &installed), Some(0));
+    }
+
+    struct Fixture {
+        child: Child,
+        directory: std::path::PathBuf,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires an isolated interactive Windows desktop and Windows Forms"]
+    async fn live_app_bounded_uia_ids_remain_actionable() {
+        use cua_driver_core::observation_revision::{
+            ACCESSIBILITY_SERIALIZER_VERSION, APP_ACCESSIBILITY_PROJECTION_VERSION,
+        };
+        let directory = std::env::temp_dir().join(format!("cua-review-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let script = directory.join("fixture.ps1");
+        std::fs::write(&script, r#"
+Add-Type -AssemblyName System.Windows.Forms
+$f=New-Object System.Windows.Forms.Form
+$f.Text='CUA review bounded UIA';$f.Width=400;$f.Height=400
+$e=New-Object System.Windows.Forms.TextBox;$e.Text='before';$e.Top=5;$e.TabIndex=0;$f.Controls.Add($e)
+for($i=0;$i -lt 30;$i++) { $b=New-Object System.Windows.Forms.Button;$b.Text="Button $i";$b.Top=40+25*$i;$b.TabIndex=$i+1;$f.Controls.Add($b) }
+$e.Add_TextChanged({[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'value.txt'),$e.Text)})
+$f.Add_Shown({@{pid=$PID;hwnd=$f.Handle.ToInt64()} | ConvertTo-Json -Compress | Set-Content (Join-Path $PSScriptRoot 'ready.json')})
+[System.Windows.Forms.Application]::Run($f)
+"#).unwrap();
+        let child_log = std::fs::File::create(directory.join("fixture.log")).unwrap();
+        let child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .stdout(child_log.try_clone().unwrap())
+            .stderr(child_log)
+            .spawn()
+            .unwrap();
+        let mut fixture = Fixture { child, directory };
+        let ready = fixture.directory.join("ready.json");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() {
+            let exited = fixture.child.try_wait().unwrap();
+            assert!(
+                exited.is_none() && Instant::now() < deadline,
+                "Windows Forms startup {exited:?}: {}",
+                std::fs::read_to_string(fixture.directory.join("fixture.log")).unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let target: Value = serde_json::from_slice(&std::fs::read(ready).unwrap()).unwrap();
+        let registry = build_registry(false);
+        let observed = registry.invoke_from_trusted_adapter("get_window_state", json!({
+            "pid":target["pid"],"window_id":target["hwnd"],"max_elements":10,
+            "app_context":true,"include_screenshot":false,
+            "_transport_session_id":"bounded-uia-fixture",
+            "observation_revision":{"version":1,"serializer_version":ACCESSIBILITY_SERIALIZER_VERSION,
+                "projection_version":APP_ACCESSIBILITY_PROJECTION_VERSION}
+        })).await;
+        assert_ne!(observed.is_error, Some(true), "{observed:?}");
+        let state = observed.structured_content.unwrap();
+        assert_eq!(state["capture_truncated"], true, "{state}");
+        assert_eq!(state["element_bindings_retained"], true, "{state}");
+        let entry = state["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|element| {
+                element["role"]
+                    .as_str()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("edit"))
+            })
+            .unwrap_or_else(|| panic!("bounded capture must include the Edit: {state}"));
+        assert!(entry["element_id"].is_number(), "{entry}");
+        assert!(entry["element_token"].as_str().unwrap().starts_with("rv1:"));
+        let action = registry.invoke_from_trusted_adapter("set_value", json!({
+            "pid":target["pid"],"window_id":target["hwnd"],"element_token":entry["element_token"],
+            "value":"after","_transport_session_id":"bounded-uia-fixture"
+        })).await;
+        assert_ne!(action.is_error, Some(true), "{action:?}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.directory.join("value.txt")).unwrap(),
+            "after"
+        );
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, IsIconic, ShowWindowAsync, SW_MINIMIZE,
+        };
+        let hwnd = windows::Win32::Foundation::HWND(target["hwnd"].as_u64().unwrap() as *mut _);
+        let _ = unsafe { ShowWindowAsync(hwnd, SW_MINIMIZE) };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !unsafe { IsIconic(hwnd) }.as_bool() {
+            assert!(Instant::now() < deadline, "fixture must minimize");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let prior = unsafe { GetForegroundWindow() };
+        let restored = registry
+            .invoke_from_trusted_adapter(
+                "get_window_state",
+                json!({
+                    "pid":target["pid"],"window_id":target["hwnd"],"max_elements":30,
+                    "app_context":true,"include_screenshot":true,
+                    "_transport_session_id":"bounded-uia-fixture"
+                }),
+            )
+            .await;
+        assert_ne!(restored.is_error, Some(true), "{restored:?}");
+        assert!(restored
+            .content
+            .iter()
+            .any(|item| matches!(item, cua_driver_core::protocol::Content::Image { .. })));
+        assert!(!unsafe { IsIconic(hwnd) }.as_bool());
+        let surface = &restored.structured_content.as_ref().unwrap()["window_surface"];
+        assert_eq!(surface["minimized"], false, "{surface}");
+        assert_eq!(surface["is_on_screen"], true, "{surface}");
+        assert_eq!(unsafe { GetForegroundWindow() }, prior);
+        println!("bounded UIA token changed a real edit; minimized observation returned a screenshot and preserved focus");
     }
 }

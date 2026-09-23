@@ -555,13 +555,21 @@ impl Tool for ListWindowsTool {
         }
         let app_target = if app_context {
             if crate::wayland::is_wayland() {
-                crate::x11::select_app_window(&windows, None)
+                crate::x11::select_app_window(
+                    &windows,
+                    crate::wayland::focused_app_window(filter_pid.expect("validated")),
+                )
             } else {
                 crate::x11::resolve_app_window(&windows)
             }
         } else {
             None
         };
+        if app_context && crate::wayland::is_wayland() && app_target.is_none() && windows.len() > 1
+        {
+            return ToolResult::error("The Wayland compositor did not expose an unambiguous active app window. This compositor cannot track this app's multiple windows; keep only the intended window open.")
+                .with_structured(json!({"code":"app_window_unavailable"}));
+        }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         for w in &windows {
             lines.push(format!(
@@ -878,79 +886,95 @@ impl Tool for GetWindowStateTool {
         let query_for_walk = query.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let mut tree = crate::atspi::walk_tree_bounded(
-                pid,
-                xid,
-                query_for_walk.as_deref(),
-                max_elements,
-                max_depth,
-            );
-            // Compact model observations only. Internal browser setup/consent
-            // matching needs the original label boundaries from the native tree.
-            if revision_request_for_capture.is_some() {
-                tree.nodes = crate::atspi::projection::compact(tree.nodes);
-            }
-            let tree_result = Some(tree);
-            // Bounds and element indices come from the same captured AT-SPI
-            // traversal. Joining two live walks by ordinal mis-associated
-            // Chromium controls when its lazy subtree changed between walks.
-            let bounds = tree_result
-                .as_ref()
-                .map(|tree| tree.bounds.clone())
-                .unwrap_or_default();
-            let observation_revision = match (
-                revision_request_for_capture.as_ref(),
-                observation_session,
-                tree_result.as_ref(),
-            ) {
-                (Some(request), Some(session), Some(tree)) => Some(
-                    observation_revisions
-                        .observe(
-                            session,
-                            pid,
-                            xid,
-                            max_elements.unwrap_or(5000),
-                            max_depth.unwrap_or(usize::MAX),
-                            tree,
-                            request,
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                ),
-                _ => None,
-            };
-            // Capture and DELIVER the screenshot alongside the tree by default — the
-            // grounding frame the agent cross-checks the tree against. With
-            // screenshot_out_file set, write to disk and surface the path instead
-            // of embedding base64; otherwise embed base64. Skipped only when
-            // include_screenshot:false and no disk path was requested.
-            // Tuple: (Option<b64>, Option<file_path>, w, h, Option<original_w>).
-            let screenshot = if should_capture {
-                match crate::wayland::screenshot_dispatch(xid) {
-                    Ok(raw) => {
-                        let orig_w = crate::capture::png_dimensions_pub(&raw)
-                            .map(|(w, _)| w)
-                            .unwrap_or(0);
-                        let png = crate::capture::resize_png_if_needed(&raw, max_dim)?;
-                        let (w, h) = crate::capture::png_dimensions_pub(&png)?;
-                        let original_w = if w < orig_w { Some(orig_w) } else { None };
-                        if let Some(ref path) = screenshot_out_file {
-                            std::fs::write(path, &png)?;
-                            Some((None, Some(path.clone()), w, h, original_w))
-                        } else {
-                            use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-                            Some((Some(B64.encode(&png)), None, w, h, original_w))
+            let capture = || -> anyhow::Result<_> {
+                let mut tree = crate::atspi::walk_tree_bounded(
+                    pid,
+                    xid,
+                    query_for_walk.as_deref(),
+                    max_elements,
+                    max_depth,
+                );
+                // Compact model observations only. Internal browser setup/consent
+                // matching needs the original label boundaries from the native tree.
+                if revision_request_for_capture.is_some() {
+                    tree.nodes = crate::atspi::projection::compact(tree.nodes);
+                }
+                let tree_result = Some(tree);
+                // Bounds and element indices come from the same captured AT-SPI
+                // traversal. Joining two live walks by ordinal mis-associated
+                // Chromium controls when its lazy subtree changed between walks.
+                let bounds = tree_result
+                    .as_ref()
+                    .map(|tree| tree.bounds.clone())
+                    .unwrap_or_default();
+                let observation_revision = match (
+                    revision_request_for_capture.as_ref(),
+                    observation_session,
+                    tree_result.as_ref(),
+                ) {
+                    (Some(request), Some(session), Some(tree)) => Some(
+                        observation_revisions
+                            .observe(
+                                session,
+                                pid,
+                                xid,
+                                max_elements.unwrap_or(5000),
+                                max_depth.unwrap_or(usize::MAX),
+                                tree,
+                                request,
+                            )
+                            .map_err(anyhow::Error::msg)?,
+                    ),
+                    _ => None,
+                };
+                // Capture and DELIVER the screenshot alongside the tree by default — the
+                // grounding frame the agent cross-checks the tree against. With
+                // screenshot_out_file set, write to disk and surface the path instead
+                // of embedding base64; otherwise embed base64. Skipped only when
+                // include_screenshot:false and no disk path was requested.
+                // Tuple: (Option<b64>, Option<file_path>, w, h, Option<original_w>).
+                let screenshot = if should_capture {
+                    match crate::wayland::screenshot_dispatch(xid) {
+                        Ok(raw) => {
+                            let orig_w = crate::capture::png_dimensions_pub(&raw)
+                                .map(|(w, _)| w)
+                                .unwrap_or(0);
+                            let png = crate::capture::resize_png_if_needed(&raw, max_dim)?;
+                            let (w, h) = crate::capture::png_dimensions_pub(&png)?;
+                            let original_w = if w < orig_w { Some(orig_w) } else { None };
+                            if let Some(ref path) = screenshot_out_file {
+                                std::fs::write(path, &png)?;
+                                Some((None, Some(path.clone()), w, h, original_w))
+                            } else {
+                                use base64::{
+                                    engine::general_purpose::STANDARD as B64, Engine as _,
+                                };
+                                Some((Some(B64.encode(&png)), None, w, h, original_w))
+                            }
+                        }
+                        Err(error) => {
+                            return Err(anyhow::anyhow!(
+                                "window screenshot failed for window {xid}: {error}"
+                            ));
                         }
                     }
-                    Err(error) => {
-                        return Err(anyhow::anyhow!(
-                            "window screenshot failed for window {xid}: {error}"
-                        ));
-                    }
-                }
-            } else {
-                None
+                } else {
+                    None
+                };
+                Ok((tree_result, screenshot, bounds, observation_revision))
             };
-            Ok((tree_result, screenshot, bounds, observation_revision))
+            if app_context
+                && should_capture
+                && !crate::wayland::is_wayland()
+                && crate::x11::is_minimized(xid)
+            {
+                crate::input::with_x11_foreground(xid, 1000, || {
+                    crate::x11::wait_for_restored_capture(xid)?;
+                    capture()
+                })
+            } else {
+                capture()
+            }
         })
         .await;
 
@@ -1023,7 +1047,6 @@ impl Tool for GetWindowStateTool {
                     }
                     let stable_ids = observation_revision
                         .as_ref()
-                        .filter(|_| revision_capture_complete)
                         .map(|revision| {
                             revision
                                 .nodes
@@ -1067,6 +1090,10 @@ impl Tool for GetWindowStateTool {
                             });
                             if let Some(element_id) = stable_ids.get(&idx) {
                                 entry["element_id"] = json!(element_id);
+                            }
+                            if let Some(element_id) =
+                                stable_ids.get(&idx).filter(|_| revision_capture_complete)
+                            {
                                 entry["element_token"] = json!(
                                     cua_driver_core::observation_revision::revision_token_for(
                                         observation_revision
@@ -2612,6 +2639,9 @@ fn with_wayland_app_focus<T>(
     window_id: u64,
     body: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    if app_context && crate::wayland::is_inject_mode() {
+        anyhow::bail!("app_window_unavailable: configured compositor injection addresses a process, not an exact window; App input is unsupported on this route; no input was sent");
+    }
     if app_context {
         crate::wayland::with_target_foreground(pid, window_id, body)
     } else {
@@ -2924,6 +2954,11 @@ impl Tool for ClickTool {
                 // selectable rows) expose bounds but no AT-SPI Action and
                 // ignore a targeted XSendEvent; limiting XTest to modified
                 // clicks made those rows addressable but not selectable.
+                if app_context && crate::wayland::is_inject_mode() {
+                    return with_wayland_app_focus(true, pid, xid2, || {
+                        crate::wayland::inject_click(pid, xid2, lx, ly, count as u32, button)
+                    });
+                }
                 if app_context && crate::wayland::wayland_input_enabled() {
                     return crate::wayland::with_target_foreground(pid, xid2, || {
                         let (sx, sy) = crate::wayland::window_local_to_output(
@@ -4881,6 +4916,7 @@ impl Tool for ScrollTool {
                     "session": cua_driver_core::tool_schema::session_schema(),
                     "cursor_id":{"type":"string","description":"Optional multi-cursor instance id. Default: 'default'."},
                     "pid":{"type":"integer"},
+                    "app_context":{"type":"boolean","description":"Use the app-bound target and focus policy."},
                     "direction":{"type":"string","enum":["up","down","left","right"]},
                     "by":{"type":"string","enum":["line","page"]},
                     "amount":{"type":"integer","minimum":1,"maximum":50},
@@ -5004,7 +5040,7 @@ impl Tool for ScrollTool {
         };
 
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
-        let app_context = delivery.is_foreground();
+        let app_context = args.bool_or("app_context", false);
         if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
             return refusal;
         }
@@ -9152,5 +9188,28 @@ mod app_discovery_tests {
         assert!(message.contains("DISPLAY"));
         assert!(message.contains("MCP server environment"));
         assert!(message.contains("restart"));
+    }
+}
+
+#[cfg(test)]
+mod app_inject_tests {
+    use super::*;
+    #[test]
+    #[ignore = "changes process environment; run alone"]
+    fn app_inject_refuses_process_addressing_before_dispatch() {
+        let old = std::env::var_os("CUA_INJECT_SOCKET");
+        std::env::set_var("CUA_INJECT_SOCKET", "/tmp/cua-fixture-unused.sock");
+        let called = std::cell::Cell::new(false);
+        let result = with_wayland_app_focus(true, 42, 7, || {
+            called.set(true);
+            Ok(())
+        });
+        if let Some(value) = old {
+            std::env::set_var("CUA_INJECT_SOCKET", value);
+        } else {
+            std::env::remove_var("CUA_INJECT_SOCKET");
+        }
+        assert!(result.unwrap_err().to_string().contains("exact window"));
+        assert!(!called.get());
     }
 }

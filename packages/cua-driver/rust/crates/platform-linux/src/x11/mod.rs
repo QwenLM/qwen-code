@@ -37,13 +37,66 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
 /// PID after the original application exits. The XID owner binds the two parts
 /// of a `get_window_state` target and fails closed when either is stale.
 pub fn window_belongs_to_pid(xid: u64, pid: u32) -> bool {
+    window_owner_matches(window_owner_pid(xid), pid)
+}
+
+pub(crate) fn window_owner_pid(xid: u64) -> Option<u32> {
+    let Ok(xid) = u32::try_from(xid) else {
+        return None;
+    };
+    let Ok((conn, _)) = RustConnection::connect(None) else {
+        return None;
+    };
+    get_window_pid(&conn, xid).ok().flatten()
+}
+
+pub(crate) fn is_minimized(xid: u64) -> bool {
     let Ok(xid) = u32::try_from(xid) else {
         return false;
     };
     let Ok((conn, _)) = RustConnection::connect(None) else {
         return false;
     };
-    window_owner_matches(get_window_pid(&conn, xid).ok().flatten(), pid)
+    let Ok(atom) = get_atom(&conn, "WM_STATE") else {
+        return false;
+    };
+    conn.get_property(false, xid, atom, atom, 0, 2)
+        .ok()
+        .and_then(|reply| reply.reply().ok())
+        .and_then(|reply| reply.value32().and_then(|mut values| values.next()))
+        == Some(3)
+}
+
+pub(crate) fn wait_for_restored_capture(xid: u64) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let xid = u32::try_from(xid)?;
+    let (conn, screen) = RustConnection::connect(None)?;
+    let root = conn.setup().roots[screen].root;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let attributes = conn.get_window_attributes(xid)?.reply()?;
+        let geometry = conn.get_geometry(xid)?.reply()?;
+        let origin = conn.translate_coordinates(xid, root, 0, 0)?.reply()?;
+        let desktop = conn.get_geometry(root)?.reply()?;
+        // A WM can report active/viewable before moving an iconic window back
+        // from its off-screen parking position. Full-window XGetImage needs
+        // the restored rectangle inside the screen, not just confirmed focus.
+        if attributes.map_state == MapState::VIEWABLE
+            && geometry.width > 0
+            && geometry.height > 0
+            && origin.dst_x >= 0
+            && origin.dst_y >= 0
+            && i32::from(origin.dst_x) + i32::from(geometry.width) <= i32::from(desktop.width)
+            && i32::from(origin.dst_y) + i32::from(geometry.height) <= i32::from(desktop.height)
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "app_window_unavailable: restored X11 window is not ready for a full screenshot"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn window_owner_matches(owner: Option<u32>, requested_pid: u32) -> bool {
@@ -193,6 +246,9 @@ fn select_app_window_with_owner(
 
 pub(crate) fn select_app_window(windows: &[WindowInfo], active: Option<u64>) -> Option<u64> {
     let visible: Vec<_> = windows.iter().filter(|w| w.is_on_screen).collect();
+    if visible.is_empty() && windows.len() == 1 {
+        return Some(windows[0].xid);
+    }
     if let Some(window) = visible.iter().find(|w| Some(w.xid) == active) {
         return Some(window.xid);
     }
@@ -442,6 +498,19 @@ mod tests {
         assert_eq!(select_app_window(&windows, Some(1)), Some(1));
         windows[1].z_index = None;
         assert_eq!(select_app_window(&windows, Some(99)), None);
+    }
+
+    #[test]
+    fn app_selection_uses_focus_without_stacking_and_keeps_minimized_identity() {
+        let mut windows = vec![app_window(1, None), app_window(2, None)];
+        assert_eq!(select_app_window(&windows, Some(2)), Some(2));
+        assert_eq!(select_app_window(&windows, None), None);
+        for window in &mut windows {
+            window.is_on_screen = false;
+        }
+        assert_eq!(select_app_window(&windows, None), None);
+        windows.pop();
+        assert_eq!(select_app_window(&windows, None), Some(1));
     }
 
     #[test]

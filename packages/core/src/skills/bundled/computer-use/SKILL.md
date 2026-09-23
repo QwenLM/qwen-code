@@ -159,7 +159,9 @@ nodeRepl.write((await app.getState()).text);
 The app handle tracks its current window and dialog. Read the returned window
 title to confirm the intended document. If the app is unknown or its name is
 ambiguous, discover applications with `computer.listApps()` and use a matching
-application `id`.
+application `id` when it distinguishes the app. Two running instances may have
+the same ID; retrying that ID cannot resolve the ambiguity. Ask the user to keep
+only the intended instance open rather than guessing a target or retrying it.
 
 AX text uses short numeric IDs, such as `[37] TextField "Name"`. Use IDs from
 the current observation for element actions. IDs can change when the app's
@@ -209,6 +211,7 @@ call.
 - Coordinate actions use pixels in this app's current screenshot, with `(0, 0)` at its top-left. Every App observation refreshes that frame internally. Request `includeScreenshot: true` when you need to inspect the image, especially after a window change. Do not infer coordinates from another window or desktop screenshot.
 - `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the connected platform's appropriate shortcut: macOS generally uses `super`; Linux/Windows generally use `ctrl`.
 - App input manages any required activation internally and restores the previous focus, unless the user has moved it elsewhere. If the platform cannot confirm the target or restore focus, the action reports an error. There is no delivery-mode choice and no automatic replay after an uncertain result.
+- On Linux, some compositor sessions cannot confirm an exact App target. An `app_window_unavailable` result can mean the session does not support this workflow; ask the user to use a supported desktop session instead of retrying input.
 - Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
 - If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Only currently captured actionable IDs can be used for element actions.
 

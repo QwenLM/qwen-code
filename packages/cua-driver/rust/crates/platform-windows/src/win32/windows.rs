@@ -88,6 +88,9 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
 pub(crate) fn resolve_app_window(windows: &[WindowInfo]) -> Option<u64> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetLastActivePopup};
     let visible: Vec<_> = windows.iter().filter(|w| w.is_on_screen).collect();
+    if visible.is_empty() && windows.len() == 1 {
+        return Some(windows[0].hwnd);
+    }
     let foreground = unsafe { GetForegroundWindow() }.0 as usize as u64;
     let selected = visible
         .iter()
@@ -269,7 +272,13 @@ pub(crate) fn restore_input_foreground(prior: u64, target: ForegroundTarget) -> 
     let mut requested = false;
     loop {
         let current = unsafe { GetForegroundWindow() }.0 as usize as u64;
-        if current == prior || !foreground_matches_target_or_owned_window(target, current) {
+        if current == prior {
+            return Ok(());
+        }
+        if !foreground_matches_target_or_owned_window(target, current) {
+            if window_owner_pid(current) == Some(target.pid) {
+                anyhow::bail!("focus_restore_unconfirmed: another window of the app took focus; input may have been dispatched; observe before retrying");
+            }
             // A foreign focus change belongs to the user. Never wait for the
             // target to return and steal focus from a later operation.
             return Ok(());
@@ -283,6 +292,33 @@ pub(crate) fn restore_input_foreground(prior: u64, target: ForegroundTarget) -> 
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+pub(crate) fn restore_minimized_app_window(pid: u32, hwnd: u64) -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, ShowWindowAsync, SW_SHOWNOACTIVATE,
+    };
+    let target = capture_foreground_target(hwnd)
+        .filter(|target| target.pid == pid)
+        .ok_or_else(|| anyhow::anyhow!("app_window_unavailable: target identity changed"))?;
+    let native = HWND(hwnd as *mut _);
+    if !unsafe { IsIconic(native) }.as_bool() {
+        return Ok(());
+    }
+    let prior = unsafe { GetForegroundWindow() }.0 as usize as u64;
+    let _ = unsafe { ShowWindowAsync(native, SW_SHOWNOACTIVATE) };
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while unsafe { IsIconic(native) }.as_bool() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    restore_input_foreground(prior, target)?;
+    anyhow::ensure!(
+        window_owner_pid(hwnd) == Some(pid) && !unsafe { IsIconic(native) }.as_bool(),
+        "app_window_unavailable: minimized window could not be restored"
+    );
+    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
+    Ok(())
 }
 
 fn window_info_by_handle(hwnd: u64) -> Option<WindowInfo> {
@@ -427,6 +463,114 @@ mod exact_window_tests {
     fn exact_lookup_rejects_wrong_pid_or_handle() {
         assert!(exact_window_from_probe(42, 7, |_| Some(window(43, 7))).is_none());
         assert!(exact_window_from_probe(42, 7, |_| Some(window(42, 8))).is_none());
+    }
+
+    #[test]
+    #[ignore = "requires an isolated interactive Windows desktop"]
+    fn live_app_minimized_restore_and_sibling_focus_uncertainty() {
+        use super::{
+            capture_foreground_target, resolve_app_window, restore_input_foreground,
+            restore_minimized_app_window,
+        };
+        use windows::core::w;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        struct DesktopFixture {
+            thread_id: u32,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for DesktopFixture {
+            fn drop(&mut self) {
+                let _ = unsafe {
+                    PostThreadMessageW(
+                        self.thread_id,
+                        WM_QUIT,
+                        windows::Win32::Foundation::WPARAM(0),
+                        windows::Win32::Foundation::LPARAM(0),
+                    )
+                };
+                self.thread.take().unwrap().join().unwrap();
+            }
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let create = |name| unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    name,
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    20,
+                    20,
+                    300,
+                    200,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            };
+            let target = create(w!("CUA review target"));
+            let prior = create(w!("CUA review prior"));
+            let sibling = create(w!("CUA review sibling"));
+            let id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+            send.send((id, target.0 as usize, prior.0 as usize, sibling.0 as usize))
+                .unwrap();
+            unsafe {
+                let mut message = MSG::default();
+                while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                for window in [target, prior, sibling] {
+                    let _ = DestroyWindow(window);
+                }
+            }
+        });
+        let (thread_id, target, prior, sibling) = receive
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .unwrap();
+        let _fixture = DesktopFixture {
+            thread_id,
+            thread: Some(thread),
+        };
+        let (target, prior, sibling) = (
+            HWND(target as *mut _),
+            HWND(prior as *mut _),
+            HWND(sibling as *mut _),
+        );
+        let focus = |window| {
+            let _ = unsafe { SetForegroundWindow(window) };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while unsafe { GetForegroundWindow() } != window {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture foreground must settle"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let pid = std::process::id();
+        unsafe {
+            let _ = ShowWindow(target, SW_MINIMIZE);
+        }
+        focus(prior);
+        assert!(unsafe { IsIconic(target) }.as_bool());
+        assert_eq!(unsafe { GetForegroundWindow() }, prior);
+        let mut info = window(pid, target.0 as usize as u64);
+        info.is_on_screen = false;
+        info.minimized = true;
+        assert_eq!(resolve_app_window(&[info]), Some(target.0 as usize as u64));
+        restore_minimized_app_window(pid, target.0 as usize as u64).unwrap();
+        assert!(!unsafe { IsIconic(target) }.as_bool());
+        assert_eq!(unsafe { GetForegroundWindow() }, prior);
+        let identity = capture_foreground_target(target.0 as usize as u64).unwrap();
+        focus(sibling);
+        assert_eq!(unsafe { GetForegroundWindow() }, sibling);
+        let error = restore_input_foreground(prior.0 as usize as u64, identity).unwrap_err();
+        assert!(error.to_string().contains("focus_restore_unconfirmed"));
+        assert_eq!(unsafe { GetForegroundWindow() }, sibling);
     }
 
     fn relation(

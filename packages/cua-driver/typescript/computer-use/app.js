@@ -1,6 +1,5 @@
 import { ComputerUseError } from "./index.js";
-import { realpathSync } from "node:fs";
-import { isAbsolute, normalize, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 
 const appQueues = new WeakMap();
 
@@ -22,14 +21,24 @@ function optionsForApp(options = {}) {
 
 function appPath(value) {
   if (typeof value !== "string") return undefined;
+  if (value.startsWith("/")) return posix.normalize(value).replace(/\/$/, "");
   if (win32.isAbsolute(value) && !value.startsWith("/")) {
     return win32.normalize(value).replace(/\\$/, "").toLocaleLowerCase();
   }
-  if (!isAbsolute(value)) return undefined;
-  try { return realpathSync(value); } catch { return normalize(value).replace(/\/$/, ""); }
+}
+
+function hasWindowsLaunchCommand(app) {
+  return typeof app.launch_path === "string" && app.launch_path &&
+    typeof app.bundle_id === "string" && win32.isAbsolute(app.bundle_id) &&
+    !app.bundle_id.startsWith("/") && app.launch_path !== app.bundle_id;
 }
 
 export function appIdentity(app) {
+  // A Windows launcher can include case-sensitive arguments. It is an opaque
+  // identity, not a filesystem path to normalize or a command to reconstruct.
+  if (hasWindowsLaunchCommand(app)) {
+    return app.launch_path;
+  }
   return appPath(app.launch_path) || app.bundle_id || app.name;
 }
 
@@ -39,9 +48,9 @@ export function resolveApp(apps, selector, { allowStopped = false } = {}) {
   }
   const path = appPath(selector);
   const needle = selector.trim().toLocaleLowerCase();
-  const matches = apps.filter((app) => path
-    ? appPath(app.launch_path) === path
-    : [app.name, app.bundle_id].some((value) => typeof value === "string" && value.toLocaleLowerCase() === needle));
+  const matches = apps.filter((app) => appIdentity(app) === selector || (path
+    ? [hasWindowsLaunchCommand(app) ? undefined : app.launch_path, app.bundle_id].some((value) => appPath(value) === path)
+    : [app.name, app.bundle_id].some((value) => typeof value === "string" && value.toLocaleLowerCase() === needle)));
   const running = matches.filter((app) =>
     app.running !== false && Number.isSafeInteger(app.pid) && app.pid > 0);
   const candidates = allowStopped ? matches : running;
@@ -255,7 +264,7 @@ export class ComputerUseApp {
         }
         const semantic = ["setValue", "performSecondaryAction", "paste", "selectText"].includes(method);
         address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: "foreground" }) };
-        if (["click", "doubleClick", "rightClick", "drag", "typeText", "paste"].includes(method)) address.appContext = true;
+        if (["click", "doubleClick", "rightClick", "drag", "scroll", "typeText", "paste"].includes(method)) address.appContext = true;
         const result = await this.#computer[method](address);
         const nativeEffects = ["confirmed", "partial", "unverifiable", "suspected_noop", "refused"];
         const nativeEffect = result.action?.effect;
