@@ -1550,8 +1550,10 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
   });
 
-  it('rejects a group senders value the group sender axis cannot take', async () => {
-    writeWorkspaceSettings(`{
+  it.each(['pairing', 'inherit'])(
+    'rejects removed or unsupported group senders %s',
+    async (senders) => {
+      writeWorkspaceSettings(`{
   "$version": 4,
   "channels": { "bot": {
     "type": "management-validation-test",
@@ -1559,26 +1561,62 @@ describe('WorkspaceChannelSettingsStore', () => {
     "clientSecret": "existing-secret"
   } }
 }\n`);
-    const store = new WorkspaceChannelSettingsStore(workspace);
-    const before = fs.readFileSync(settingsPath, 'utf8');
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const before = fs.readFileSync(settingsPath, 'utf8');
 
-    await expect(
-      store.upsert('bot', {
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            groups: { '*': { senders } },
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: 'Channel field "groups.*.senders" is invalid.',
+      });
+
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    },
+  );
+
+  it.each(['disabled', 'allowlist', 'pairing', 'open'])(
+    'stores privatePolicy=%s alongside deprecated keys',
+    async (privatePolicy) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              type: 'management-validation-test',
+              clientId: 'client-id',
+              clientSecret: 'existing-secret',
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bot', {
         expectedRevision: store.snapshot().revision,
         config: {
           type: 'management-validation-test',
           clientId: 'client-id',
-          groups: { '*': { senders: 'pairing' } },
+          privatePolicy,
+          senderPolicy: 'open',
+          dmPolicy: 'disabled',
         },
         secrets: { clientSecret: { operation: 'preserve' } },
-      }),
-    ).rejects.toMatchObject({
-      code: 'channel_settings_invalid_config',
-      message: 'Channel field "groups.*.senders" is invalid.',
-    });
-
-    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
-  });
+      });
+      expect(store.snapshot().channels['bot']).toMatchObject({
+        privatePolicy,
+        senderPolicy: 'open',
+        dmPolicy: 'disabled',
+      });
+    },
+  );
 
   it('stores per-group senders with their own member list', async () => {
     writeWorkspaceSettings(`{
