@@ -4,6 +4,8 @@
 
 状态：总体架构仍为提议；本分支已实现 P0 和基于 SQL 的 P1 物化切片。日期：2026-09-20。本文按下面的集成代码快照设计，不表示完整架构已经通过生产验收。
 
+补充状态：§9.1～9.4 的灾备与合规删除是待实现、未验收设计。本轮只修改文档，不修改代码/schema/部署或运行产品测试。补充设计源固定为 [code_agent@1478e7b](https://github.com/doudouOUC/code_agent/tree/1478e7b632eb237bc3f40ea574ce90782e1cf4c3/qwen-code/feature/managed-agents)，draft 集成参考为 `bad721f22fcd8cfad9ec22e98f69fec75b20b6f0`，本地核对基线为 `f5088d2e`；不整体覆盖旧设计，也不把这些快照视作同一实现。第5项配额/计费排除；租户信任与强隔离选型暂缓，不默认已具备生产多租户安全。
+
 ## 1. 决策
 
 保留 WebShell → Java 控制面 → Hosted Harness → Runtime Broker → Tool-only Runtime 的分工。Harness 运行 Qwen Agent 循环，Java 负责准入、状态、事件投影和客户端接口，Runtime 负责工具与工作区。模型推理与 Runtime 预热仍并行，实际调用工具时才等待 Runtime。
@@ -140,7 +142,7 @@ EventTransport 的通用保证保持较小：允许重复和跨重连乱序，�
 1. 按统一顺序锁 Session 与 Turn，验证租户、活动 Turn、数据库时间租约、单调递增的 owner generation 及源 epoch。过期写者不能提交，即使它还活着。
 2. 丢弃当前 epoch 下已提交源游标以前的输入，再进行合并。IngressBatch 在提交前保留源事件边界，以便处理重试批次与已接受前缀重叠；不同 epoch 不能用数字大小比较。
 3. 为新公开事件分配连续 `sequence`，保存不可变批次，推进源游标和 Session 水位；终态与其终态事件同事务更新。全部被过滤时只提交游标检查点，不产生空公开事件。
-4. 事务提交后才向 Hub 发布；命令产生的控制事件使用同一序号分配机制。Runtime 异步回调还需验证对应操作的 generation/状态，拒绝失效操作的晚到结果。
+4. 事务提交后才向 Hub 发布；命令产生的控制事件使用同一序号分配机制。Runtime 异步回调还需验证对应操作的 generation/状态，拒绝失效操作推进当前状态。原调用的可信迟到回执走独立受限收件/结算路径，保留事实，不注入 replacement generation 或唤醒已关闭 Session。
 
 SQL 提交响应丢失时，先按稳定提交身份核对结果；已提交的批次复用原 `batchId`、序号和内容，不重新分配序号。相同身份携带不同摘要属于协议冲突，应停止该流并报警。接受凭据和源游标去重元数据至少保留到承诺的重试窗口结束，不能随短期正文一起提前删除。
 
@@ -196,6 +198,7 @@ RocketMQ 的组内顺序需要单生产者串行发送；跨生产者接管仍�
 - 完整内容、控制状态及所需 Snapshot 已覆盖到该批次末尾。
 - 所有必要消费者都已完成；启用 MQ 时也已完成分发及必要下游处理。新增消费者先从 Snapshot 初始化，不能假设旧批次仍在。
 - 不存在调查、恢复或资源引用 pin；按有界分页删除，避免长期持锁。
+- 已明确保留策略，并满足 §9.3～9.4 的删除、安全水位与真实资源 owner 条件。`coveredSequence` 只表示投影覆盖，不是跨存储安全删除水位；控制事件、Range、回执查询仍依赖原表时不能清掉它们。
 
 `W` 是待确认参数，不预设永久保存。可用 `24h` 作为容量测算示例，但它不是已经承诺的产品配置。超过窗口并不等于无条件删除；若消费者长时间落后，限流、暂停新 Turn 并告警，不能无限积压或静默丢弃。
 
@@ -211,15 +214,82 @@ RocketMQ 自身会按保留和空间策略清理，包括尚未消费的数据�
 
 提议的恢复顺序：
 
-1. 按租户与 Session 找到已提交的 manifest 和日志修订，确认旧 writer 已被 fencing；旧 generation 的运行结果需要核对。
-2. 验证资源摘要、长度和引用闭包，挂载原 Workspace 或恢复已确认的快照。缺少资源时进入 `recovery_blocked`，不假装是一个空 Session。
-3. 在同一 Session UUID 下取得新的写者 generation，恢复 Harness authority，再创建可替换的 Runtime 执行句柄。
-4. 对不确定工具调用按原 `executionCallId` 查询或核对。停止响应、超时或进程死亡不证明工具未产生副作用；无法确定时阻止自动重放。
-5. 只从协议明确允许的恢复边界继续。私有日志恢复、公开 SSE 补发、运行中模型请求续算是三件不同的事。
+1. 按租户与 Session 找到已提交 manifest/日志修订，在隔离状态核验恢复资格与当前安全水位；先隔离旧 Java/Harness/Runtime 写权。没有证据时不开放普通读取、派发、自动任务或 GC。
+2. 从原持久账本按原 `executionCallId` 核对不确定调用及备份后缺失区间；查询不新建 Runtime、不重新 prepare/execute。超时、进程退出、恢复库无记录都不证明无副作用；未知区间无法枚举时扩大 blocked 范围。
+3. 验证资源精确版本、摘要、长度和引用闭包，重放删除/密钥撤销约束，核对实际模型消费位置。缺资源进入 `recovery_blocked`，不回退为空 Session 或把全部 settled 结果当作已消费。
+4. 只有 Workspace 占用、旧 writer 停止/隔离、原结果/history 结算及存储交接证明满足后，才挂载原 Workspace 或已确认快照。随后在同一 Session UUID 下取得新 writer generation、恢复 Harness authority，并按原 binding 策略恢复执行句柄；不透明重绑活跃 Runtime Session。
+5. 仅在当前 ACL、生命周期及协议恢复边界允许时继续。私有日志恢复、公开 SSE 补发、运行中模型请求续算是三件不同的事。
 
-资源先不可变发布并校验，再通过带 expected revision 与 writer generation 的条件提交发布 manifest/日志提交点。上传成功但提交失败产生可回收孤儿；提交点不能引用尚未持久化的对象。对象存储插件之外，必须有实际拒绝旧 generation 的权威提交机制，不能仅依赖本地锁或“租约已经过期”的客户端判断。
+资源先不可变发布并校验，再通过带 expected revision 与 writer generation 的条件提交发布 manifest/日志提交点。上传成功但提交不明只产生候选孤儿；实际 owner 必须按原 commandId 查明原提交、隔离旧生产者并核对全部引用/发布 hold 后，才允许回收，不能超时清唯一副本。提交点不能引用尚未持久化的对象。对象存储插件之外，必须有实际拒绝旧 generation 的权威提交机制，不能仅依赖本地锁或“租约已经过期”的客户端判断。
 
 生产恢复能力需扩展 Harness 协议，明确 `journalRevision`、资源 manifest 与可恢复边界的确认。恢复状态与 Turn 完成状态分别记录；成功生成回复不自动证明可迁移恢复。持久化确认和执行核对完成前禁止回收仍被引用的资源。现有 boot mismatch 拒绝路径在这些验收完成前继续保留，不改成无条件重新 attach。
+
+<a id="restore-set"></a>
+
+### 9.1 RestoreSet：一致备份集合
+
+首版选择维护屏障备份，不承诺任意时刻热快照。停止集合涉及的 Session/共享 Workspace 的新输入、唤醒、派发和引用变更，排空实际写者及后代，持久接收结果/资源，提交模型实际消费位置与 history/checkpoint，再 freeze/flush。无法获得这些证明的集合不发布为可自动恢复。
+
+RestoreSet 是有版本、不可变的跨存储 manifest，绑定稳定集合 ID、原维护 operation、范围、schema/reader 版本、屏障与冻结证明、组件版本/ref/digest、恢复边界和核验状态；通过已有仓库条件发布，不作为第二份 Session 日志。它关联：
+
+| 组成           | 必须固定的内容                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------- |
+| MySQL          | 一致备份身份、校验信息、对应 binlog/GTID 边界；包括产品状态、原命令、Broker binding/执行记录和 Workspace 引用 |
+| qwen authority | 私有 journal 完整提交前缀、checkpoint、待处理命令/原调用、实际模型消费结果及位置；不能仅取公开 Item/Snapshot  |
+| 对象与资源     | 精确版本、长度、digest、全部引用闭包与各 owner/hold；不能只保存可变 object key 或“最新版本”                   |
+| Workspace      | PVC/卷快照、受信 storage identity、文件 history/前后像及对应占用/冻结证明                                     |
+| 构建与密钥     | build/Bundle/模板/协议兼容版本、所需 key 版本引用；manifest 不存密钥明文                                      |
+
+组件完成和 manifest 发布之间丢 ACK 时查询原 operation，不另造恢复集合或提前解屏障。全部组件核验、条件发布成功后才按当前权限释放维护屏障；失败保留持久进度并由原 operation 收敛。备份成功只证明所声明边界，不批准将来恢复。
+
+共同时间戳不是一致性证明；[MySQL binlog/PITR](https://dev.mysql.com/doc/refman/8.0/en/point-in-time-recovery-binlog.html)和 GTID 不证明外部副作用，[VolumeSnapshot](https://kubernetes.io/blog/2020/12/10/kubernetes-1.20-volume-snapshot-moves-to-ga/)不自动提供应用一致性。`RestoreBundle` 仍是单 Session 的恢复响应，读取已验证集合里的合法基础；RestoreSet 不代替 authority。封闭记录/引用、minimumReader 及 capability 规则见[存储规范](managed-agent-session-storage.zh-CN.md#restore-set)。
+
+<a id="quarantined-restore"></a>
+
+### 9.2 隔离恢复与缺失区间
+
+恢复启动默认隔离，不派发、不自动唤醒、不运行 GC；普通读取也须等 §9.3 的完整当前安全依据。旧 Java/Harness 的存储写权与旧 Runtime 的物理写通道分别隔离，新 DB epoch 或凭据版本不能证明旧 Shell 停止。原节点/存储证明、RWOP 和同卷交接遵守 [Endpoint §17](2026-09-21-managed-runtime-endpoint-recovery.zh-CN.md#hosted-runtime-profile)。
+
+从备份边界到恢复隔离完成之间，必须依靠不随该备份丢失的原持久账本、受保护备份/审计及原 owner 证据枚举执行缺口。恢复库自己没有 command/dispatch 行不是未执行证明。仅当现有证据可覆盖完整区间、原效果已结算且结果/history/消费位置一致时才允许续跑；区间无法枚举就阻塞可能受影响的全部 Session/Workspace，不能把已知子集当作完整清单。原执行查询不 provision/prepare/execute。
+
+重放删除/密钥撤销事实后只恢复仍有资格的资源。真实 ACL 权威不可用或尚可能是回滚旧版本时，不签新 grant、不开放普通读取；技术恢复成功不恢复用户旧权限。`accepted_unresolved` 仅关闭业务案件，物理 UNKNOWN 保留，不生成工具成功、不解卷、不恢复原模型。新任务也不能绕开原卷屏障，见[对账](managed-agent-recovery-operations.zh-CN.md#unknown-reconciliation)及[撤权](managed-agent-control-protocol.zh-CN.md#dynamic-authorization)。
+
+<a id="recovery-safety-watermark"></a>
+
+### 9.3 备份外的完整安全水位
+
+完整 DR 开放前，必须有不随业务 DB 回滚的恢复资格、删除 tombstone、密钥撤销记录和可验证完整水位。优先复用已有受保护备份/审计存储，只保存这些窄事实，不复制 Session 日志、不新增服务或 MQ。它必须处于不会与业务备份一起回退的保护范围；同一份 SQL 备份里的“最新水位”无效。
+
+接口义务是返回目标恢复范围、当前资格/删除/key 撤销事实、完整水位、对应记录集及其完整性和新鲜性证据；验证者必须能证明无漏尾、无倒退，且查询覆盖全部相关范围。签名、hash、备份时间或客户端缓存的最大序号本身不能证明当前性。部署可复用受保护存储自身经验证的当前完整读取能力；无法提供这项证明的适配器不具备完整 DR capability，不能临时信任恢复库自报。
+
+启用完整 DR 的部署，先在受保护依据中按原 operation 幂等预登记会降低恢复资格的删除/撤销意图，再推进业务库操作，最后登记经核验的结算引用。待决意图也阻止对应范围恢复；任何一步丢 ACK 按原 ID 对账，不因业务库回滚而抹掉意图。受保护存储不能在尚有未结意图或无法覆盖的来源变更时声称完整水位。该顺序复用原 operation 的持久阶段，不承诺跨库原子事务，也不复制业务日志。
+
+恢复验证期间的并发删除/撤权也不能漏掉：开放读取/签发 grant 前重新核验当前权威与安全水位，并让后续读取/续租持续服从当前权限。跨系统读取不冒充分布式原子事务；无法形成有效准入屏障时继续隔离。没有证据时，普通 SSE/历史/Range/export/回执内容均 blocked，仅可经独立授权的隔离诊断访问必要材料，不唤醒模型、不允许普通导出。
+
+删除/撤销依据至少覆盖所有仍能恢复相关旧数据的备份与副本，不能按短命令幂等 TTL 清除。该前置属于 G/W1 完整灾备开放条件，不强迫 C/E＋W0 在线闭环新增基础设施。缺少它可以报告备份存在或恢复未验证，不能宣称安全自动恢复。
+
+<a id="compliance-deletion"></a>
+
+### 9.4 合规删除与副本完成度
+
+复用原 Session close/delete、operation、资源 owner 和持久清理进度。删除请求先持久受理并封新输入/派发/普通读取，ACK 不等于停止或删除。生命周期仍为 `idle/active/recovery_blocked → closing → closed`，随后 `closed/archived → deleting → deleted`，不从活动态跳删除终态；原物理 owner 未知不能提前 closed。原 ID 查询/取消、可信迟到收件及清理保留窄系统资格，不唤醒模型或恢复撤权用户读取。
+
+原工作可信停止后，核对结果交付、reader、pin、fork/export、发布 hold、调查/法律保留；在原 operation 下持久注销引用与 tombstone，再由真实 owner 按精确版本和身份条件清理。跨 owner 丢 ACK 查原引用/提交，不按超时推断已释放。未知引用或执行保持 pending/blocked，不清唯一证据；单 Session 删除只释放自身引用，不删除共享 Workspace/PVC。整个 Workspace/租户删除需要单独权限并核对全部引用。
+
+完成度使用受控、版本化公开投影，且每项带原 operation、范围、revision、证据引用与未完成原因，不重定义既有 `deleted`：
+
+| 维度              | 可报告完成的依据                                                                 |
+| ----------------- | -------------------------------------------------------------------------------- |
+| 在线撤读          | 普通新请求及已有流的后续内容交付均已阻断；已发字节无法追回                       |
+| 执行停止          | 原可信监督者确认声明范围内实际退出；节点/存储隔离另报，不能伪称进程退出          |
+| 在线清理          | 当前 owner 的可删除在线副本与引用已结算并核验，其他 owner 合法引用未受损         |
+| 备份待清理        | 逐项记录 SQL 备份、对象历史版本、快照、导出等仍存副本及保留期限，不算完全完成    |
+| hold/供应商待确认 | 有效法律保留或供应商未证实清理，记录适用范围、期限和后续动作                     |
+| 完全完成          | 声明删除范围内所有应清理副本均有证明，不再有未完成 hold/外部确认或可解密恢复路径 |
+
+删除约束必须在任意灾备开放读取前重放。[OSS delete marker](https://www.alibabacloud.com/help/en/oss/developer-reference/deleteobject)不等于历史版本已清除；已交付的用户导出无法技术追回，不能无依据承诺清理它。密钥擦除只有所有相关可解密副本及可恢复 key 路径都不可恢复才成立，不销毁他人共享 key，不同时承诺彻底擦除和完整恢复。
+
+RPO/RTO、保留窗口、具体 CSI 驱动、备份删除及供应商契约尚未选定，不猜数值；未配置/未验证时相应自动恢复或 GC 不开放。UNKNOWN 不是无限期保留敏感数据的法律依据，需独立保留策略和有权合规处理；业务风险接受也不伪造物理结算。更细生命周期与引用规则见[Session 存储](managed-agent-session-storage.zh-CN.md#deletion-settlement)。
 
 ## 10. 后端选择与部署配置
 
@@ -261,7 +331,7 @@ qwen:
 | 租约切换后旧 Java/Harness 回来 | 数据库接受事务和私有日志提交均校验 generation；MQ 顺序能力不承担此防护。  |
 | 工具结果未知或 Workspace 缺失  | `recovery_blocked`，不自动执行第二次，也不创建空工作区冒充恢复。          |
 
-所有查询、重放、资源下载与内部通知都保留租户鉴权。`X-Qwen-Tenant-Id` 是可信入口传递的范围，不是身份凭证。MQ 内部元数据和私有 Harness 记录不得直接透传前端；保留当前显式公开投影及敏感字段过滤。
+所有查询、重放、资源下载与内部通知都保留租户鉴权。`X-Qwen-Tenant-Id` 是可信入口传递的范围，不是身份凭证。MQ 内部元数据和私有 Harness 记录不得直接透传前端；保留当前显式公开投影及敏感字段过滤。Hosted 按[动态授权契约](managed-agent-control-protocol.zh-CN.md#dynamic-authorization)在现有 SSE 和每个后续内容交付边界核对当前 ACL，不把连接建立时的权限当成永久资格。内部原 ID 收件可继续，但不会恢复用户读取或模型推进。
 
 ## 12. 落地顺序与代码改造
 
@@ -290,6 +360,19 @@ P4 是明确的后续设计门槛，不是当前接口已经实现的能力。�
 - 清理时模拟必要消费者落后、Broker 提前清理和资源 pin；达到容量阈值前正确限流，仍可由保留日志补洞。
 - 删除 Runtime 进程及临时 generation 目录后恢复同一 Workspace 和 Session；缺少资源或工具结果未知时明确阻塞，不重复执行。
 - 各数据库适配器执行同一事务/幂等/CAS 测试；MQ 适配器执行同一确认丢失、重复、乱序和恢复测试；源码集成时再执行对应构建、类型检查和 E2E。
+
+补充验收（均未执行）：
+
+| 用例                          | 必须成功                                             | 必须拒绝或阻塞                                         |
+| ----------------------------- | ---------------------------------------------------- | ------------------------------------------------------ |
+| 一致备份与丢 ACK              | 冻结闭包、精确版本及原 operation 收敛同一 RestoreSet | 单独 timestamp/GTID/VolumeSnapshot 不冒充一致恢复      |
+| DB 回滚至派发前               | 完整缺口证据及原回执允许合法恢复                     | 缺记录不重放；旧写者未隔离、缺口不可枚举则扩大 blocked |
+| DB 回滚至删除/撤权前          | 最新完整安全水位重放删除/撤销后仅合法数据可读        | 陈旧签名/水位或缺 authority 时普通读取也拒绝           |
+| 恢复与并发删除                | 开放前及后续读取持续服从当前权威                     | 一次恢复验证不永久豁免后续撤权/删除                    |
+| 删除与 reader/pin/fork/共享卷 | 排空和引用注销可恢复，独立引用保持可读               | 不误删共享 PVC、发布 hold 或唯一 UNKNOWN 证据          |
+| 副本/key/供应商               | 所有声明范围内副本及可解密路径结清才完全完成         | delete marker、部分密钥擦除、未确认外部删除不虚报完成  |
+
+每项须同时有成功与拒绝路径，不能全部 blocked 冒充通过。真实 MySQL/Kubernetes/CSI/对象版本及供应商语义须独立验证，H2/fake API 不替代。补充的 G/W1/O4 开放条件与本篇原 P0～P4 编号分开；内部安全规则不等 D 公共投影上线。
 
 性能对比记录：首字延迟及段间延迟 p50/p95/p99、每 Session 事务/秒、SQL 实际字节与索引占用、重放吞吐、物化延迟、MQ 积压、每节点/SSE 连接缓冲和资源恢复耗时。本文没有跑性能实验，不声称固定倍数提升。
 

@@ -4,6 +4,8 @@
 
 Status: proposed architecture, with P0 and the SQL-backed P1 materialization slice implemented on this branch. Date: 2026-09-20. This design uses the integration snapshot below; it does not claim production validation of the complete architecture.
 
+Supplement status: disaster recovery and compliance deletion in Sections 9.1–9.4 are proposed and unvalidated. This change updates documentation only, with no code/schema/deployment changes or product tests. The supplement uses the fixed [code_agent@1478e7b](https://github.com/doudouOUC/code_agent/tree/1478e7b632eb237bc3f40ea574ce90782e1cf4c3/qwen-code/feature/managed-agents) design, draft integration reference `bad721f22fcd8cfad9ec22e98f69fec75b20b6f0`, and inspected local baseline `f5088d2e`; it neither replaces the older design wholesale nor treats those snapshots as one implementation. Item 5, quotas/billing, is excluded. Tenant trust and strong-isolation selection remain deferred, with no implied production multi-tenant security guarantee.
+
 ## 1. Decisions
 
 Keep the WebShell → Java control plane → Hosted Harness → Runtime Broker → Tool-only Runtime responsibilities. Harness runs the Qwen Agent loop; Java owns admission, state, event projection, and client APIs; Runtime owns tools and the workspace. Model inference and Runtime warmup remain concurrent, with a wait only when an actual tool call needs Runtime.
@@ -140,7 +142,7 @@ Internal batches record `batchId`, `firstSequence`, `lastSequence`, `producerGen
 1. Lock Session and Turn in a consistent order. Validate tenant, active Turn, database-time lease, monotonically increasing owner generation, and source epoch. An expired writer cannot commit even if its process remains alive.
 2. Discard input at or before the committed source cursor in the current epoch, then merge. Before commit, IngressBatch preserves source event boundaries so retries can overlap an already accepted prefix. Numeric cursors from different epochs cannot be compared.
 3. Allocate consecutive `sequence` values for new public events, store an immutable batch, and advance source cursors and the Session watermark. Commit terminal state and its terminal event together. If every input is filtered, commit only a cursor checkpoint, without an empty public event.
-4. Publish to the Hub only after commit. Command-generated control events use the same sequence allocator. Runtime callbacks also validate their operation generation/state and reject late results from obsolete operations.
+4. Publish to the Hub only after commit. Command-generated control events use the same sequence allocator. Runtime callbacks validate operation generation/state and reject obsolete operations advancing current state. Trusted late receipts for original calls use a separate restricted acceptance/settlement path: preserve facts without injecting them into a replacement generation or waking a closed Session.
 
 If the SQL commit response is lost, reconcile by stable submission identity first. A committed batch retains its original `batchId`, sequences, and content; do not allocate new sequences. The same identity with a different digest is a protocol conflict: stop the stream and alert. Keep acceptance receipts and source-cursor deduplication metadata through the promised retry window, independently of short-lived payload cleanup.
 
@@ -196,6 +198,7 @@ All cleanup conditions must hold:
 - Complete content, control state, and required Snapshots cover the batch through its end.
 - All required consumers have finished. When MQ is enabled, distribution and required downstream processing must also be complete. New consumers initialize from Snapshots rather than assuming old batches still exist.
 - No investigation, recovery, or resource-reference pin remains. Delete in bounded pages to avoid long-held locks.
+- Retention policy is defined and deletion, safety-watermark, and actual resource-owner conditions in Sections 9.3–9.4 hold. `coveredSequence` represents projection coverage, not a cross-store safe-deletion watermark. Do not remove original tables/ranges still needed for control events, Range reads, or receipt queries.
 
 `W` remains an open parameter, not permanent retention. `24h` can be used for capacity examples but is not a committed product configuration. Passing the window does not imply unconditional deletion. If required consumers fall far behind, throttle, pause new Turns, and alert rather than accumulating indefinitely or silently discarding data.
 
@@ -211,15 +214,82 @@ A complete recovery unit contains the private journal, checkpoints, the transiti
 
 Proposed recovery order:
 
-1. Locate the committed manifest and journal revision by tenant and Session, and fence the old writer. Reconcile results from the old generation.
-2. Verify resource digests, lengths, and reference closure. Mount the original Workspace or restore a confirmed snapshot. Missing resources cause `recovery_blocked`, never an empty Session presented as restored.
-3. Acquire a new writer generation under the same Session UUID, restore Harness authority, and then create replaceable Runtime execution handles.
-4. Query or reconcile uncertain tool calls using the original `executionCallId`. A missing response, timeout, or process death does not prove that no side effect occurred. Block automatic replay when the outcome cannot be established.
-5. Continue only at recovery boundaries explicitly supported by the protocol. Private journal restoration, public SSE replay, and continuation of an in-flight model request are distinct capabilities.
+1. Locate the committed manifest/journal revision by tenant and Session, and verify recovery eligibility and current safety watermarks in quarantine. First isolate old Java/Harness/Runtime write authority. Without evidence, enable no ordinary reads, dispatch, automatic tasks, or GC.
+2. Reconcile uncertain calls and the missing post-backup interval from original durable ledgers using original `executionCallId` values. Queries must not create Runtime or rerun prepare/execute. Timeouts, process exit, and missing rows in the restored database do not prove absence of side effects. Expand the blocked scope when the unknown interval cannot be enumerated.
+3. Verify exact resource versions, digests, lengths, and reference closure; replay deletion/key-revocation constraints and verify actual model consumption positions. Missing resources cause `recovery_blocked`, never an empty Session or all settled results being treated as consumed.
+4. Mount the original Workspace or a confirmed snapshot only after occupancy, old-writer stop/isolation, original result/history settlement, and storage-handover proofs pass. Then acquire a new writer generation under the same Session UUID, restore Harness authority, and recover execution handles under the original binding policy; do not transparently rebind an active Runtime Session.
+5. Continue only when current ACL, lifecycle, and protocol recovery boundaries permit. Private journal restoration, public SSE replay, and continuation of an in-flight model request are distinct capabilities.
 
-Publish and verify immutable resources first, then publish the manifest/journal commit point through a conditional commit using expected revision and writer generation. Successful uploads followed by failed commits leave collectible orphans; a committed manifest must never reference objects not yet durably published. Beyond an object-storage plugin, an authoritative commit mechanism must reject old generations. Local locks or client-side lease-expiry judgments are insufficient.
+Publish and verify immutable resources first, then publish the manifest/journal commit point through a conditional commit using expected revision and writer generation. Successful uploads with uncertain commits create only candidate orphans. Before reclamation, the actual owner must establish the original commit by commandId, isolate the old producer, and verify all references/publication holds. Never expire the only copy on timeout. A committed manifest must not reference objects not yet durably published. Beyond an object-storage plugin, an authoritative commit mechanism must reject old generations. Local locks or client-side lease-expiry judgments are insufficient.
 
 Production recovery requires Harness protocol extensions defining `journalRevision`, resource manifests, and acknowledgement of recoverable boundaries. Track recovery status separately from Turn completion: a successfully generated answer does not prove migratable state. Do not reclaim referenced resources before persistence acknowledgement and execution reconciliation. Preserve the existing boot-mismatch rejection until these checks pass, rather than changing it to unconditional reattachment.
+
+<a id="restore-set"></a>
+
+### 9.1 RestoreSet: Consistent Backup Collection
+
+The initial profile uses a maintenance-barrier backup, not arbitrary hot snapshots. Stop new input, wakeups, dispatch, and reference changes for affected Sessions/shared Workspaces. Drain actual writers and descendants, durably accept results/resources, commit actual model consumption positions and history/checkpoints, then freeze/flush. A collection lacking these proofs cannot be published as automatically recoverable.
+
+RestoreSet is a versioned immutable cross-store manifest binding a stable set ID, original maintenance operation, scope, schema/reader versions, barrier and freeze evidence, component versions/refs/digests, recovery boundary, and verification status. Publish conditionally through existing repositories; it is not a second Session journal. It associates:
+
+| Component             | Required fixed content                                                                                                                                                              |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MySQL                 | Consistent backup identity, verification data, and binlog/GTID boundary, including product state, original commands, Broker binding/execution records, and Workspace references     |
+| qwen authority        | Complete committed private-journal prefix, checkpoint, pending commands/original calls, and actual consumed model results and positions; public Item/Snapshot alone is insufficient |
+| Objects and resources | Exact versions, lengths, digests, complete reference closure, and each owner/hold; not mutable object keys or “latest version”                                                      |
+| Workspace             | PVC/volume snapshot, trusted storage identity, file history/before-and-after images, and corresponding occupancy/freeze proofs                                                      |
+| Build and keys        | Compatible build/Bundle/template/protocol versions and required key-version references; no plaintext keys in the manifest                                                           |
+
+Reconcile lost ACKs between component completion and manifest publication by the original operation; do not create another set or release the barrier early. Release the maintenance barrier under current authorization only after component verification and conditional publication succeed. On failure retain durable progress and converge under the original operation. A successful backup proves only its declared boundary, not future restoration eligibility.
+
+A shared timestamp is not consistency evidence. [MySQL binlog/PITR](https://dev.mysql.com/doc/refman/8.0/en/point-in-time-recovery-binlog.html) and GTID do not prove external side effects, and [VolumeSnapshot](https://kubernetes.io/blog/2020/12/10/kubernetes-1.20-volume-snapshot-moves-to-ga/) does not automatically provide application consistency. `RestoreBundle` remains a single-Session recovery response using a valid basis within the verified collection; RestoreSet does not replace the authority. See [storage contracts](managed-agent-session-storage.md#restore-set) for closed records/references, minimumReader, and capability rules.
+
+<a id="quarantined-restore"></a>
+
+### 9.2 Quarantined Restore and Missing Intervals
+
+Restoration starts quarantined: no dispatch, automatic wakeups, or GC. Ordinary reads also require the complete current safety evidence in Section 9.3. Isolate old Java/Harness storage-write rights separately from old Runtime physical write channels; a new DB epoch or credential version does not prove an old Shell stopped. Original-node/storage evidence, RWOP, and same-volume handover follow [Endpoint Section 17](2026-09-21-managed-runtime-endpoint-recovery.md#hosted-runtime-profile).
+
+Enumerate execution gaps from the backup boundary through completion of recovery isolation using original durable ledgers, protected backups/audit data, and original-owner evidence that survive that backup's loss interval. No command/dispatch row in the restored database does not prove non-execution. Continue only when evidence covers the complete interval, original effects are settled, and results/history/consumption positions agree. If the interval cannot be enumerated, block all potentially affected Sessions/Workspaces rather than treating a known subset as complete. Original-execution queries do not provision/prepare/execute.
+
+Replay deletion/key-revocation facts and restore only still-eligible resources. If the real ACL authority is unavailable or may have rolled back, grant no new rights and open no ordinary reads; technical restoration does not restore a user's old permissions. `accepted_unresolved` closes only the business case: physical UNKNOWN persists, without tool success, volume release, or continuation of the original model. New tasks cannot bypass the original volume barrier either; see [reconciliation](managed-agent-recovery-operations.md#unknown-reconciliation) and [revocation](managed-agent-control-protocol.md#dynamic-authorization).
+
+<a id="recovery-safety-watermark"></a>
+
+### 9.3 Complete Safety Watermarks Outside the Backup
+
+Full DR requires recovery eligibility, deletion tombstones, key-revocation records, and verifiably complete watermarks that cannot roll back with the business database. Prefer existing protected backup/audit storage containing only these narrow facts, without duplicating Session journals or adding a service or MQ. Its protection domain must not revert with the business backup; a “latest watermark” inside the same SQL backup is invalid.
+
+The interface must return the target recovery scope, current eligibility/deletion/key-revocation facts, complete watermark, corresponding records, and evidence of integrity and freshness. The verifier must establish no omitted tail or rollback and coverage of all relevant scopes. Signatures, hashes, backup timestamps, and a client's cached maximum sequence do not themselves establish currentness. A deployment may reuse verified current-and-complete reads from protected storage. An adapter unable to provide this proof lacks full DR capability; it cannot temporarily trust the restored database's own claim.
+
+In full-DR deployments, first idempotently preregister deletion/revocation intents that reduce recovery eligibility in protected evidence under the original operation, then advance the business-database operation, and finally record verified settlement references. Pending intents also block restoration of their scopes. Reconcile every lost ACK by the original ID; business-database rollback cannot erase an intent. Protected storage must not claim a complete watermark while intents remain unresolved or source changes are not covered. This sequence reuses durable stages of the original operation without claiming cross-store atomicity or copying business journals.
+
+Do not miss concurrent deletion/revocation during restore verification. Recheck current authority and safety watermarks before opening reads or issuing grants, then keep subsequent reads/renewals subject to current permissions. Cross-system reads are not a distributed atomic transaction; remain quarantined without a valid admission barrier. Without evidence, ordinary SSE/history/Range/export/receipt content stays blocked. Only separately authorized isolated diagnostics may access necessary material, without model wakeups or ordinary export.
+
+Deletion/revocation evidence must cover every backup or replica still capable of restoring the affected old data; short command-idempotency TTLs cannot remove it. This is a G/W1 full-DR enablement requirement, not an obligation to add infrastructure for the initial C/E + W0 online loop. Without it, report that a backup exists or restoration is unverified, never safe automatic recovery.
+
+<a id="compliance-deletion"></a>
+
+### 9.4 Compliance Deletion and Replica Completion
+
+Reuse original Session close/delete, operations, resource owners, and durable cleanup progress. Durably accept the deletion request and fence new input/dispatch/ordinary reads; ACK proves neither termination nor deletion. Preserve `idle/active/recovery_blocked → closing → closed`, followed by `closed/archived → deleting → deleted`, with no active-to-deleted shortcut. An unknown original physical owner prevents premature closed state. Original-ID queries/cancellation, trusted late receipt acceptance, and cleanup retain narrow system rights, without waking the model or restoring revoked user reads.
+
+After trusted termination of original work, reconcile result delivery, readers, pins, fork/export, publication holds, and investigation/legal retention. Durably deregister references and record tombstones under the original operation before actual owners conditionally clean exact versions/identities. Reconcile cross-owner lost ACKs through original references/commits; timeout does not prove release. Unknown references/executions remain pending/blocked without deleting sole evidence. A Session deletion releases only its own references, not a shared Workspace/PVC. Whole-Workspace/tenant deletion requires separate authority and all-reference checks.
+
+Expose completion through a controlled versioned public projection, with original operation, scope, revision, evidence references, and outstanding reasons per dimension. Do not redefine existing `deleted`:
+
+| Dimension                        | Evidence required for the reported state                                                                                                           |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Online read revocation           | Ordinary new requests and subsequent content delivery on existing streams are blocked; delivered bytes cannot be recalled                          |
+| Execution stopped                | Original trusted supervision proves actual exit within the declared scope; report node/storage isolation separately, not as process exit           |
+| Online cleanup                   | The current owner's deletable online copies and references are settled and verified, preserving other owners' legitimate references                |
+| Backup cleanup pending           | Enumerate remaining SQL backups, object versions, snapshots, exports, and retention periods; this is not complete deletion                         |
+| Hold/vendor confirmation pending | Record scope, expiry, and follow-up for legal retention or unconfirmed vendor deletion                                                             |
+| Fully complete                   | Every copy due for deletion within the declared scope is evidenced, with no outstanding hold/external confirmation or decryptable restoration path |
+
+Replay deletion constraints before any disaster-recovery reads open. An [OSS delete marker](https://www.alibabacloud.com/help/en/oss/developer-reference/deleteobject) does not erase historical versions. Delivered user exports cannot technically be recalled; do not claim their cleanup without evidence. Cryptographic erasure requires every relevant decryptable copy and recoverable key path to be irrecoverable. Never destroy another owner's shared key or promise both complete erasure and complete restoration.
+
+RPO/RTO, retention windows, the specific CSI driver, backup deletion, and vendor contracts remain undecided; do not guess values. Unconfigured/unvalidated automatic recovery or GC stays disabled. UNKNOWN is not a legal basis for indefinite sensitive-data retention: separate retention policy and authorized compliance handling are required. Business risk acceptance also does not fabricate physical settlement. See [Session storage](managed-agent-session-storage.md#deletion-settlement) for detailed lifecycle/reference rules.
 
 ## 10. Backend Selection and Deployment Configuration
 
@@ -261,7 +331,7 @@ Do not switch MySQL/PG or MQ arbitrarily per request. Switching requires pausing
 | Old Java/Harness returns after lease handover          | Both database acceptance and private journal commits validate generations. MQ ordering does not provide this protection.                      |
 | Unknown tool outcome or missing Workspace              | Enter `recovery_blocked`; neither execute automatically a second time nor substitute an empty workspace for recovery.                         |
 
-Retain tenant authorization for all queries, replay, resource downloads, and internal notifications. `X-Qwen-Tenant-Id` conveys scope from a trusted entry point, not identity credentials. Internal MQ metadata and private Harness records must not pass directly to the frontend. Preserve explicit public projection and sensitive-field filtering.
+Retain tenant authorization for all queries, replay, resource downloads, and internal notifications. `X-Qwen-Tenant-Id` conveys scope from a trusted entry point, not identity credentials. Internal MQ metadata and private Harness records must not pass directly to the frontend. Preserve explicit public projection and sensitive-field filtering. Hosted checks current ACL on existing SSE streams and each subsequent content-delivery boundary under the [dynamic authorization contract](managed-agent-control-protocol.md#dynamic-authorization); connection-time permission is not permanent authorization. Internal original-ID receipt acceptance may continue without restoring user reads or model progress.
 
 ## 12. Rollout and Code Changes
 
@@ -290,6 +360,19 @@ Validate against the actual deployed MySQL, PostgreSQL, and MQ versions. Passing
 - During cleanup, simulate lagging required consumers, early Broker cleanup, and resource pins. Throttle before capacity limits and repair gaps using retained journal data.
 - Restore the same Workspace and Session after deleting Runtime processes and temporary generation directories. Explicitly block missing resources or unknown tool outcomes without executing twice.
 - Run the same transaction/idempotency/CAS tests for database adapters and the same lost-acknowledgement, duplicate, reordering, and recovery tests for MQ adapters. Run corresponding builds, type checks, and E2E when integrating source changes.
+
+Supplement acceptance (not executed):
+
+| Case                                          | Required success                                                                                  | Required rejection or blocking                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Consistent backup and lost ACK                | Frozen closure, exact versions, and original operation converge on one RestoreSet                 | Timestamp/GTID/VolumeSnapshot alone cannot establish consistent restoration                                 |
+| DB rollback before dispatch                   | Complete gap evidence and original receipts allow legitimate recovery                             | Missing rows never replay effects; absent old-writer isolation or an unenumerable gap expands blocked scope |
+| DB rollback before deletion/revocation        | Current complete safety watermarks replay deletion/revocation and expose only eligible data       | Stale signatures/watermarks or missing authority block ordinary reads too                                   |
+| Restore concurrent with deletion              | Opening and subsequent reads continuously follow current authority                                | One restore verification never exempts later revocation/deletion                                            |
+| Delete with readers/pins/forks/shared volumes | Drain and reference deregistration recover correctly while independent references remain readable | Never delete shared PVCs, publication holds, or sole UNKNOWN evidence                                       |
+| Replicas/keys/vendors                         | All in-scope copies and decryptable paths are settled before full completion                      | Delete markers, partial key erasure, or unconfirmed external deletion cannot report full completion         |
+
+Every case requires success and rejection paths; blocking everything does not pass. Validate real MySQL/Kubernetes/CSI/object-version and vendor semantics independently; H2/fake APIs are insufficient. Supplemental G/W1/O4 enablement gates are distinct from this document's original P0–P4 numbering; internal safety does not wait for D public projections.
 
 Performance comparisons record first-text and inter-chunk latency p50/p95/p99, transactions/second per Session, actual SQL bytes and index size, replay throughput, materialization lag, MQ backlog, node/SSE-connection buffers, and resource restoration time. This document reports no performance experiment or fixed speedup.
 
