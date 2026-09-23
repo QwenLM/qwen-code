@@ -65,6 +65,7 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(nameLine).toBeDefined();
     expect(nameLine).toContain('5.0k tokens');
     expect(nameLine).not.toContain('body loaded');
+    expect(nameLine).not.toContain('active');
     expect(skills.match(/body loaded/g)).toHaveLength(1);
     expect(skills).toContain('+5.0k tokens');
   });

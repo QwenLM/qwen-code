@@ -1625,6 +1625,109 @@ Review content`;
   });
 
   describe('discovery completeness', () => {
+    function createReadGate() {
+      let resolve!: (value: []) => void;
+      const promise = new Promise<[]>((release) => {
+        resolve = release;
+      });
+      return { promise, resolve };
+    }
+
+    it.each(['failure-first', 'success-first'] as const)(
+      'publishes each overlapping scan with its own completeness (%s)',
+      async (order) => {
+        const gates = [createReadGate(), createReadGate()];
+        let failedRead: Promise<never> | undefined;
+        let projectReads = 0;
+        let gateReads = 0;
+        vi.spyOn(mockConfig, 'getDisabledSkillLevels').mockReturnValue(
+          new Set(['user', 'extension', 'bundled']),
+        );
+        vi.spyOn(manager, 'getSkillsBaseDirs').mockReturnValue([
+          '/overlap/project',
+          '/overlap/gate',
+        ]);
+        vi.mocked(fs.access).mockResolvedValue(undefined);
+        vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
+        vi.mocked(fs.readdir).mockImplementation((directory) => {
+          if (String(directory) === '/overlap/project') {
+            if (++projectReads === 1) {
+              failedRead = Promise.reject(
+                Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+              );
+              return failedRead;
+            }
+            return Promise.resolve([
+              {
+                name: 'test-skill',
+                isDirectory: () => true,
+                isSymbolicLink: () => false,
+              },
+            ]) as unknown as ReturnType<typeof fs.readdir>;
+          }
+          return gates[gateReads++].promise;
+        });
+        const snapshots: Array<{ names: string[]; incomplete: boolean }> = [];
+        manager.addChangeListener(() => {
+          snapshots.push({
+            names: (manager.getCachedSkills() ?? []).map((skill) => skill.name),
+            incomplete: manager.hasDiscoveryErrors(),
+          });
+        });
+        const failure = manager.refreshCache();
+        await expect(failedRead).rejects.toMatchObject({ code: 'EACCES' });
+        const success = manager.refreshCache();
+        try {
+          const first = order === 'failure-first' ? 0 : 1;
+          gates[first].resolve([]);
+          await (first === 0 ? failure : success);
+          gates[1 - first].resolve([]);
+          await (first === 0 ? success : failure);
+          const failed = { names: [], incomplete: true };
+          const succeeded = { names: ['test-skill'], incomplete: false };
+          expect(snapshots).toEqual(
+            first === 0 ? [failed, succeeded] : [succeeded, failed],
+          );
+        } finally {
+          gates.forEach((gate) => gate.resolve([]));
+          await Promise.allSettled([failure, success]);
+        }
+      },
+    );
+
+    it('keeps the committed completeness while a new scan is pending', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(
+        Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+      );
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      const gate = createReadGate();
+      vi.mocked(fs.readdir).mockReturnValue(gate.promise);
+      const refreshing = manager.refreshCache();
+      try {
+        expect(manager.hasDiscoveryErrors()).toBe(true);
+      } finally {
+        gate.resolve([]);
+        await refreshing;
+      }
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it('retains external validation diagnostics without changing scan completeness', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      await manager.refreshCache();
+      expect(() =>
+        manager.parseSkillContent(
+          'invalid frontmatter',
+          '/draft/SKILL.md',
+          'project',
+        ),
+      ).toThrow();
+      expect(manager.getParseErrors().has('/draft/SKILL.md')).toBe(true);
+      expect(manager.getCachedSkills()).toEqual([]);
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
     it.each(['EACCES', 'ENOENT'] as const)(
       'distinguishes a bundled directory %s error even when existsSync returns false',
       async (code) => {
@@ -2034,6 +2137,10 @@ Body.
       expect(oversizedEntry).toBeDefined();
       expect(oversizedEntry![1].message).toMatch(/Invalid glob in "paths"/);
       expect(oversizedEntry![1].skillName).toBe('bad-glob-skill');
+      expect(manager.getCachedSkills()?.map((skill) => skill.name)).toContain(
+        'bad-glob-skill',
+      );
+      expect(manager.hasDiscoveryErrors()).toBe(false);
     });
   });
 

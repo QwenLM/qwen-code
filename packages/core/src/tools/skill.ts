@@ -14,7 +14,7 @@ import type {
 } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
-import type { SkillConfig } from '../skills/types.js';
+import { skillRestrictionNames, type SkillConfig } from '../skills/types.js';
 import {
   logSkillLaunch,
   recordSkillInvocation,
@@ -124,7 +124,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
   private loadedSkillContents = new Map<string, string>();
-  private loadedSkillContentByName = new Map<string, string>();
+  private loadedSkillContentByName = new Map<
+    string,
+    { content: string; restrictionNames: string[] }
+  >();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -213,19 +216,23 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           skill,
         ]),
       );
+      const disabledNames = this.config.getDisabledSkillNames();
       for (const name of this.loadedSkillNames) {
         const skill = discoveredByName.get(name);
+        const loaded = this.loadedSkillContentByName.get(name);
         if (
           !skill &&
           this.skillManager.hasDiscoveryErrors() &&
-          !this.config.getDisabledSkillNames().has(name.toLowerCase())
+          !(loaded?.restrictionNames ?? skillRestrictionNames({ name })).some(
+            (entry) => disabledNames.has(entry),
+          )
         ) {
           continue;
         }
         if (
           !skill ||
           !this.config.isSkillEnabled(skill) ||
-          this.loadedSkillContentByName.get(name) !==
+          loaded?.content !==
             buildSkillLlmContent(path.dirname(skill.filePath), skill.body)
         ) {
           this.loadedSkillNames.delete(name);
@@ -366,11 +373,14 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.config,
       this.skillManager,
       params,
-      (name: string, content?: string) => {
+      (name: string, content?: string, skill?: SkillConfig) => {
         this.loadedSkillNames.add(name);
         if (content !== undefined) {
           this.loadedSkillContents.set(content, name);
-          this.loadedSkillContentByName.set(name, content);
+          this.loadedSkillContentByName.set(name, {
+            content,
+            restrictionNames: skillRestrictionNames(skill ?? { name }),
+          });
         }
       },
       this.config.getModelInvocableCommandsExecutor(),
@@ -468,7 +478,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       }
       this.loadedSkillContents.set(skill.output, skill.name);
       this.loadedSkillNames.add(skill.name);
-      this.loadedSkillContentByName.set(skill.name, skill.output);
+      this.loadedSkillContentByName.set(skill.name, {
+        content: skill.output,
+        restrictionNames: skillRestrictionNames(skill.config),
+      });
       if (rearm) restored.set(skill.name, skill.config);
     };
 
@@ -627,7 +640,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     private readonly config: Config,
     private readonly skillManager: SkillManager,
     params: SkillParams,
-    private readonly onSkillLoaded: (name: string, content?: string) => void,
+    private readonly onSkillLoaded: (
+      name: string,
+      content?: string,
+      skill?: SkillConfig,
+    ) => void,
     private readonly commandExecutor:
       | ((
           name: string,
@@ -927,7 +944,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
-      this.onSkillLoaded(this.params.skill, llmContent);
+      this.onSkillLoaded(this.params.skill, llmContent, skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {

@@ -700,12 +700,19 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(100_000);
       const text = formatContextUsageText(data);
       expect(text).not.toContain('report-builder (body loaded)');
+      expect(text).not.toContain('report-builder (active)');
       expect(text.match(/body loaded/g)).toHaveLength(1);
     });
 
-    it.each([0, 100_000])(
-      'bills repeated copies of a tracked skill body as messages (API total %i)',
-      async (total) => {
+    it.each([
+      { total: 0, suffix: '' },
+      { total: 100_000, suffix: '' },
+      { total: 0, suffix: '\nRestored invocation metadata.' },
+      { total: 100_000, suffix: '\nRestored invocation metadata.' },
+    ])(
+      'bills repeated copies of a tracked body (API total $total, suffix "$suffix")',
+      async ({ total, suffix }) => {
+        const emittedBody = trackedBody + suffix;
         const trackedBodies = new Map([[trackedBody, 'report-builder']]);
         const options = {
           total,
@@ -717,16 +724,16 @@ describe('collectContextData (contextCommand)', () => {
           ],
           declared: [skillToolSchema],
           skillList: trackedSkillList,
-          history: [prelude, conversation[0]!, skillResponse(trackedBody)],
+          history: [prelude, conversation[0]!, skillResponse(emittedBody)],
         };
         const once = await collectContextData(makeChatConfig(options), true);
         const repeatedConfig = makeChatConfig({
           ...options,
-          history: [...options.history, skillResponse(trackedBody)],
+          history: [...options.history, skillResponse(emittedBody)],
         });
         const repeated = await collectContextData(repeatedConfig, true);
         const responseTokens = estimateContextTextTokens(
-          JSON.stringify({ name: 'skill', response: { output: trackedBody } }),
+          JSON.stringify({ name: 'skill', response: { output: emittedBody } }),
         );
 
         expect(once.breakdown.messages).toBe(total ? 100 : 0);
