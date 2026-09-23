@@ -78,6 +78,9 @@
   height: 8px;
   z-index: var(--stack, 1);
   border-radius: 1px;
+  /* A ring of the surface colour, so a span stacked over another of the same
+     lane still reads as a separate mark. */
+  box-shadow: 0 0 0 1px var(--background);
   background: var(--traj-request);
   cursor: pointer;
 }
