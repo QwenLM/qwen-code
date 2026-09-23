@@ -131,6 +131,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
+  toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
 // The tool-exclusion sets and the context-aware selector now live in
@@ -592,19 +593,18 @@ export class AgentCore {
    * Returns true if this agent's effective tool surface will include the Skill
    * tool. Used before `prepareTools()` to decide whether to inject the
    * `<available_skills>` snapshot.
+   *
+   * Delegates to the predicate `SubagentManager` uses to decide whether this
+   * agent's Config holds a SkillManager, so the listing and a bundled
+   * reference's pointer cannot disagree (#12424). That predicate also honours
+   * `disallowedTools`, which this method used to ignore — a `'*'` agent that
+   * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
-    if (!this.toolConfig) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    const asStrings = this.toolConfig.tools.filter(
-      (t): t is string => typeof t === 'string',
-    );
-    const hasWildcard = asStrings.includes('*');
-    if (hasWildcard || asStrings.length === 0) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    return asStrings.includes(ToolNames.SKILL);
+    return toolConfigAllowsSkill(this.toolConfig, {
+      codeModeOnly:
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
+    });
   }
 
   /**

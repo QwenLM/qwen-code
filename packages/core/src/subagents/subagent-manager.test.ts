@@ -22,6 +22,9 @@ import { AuthType } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ExecutionEnvironment } from '../services/execution-environment.js';
 import { Storage } from '../config/storage.js';
+import { type AgentTool, TOOL_REGISTRY_REBUILT } from '../tools/agent/agent.js';
+import { resolveAgentDelegationSurface } from '../skills/agent-delegation-skill.js';
+import type { SkillManager } from '../skills/skill-manager.js';
 
 // Mock file system operations
 vi.mock('fs/promises');
@@ -4097,6 +4100,111 @@ bad`);
           ),
         ).rejects.toThrow(/synthetic constructor failure/);
         expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    // #12424: a subagent whose tool policy leaves it no Skill tool must not
+    // hold a SkillManager, or the nested Agent tool's description points it
+    // at the agent-delegation skill it cannot load.
+    describe('createAgentHeadless — SkillManager follows the tool policy', () => {
+      const baseConfig: SubagentConfig = {
+        name: 'skill-policy-agent',
+        description: 'skill policy test',
+        systemPrompt: 'You are a test agent.',
+        level: 'session' as const,
+      };
+      const sessionManager = {} as SkillManager;
+
+      beforeEach(() => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+          getResult: vi.fn(),
+        });
+        vi.spyOn(mockConfig, 'getSkillManager').mockReturnValue(sessionManager);
+        // The nested Agent tool subscribes to the subagent manager.
+        vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(manager);
+        // The Agent-tool launch path: the per-launch wrapper already rebuilt
+        // its registry, so an unrestricted agent skips its own rebuild.
+        (mockConfig as unknown as Record<symbol, unknown>)[
+          TOOL_REGISTRY_REBUILT
+        ] = true;
+      });
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+      });
+
+      async function launch(
+        config: Partial<SubagentConfig>,
+        parent: Config = mockConfig,
+      ): Promise<Config> {
+        mockAgentHeadlessCreate.mockClear();
+        await manager.createAgentHeadless({ ...baseConfig, ...config }, parent);
+        return destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        ).runtimeContext as Config;
+      }
+
+      it('keeps the session manager and the wrapper registry for an unrestricted agent', async () => {
+        const context = await launch({});
+        expect(context.getSkillManager()).toBe(sessionManager);
+        expect(context.getToolRegistry()).toBe(mockToolRegistry);
+      });
+
+      it.each([
+        ['an allowlist without skill', { tools: [ToolNames.READ_FILE] }],
+        ['a blocklist naming skill', { disallowedTools: [ToolNames.SKILL] }],
+      ])(
+        'withholds the manager and inlines the delegation guidance for %s',
+        async (_label, config) => {
+          const context = await launch(config);
+          expect(context.getSkillManager()).toBeNull();
+          expect(resolveAgentDelegationSurface(context)).toBe('inline');
+          // The nested Agent tool is built lazily by the agent's registry. It
+          // must be rebuilt on this Config, or the tool reads the wrapper's
+          // manager and still points at the skill.
+          expect(context.getToolRegistry()).not.toBe(mockToolRegistry);
+          // SkillTool cannot be built without a manager; not registering it
+          // keeps every warmAll() from retrying a factory that throws.
+          expect(context.getToolRegistry().getAllToolNames()).not.toContain(
+            ToolNames.SKILL,
+          );
+          const agentTool = (await context
+            .getToolRegistry()
+            .ensureTool(ToolNames.AGENT)) as AgentTool;
+          await agentTool.refreshSubagents();
+          expect(agentTool.description).toContain(
+            'Skills cannot be loaded in this session',
+          );
+        },
+      );
+
+      it('points at the delegation skill when the agent can load it', async () => {
+        const context = await launch({
+          tools: [ToolNames.READ_FILE, ToolNames.SKILL],
+        });
+        expect(context.getSkillManager()).toBe(sessionManager);
+        expect(resolveAgentDelegationSurface(context)).not.toBe('inline');
+      });
+
+      it('restores the session manager for a nested agent that can load skills', async () => {
+        const child = await launch({ tools: [ToolNames.READ_FILE] });
+        const grandchild = await launch({}, child);
+        expect(grandchild.getSkillManager()).toBe(sessionManager);
+        expect(grandchild.getToolRegistry()).not.toBe(child.getToolRegistry());
+        expect(grandchild.getToolRegistry().getAllToolNames()).toContain(
+          ToolNames.SKILL,
+        );
+      });
+
+      it('leaves a nested agent that also cannot load skills on its parent registry', async () => {
+        const child = await launch({ tools: [ToolNames.READ_FILE] });
+        const grandchild = await launch(
+          { disallowedTools: [ToolNames.SKILL] },
+          child,
+        );
+        expect(grandchild.getSkillManager()).toBeNull();
+        expect(grandchild.getToolRegistry()).toBe(child.getToolRegistry());
       });
     });
   });

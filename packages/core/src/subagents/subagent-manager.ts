@@ -84,6 +84,9 @@ import {
   hasRebuiltToolRegistry,
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
+import { toolConfigAllowsSkill } from '../agents/runtime/subagent-plan-tool-policy.js';
+import type { SkillManager } from '../skills/skill-manager.js';
+import { ToolMode } from '../tools/code-mode.js';
 
 const AGENT_CONFIG_DIR = 'agents';
 
@@ -132,6 +135,28 @@ function recordExecutionRefusal(
   ]) {
     if (name) refusals.set(name.toLowerCase(), error);
   }
+}
+
+/**
+ * The session's own SkillManager, recorded on a subagent Config whose tool
+ * policy withholds skills. Symbol-keyed so `sessionSkillManager` below reads it
+ * through the prototype chain: a nested agent derives its Config from its
+ * parent's, and needs the real manager back when its own policy allows skills
+ * even though an ancestor's did not.
+ */
+const SESSION_SKILL_MANAGER: unique symbol = Symbol.for(
+  'qwen-code.subagent.sessionSkillManager',
+);
+
+/**
+ * The SkillManager the session itself holds, looking past any ancestor
+ * subagent that withheld it from its own Config.
+ */
+function sessionSkillManager(config: Config): SkillManager | null {
+  const recorded = (config as unknown as Record<symbol, unknown>)[
+    SESSION_SKILL_MANAGER
+  ] as SkillManager | null | undefined;
+  return recorded !== undefined ? recorded : config.getSkillManager();
 }
 
 /**
@@ -1169,7 +1194,12 @@ export class SubagentManager {
       );
 
       const { context: subagentContext, cleanup } =
-        await this.buildSubagentContextOverride(runtimeContext, config);
+        await this.buildSubagentContextOverride(runtimeContext, config, {
+          skillsAvailable: toolConfigAllowsSkill(toolConfig, {
+            codeModeOnly:
+              runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
+          }),
+        });
       disposeSubagentRegistry = cleanup;
 
       // Register per-agent frontmatter hooks. The returned unregister callback
@@ -1272,6 +1302,14 @@ export class SubagentManager {
   private async buildSubagentContextOverride(
     runtimeContext: Config,
     config: SubagentConfig,
+    options: {
+      /**
+       * Whether this agent's resolved tool policy declares the Skill tool —
+       * {@link toolConfigAllowsSkill} on the ToolConfig the agent will run
+       * with. Decides whether its Config holds a SkillManager.
+       */
+      skillsAvailable: boolean;
+    },
   ): Promise<{
     context: Config;
     /**
@@ -1330,6 +1368,35 @@ export class SubagentManager {
       subagentContext.getMcpServers = () => merged;
     }
 
+    // A subagent whose tool policy leaves it no Skill tool must not hold a
+    // SkillManager either (#12424). The manager is what every surface that
+    // talks about skills keys on: the `<available_skills>` listing, path-gated
+    // skill activation, and — the reported bug — a bundled reference's route.
+    // With the manager present, the nested Agent tool's description points at
+    // the `agent-delegation` skill this agent cannot load, so the guidance that
+    // used to sit resident in that description reaches it as a dead pointer.
+    // Withheld, the route resolves to `inline` and the guidance travels in the
+    // description instead, as it does for any session with no route to skills.
+    //
+    // The session's real manager is recorded rather than dropped, because a
+    // nested agent derives its Config from this one through the prototype
+    // chain: without the record, an agent whose own policy allows skills would
+    // inherit `null` from an ancestor whose policy did not.
+    //
+    // Only re-anchor when the manager this agent should hold differs from the
+    // one its Config would inherit, so an unrestricted agent — the common case
+    // — gets exactly the Config it got before.
+    const sessionManager = sessionSkillManager(runtimeContext);
+    const agentManager = options.skillsAvailable ? sessionManager : null;
+    const reanchorSkillManager =
+      agentManager !== runtimeContext.getSkillManager();
+    if (reanchorSkillManager) {
+      (subagentContext as unknown as Record<symbol, unknown>)[
+        SESSION_SKILL_MANAGER
+      ] = sessionManager;
+      subagentContext.getSkillManager = () => agentManager;
+    }
+
     // The skip-rebuild optimization (`hasRebuiltToolRegistry`) is bypassed
     // when per-agent `mcpServers` are present: without a fresh rebuild
     // anchored on `subagentContext`, the existing wrapper-owned registry's
@@ -1338,7 +1405,18 @@ export class SubagentManager {
     // discovery loop below would silently no-op. Forcing a rebuild here
     // ties the manager to `subagentContext`, which is the only config in
     // the chain that knows about the per-agent servers.
-    if (hasAgentMcpServers || !hasRebuiltToolRegistry(runtimeContext)) {
+    //
+    // It is also bypassed when the SkillManager was re-anchored above: the
+    // wrapper's registry was built on `runtimeContext`, so its lazily
+    // constructed tools — the nested Agent tool among them — would read the
+    // inherited manager, not the one this agent should hold. Rebuilding is the
+    // only re-anchoring that moves tools above the wrapper; see the
+    // `markRebuilt` note on `rebuildToolRegistryOnOverride`.
+    if (
+      hasAgentMcpServers ||
+      reanchorSkillManager ||
+      !hasRebuiltToolRegistry(runtimeContext)
+    ) {
       await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
     }
 

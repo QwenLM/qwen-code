@@ -73,10 +73,11 @@ import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
 import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
 import {
   buildInheritedForkExecutionToolNames,
-  EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from './runtime/agent-core.js';
+import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import type {
   AgentExternalInput,
   PromptConfig,
@@ -116,17 +117,42 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
 
 /**
  * Returns true when the subagent's effective tool surface will include the
- * Skill tool. Mirrors `AgentCore.willHaveSkillTool()` for the resume path
- * where no AgentCore instance exists yet.
+ * Skill tool — the answer `SubagentManager.createAgentHeadless()` reaches for
+ * the same agent, so a resumed agent is shown the skill listing exactly when
+ * its Config holds a SkillManager (#12424). Names are resolved the way
+ * `convertToRuntimeConfig` resolves them, because the predicate matches
+ * exactly and a definition may use a display name.
  */
-function subagentWillHaveSkillTool(
+async function subagentWillHaveSkillTool(
+  config: Config,
   subagentConfig: SubagentConfig | undefined,
-): boolean {
-  const tools = subagentConfig?.tools;
-  if (!tools || tools.length === 0 || tools.includes('*')) {
-    return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+): Promise<boolean> {
+  const codeModeOnly = config.getToolMode?.() === ToolMode.CodeModeOnly;
+  if (
+    !subagentConfig ||
+    ((!subagentConfig.tools || subagentConfig.tools.length === 0) &&
+      (!subagentConfig.disallowedTools ||
+        subagentConfig.disallowedTools.length === 0))
+  ) {
+    return toolConfigAllowsSkill(undefined, { codeModeOnly });
   }
-  return tools.includes(ToolNames.SKILL);
+  const manager = config.getSubagentManager();
+  return toolConfigAllowsSkill(
+    {
+      tools: subagentConfig.tools
+        ? await manager.resolveToolNames(subagentConfig.tools)
+        : ['*'],
+      ...(subagentConfig.disallowedTools &&
+      subagentConfig.disallowedTools.length > 0
+        ? {
+            disallowedTools: await manager.resolveToolNames(
+              subagentConfig.disallowedTools,
+            ),
+          }
+        : {}),
+    },
+    { codeModeOnly },
+  );
 }
 
 interface TranscriptRecovery {
@@ -971,7 +997,8 @@ export class BackgroundAgentResumeService {
             ...(
               await getInitialChatHistory(activeAgentConfig, undefined, {
                 includeDeferredToolsReminder: false,
-                includeAvailableSkillsReminder: subagentWillHaveSkillTool(
+                includeAvailableSkillsReminder: await subagentWillHaveSkillTool(
+                  this.config,
                   target.subagentConfig,
                 ),
               })

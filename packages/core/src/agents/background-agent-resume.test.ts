@@ -98,6 +98,7 @@ describe('BackgroundAgentResumeService', () => {
           : null,
       ),
       createAgentHeadless: vi.fn(),
+      resolveToolNames: vi.fn(async (tools: string[]) => tools),
     };
     const hookSystem =
       options.hookSystem !== undefined
@@ -1298,6 +1299,113 @@ describe('BackgroundAgentResumeService', () => {
     };
     expect(contextArg.get('hook_context')).toBe('');
   });
+
+  // #12424: the resumed agent is shown the skill listing exactly when
+  // createAgentHeadless leaves its Config a SkillManager.
+  it.each([
+    ['inherits every tool', {}, true],
+    [
+      'disallows the Skill tool by display name',
+      { tools: ['*'], disallowedTools: ['Skill'] },
+      false,
+    ],
+    ['lists tools without skill', { tools: ['read_file'] }, false],
+  ])(
+    'matches the launch-time skill listing when the definition %s',
+    async (_label, toolFields, expectListing) => {
+      const sessionId = 'session-skill-listing';
+      const agentId = 'agent-skill-listing';
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        description: 'Resume with skills',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'running',
+        subagentName: 'researcher',
+        resolvedApprovalMode: 'auto-edit',
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Resume with skills' }] },
+        }) + '\n',
+        'utf8',
+      );
+      registry.register({
+        agentId,
+        description: 'Resume with skills',
+        subagentType: 'researcher',
+        isBackgrounded: true,
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        prompt: 'Resume with skills',
+        outputFile,
+        metaPath,
+      });
+
+      const subagent = {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          outputTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      };
+      const { service, subagentManager } = createService({
+        skillManager: {
+          listSkills: vi.fn().mockResolvedValue([
+            {
+              name: 'auto-skill-demo',
+              description: 'Demo project skill',
+              level: 'project',
+              disableModelInvocation: false,
+            },
+          ]),
+          isSkillActive: vi.fn().mockReturnValue(true),
+        },
+      });
+      subagentManager.loadSubagent.mockResolvedValue({
+        name: 'researcher',
+        color: 'cyan',
+        model: undefined,
+        approvalMode: undefined,
+        ...toolFields,
+      } as never);
+      subagentManager.resolveToolNames.mockImplementation(
+        async (tools: string[]) =>
+          tools.map((tool) => (tool === 'Skill' ? ToolNames.SKILL : tool)),
+      );
+      subagentManager.createAgentHeadless.mockResolvedValue({
+        subagent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await service.resumeBackgroundAgent(agentId, 'continue');
+
+      const options = subagentManager.createAgentHeadless.mock.calls[0]?.[2] as
+        | { promptConfigOverrides?: { initialMessages?: unknown[] } }
+        | undefined;
+      const initialMessages = JSON.stringify(
+        options?.promptConfigOverrides?.initialMessages ?? [],
+      );
+      expect(initialMessages.includes('auto-skill-demo')).toBe(expectListing);
+    },
+  );
 
   it('returns only model-visible subagent output when resumed background agents complete', async () => {
     const sessionId = 'session-resume-sanitized';

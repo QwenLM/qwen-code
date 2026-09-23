@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { FunctionDeclaration } from '@google/genai';
 import { ToolNames } from '../../tools/tool-names.js';
-import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import {
+  matchesMcpPattern,
+  matchesToolPattern,
+} from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
+import type { ToolConfig } from './agent-types.js';
+import { getToolExposure } from '../../tools/code-mode.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
@@ -77,6 +83,76 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
 ]);
+
+/**
+ * Whether an agent running with `toolConfig` is declared the Skill tool: the
+ * same declaration-level filters `AgentCore.prepareTools()` applies.
+ *
+ * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
+ * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
+ * (whether the agent's Config holds a `SkillManager`, which decides whether a
+ * bundled reference reaches it as a pointer or inline). One predicate, so the
+ * listing and the pointer cannot disagree about whether a skill can actually
+ * be loaded — the disagreement #12424 reports.
+ *
+ * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
+ * configured names to canonical tool names before they reach a `ToolConfig`,
+ * and `matchesToolPattern` compares a non-MCP name by equality.
+ *
+ * - No `toolConfig`, a `'*'` entry, or an empty list inherits the registry,
+ *   so the Skill tool is available unless the subagent exclusion set removes
+ *   it. A list holding only inline declarations does NOT inherit: that is the
+ *   explicit branch of `prepareTools()`, which declares no registry tool.
+ * - An explicit list must name `skill` — or, under CodeModeOnly, name `exec`,
+ *   which admits every code-mode-callable tool, the Skill tool included.
+ * - `disallowedTools` removes it at declaration.
+ *
+ * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
+ * agent cannot follow, a wrong `false` takes skills away from an agent that
+ * could load them. That is also why `executionAllowedTools` is not consulted:
+ * the only agents that carry one are forks, which reuse the parent's
+ * declarations for cache reasons and never rebuild the listing, and reading
+ * it correctly under CodeModeOnly would need the same `exec` carve-out again.
+ */
+export function toolConfigAllowsSkill(
+  toolConfig: ToolConfig | undefined,
+  options: { codeModeOnly?: boolean } = {},
+): boolean {
+  if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+    return false;
+  }
+  if (!toolConfig) {
+    return true;
+  }
+  const names = toolConfig.tools.filter(
+    (tool): tool is string => typeof tool === 'string',
+  );
+  const inlineDeclarations = toolConfig.tools.filter(
+    (tool): tool is FunctionDeclaration => typeof tool !== 'string',
+  );
+  const inheritsRegistry =
+    names.includes('*') ||
+    (names.length === 0 && inlineDeclarations.length === 0);
+  const reachesSkillThroughExec =
+    options.codeModeOnly === true &&
+    names.includes(ToolNames.EXEC) &&
+    getToolExposure(ToolNames.SKILL) === 'code-mode-callable';
+  if (
+    !inheritsRegistry &&
+    !names.includes(ToolNames.SKILL) &&
+    !reachesSkillThroughExec
+  ) {
+    return false;
+  }
+  if (
+    toolConfig.disallowedTools?.some((pattern) =>
+      matchesToolPattern(pattern, ToolNames.SKILL),
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
 
 /**
  * Tools excluded from teammates. Teammates need send_message and the
