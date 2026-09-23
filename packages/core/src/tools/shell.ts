@@ -4460,9 +4460,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * `null` when the reflog holds a single entry (an initial commit, or one
    * expired down to a single record).
    */
-  private async getGitHeadOrigin(
-    cwd: string,
-  ): Promise<{
+  private async getGitHeadOrigin(cwd: string): Promise<{
     sha: string;
     createdByCommit: boolean;
     predecessor: string | null;
