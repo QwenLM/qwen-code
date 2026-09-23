@@ -231,6 +231,28 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                                     runtimeSessionId, snapshot));
             return;
         }
+        if ("POST".equals(exchange.getRequestMethod())
+                && suffix.endsWith(":resolve")) {
+            String executionCallId = pathId(suffix.substring(0,
+                    suffix.length() - ":resolve".length()));
+            Map<String, Object> body = requestBody(exchange,
+                    "resolve request");
+            requireProtocol(body);
+            JsonCodec.requiredString(body, "requestId", "resolve request");
+            String harnessSessionId = JsonCodec.requiredString(body,
+                    "harnessSessionId", "resolve request");
+            String runtimeSessionId = JsonCodec.requiredString(body,
+                    "runtimeSessionId", "resolve request");
+            UnknownExecutionResolution resolution = parseResolution(
+                    JsonCodec.requiredString(body, "resolution",
+                            "resolve request"));
+            Map<String, Object> snapshot = service.resolveUnknownExecution(
+                    harnessSessionId, runtimeSessionId, executionCallId,
+                    resolution);
+            sendJson(exchange, 200, executionEnvelope(harnessSessionId,
+                    runtimeSessionId, snapshot));
+            return;
+        }
         if ("GET".equals(exchange.getRequestMethod())
                 && suffix.indexOf('/') < 0) {
             String executionCallId = pathId(suffix);
@@ -263,6 +285,19 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             throw new RuntimeBrokerException(401,
                     "runtime_broker_unauthorized",
                     "Runtime Broker authentication failed.", false);
+        }
+    }
+
+    private static UnknownExecutionResolution parseResolution(String raw) {
+        switch (raw) {
+            case "confirmed_not_executed":
+                return UnknownExecutionResolution.CONFIRMED_NOT_EXECUTED;
+            case "accepted_unknown":
+                return UnknownExecutionResolution.ACCEPTED_UNKNOWN;
+            default:
+                throw new RuntimeBrokerException(400,
+                        "runtime_broker_invalid_request",
+                        "Runtime Broker resolution is unsupported.", false);
         }
     }
 

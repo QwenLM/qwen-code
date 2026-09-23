@@ -76,6 +76,10 @@ export type ManagedRuntimeExecutionInspection =
     }
   | { readonly outcome: 'unknown' };
 
+export type ManagedRuntimeUnknownResolution =
+  | 'confirmed_not_executed'
+  | 'accepted_unknown';
+
 export interface ManagedRuntimeProvider {
   getToolV2Client?(
     request: ManagedRuntimePrepareRequest,
@@ -89,6 +93,10 @@ export interface ManagedRuntimeProvider {
   ): Promise<ManagedRuntimeExecutionInspection>;
   cancelExecution?(
     identity: ManagedRuntimeExecutionIdentity,
+  ): Promise<ManagedRuntimeExecutionInspection>;
+  resolveExecution?(
+    identity: ManagedRuntimeExecutionIdentity,
+    resolution: ManagedRuntimeUnknownResolution,
   ): Promise<ManagedRuntimeExecutionInspection>;
   prepare(request: ManagedRuntimePrepareRequest): ManagedRuntimeHandle;
   cancel(

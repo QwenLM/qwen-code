@@ -466,4 +466,66 @@ describe('BrokerManagedRuntimeProvider', () => {
       calls.some((call) => call.url.includes('tool-sessions:acquire')),
     ).toBe(false);
   });
+
+  it('resolves an unknown execution through the broker without re-executing it', async () => {
+    const settled = {
+      state: 'settled' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+      result: {
+        executionStatus: 'not_started',
+        resolution: 'confirmed_not_executed',
+      },
+    };
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const body = init?.body
+        ? (JSON.parse(String(init.body)) as unknown)
+        : undefined;
+      calls.push({ method, url, ...(body === undefined ? {} : { body }) });
+      if (url.endsWith('/executions/execution-recovery:resolve')) {
+        return json(
+          envelope({
+            executionCallId: 'execution-recovery',
+            status: settled,
+          }),
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${method} ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+
+    await expect(
+      provider.resolveExecution(
+        {
+          harnessSessionId,
+          runtimeSessionId,
+          executionCallId: 'execution-recovery',
+        },
+        'confirmed_not_executed',
+      ),
+    ).resolves.toEqual({ outcome: 'known', status: settled });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe(
+      'http://127.0.0.1:8080/internal/runtime-broker/v1/executions/execution-recovery:resolve',
+    );
+    expect(calls[0].body).toMatchObject({
+      protocolVersion: 1,
+      harnessSessionId,
+      runtimeSessionId,
+      resolution: 'confirmed_not_executed',
+      requestId: expect.any(String),
+    });
+  });
 });

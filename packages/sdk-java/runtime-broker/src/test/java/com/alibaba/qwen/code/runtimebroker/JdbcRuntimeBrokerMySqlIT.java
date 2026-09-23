@@ -11,7 +11,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 
@@ -55,6 +59,194 @@ class JdbcRuntimeBrokerMySqlIT {
                         + "WHERE tenant_id = 'mysql-process-tenant' "
                         + "AND binding_state = 'READY' "
                         + "AND runtime_generation = 1"));
+    }
+
+    @Test
+    void lostAckIsSettledFromMySqlWithoutReexecution() throws Exception {
+        DataSource dataSource = dataSource();
+        JdbcRuntimeBrokerSchema.initialize(dataSource);
+        cleanAckLossRows(dataSource);
+        RuntimeScope scope = new RuntimeScope("ack-loss-tenant",
+                "ack-loss-workspace", "generation-1", "/workspace",
+                "capability-digest", "workspace");
+        RuntimeLease lease = new RuntimeLease("runtime-ack-loss",
+                java.net.URI.create("http://127.0.0.1:4190"),
+                "runtime-token", "lease-1", 1);
+        CountingTransport transport = new CountingTransport();
+        String idempotencyKey = "ack-loss-key";
+
+        RuntimeBrokerService first = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                request -> CompletableFuture.completedFuture(lease),
+                transport,
+                new JdbcRuntimeBindingRepository(dataSource, protector()),
+                new JdbcRuntimeSessionRepository(dataSource),
+                new JdbcToolExecutionRepository(dataSource),
+                "ack-loss-owner-a");
+        String executionCallId;
+        try {
+            first.acquire("ack-loss-harness", "ack-loss-runtime",
+                    "bootstrap").toCompletableFuture().get(10,
+                            TimeUnit.SECONDS);
+            Map<String, Object> created = first.createExecution(
+                    idempotencyKey, "ack-loss-harness", "ack-loss-runtime",
+                    "turn-1", "tool-1", "args-1", reference());
+            executionCallId = (String) created.get("executionCallId");
+            awaitSettled(dataSource, executionCallId);
+            assertEquals(1, transport.executions.get());
+        } finally {
+            // The ACK is lost here: the caller never learned the outcome, and
+            // the broker goes away without releasing anything.
+            first.close();
+        }
+
+        RuntimeBrokerService restarted = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                request -> CompletableFuture.completedFuture(lease),
+                transport,
+                new JdbcRuntimeBindingRepository(dataSource, protector()),
+                new JdbcRuntimeSessionRepository(dataSource),
+                new JdbcToolExecutionRepository(dataSource),
+                "ack-loss-owner-b");
+        try {
+            Map<String, Object> queried = restarted.getExecution(
+                    "ack-loss-harness", "ack-loss-runtime", executionCallId,
+                    null);
+            assertEquals("settled", status(queried).get("state"));
+            assertEquals("success", result(queried).get("executionStatus"));
+
+            // The retry with the original idempotency key returns the settled
+            // execution instead of dispatching the tool again.
+            Map<String, Object> retried = restarted.createExecution(
+                    idempotencyKey, "ack-loss-harness", "ack-loss-runtime",
+                    "turn-1", "tool-1", "args-1", reference());
+            assertEquals(executionCallId, retried.get("executionCallId"));
+            assertEquals("settled", status(retried).get("state"));
+            assertEquals(1, transport.executions.get());
+        } finally {
+            restarted.close();
+        }
+    }
+
+    private static void cleanAckLossRows(DataSource dataSource)
+            throws SQLException {
+        List<String> statements = List.of(
+                "DELETE FROM qwen_tool_execution WHERE "
+                        + "harness_session_id = 'ack-loss-harness'",
+                "DELETE FROM qwen_runtime_session WHERE "
+                        + "harness_session_id = 'ack-loss-harness'",
+                "DELETE FROM qwen_runtime_binding WHERE "
+                        + "tenant_id = 'ack-loss-tenant'",
+                "DELETE FROM qwen_runtime_binding_slot WHERE "
+                        + "tenant_id = 'ack-loss-tenant'");
+        try (Connection connection = dataSource.getConnection()) {
+            for (String sql : statements) {
+                try (PreparedStatement statement =
+                        connection.prepareStatement(sql)) {
+                    statement.executeUpdate();
+                }
+            }
+        }
+    }
+
+    private static void awaitSettled(DataSource dataSource,
+            String executionCallId) throws Exception {
+        JdbcToolExecutionRepository executions =
+                new JdbcToolExecutionRepository(dataSource);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            ToolExecutionRecord record = executions.findByExecutionCallId(
+                    executionCallId);
+            if (record != null && record.isSettled()) {
+                return;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("execution did not settle: "
+                + executionCallId);
+    }
+
+    private static Map<String, Object> reference() {
+        Map<String, Object> reference = new java.util.LinkedHashMap<>();
+        reference.put("sessionId", "ack-loss-runtime");
+        reference.put("promptId", "turn-1");
+        reference.put("callId", "tool-1");
+        reference.put("capabilityDigest", "capability-digest");
+        reference.put("policyRevision", "policy-1");
+        reference.put("invocationId", "invocation-1");
+        reference.put("argsDigest", "args-1");
+        return reference;
+    }
+
+    private static SecretProtector protector() {
+        byte[] key = new byte[32];
+        byte[] source = "ack-loss".getBytes(StandardCharsets.UTF_8);
+        for (int index = 0; index < key.length; index++) {
+            key[index] = source[index % source.length];
+        }
+        return new AesGcmSecretProtector("ack-loss-key", key);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> status(Map<String, Object> snapshot) {
+        return (Map<String, Object>) snapshot.get("status");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> result(Map<String, Object> snapshot) {
+        return (Map<String, Object>) status(snapshot).get("result");
+    }
+
+    private static final class CountingTransport implements RuntimeTransport {
+        private final AtomicInteger executions = new AtomicInteger();
+
+        @Override
+        public CompletionStage<Void> acquire(RuntimeLease lease,
+                RuntimeSession session) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Object> control(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> operation) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> execute(
+                RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> reference) {
+            executions.incrementAndGet();
+            return CompletableFuture.completedFuture(
+                    Map.of("executionStatus", "success"));
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> status(
+                RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> reference, long afterSequence) {
+            Map<String, Object> status = new java.util.LinkedHashMap<>();
+            status.put("state", executions.get() == 0
+                    ? "prepared" : "executing");
+            status.put("cancelRequested", false);
+            status.put("lastSeq", 0);
+            status.put("firstAvailableSeq", 1);
+            status.put("progressGap", false);
+            status.put("progress", List.of());
+            return CompletableFuture.completedFuture(status);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference) {
+            throw new AssertionError("cancel was not expected");
+        }
+
+        @Override
+        public CompletionStage<Boolean> release(RuntimeLease lease,
+                RuntimeSession session) {
+            return CompletableFuture.completedFuture(true);
+        }
     }
 
     private static void prepareProcessFixture(DataSource dataSource)

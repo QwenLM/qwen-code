@@ -24,6 +24,7 @@ import {
   type ManagedRuntimeProvider,
   type ManagedRuntimeReleaseOptions,
   type ManagedRuntimeToolClientContext,
+  type ManagedRuntimeUnknownResolution,
 } from './managed-runtime-provider.js';
 import {
   sameManagedRuntimeIdentity,
@@ -418,6 +419,36 @@ export class ManagedRuntimeBrokerClient {
     return parseInvocationStatus(envelope.status);
   }
 
+  async resolveUnknownExecution(
+    runtimeSessionId: string,
+    harnessSessionId: string,
+    executionCallId: string,
+    resolution: 'confirmed_not_executed' | 'accepted_unknown',
+    signal: AbortSignal,
+  ): Promise<ManagedToolInvocationStatus> {
+    const response = await this.requestJson(
+      'POST',
+      `executions/${encodeURIComponent(executionCallId)}:resolve`,
+      {
+        protocolVersion: MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
+        requestId: randomUUID(),
+        harnessSessionId,
+        runtimeSessionId,
+        resolution,
+      },
+      signal,
+    );
+    const envelope = this.parseEnvelope(
+      response,
+      harnessSessionId,
+      runtimeSessionId,
+    ) as BrokerExecutionResponse;
+    if (envelope.executionCallId !== executionCallId) {
+      throw new Error('Managed Runtime Broker execution identity changed.');
+    }
+    return parseInvocationStatus(envelope.status);
+  }
+
   async release(
     runtimeSessionId: string,
     harnessSessionId: string,
@@ -771,6 +802,24 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       }
       throw error;
     }
+  }
+
+  async resolveExecution(
+    identity: ManagedRuntimeExecutionIdentity,
+    resolution: ManagedRuntimeUnknownResolution,
+  ): Promise<ManagedRuntimeExecutionInspection> {
+    this.lifetime.signal.throwIfAborted();
+    const status = await this.client.resolveUnknownExecution(
+      identity.runtimeSessionId,
+      identity.harnessSessionId,
+      identity.executionCallId,
+      resolution,
+      AbortSignal.any([
+        this.lifetime.signal,
+        AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+      ]),
+    );
+    return { outcome: 'known', status };
   }
 
   async cancel(
