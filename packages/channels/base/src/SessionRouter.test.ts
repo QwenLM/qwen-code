@@ -6549,7 +6549,14 @@ describe('SessionRouter', () => {
         (id: string) => Promise.resolve(id),
       );
       expect(
-        await router.resolve('ch', 'alice', 'chat1', undefined, undefined, true),
+        await router.resolve(
+          'ch',
+          'alice',
+          'chat1',
+          undefined,
+          undefined,
+          true,
+        ),
       ).toBe('worktree-session');
       const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
       expect(persisted['ch:alice:chat1']).toMatchObject({
@@ -6592,9 +6599,7 @@ describe('SessionRouter', () => {
             // The first restore's alice load redirects to a replacement id;
             // every later load returns the id it was asked for.
             const isFirst = loads.length === 0 && sessionId === 'old-alice';
-            loads.push(() =>
-              resolve(isFirst ? 'replacement' : sessionId),
-            );
+            loads.push(() => resolve(isFirst ? 'replacement' : sessionId));
           }),
       );
       const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
@@ -6769,9 +6774,10 @@ describe('SessionRouter', () => {
       await expect(successor).resolves.toEqual({ restored: 1, failed: 0 });
       await expect(superseded).resolves.toEqual({ restored: 0, failed: 0 });
       expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-alice');
-      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))['ch:alice:chat1'].sessionId).toBe(
-        'old-alice',
-      );
+      expect(
+        JSON.parse(readFileSync(persistPath, 'utf-8'))['ch:alice:chat1']
+          .sessionId,
+      ).toBe('old-alice');
     });
 
     it('does not rotate a route carrying managed worktree metadata', async () => {
@@ -6869,9 +6875,9 @@ describe('SessionRouter', () => {
       loadResolvers[0]!('worktree-session');
       await drainMicrotasks();
       expect(
-        (
-          bridge.discardSession as ReturnType<typeof vi.fn>
-        ).mock.calls.some((call) => call[0] === 'worktree-session'),
+        (bridge.discardSession as ReturnType<typeof vi.fn>).mock.calls.some(
+          (call) => call[0] === 'worktree-session',
+        ),
       ).toBe(false);
 
       loadResolvers[1]!('worktree-session');

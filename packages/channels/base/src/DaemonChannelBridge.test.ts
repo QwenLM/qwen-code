@@ -150,7 +150,9 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 describe('DaemonChannelBridge', () => {
   it('classifies a transport-level daemon failure as BridgeConnectivityError', async () => {
     const transportError = new TypeError('fetch failed', {
-      cause: Object.assign(new Error('socket hangup'), { code: 'ECONNREFUSED' }),
+      cause: Object.assign(new Error('socket hangup'), {
+        code: 'ECONNREFUSED',
+      }),
     });
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
@@ -181,9 +183,9 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.loadSession('session-1', '/repo')).rejects.toThrow(
       'session not found',
     );
-    await expect(
-      bridge.loadSession('session-1', '/repo'),
-    ).rejects.not.toThrow(BridgeConnectivityError);
+    await expect(bridge.loadSession('session-1', '/repo')).rejects.not.toThrow(
+      BridgeConnectivityError,
+    );
     bridge.stop();
   });
 

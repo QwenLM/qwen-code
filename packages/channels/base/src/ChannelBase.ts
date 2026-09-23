@@ -6892,16 +6892,16 @@ export abstract class ChannelBase {
       this.router.releaseRoutingLease(sessionId);
     };
     try {
-    const sourceLabel = this.namedSessions
-      ? this.sourceLabelForTurn(sessionId, envelope)
-      : undefined;
-    if (this.namedSessions && !sourceLabel) {
-      await this.sendThreadMessage(
-        envelope.chatId,
-        envelope.threadId,
-        `Could not identify the selected task. Use /sessions, select it again, and retry.`,
-      );
-      return;
+      const sourceLabel = this.namedSessions
+        ? this.sourceLabelForTurn(sessionId, envelope)
+        : undefined;
+      if (this.namedSessions && !sourceLabel) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          `Could not identify the selected task. Use /sessions, select it again, and retry.`,
+        );
+        return;
       }
 
       if (btwQuestion !== undefined) {
@@ -7090,7 +7090,8 @@ export abstract class ChannelBase {
       }
 
       if (envelope.metadata) {
-        promptText = promptText + '\n\n' + sanitizePromptText(envelope.metadata);
+        promptText =
+          promptText + '\n\n' + sanitizePromptText(envelope.metadata);
       }
 
       // Resolve dispatch mode: per-group override → channel config → default
@@ -7197,7 +7198,10 @@ export abstract class ChannelBase {
               // turn at the channel level (cancelled is already set above), so
               // the event reflects that intent, not the bridge RPC outcome.
               this.emitTaskCancellation(active, sessionId, 'steer');
-              this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
+              this.removePendingPermissionsForSession(
+                sessionId,
+                'run_cancelled',
+              );
             }
             // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
             // after the wind-down bound, this steered turn is wedged behind a hung
@@ -7318,7 +7322,11 @@ export abstract class ChannelBase {
             );
             this.releaseChannelMemoryRead(recallRead);
             recallRead = undefined;
-            this.logChannelMemoryError('read', envelope, 'entry listing failed');
+            this.logChannelMemoryError(
+              'read',
+              envelope,
+              'entry listing failed',
+            );
           }
         }
         if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
@@ -7570,7 +7578,8 @@ export abstract class ChannelBase {
           // re-seeded or draining a buffer it owns. So only touch session-scoped
           // state when the entry is still ours. (Steer no longer evicts: it cancels
           // and waits, so a steered turn is always stillCurrent when it completes.)
-          const stillCurrent = this.activePrompts.get(sessionId) === promptState;
+          const stillCurrent =
+            this.activePrompts.get(sessionId) === promptState;
           // onPromptEnd runs platform cleanup (clear the typing interval, recall the
           // working reaction, finalize the card). Run it UNLESS this turn was a
           // /clear eviction (clearEvicted): /clear already ran this turn's onPromptEnd

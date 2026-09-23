@@ -16425,9 +16425,9 @@ describe('ChannelBase', () => {
       // The second message resolves (lease + count taken) and then throws in
       // the dispatch switch with a turn still active: the structural refund
       // must return both, or rotation is deferred on this route forever.
-      await expect(ch.handleInbound(envelope({ text: 'second' }))).rejects.toThrow(
-        'Unknown dispatch mode',
-      );
+      await expect(
+        ch.handleInbound(envelope({ text: 'second' })),
+      ).rejects.toThrow('Unknown dispatch mode');
       expect(leases.sessionRoutingLeases.has(sessionId)).toBe(false);
       expect(leases.toTurns.get(sessionId)).toBe(1);
 

@@ -1394,7 +1394,10 @@ export class SessionRouter {
   }
 
   /** Remove a session mapping by daemon/ACP session ID. */
-  removeSessionId(sessionId: string, options?: { deliberate?: boolean }): boolean {
+  removeSessionId(
+    sessionId: string,
+    options?: { deliberate?: boolean },
+  ): boolean {
     let removed = false;
     for (const [key, mappedSessionId] of [...this.toSession.entries()]) {
       if (mappedSessionId === sessionId) {
