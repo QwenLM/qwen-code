@@ -97,7 +97,18 @@ describe.skipIf(process.platform === 'win32')(
     // through `postPromote.onSettle`, instead of returning a plain
     // foreground result. The command itself still really runs.
     let simulatePromote = false;
+    // When true the fake executor does not fire that settle itself: it
+    // captures it in `firePromoteSettle` so the row decides when the
+    // backgrounded child exits. That is the shape a real Ctrl+B promote
+    // of a still-running command takes, and the only one that reaches
+    // registration through `promoteArtifacts.onSettleWired` rather than
+    // through the `settleQueued` drain.
+    let deferPromoteSettle = false;
+    let firePromoteSettle: (() => void) | null = null;
     let otherRepoDirs: string[];
+    // Non-repo temp dirs a row creates (e.g. a copied `git.exe`); removed
+    // in `afterEach`.
+    let scratchDirs: string[];
 
     /**
      * `isDestructiveCommand` returns `null` when it does not block, and a
@@ -145,6 +156,13 @@ describe.skipIf(process.platform === 'win32')(
       return otherDir;
     }
 
+    /** A temp dir that is not a repository; removed in `afterEach`. */
+    function makeScratchDir(prefix: string): string {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+      scratchDirs.push(dir);
+      return dir;
+    }
+
     /** Subject + trailer assertions shared by the loose-spelling rows. */
     function expectFeatureCommitLanded(preHead: string): void {
       expect(headSha()).not.toBe(preHead);
@@ -170,7 +188,10 @@ describe.skipIf(process.platform === 'win32')(
       clearSessionCommits();
       CommitAttributionService.resetInstance();
       simulatePromote = false;
+      deferPromoteSettle = false;
+      firePromoteSettle = null;
       otherRepoDirs = [];
+      scratchDirs = [];
 
       // Every repo below is real and every commit really runs, so a
       // machine-wide hook manager (`core.hooksPath` in the host's or the
@@ -217,16 +238,25 @@ describe.skipIf(process.platform === 'win32')(
             // `promoted: true` instead of a terminal exit, and the child
             // keeps running under the caller's ownership. Here the child
             // really ran to completion above (spawnSync is blocking), so
-            // this models a promote whose child exits before
-            // handlePromotedForeground finishes wiring — the settle lands
-            // in `promoteArtifacts.settleQueued` and is drained
-            // synchronously, which is what keeps the witness assertion
-            // (registration happened) deterministic.
-            options?.postPromote?.onSettle?.({
-              exitCode: spawned.status,
-              signal: null,
-              endTime: Date.now(),
-            });
+            // firing the settle immediately models a promote whose child
+            // exits before `handlePromotedForeground` finishes wiring —
+            // the settle lands in `promoteArtifacts.settleQueued` and is
+            // drained synchronously, which is what keeps the witness
+            // assertion (registration happened) deterministic.
+            const settle = () =>
+              options?.postPromote?.onSettle?.({
+                exitCode: spawned.status,
+                signal: null,
+                endTime: Date.now(),
+              });
+            if (deferPromoteSettle) {
+              // The other promote shape: the child is still running when
+              // `execute()` returns, so the settle arrives later and
+              // registration goes through `promoteArtifacts.onSettleWired`.
+              firePromoteSettle = settle;
+            } else {
+              settle();
+            }
             return {
               pid: 4242,
               result: Promise.resolve({ ...result, promoted: true }),
@@ -298,6 +328,9 @@ describe.skipIf(process.platform === 'win32')(
       fs.rmSync(repoDir, { recursive: true, force: true });
       for (const otherDir of otherRepoDirs) {
         fs.rmSync(otherDir, { recursive: true, force: true });
+      }
+      for (const dir of scratchDirs) {
+        fs.rmSync(dir, { recursive: true, force: true });
       }
     });
 
@@ -379,6 +412,32 @@ describe.skipIf(process.platform === 'win32')(
       const preHead = headSha();
 
       await runShellCommand('time git commit -m "feature"');
+
+      expectFeatureCommitLanded(preHead);
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('registers a commit spelled with a Windows `.exe` git path (issue #12514)', async () => {
+      // #12514-B: `"C:\Program Files\Git\cmd\git.exe" commit` is the
+      // spelling a Windows session really produces, and recognition is
+      // purely textual (shell.ts has no `process.platform` branch), so
+      // the row is runnable here: copy the resolved git binary to
+      // `<tmp>/git.exe` and commit through it. Without the suffix strip
+      // `programBasename` yields `git.exe`, neither loose `git` branch
+      // fires, the commit lands unregistered — and because
+      // `GIT_AMEND_PATTERN` never matches a `.exe`-spelled amend, the
+      // block fires precisely on the mixed spelling (absolute `.exe`
+      // commit, then a bare `git commit --amend`).
+      const gitPath = execSync('command -v git', { encoding: 'utf-8' }).trim();
+      const exePath = path.join(makeScratchDir('qwen-12514-exe-'), 'git.exe');
+      fs.copyFileSync(fs.realpathSync(gitPath), exePath);
+      fs.chmodSync(exePath, 0o755);
+
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      rawGit('add feature.txt');
+      const preHead = headSha();
+
+      await runShellCommand(`${exePath} commit -m "feature"`);
 
       expectFeatureCommitLanded(preHead);
       expect(amendVerdict()).toBeNull();
@@ -484,6 +543,85 @@ describe.skipIf(process.platform === 'win32')(
 
       expect(result.llmContent).toContain('promoted to background as');
       expect(headSha()).toBe(preHead);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
+    it('registers a promoted commit whose settle arrives after execute() returned (issue #12514)', async () => {
+      // The three promote rows above fire the settle before the handle
+      // resolves, so it lands in `promoteArtifacts.settleQueued` and is
+      // drained synchronously — none of them reaches the wired handler.
+      // A real Ctrl+B promote of a still-running command reaches
+      // registration only through `promoteArtifacts.onSettleWired`, so
+      // moving `registerPromotedCommit()` into the drain would keep every
+      // one of them green while losing registration for every promoted
+      // commit in production. This row defers the settle and pins that
+      // path.
+      simulatePromote = true;
+      deferPromoteSettle = true;
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      const preHead = headSha();
+
+      const result = await runShellCommand(
+        'git add feature.txt && git commit -m "feature"',
+      );
+
+      expect(result.llmContent).toContain('promoted to background as');
+      // Load-bearing: no settle was observed, i.e. the row really took
+      // the deferred branch instead of the queued drain.
+      expect(result.llmContent).toContain('Status: running');
+      // The commit is already on disk while the child is still counted
+      // as running, and registration is settle-only, so the exemption is
+      // not in place yet. This pins what the code does today (R1-9 asks
+      // whether it should); the assertion below is what makes the
+      // post-settle one causal.
+      expect(headSha()).not.toBe(preHead);
+      expect(amendVerdict()?.blocked).toBe(true);
+
+      firePromoteSettle!();
+      // `onSettleWired` starts registration asynchronously, so wait for
+      // the registry to reflect it instead of sleeping a fixed guess.
+      await vi.waitFor(() => expect(amendVerdict()).toBeNull());
+    });
+
+    it('does not adopt a commit somebody else landed while a promoted child ran (issue #12514)', async () => {
+      // The promoted window is the backgrounded child's whole lifetime,
+      // not the command's own duration, so #12523's accepted foreground
+      // window does not cover it. At settle the newest `commit:` reflog
+      // entry can be a commit the user (or a hook, or a parallel
+      // worktree session) landed after ours. Difference-from-`preHead`
+      // alone adopts it: the foreign commit earns the amend exemption —
+      // lifting the deterministic block on rewriting a commit the shell
+      // tool never made — and the promoted one loses its own.
+      // Registration must instead prove lineage: that the entry which
+      // created HEAD moved it *from* the captured preHead.
+      simulatePromote = true;
+      deferPromoteSettle = true;
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      const preHead = headSha();
+
+      const result = await runShellCommand(
+        'git add feature.txt && git commit -m "feature"',
+      );
+      expect(result.llmContent).toContain('Status: running');
+      const agentSha = headSha();
+      expect(agentSha).not.toBe(preHead);
+
+      // A foreign commit lands in the same repository while the promoted
+      // child is still running.
+      fs.writeFileSync(path.join(repoDir, 'foreign.txt'), 'not the agent\n');
+      rawGit('add foreign.txt');
+      rawGit('commit -q -m "foreign"');
+      const foreignSha = headSha();
+      expect(foreignSha).not.toBe(agentSha);
+
+      firePromoteSettle!();
+      // The settle-time probe is a single `git log -g` (2 s timeout,
+      // ~10 ms on a healthy runner). When it correctly registers nothing
+      // it leaves no observable to wait on, so give it room and then
+      // assert the fail-closed outcome: HEAD is the foreign commit, the
+      // registry never adopted it, and amending it stays hard-blocked.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(headSha()).toBe(foreignSha);
       expect(amendVerdict()?.blocked).toBe(true);
     });
 

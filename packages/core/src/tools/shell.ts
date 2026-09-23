@@ -680,13 +680,12 @@ const COMMIT_RECOGNITION_LEADING_NOISE: ReadonlySet<string> = new Set([
  * The program recogniser shared by `gitCommitContext` and
  * `findAttributableCommitSegment` (#12514): skip leading
  * control-flow/noise keywords and match the program on its
- * basename (the convention `getCommandRoot` already uses), so
- * `then git commit`, `time git commit`, `! git commit` and
- * `/usr/bin/git commit` all resolve to the `git` invocation a
- * `tokens[0] === 'git'` check misses. Returns the token slice
- * starting at the recognised program, or `null` when the segment is
- * nothing but noise. The slice keeps the program token at index 0 so
- * `parseGitInvocation` applies unchanged.
+ * basename (see `programBasename`), so `then git commit`,
+ * `time git commit`, `! git commit` and `/usr/bin/git commit` all
+ * resolve to the `git` invocation a `tokens[0] === 'git'` check
+ * misses. Returns the token slice starting at the recognised program,
+ * or `null` when the segment is nothing but noise. The slice keeps the
+ * program token at index 0 so `parseGitInvocation` applies unchanged.
  */
 function skipCommitRecognitionNoise(tokens: string[]): string[] | null {
   let i = 0;
@@ -700,9 +699,23 @@ function skipCommitRecognitionNoise(tokens: string[]): string[] | null {
   return tokens.slice(i);
 }
 
-/** Basename a program token the way `getCommandRoot` does. */
+/**
+ * Basename a program token and drop a Windows `.exe` suffix.
+ *
+ * `getCommandRoot` stops at the basename and keeps the suffix (pinned
+ * as `bar.exe` by `utils/shell-utils.test.ts`), so this deliberately
+ * goes one step further: recognition here is purely textual —
+ * `shell.ts` has no `process.platform` branch — and
+ * `"C:\Program Files\Git\cmd\git.exe" commit` is the spelling a
+ * Windows session really produces. Without the strip neither `git`
+ * branch fires, the commit lands unregistered, and the follow-up bare
+ * `git commit --amend` is hard-blocked with the false reason #12514
+ * set out to remove. Same normalisation the guard side already
+ * applies (`dangerousRules.stripWindowsExecutableSuffix`).
+ */
 function programBasename(program: string): string {
-  return program.split(/[\\/]/).pop()!;
+  const base = program.split(/[\\/]/).pop()!;
+  return base.endsWith('.exe') ? base.slice(0, -'.exe'.length) : base;
 }
 
 /**
@@ -3850,15 +3863,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let promotedCommitRegistration: Promise<void> | null = null;
     const registerPromotedCommit = (): void => {
       if (preHead === null || promotedCommitRegistration !== null) return;
-      promotedCommitRegistration = this.trackSessionCommit(cwd, preHead).catch(
-        (err: unknown) => {
-          // Registration must never break the settle path — a failure
-          // here costs the exemption (fail-closed), nothing more.
-          debugLogger.warn(
-            `promote: session-commit registration failed: ${getErrorMessage(err)}`,
-          );
-        },
-      );
+      promotedCommitRegistration = this.trackSessionCommit(
+        cwd,
+        preHead,
+        // Lineage, not mere difference. This runs when the backgrounded
+        // child exits — arbitrarily later than the caller's pre-spawn
+        // capture — so a commit anybody else lands in this repository
+        // while the child runs is the newest `commit:` entry by then,
+        // and `head.sha !== preHead` alone would adopt it: the foreign
+        // commit would earn the amend exemption and the promoted one
+        // would lose its own. Requiring that entry to have moved HEAD
+        // *from* `preHead` keeps the registered SHA one this command
+        // created (see `trackSessionCommit`'s `requirePredecessor`).
+        preHead,
+      ).catch((err: unknown) => {
+        // Registration must never break the settle path — a failure
+        // here costs the exemption (fail-closed), nothing more.
+        debugLogger.warn(
+          `promote: session-commit registration failed: ${getErrorMessage(err)}`,
+        );
+      });
     };
     promoteArtifacts.onSettleWired = (info) => {
       // The child has exited — if the promoted command landed a commit
@@ -4359,12 +4383,45 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * to *partition* per-file contribution and so bails. In `commit a &&
    * commit b` HEAD is `b`, created by this command, so registering it is
    * sound and `a` stays blocked.
+   *
+   * `requirePredecessor` is the promoted path's lineage guard and is
+   * deliberately not applied to the foreground one. There, the window
+   * between the pre-spawn capture and this reflog read is the command's
+   * own duration — the trade-off #12523 tracks and this docblock
+   * discloses. On a Ctrl+B promote the same window is the backgrounded
+   * child's whole (deliberately long) lifetime, so a commit anybody else
+   * lands in this repository meanwhile is not a narrow race but the
+   * expected shape, and difference-from-`preHead` alone would adopt it.
+   * Passing the captured `preHead` here requires the entry that created
+   * HEAD to have moved it *from* that SHA, which only this command's own
+   * commit does. Fail-closed both ways: a foreign commit never earns an
+   * exemption, and a multi-commit promoted chain (`commit a && commit b`,
+   * whose newest entry descends from `a`) loses one it had earned rather
+   * than guessing. The foreground call site passes nothing and keeps the
+   * disclosed window unchanged.
    */
   private async trackSessionCommit(
     cwd: string,
     preHead: string | null,
+    requirePredecessor?: string,
   ): Promise<void> {
     const head = await this.getGitHeadOrigin(cwd);
+    if (
+      head !== null &&
+      requirePredecessor !== undefined &&
+      head.predecessor !== requirePredecessor
+    ) {
+      // Same visibility contract as the `head === null` branch below: the
+      // only other output of this path is a block reason asserting the
+      // commit was not the agent's, so say which side of the lineage
+      // check failed.
+      debugLogger.warn(
+        `Session commit not registered in ${cwd}: the newest HEAD reflog entry descends from ` +
+          `${head.predecessor ?? '(no predecessor)'}, not from the pre-spawn HEAD ` +
+          `${requirePredecessor.slice(0, 12)}, so it was not created by this command.`,
+      );
+      return;
+    }
     // Neither condition subsumes the other: `createdByCommit` rejects a HEAD
     // something else relocated, and the `preHead` comparison rejects a commit
     // that never moved HEAD (nothing staged), which would otherwise
@@ -4385,30 +4442,45 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Read HEAD and the reflog action that last moved it in one subprocess.
+   * Read HEAD, the reflog action that last moved it, and the SHA that
+   * entry moved it *from*, in one subprocess.
    *
    * `--no-show-signature` is required, not cosmetic: with
    * `log.showSignature=true` git prints the signature verdict ahead of the
    * formatted output, shifting both fields and making an agent's own signed
    * commit look uncommitted. Inert when nothing is signed.
    *
+   * `-2` rather than `-1` so the second entry's SHA is available as the
+   * newest entry's predecessor — the lineage input
+   * {@link trackSessionCommit} requires on the promoted path. It costs one
+   * extra reflog record inside the same 2 s budget.
+   *
    * Returns `null` when git cannot answer (not a repo, no HEAD, reflog off or
-   * expired, git missing) so every caller fails closed.
+   * expired, git missing) so every caller fails closed. `predecessor` is
+   * `null` when the reflog holds a single entry (an initial commit, or one
+   * expired down to a single record).
    */
   private async getGitHeadOrigin(
     cwd: string,
-  ): Promise<{ sha: string; createdByCommit: boolean } | null> {
+  ): Promise<{
+    sha: string;
+    createdByCommit: boolean;
+    predecessor: string | null;
+  } | null> {
     return new Promise((resolve) => {
       const child = childProcess.execFile(
         'git',
-        ['log', '-g', '-1', '--no-show-signature', '--format=%H%n%gs', 'HEAD'],
+        ['log', '-g', '-2', '--no-show-signature', '--format=%H%n%gs', 'HEAD'],
         { cwd, timeout: 2000, windowsHide: true },
         (error, stdout) => {
           if (error) {
             resolve(null);
             return;
           }
-          const [sha, subject] = String(stdout).split('\n');
+          // One line per field, newest entry first: its SHA, its reflog
+          // subject, then the previous entry's SHA (whose subject is not
+          // read).
+          const [sha, subject, predecessor] = String(stdout).split('\n');
           if (!sha || !subject) {
             resolve(null);
             return;
@@ -4418,6 +4490,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           resolve({
             sha: sha.trim(),
             createdByCommit: /^commit\b/.test(subject),
+            predecessor: predecessor?.trim() || null,
           });
         },
       );
