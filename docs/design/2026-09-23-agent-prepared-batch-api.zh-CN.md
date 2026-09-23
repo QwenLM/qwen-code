@@ -5,6 +5,10 @@
 状态：与本文同步实现（2026-09-23），构建在 #11874 的底层
 `qwen batch submit|status|fetch|cancel` 传输能力之上。本文是工作流层的
 设计约定；面向用户的使用说明在 `docs/users/features/batch.md`。
+团队扫盲（Batch API 特点、三种执行方式的架构图、自动收取方案）见
+[`2026-09-23-batch-api-overview.zh-CN.md`](./2026-09-23-batch-api-overview.zh-CN.md)；
+首轮实测数据与结论见
+[`docs/verification/batch-api/results-2026-09-23.md`](../verification/batch-api/results-2026-09-23.md)。
 
 ## 1. 问题与目标
 

@@ -5,7 +5,12 @@
 Status: implemented alongside this document (2026-09-23), on top of the
 low-level `qwen batch submit|status|fetch|cancel` transport from #11874.
 This document is the design contract for the workflow layer; the user-facing
-guide lives in `docs/users/features/batch.md`.
+guide lives in `docs/users/features/batch.md`. A team explainer (Batch API
+traits, architecture diagrams of the three execution paths, the auto-collect
+proposal) is in
+[`2026-09-23-batch-api-overview.zh-CN.md`](./2026-09-23-batch-api-overview.zh-CN.md);
+first measured results are in
+[`docs/verification/batch-api/results-2026-09-23.md`](../verification/batch-api/results-2026-09-23.md).
 
 ## 1. Problem and goal
 
