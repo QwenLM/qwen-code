@@ -15,6 +15,7 @@ import {
   NO_EXEC_CONFIG,
   readFirstLineNoFollow,
 } from './gitUtils.js';
+import { gitEnv } from './git-branches.js';
 import { isUnverifiableIdentityError, openNoFollow } from './no-follow-open.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
@@ -1133,7 +1134,11 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function runGit(args: string[], cwd: string): Promise<string | null> {
+async function runGit(
+  args: string[],
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string | null> {
   // `core.quotepath=false` keeps non-ASCII filenames as UTF-8 in git's output
   // instead of octal-escaping them (`\346\226\207.txt`), which would otherwise
   // end up as literal keys in `perFileStats`. The guard rides along here because
@@ -1149,6 +1154,11 @@ async function runGit(args: string[], cwd: string): Promise<string | null> {
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
       encoding: 'utf8',
+      // Given one, the caller's environment and not the process's: a daemon
+      // serving several workspaces runs git for each in that workspace's own
+      // environment, with the variables that would point git at some other
+      // repository taken out. Without one, the process's, as before.
+      ...(env ? { env: gitEnv(env) } : {}),
     });
     return stdout;
   } catch {
@@ -1206,7 +1216,10 @@ export interface GitWorkingTreeStatus {
 
 export async function getGitWorkingTreeStatus(
   cwd: string,
-  options: { countHiddenUntracked?: boolean } = {},
+  options: {
+    countHiddenUntracked?: boolean;
+    env?: Readonly<Record<string, string | undefined>>;
+  } = {},
 ): Promise<GitWorkingTreeStatus | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
@@ -1227,6 +1240,7 @@ export async function getGitWorkingTreeStatus(
       '-z',
     ],
     gitRoot,
+    options.env,
   );
   if (stdout == null) return null;
 

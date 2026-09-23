@@ -269,7 +269,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `worktree_operation_in_progress` / `worktree_unmerged_commits` /
   // `worktree_status_unknown` / `worktree_nested_repository`, the last for a
   // submodule whose own repository the removal would delete — which git
-  // itself only refuses while the checkout is still there). The
+  // itself only refuses while the checkout is still there, and which carries
+  // `submodulesUnknown` instead when whether there is one could not be
+  // checked). The
   // `worktree_is_workspace` refusal names the blocking workspace in
   // `workspaceCwd`, since it may be rooted below the worktree. Any
   // other refusal git makes on a non-forced removal that changed nothing,

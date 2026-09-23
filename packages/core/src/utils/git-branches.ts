@@ -135,12 +135,6 @@ export function gitEnv(
 }
 
 /**
- * Both streams, for the handful of subcommands that report on stderr.
- *
- * `git worktree prune -v` is one: everything it says it would remove goes to
- * stderr, so a caller reading only stdout is told nothing at all.
- */
-/**
  * Run git and hand each NUL-separated record to `onRecord` as it arrives.
  *
  * For output whose size follows the repository rather than the question —
@@ -148,52 +142,66 @@ export function gitEnv(
  * and fails past `maxBuffer`, which on a safety check reads as "nothing
  * found"; this holds only the record being read, and stops the moment
  * `onRecord` says it has seen enough.
+ *
+ * Records are bytes. git writes a path as the bytes it is, and `-z` output
+ * does not quote it, so decoding the stream before splitting it replaces a
+ * byte that is not UTF-8 and hands the reader a path that names some other
+ * file. A reader decodes what it needs, and can tell when that failed.
+ *
+ * Settles exactly once: `true` when the reader stopped early, `false` when
+ * git finished without it, a rejection when git failed, timed out, or the
+ * reader threw — including on the last record, which has no separator after
+ * it and so is only seen once git has closed.
  */
 export function streamGitRecords(
   cwd: string,
   args: string[],
-  onRecord: (record: string) => boolean,
+  onRecord: (record: Buffer) => boolean,
   env?: Readonly<Record<string, string | undefined>>,
+  options: { timeoutMs?: number } = {},
 ): Promise<boolean> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: gitEnv(env) });
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`git ${args[0]} timed out`));
-    }, GIT_TIMEOUT_MS);
-    let pending = '';
-    let answered = false;
-    const finish = (value: boolean) => {
-      if (answered) return;
-      answered = true;
+    const child = spawn('git', args, {
+      cwd,
+      env: gitEnv(env),
+      windowsHide: true,
+    });
+    let settled = false;
+    const settle = (outcome: () => void) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       child.kill('SIGKILL');
-      resolve(value);
+      outcome();
     };
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      pending += chunk;
-      let at = pending.indexOf('\0');
+    // The subcommand, for messages: the arguments begin with `-c` pairs.
+    const subcommand =
+      args.find((arg, i) => !arg.startsWith('-') && args[i - 1] !== '-c') ??
+      'git';
+    const timer = setTimeout(
+      () => settle(() => reject(new Error(`git ${subcommand} timed out`))),
+      options.timeoutMs ?? GIT_TIMEOUT_MS,
+    );
+    // Whether the reader has seen enough — or, when it threw, the throw.
+    const deliver = (record: Buffer): boolean => {
+      try {
+        if (!onRecord(record)) return false;
+        settle(() => resolve(true));
+      } catch (err) {
+        settle(() => reject(err));
+      }
+      return true;
+    };
+    let pending = Buffer.alloc(0);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let at = pending.indexOf(0);
       while (at !== -1) {
-        const record = pending.slice(0, at);
-        pending = pending.slice(at + 1);
-        let seen;
-        try {
-          seen = onRecord(record);
-        } catch (err) {
-          // Thrown from a reader, not from git: it would otherwise leave the
-          // event emitter with nowhere to put it.
-          clearTimeout(timer);
-          answered = true;
-          child.kill('SIGKILL');
-          reject(err);
-          return;
-        }
-        if (seen) {
-          finish(true);
-          return;
-        }
-        at = pending.indexOf('\0');
+        const record = pending.subarray(0, at);
+        pending = pending.subarray(at + 1);
+        if (deliver(record)) return;
+        at = pending.indexOf(0);
       }
     });
     let stderr = '';
@@ -202,25 +210,33 @@ export function streamGitRecords(
       // Bounded: a failure's first words are what a caller reports.
       if (stderr.length < 8192) stderr += chunk;
     });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      if (!answered) reject(err);
-    });
-    child.on('close', (code) => {
-      if (answered) return;
-      clearTimeout(timer);
-      answered = true;
-      // A final record with no separator after it still counts.
-      if (code === 0 && pending.length > 0 && onRecord(pending)) {
-        resolve(true);
+    child.on('error', (err) => settle(() => reject(err)));
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      if (code !== 0) {
+        settle(() =>
+          reject(
+            new Error(
+              stderr.trim() ||
+                `git ${subcommand} exited with ${code ?? signal}`,
+            ),
+          ),
+        );
         return;
       }
-      if (code === 0) resolve(false);
-      else reject(new Error(stderr.trim() || `git ${args[0]} failed`));
+      // A final record with no separator after it still counts.
+      if (pending.length > 0 && deliver(pending)) return;
+      settle(() => resolve(false));
     });
   });
 }
 
+/**
+ * Both streams, for the handful of subcommands that report on stderr.
+ *
+ * `git worktree prune -v` is one: everything it says it would remove goes to
+ * stderr, so a caller reading only stdout is told nothing at all.
+ */
 export function runGitCapture(
   cwd: string,
   args: string[],

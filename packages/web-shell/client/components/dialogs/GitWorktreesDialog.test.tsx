@@ -1188,6 +1188,598 @@ describe('GitWorktreesContent', () => {
     expect(text).not.toContain('Remove anyway');
   });
 
+  it('never lands an older request\u2019s answer in a newer one\u2019s panel', async () => {
+    // A -> B -> A leaves the workspace the same; only the request can tell
+    // the answer to the first removal from the answer to the second.
+    const answers: Array<(value: unknown) => void> = [];
+    const refusals: Array<(value: unknown) => void> = [];
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          answers.push(resolve);
+          refusals.push(reject);
+        }),
+    );
+    const show = async (cwd: string) => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <GitWorktreesContent workspaceCwd={cwd} />
+          </I18nProvider>,
+        );
+      });
+      await flush();
+    };
+    mount();
+    await flush();
+    const confirm = async () => {
+      await act(async () => {
+        button('Remove worktree swift-fox').click();
+      });
+      await act(async () => {
+        button('Remove').click();
+      });
+    };
+    await confirm();
+    await show('/other');
+    await show('/repo');
+    await confirm();
+    expect(answers).toHaveLength(2);
+
+    // The first request's refusal arrives while the second is still out.
+    await act(async () => {
+      refusals[0](
+        rejection({ code: 'worktree_dirty', error: 'dirty', changes: 7 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const text = document.body.textContent ?? '';
+    expect(text).not.toContain('7 uncommitted change(s)');
+    expect(text).not.toContain('Remove anyway');
+    // Still waiting on the request that is actually outstanding.
+    expect(text).toContain('Removing');
+  });
+
+  it('still takes in a success that lands after a trip away and back', async () => {
+    // A -> B -> A: the request is no longer the latest in any sense that
+    // owns a panel, but the removal it reports happened in this repository.
+    let answer: ((value: unknown) => void) | undefined;
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      .mockResolvedValueOnce(listPayload([MAIN]))
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      // The refresh the success asks for never lands.
+      .mockReturnValue(new Promise(() => {}));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const show = async (cwd: string) => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <GitWorktreesContent workspaceCwd={cwd} />
+          </I18nProvider>,
+        );
+      });
+      await flush();
+    };
+    mount();
+    await flush();
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await show('/other');
+    await show('/repo');
+    expect(document.body.textContent).toContain('swift-fox');
+
+    await act(async () => {
+      answer?.({ removed: true, path: FEATURE.path, directoryRemains: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The row git let go of is not left with a live trash button, and the
+    // directory it left behind is still announced.
+    expect(() => button('Remove worktree swift-fox')).toThrow();
+    expect(document.body.textContent).toContain('still on disk');
+  });
+
+  it('lets an older success clear a newer refusal about the same worktree', async () => {
+    // The first removal is still deleting a large checkout; a second one,
+    // sent after a trip away and back, is refused over what the first left
+    // half-deleted. Then the first one finishes: the worktree is gone, and
+    // a refusal still on screen about it would be telling the user the
+    // opposite of what happened.
+    const answers: Array<{
+      resolve: (value: unknown) => void;
+      reject: (value: unknown) => void;
+    }> = [];
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      .mockResolvedValueOnce(listPayload([MAIN]))
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      .mockReturnValue(new Promise(() => {}));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          answers.push({ resolve, reject });
+        }),
+    );
+    const show = async (cwd: string) => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <GitWorktreesContent workspaceCwd={cwd} />
+          </I18nProvider>,
+        );
+      });
+      await flush();
+    };
+    mount();
+    await flush();
+    const confirm = async () => {
+      await act(async () => {
+        button('Remove worktree swift-fox').click();
+      });
+      await act(async () => {
+        button('Remove').click();
+      });
+    };
+    await confirm();
+    await show('/other');
+    await show('/repo');
+    await confirm();
+    await act(async () => {
+      answers[1].reject(
+        rejection({ code: 'worktree_dirty', error: 'dirty', changes: 7 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.body.textContent).toContain('7 uncommitted change(s)');
+
+    await act(async () => {
+      answers[0].resolve({ removed: true, path: FEATURE.path });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const text = document.body.textContent ?? '';
+    expect(text).not.toContain('7 uncommitted change(s)');
+    expect(text).not.toContain('refused');
+    expect(() => button('Remove worktree swift-fox')).toThrow();
+  });
+
+  it('lets a success from another repository change nothing here', async () => {
+    let answer: ((value: unknown) => void) | undefined;
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    mount();
+    await flush();
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    // Another workspace, listing a worktree at the same path.
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <GitWorktreesContent workspaceCwd="/other" />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      answer?.({ removed: true, path: FEATURE.path, directoryRemains: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The removal happened in the repository left behind; nothing here is
+    // about it — not the row, not a notice.
+    expect(() => button('Remove worktree swift-fox')).not.toThrow();
+    expect(document.body.textContent).not.toContain('still on disk');
+  });
+
+  it('says nothing about staleness when no refusal is keeping the list', async () => {
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      .mockRejectedValue(new Error('listing unavailable'));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockResolvedValue({
+      removed: true,
+      path: FEATURE.path,
+    });
+    mount();
+    await flush();
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    // The refresh after a success failed: the placeholder says so, and a
+    // "may be out of date" line over a list that is not shown would be
+    // noise about rows nobody can see.
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('Failed to load worktrees');
+    expect(text).not.toContain('may be out of date');
+  });
+
+  it('shows a worktree made again at a removed path once the list says so', async () => {
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      // By the time the refresh reads it, the path has a worktree again.
+      .mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockResolvedValue({
+      removed: true,
+      path: FEATURE.path,
+    });
+    mount();
+    await flush();
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+    await flush();
+
+    // Hidden only until a list read after the removal arrives; after that
+    // the list is the truth, and it has the path.
+    expect(() => button('Remove worktree swift-fox')).not.toThrow();
+  });
+
+  it('counts only the rows still on screen', async () => {
+    const counts: Array<string | undefined> = [];
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      .mockReturnValue(new Promise(() => {}));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockResolvedValue({
+      removed: true,
+      path: FEATURE.path,
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <GitWorktreesContent
+            workspaceCwd="/repo"
+            onSubtitleChange={(subtitle) => counts.push(subtitle)}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    expect(counts.at(-1)).toContain('2');
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+    expect(counts.at(-1)).toContain('1');
+  });
+
+  it('takes a removed row off screen before the refresh lands', async () => {
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      // The refresh after the removal never lands.
+      .mockReturnValue(new Promise(() => {}));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockResolvedValue({
+      removed: true,
+      path: FEATURE.path,
+    });
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    // git has let go of it; a row left here carries a live trash button
+    // for a worktree that no longer exists.
+    expect(() => button('Remove worktree swift-fox')).toThrow();
+    expect(document.body.textContent).not.toContain('swift-fox');
+  });
+
+  it('takes "already gone" as done, not as a refusal', async () => {
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      // Whatever the refresh would say, the row goes now.
+      .mockReturnValue(new Promise(() => {}));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValue(
+      rejection({
+        code: 'worktree_not_found',
+        error: 'No worktree of this repository has that path',
+      }),
+    );
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    // Something else removed it first, which is the outcome asked for.
+    const text = document.body.textContent ?? '';
+    expect(text).not.toContain('refused');
+    expect(text).not.toContain('No worktree of this repository has that path');
+    expect(() => button('Remove worktree swift-fox')).toThrow();
+  });
+
+  it('never shows an empty failure as no failure at all', async () => {
+    // git can die with nothing on either stream, and the daemon then has no
+    // sentence to forward. The panel must still read as a failure — not as
+    // the first click's confirmation with its button gone.
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValue(
+      rejection({ error: '', message: '   ' }),
+    );
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('Failed to remove the worktree');
+    expect(text).not.toContain('Remove this worktree?');
+  });
+
+  it('says when it could not check for a nested repository', async () => {
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree
+      .mockRejectedValueOnce(
+        rejection({
+          code: 'worktree_nested_repository',
+          error: 'could not be checked',
+          submodulesUnknown: true,
+        }),
+      )
+      .mockRejectedValueOnce(
+        rejection({
+          code: 'worktree_dirty',
+          error: 'dirty',
+          changes: 2,
+          submodulesUnknown: true,
+        }),
+      );
+    mount();
+    await flush();
+    const sentence = 'could not be checked. If one does';
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+    // Its own refusal: said once, never as "there is one".
+    let text = document.body.textContent ?? '';
+    expect(text.split(sentence).length - 1).toBe(1);
+    expect(text).not.toContain('keeps a repository of its own, and removing');
+    expect(() => button('Remove anyway')).not.toThrow();
+
+    await act(async () => {
+      button('Cancel').click();
+    });
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+    // Beside another refusal, as one more thing the second click takes.
+    text = document.body.textContent ?? '';
+    expect(text).toContain('2 uncommitted change(s)');
+    expect(text.split(sentence).length - 1).toBe(1);
+  });
+
+  it('leaves the keyboard alone when a refusal lands while the user types', async () => {
+    let refuse: ((value: unknown) => void) | undefined;
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    mount();
+    await flush();
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+
+    const input = document.body.querySelector(
+      'input[type="search"]',
+    ) as HTMLInputElement;
+    const type = async (value: string) => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!;
+        setter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+    input.focus();
+    await type('nothing-matches-this');
+    await type('swift');
+    expect(document.activeElement).toBe(input);
+
+    // The refusal is new, and it changes the panel — but the keyboard is
+    // where the user put it, not somewhere it fell to.
+    await act(async () => {
+      refuse?.(
+        rejection({ code: 'worktree_dirty', error: 'dirty', changes: 1 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.body.textContent).toContain('1 uncommitted change(s)');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('moves the keyboard off the danger button when the answer is a refusal', async () => {
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    let refuse: ((value: unknown) => void) | undefined;
+    workspaceGitRemoveWorktree.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    mount();
+    await flush();
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    const remove = button('Remove');
+    remove.focus();
+    await act(async () => {
+      remove.click();
+    });
+
+    await act(async () => {
+      refuse?.(
+        rejection({ code: 'worktree_dirty', error: 'dirty', changes: 1 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The same button may now read "Remove anyway", and Enter on it would
+    // discard work the user has only just been told about. The keyboard
+    // goes to the panel's first button instead.
+    const alert = document.body.querySelector('[role="alert"]');
+    expect(document.activeElement).toBe(alert?.querySelector('button'));
+    expect(document.activeElement?.textContent).toBe('Cancel');
+  });
+
+  it('says a list is stale even when the filter hides every row', async () => {
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      .mockRejectedValue(new Error('listing unavailable'));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValue(
+      rejection({ code: 'worktree_dirty', error: 'dirty', changes: 3 }),
+    );
+    mount();
+    await flush();
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+    const input = document.body.querySelector(
+      'input[type="search"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(input, 'nothing-matches-this');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // "No worktrees match" is computed from rows that may be out of date,
+    // and saying so is not up to whether any of them matched.
+    expect(document.body.textContent).toContain('may be out of date');
+  });
+
+  it('says a list kept for a refusal is one it could not refresh', async () => {
+    workspaceGitWorktrees
+      .mockResolvedValueOnce(listPayload([MAIN, FEATURE]))
+      .mockRejectedValue(new Error('listing unavailable'));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValue(
+      rejection({ code: 'worktree_dirty', error: 'dirty', changes: 3 }),
+    );
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    const text = document.body.textContent ?? '';
+    // The refusal stays readable, and the rows around it are said to be
+    // possibly out of date rather than passing for current.
+    expect(text).toContain('3 uncommitted change(s)');
+    expect(text).toContain('may be out of date');
+  });
+
   it('says something useful when the daemon named no workspace', async () => {
     // An older daemon sends the code without the path; the sentence still
     // has to tell the user what is in the way and that forcing will not fix

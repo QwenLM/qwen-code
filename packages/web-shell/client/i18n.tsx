@@ -316,6 +316,10 @@ const EN: Messages = {
       : 'A registered workspace lives in this worktree, so removing it would take the workspace too. Remove the workspace first.',
   'gitWorktrees.blockedSubmodules':
     'A submodule of this worktree keeps a repository of its own, and removing the worktree deletes that repository too.',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    'Whether a submodule of this worktree keeps a repository of its own could not be checked. If one does, removing the worktree deletes it too.',
+  'gitWorktrees.refreshFailed':
+    'The list could not be refreshed, so it may be out of date.',
   'gitWorktrees.removeAnyway': 'Remove anyway',
   'gitWorktrees.removeFailed': 'Failed to remove the worktree',
   'gitWorktrees.keptDirectory': (v) =>
@@ -4319,6 +4323,9 @@ const ZH: Messages = {
       : '有已注册的工作区就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。',
   'gitWorktrees.blockedSubmodules':
     '该 worktree 的子模块有自己的仓库，删除这个 worktree 会把那个仓库一并删掉。',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    '无法确认该 worktree 的子模块是否有自己的仓库。如果有，删除这个 worktree 会把它一并删掉。',
+  'gitWorktrees.refreshFailed': '列表未能刷新，可能已过时。',
   'gitWorktrees.removeAnyway': '仍然删除',
   'gitWorktrees.removeFailed': '删除 worktree 失败',
   'gitWorktrees.keptDirectory': (v) =>

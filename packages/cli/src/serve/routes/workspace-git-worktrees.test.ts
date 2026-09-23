@@ -154,6 +154,23 @@ function runtime(
   } as unknown as WorkspaceRuntime;
 }
 
+/**
+ * A runtime whose environment is an object of its own.
+ *
+ * Every other fixture carries an equal empty one, so an environment dropped
+ * or swapped on its way to git passes an equality check; identity is what
+ * tells "this workspace's environment" from "an environment".
+ */
+function runtimeWithOwnEnv(workspaceId: string, workspaceCwd: string) {
+  const rt = runtime(workspaceId, workspaceCwd, true);
+  const effectiveEnv = { QWEN_FIXTURE_WORKSPACE: workspaceId };
+  (rt as unknown as { env: { effectiveEnv: object } }).env = {
+    ...rt.env,
+    effectiveEnv,
+  };
+  return { rt, effectiveEnv };
+}
+
 function registry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
   return createWorkspaceRegistry(runtimes);
 }
@@ -196,8 +213,8 @@ describe('workspace git worktree routes', () => {
     unlockMock.mockResolvedValue(undefined);
     // Detached entries are the exception, so the default is "some ref has it".
     reachableMock.mockResolvedValue(true);
-    submodulesMock.mockResolvedValue(false);
-    adminModulesMock.mockResolvedValue(false);
+    submodulesMock.mockResolvedValue('absent');
+    adminModulesMock.mockResolvedValue('absent');
     // Shielded, so git says it would drop only the entry that was asked for,
     // and names it as that entry rather than merely counting one.
     dryRunMock.mockResolvedValue([
@@ -226,6 +243,23 @@ describe('workspace git worktree routes', () => {
         { ...OUTSIDE, isWorkspace: false },
       ],
     });
+  });
+
+  it('names a managed worktree whose own name begins with two dots', async () => {
+    // `..data` sits inside the managed directory, so it has a slug; a
+    // prefix test on the relative path reads it as the parent and drops it.
+    const dotted = {
+      ...LINKED,
+      path: path.join(ROOT, '.qwen', 'worktrees', '..data'),
+    };
+    listMock.mockResolvedValue([MAIN, dotted]);
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const response = await request(app).get(
+      '/workspaces/primary/git/worktrees',
+    );
+
+    expect(response.body.worktrees[1].slug).toBe('..data');
   });
 
   it('reports available:false when git cannot list the repository', async () => {
@@ -310,7 +344,8 @@ describe('workspace git worktree routes', () => {
       ahead: 5,
       behind: 6,
     });
-    const app = mount([runtime('primary', ROOT, true)]);
+    const { rt, effectiveEnv } = runtimeWithOwnEnv('primary', ROOT);
+    const app = mount([rt]);
     const ok = await request(app).get(
       `/workspaces/primary/git/worktrees/status?path=${encodeURIComponent(LINKED.path)}`,
     );
@@ -334,7 +369,12 @@ describe('workspace git worktree routes', () => {
     // checkout, so it is never a cacheable answer.
     expect(ok.headers['cache-control']).toBe('no-store');
     expect(ok.headers['x-content-type-options']).toBe('nosniff');
-    expect(statusMock).toHaveBeenCalledWith(LINKED.path);
+    // In this workspace's environment, not the daemon's: a git child that
+    // inherits the process's instead runs under whatever `GIT_DIR` the
+    // daemon was started with, and answers about that repository.
+    expect(statusMock).toHaveBeenCalledTimes(1);
+    expect(statusMock.mock.calls[0]?.[0]).toBe(LINKED.path);
+    expect(statusMock.mock.calls[0]?.[1]?.env).toBe(effectiveEnv);
 
     const unknown = await request(app).get(
       '/workspaces/primary/git/worktrees/status?path=%2Fnot%2Fa%2Fworktree',
@@ -790,7 +830,7 @@ describe('workspace git worktree routes', () => {
     // The submodule probe used to hang off git's own refusal, so a worktree
     // stopped by one of this route's gates lost its nested repository to the
     // second click without a word.
-    submodulesMock.mockResolvedValue(true);
+    submodulesMock.mockResolvedValue('present');
     statusMock.mockResolvedValue({ ...CLEAN, untracked: 2 });
     listMock.mockResolvedValue([MAIN, LINKED]);
     const app = mount([runtime('primary', ROOT, true)]);
@@ -1196,6 +1236,41 @@ describe('workspace git worktree routes', () => {
     expect(response.status).toBe(503);
     expect(response.body.code).toBe('workspace_runtime_unavailable');
     expect(response.body.removed).toBeUndefined();
+    // And, more to the point, nothing was deleted: the generation is asked
+    // again right before git is, not only before answering.
+    expect(removeMock).not.toHaveBeenCalled();
+  });
+
+  it('asks the generation again before the prune it is about to run', async () => {
+    // Open through the gathering and the removal git refused; closed by the
+    // time the fallback has proven its shield. The prune is repository-wide
+    // and deletes an admin directory, so it is the last point at which a
+    // replaced workspace can still be spared.
+    let asked = 0;
+    const assertOpen = vi.fn(() => {
+      asked += 1;
+      if (asked >= 3) {
+        throw Object.assign(new Error('generation closed'), {
+          code: 'workspace_generation_closed',
+        });
+      }
+    });
+    const stale = { ...LINKED, prunable: 'gitdir file does not exist' };
+    listMock.mockResolvedValue([MAIN, stale]);
+    removeMock.mockRejectedValue(new Error('fatal: validation failed'));
+    const guarded = {
+      ...runtime('primary', ROOT, true),
+      generationGuard: { assertOpen },
+    } as unknown as WorkspaceRuntime;
+    const app = mount([guarded]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    expect(response.status).toBe(503);
+    expect(dryRunMock).toHaveBeenCalled();
+    expect(pruneMock).not.toHaveBeenCalled();
   });
 
   it('never turns a prune it finished into a failure it did not', async () => {
@@ -1286,7 +1361,8 @@ describe('workspace git worktree routes', () => {
 
   it('asks git for untracked files the repository hides', async () => {
     listMock.mockResolvedValue([MAIN, LINKED]);
-    const app = mount([runtime('primary', ROOT, true)]);
+    const { rt, effectiveEnv } = runtimeWithOwnEnv('primary', ROOT);
+    const app = mount([rt]);
 
     await request(app)
       .post('/workspaces/primary/git/worktrees/remove')
@@ -1296,12 +1372,15 @@ describe('workspace git worktree routes', () => {
     // this gate has to override it or the files are destroyed unannounced.
     expect(statusMock).toHaveBeenCalledWith(LINKED.path, {
       countHiddenUntracked: true,
+      env: effectiveEnv,
     });
+    // The very object, not one equal to it.
+    expect(statusMock.mock.calls[0]?.[1]?.env).toBe(effectiveEnv);
   });
 
   it('says a nested repository goes with the removal it is refusing', async () => {
     listMock.mockResolvedValue([MAIN, LINKED]);
-    submodulesMock.mockResolvedValue(true);
+    submodulesMock.mockResolvedValue('present');
     const app = mount([runtime('primary', ROOT, true)]);
 
     const refused = await request(app)
@@ -1327,7 +1406,7 @@ describe('workspace git worktree routes', () => {
       MAIN,
       { ...LINKED, prunable: 'gitdir file points to non-existent location' },
     ]);
-    adminModulesMock.mockResolvedValue(true);
+    adminModulesMock.mockResolvedValue('present');
     const app = mount([runtime('primary', ROOT, true)]);
 
     const refused = await request(app)
@@ -1557,8 +1636,8 @@ describe('workspace git worktree routes', () => {
     // admin directory while `git submodule status` stops reporting it, so
     // asking the checkout alone answers that there is nothing to lose — and
     // git removes it without a word on the second click.
-    submodulesMock.mockResolvedValue(false);
-    adminModulesMock.mockResolvedValue(true);
+    submodulesMock.mockResolvedValue('absent');
+    adminModulesMock.mockResolvedValue('present');
     const app = mount([runtime('primary', ROOT, true)]);
 
     const refused = await request(app)
@@ -1576,21 +1655,110 @@ describe('workspace git worktree routes', () => {
     expect(adminModulesMock).toHaveBeenCalledWith(ROOT, LINKED_PATH, {});
   });
 
-  it('does not invent a nested repository when the probe fails', async () => {
-    // The probe is a stat of somebody else's directory and can fail on its
-    // own. Reading that as "there is a nested repository" would refuse a
-    // removal over something nobody saw — so a failure is not evidence, and
-    // the gates that did answer are what decide.
+  it('says it could not check, rather than that there is nothing to lose', async () => {
+    // A probe that fails has not looked: a timeout, a corrupt index, a
+    // directory the daemon may not read. Reading that as "no nested
+    // repository" is how a forced removal deletes one nobody named — so the
+    // refusal says what it could not tell, and the second click is the
+    // user's to make knowing that.
     adminModulesMock.mockRejectedValue(new Error('EACCES: permission denied'));
-    submodulesMock.mockRejectedValue(new Error('EACCES: permission denied'));
+    submodulesMock.mockRejectedValue(new Error('git ls-files timed out'));
     const app = mount([runtime('primary', ROOT, true)]);
 
-    const response = await request(app)
+    const refused = await request(app)
       .post('/workspaces/primary/git/worktrees/remove')
       .send({ path: LINKED_PATH });
 
-    expect(response.status).toBe(200);
-    expect(removeMock).toHaveBeenCalled();
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({
+      code: 'worktree_nested_repository',
+      submodulesUnknown: true,
+    });
+    // Not "there is one": nobody saw one.
+    expect(refused.body.submodules).toBeUndefined();
+    expect(removeMock).not.toHaveBeenCalled();
+
+    // And the same uncertainty rides along on a refusal about something
+    // else, since the second click overrides that one too.
+    statusMock.mockResolvedValue({ ...CLEAN, unstaged: 2 });
+    const dirty = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH });
+    expect(dirty.body).toMatchObject({
+      code: 'worktree_dirty',
+      submodulesUnknown: true,
+    });
+
+    const forced = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH, force: true });
+    expect(forced.status).toBe(200);
+  });
+
+  it('refuses on either side it could not look at, alone', async () => {
+    // Each probe on its own, with the other answering "nothing here": one
+    // side that could not look is enough to leave the question open.
+    for (const [admin, checkout] of [
+      ['unknown', 'absent'],
+      ['absent', 'unknown'],
+    ] as const) {
+      vi.clearAllMocks();
+      listMock.mockResolvedValue([MAIN, LINKED]);
+      statusMock.mockResolvedValue(CLEAN);
+      adminModulesMock.mockResolvedValue(admin);
+      submodulesMock.mockResolvedValue(checkout);
+      const app = mount([runtime('primary', ROOT, true)]);
+
+      const refused = await request(app)
+        .post('/workspaces/primary/git/worktrees/remove')
+        .send({ path: LINKED_PATH });
+
+      expect([admin, checkout, refused.status, refused.body.code]).toEqual([
+        admin,
+        checkout,
+        409,
+        'worktree_nested_repository',
+      ]);
+      expect(refused.body.submodulesUnknown).toBe(true);
+      expect(removeMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it('prefers what it saw to what it could not see', async () => {
+    // One side found a repository; the other could not look. What is known
+    // to be there is what the user is told.
+    adminModulesMock.mockResolvedValue('present');
+    submodulesMock.mockRejectedValue(new Error('git ls-files timed out'));
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const refused = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH });
+
+    expect(refused.body).toMatchObject({
+      code: 'worktree_nested_repository',
+      submodules: true,
+    });
+    expect(refused.body.submodulesUnknown).toBeUndefined();
+  });
+
+  it('still asks the checkout when the admin side could not look', async () => {
+    // Not being able to see one side is no reason to stop at the other: if
+    // the checkout does hold a repository, that is what the user is told —
+    // not that it "could not be checked".
+    adminModulesMock.mockResolvedValue('unknown');
+    submodulesMock.mockResolvedValue('present');
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const refused = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH });
+
+    expect(refused.body).toMatchObject({
+      code: 'worktree_nested_repository',
+      submodules: true,
+    });
+    expect(refused.body.submodulesUnknown).toBeUndefined();
   });
 
   it('never asks a stranded worktree about its submodules', async () => {
@@ -1602,7 +1770,7 @@ describe('workspace git worktree routes', () => {
       MAIN,
       { ...LINKED, prunable: 'gitdir file points to non-existent location' },
     ]);
-    adminModulesMock.mockResolvedValue(false);
+    adminModulesMock.mockResolvedValue('absent');
     const app = mount([runtime('primary', ROOT, true)]);
 
     const response = await request(app)
@@ -1754,6 +1922,48 @@ describe('workspace git worktree routes', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(pruneTurnsHeld()).toBe(before);
   });
+
+  it('refuses a workspace in a directory whose name begins with two dots', async () => {
+    // `..data` is a child, not the parent: a prefix test on the relative
+    // path calls it outside and lets the removal take the workspace in it.
+    const inside = path.join(LINKED_PATH, '..data');
+    const app = mount([
+      runtime('primary', ROOT, true),
+      runtime('dotted', inside, true),
+    ]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH, force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      code: 'worktree_is_workspace',
+      workspaceCwd: inside,
+    });
+    expect(removeMock).not.toHaveBeenCalled();
+  });
+
+  // On Windows a backslash is the separator, so this name is not a child
+  // there; the shape is POSIX's, where it is an ordinary character.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a workspace in a child whose name holds a backslash',
+    async () => {
+      const inside = path.join(LINKED_PATH, '..\\data');
+      const app = mount([
+        runtime('primary', ROOT, true),
+        runtime('backslash', inside, true),
+      ]);
+
+      const response = await request(app)
+        .post('/workspaces/primary/git/worktrees/remove')
+        .send({ path: LINKED_PATH, force: true });
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('worktree_is_workspace');
+      expect(removeMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('refuses a workspace registered under another spelling of the path', async () => {
     // A daemon that canonicalises an added workspace through the platform

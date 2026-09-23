@@ -21,6 +21,7 @@ import {
   unlockGitWorktree,
   worktreeAdminHoldsModules,
   worktreeHoldsSubmodules,
+  type NestedRepositoryAnswer,
   type GitWorktreeEntry,
 } from '@qwen-code/qwen-code-core/utils/git-worktrees.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -197,6 +198,21 @@ function checkoutIsUnseeable(entry: GitWorktreeEntry): boolean {
   }
 }
 
+/**
+ * Whether a `path.relative` answer stays at or below where it started.
+ *
+ * Asked of the first segment, not the string: `..data` — a directory whose
+ * own name begins with two dots — is inside, while a prefix test calls it
+ * the parent and lets whatever lives there out of the gate that exists to
+ * protect it. Segments are split on this platform's separator only: a
+ * backslash is an ordinary character in a POSIX name, so `..\data` there is
+ * one child directory, not the parent and then `data`.
+ */
+function staysInside(relative: string): boolean {
+  if (path.isAbsolute(relative)) return false;
+  return relative.split(path.sep)[0] !== '..';
+}
+
 function managedSlug(
   entry: GitWorktreeEntry,
   managedDir: string,
@@ -205,7 +221,7 @@ function managedSlug(
     realpathOnDiskOrSelf(managedDir),
     realpathOnDiskOrSelf(entry.path),
   );
-  return relative && !relative.startsWith('..') && !path.isAbsolute(relative)
+  return relative && staysInside(relative)
     ? relative.split(path.sep)[0]
     : undefined;
 }
@@ -416,7 +432,9 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
       // it would answer about the main worktree instead — see
       // {@link isReadableCheckout}.
       const status = isReadableCheckout(entry)
-        ? await getGitWorkingTreeStatus(entry.path)
+        ? await getGitWorkingTreeStatus(entry.path, {
+            env: runtime.env.effectiveEnv,
+          })
         : null;
       runtime.generationGuard?.assertOpen();
       res.status(200).json(
@@ -546,10 +564,7 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
           realpathOnDiskOrSelf(entry.path),
           realpathOnDiskOrSelf(root),
         );
-        return (
-          relative === '' ||
-          (!relative.startsWith('..') && !path.isAbsolute(relative))
-        );
+        return relative === '' || staysInside(relative);
       };
       const blockingWorkspace = deps.workspaceRegistry
         .listAllEntries()
@@ -593,6 +608,7 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
             // own safety check as well, and this gate is what is left.
             const status = await getGitWorkingTreeStatus(entry.path, {
               countHiddenUntracked: true,
+              env: runtime.env.effectiveEnv,
             });
             if (!status) statusUnknown = true;
             else {
@@ -643,18 +659,32 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
           // is on, and the only one left to ask when the checkout is gone —
           // and `git submodule status` after it, for a submodule that keeps
           // its repository inside its own working directory instead.
-          const nestedRepository =
-            (await worktreeAdminHoldsModules(
+          // A probe that fails has not found nothing: a timeout, a corrupt
+          // index, a directory it may not read all leave the question open,
+          // and a removal on the far side of an open question is exactly the
+          // one that deletes a repository nobody named.
+          const probe = (
+            look: () => Promise<NestedRepositoryAnswer>,
+          ): Promise<NestedRepositoryAnswer> =>
+            look().catch(() => 'unknown' as const);
+          const adminSide = await probe(() =>
+            worktreeAdminHoldsModules(
               runtime.workspaceCwd,
               entry.path,
               runtime.env.effectiveEnv,
-            ).catch(() => false)) ||
-            (isReadableCheckout(entry)
-              ? await worktreeHoldsSubmodules(
-                  entry.path,
-                  runtime.env.effectiveEnv,
-                ).catch(() => false)
-              : false);
+            ),
+          );
+          const checkoutSide =
+            adminSide === 'present' || !isReadableCheckout(entry)
+              ? 'absent'
+              : await probe(() =>
+                  worktreeHoldsSubmodules(entry.path, runtime.env.effectiveEnv),
+                );
+          const nestedRepository =
+            adminSide === 'present' || checkoutSide === 'present';
+          const nestedUnknown =
+            !nestedRepository &&
+            (adminSide === 'unknown' || checkoutSide === 'unknown');
           // One exit for every refusal, because the invariant is that
           // whichever one answers names everything the second click takes —
           // and a per-branch payload is how a branch comes to forget one.
@@ -671,6 +701,7 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
               ...extra,
               ...alsoDiscards,
               ...(nestedRepository ? { submodules: true } : {}),
+              ...(nestedUnknown ? { submodulesUnknown: true } : {}),
             });
           };
           // Reads every registered workspace's bridge, so a forced removal
@@ -745,16 +776,26 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
             );
             return;
           }
-          if (nestedRepository) {
+          if (nestedRepository || nestedUnknown) {
             // Nothing above refused, so without this the only warning about
-            // a repository that is about to be deleted would never render.
+            // a repository that is about to be deleted would never render —
+            // and the same holds when whether there is one could not be
+            // told: the second click is the user's to make, knowing that.
             await refuse(
               'worktree_nested_repository',
-              'A nested repository would be deleted with this worktree',
+              nestedRepository
+                ? 'A nested repository would be deleted with this worktree'
+                : 'Whether a nested repository would be deleted with this worktree could not be checked',
             );
             return;
           }
         }
+        // Every probe above is a git process, and the workspace can be
+        // replaced while they run. Asking again here, right before git
+        // deletes anything, is what keeps a removal from happening in a
+        // repository the request no longer owns; asking only before the
+        // answer would report it after the fact.
+        runtime.generationGuard?.assertOpen();
         try {
           await removeGitWorktree(
             runtime.workspaceCwd,
@@ -883,6 +924,7 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
                 ) {
                   throw removeError;
                 }
+                runtime.generationGuard?.assertOpen();
                 await pruneGitWorktrees(
                   runtime.workspaceCwd,
                   runtime.env.effectiveEnv,

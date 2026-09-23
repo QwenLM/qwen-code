@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   dryRunGitWorktreePrune,
   realpathOnDiskOrSelf,
@@ -269,7 +269,7 @@ describe('worktreeHoldsSubmodules', () => {
     // `git worktree add` does not initialise submodules, so nothing under
     // the new checkout has a repository of its own yet, and warning that one
     // would be deleted would be a warning about a loss that cannot happen.
-    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('absent');
 
     git(
       wt,
@@ -280,7 +280,7 @@ describe('worktreeHoldsSubmodules', () => {
       '--init',
       '-q',
     );
-    expect(await worktreeHoldsSubmodules(wt)).toBe(true);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('present');
   }, 30_000);
 });
 
@@ -306,17 +306,17 @@ describe('worktreeHoldsSubmodules, on what a gitlink path holds', () => {
     // git refuses these shapes too, but with a far more exact sentence than
     // "a nested repository would be deleted" — so do not say that first.
     fs.mkdirSync(dot, { recursive: true });
-    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('absent');
     fs.writeFileSync(path.join(dot, 'not-a-head'), 'x\n');
-    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('absent');
     fs.rmSync(dot, { recursive: true });
     fs.writeFileSync(dot, 'nonsense\n');
-    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('absent');
 
     fs.rmSync(dot);
     fs.mkdirSync(dot);
     fs.writeFileSync(path.join(dot, 'HEAD'), 'ref: refs/heads/main\n');
-    expect(await worktreeHoldsSubmodules(wt)).toBe(true);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('present');
   }, 30_000);
 });
 
@@ -366,22 +366,80 @@ describe('worktreeHoldsSubmodules, on an index it cannot hold', () => {
     });
     expect(listed.length).toBeGreaterThan(10 * 1024 * 1024);
 
-    expect(await worktreeHoldsSubmodules(wt)).toBe(true);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('present');
   }, 60_000);
 
-  it('will not wait on a gitlink whose .git never answers', async () => {
+  it('says what it saw even after something it could not look at', async () => {
     const repo = makeRepo();
     const wt = path.join(path.dirname(repo), 'wt');
     git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
-    gitlink(wt, 'sub', git(repo, 'rev-parse', 'HEAD').trim());
-    fs.mkdirSync(path.join(wt, 'sub'), { recursive: true });
-    // A FIFO blocks a reader until somebody writes, and nobody will. This
-    // runs on the daemon's own thread, so waiting is every workspace and
-    // every session waiting with it.
-    execFileSync('mkfifo', [path.join(wt, 'sub', '.git')]);
+    const head = git(repo, 'rev-parse', 'HEAD').trim();
+    // Sorted first: a gitlink whose path is not UTF-8, so it cannot be
+    // looked at. Sorted after it: one that plainly holds a repository.
+    execFileSync('git', ['update-index', '--index-info'], {
+      cwd: wt,
+      input: Buffer.concat([
+        Buffer.from(`160000 ${head} 0\ta`),
+        Buffer.from([0xff]),
+        Buffer.from(`\n160000 ${head} 0\tz\n`),
+      ]),
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+      },
+    });
+    fs.mkdirSync(path.join(wt, 'z', '.git'), { recursive: true });
+    fs.writeFileSync(path.join(wt, 'z', '.git', 'HEAD'), 'ref: refs/heads/x\n');
 
-    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+    // One seen outweighs one unseen: the user is told there is a repository.
+    expect(await worktreeHoldsSubmodules(wt)).toBe('present');
   }, 20_000);
+
+  it('says it cannot tell when a gitlink path is not UTF-8', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    const head = git(repo, 'rev-parse', 'HEAD').trim();
+    // git keeps a path as the bytes it is. Read as UTF-8 this one names a
+    // different directory, so whatever is at the real one cannot be looked
+    // at — which is not the same as having looked and found nothing.
+    execFileSync('git', ['update-index', '--index-info'], {
+      cwd: wt,
+      input: Buffer.concat([
+        Buffer.from(`160000 ${head} 0\tsub`),
+        Buffer.from([0xff]),
+        Buffer.from('\n'),
+      ]),
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+      },
+    });
+
+    expect(await worktreeHoldsSubmodules(wt)).toBe('unknown');
+  }, 20_000);
+
+  // Windows has no FIFOs on disk; Git Bash's `mkfifo` makes an ordinary file
+  // there, so this would pass without testing anything.
+  it.skipIf(process.platform === 'win32')(
+    'will not wait on a gitlink whose .git never answers',
+    async () => {
+      const repo = makeRepo();
+      const wt = path.join(path.dirname(repo), 'wt');
+      git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+      gitlink(wt, 'sub', git(repo, 'rev-parse', 'HEAD').trim());
+      fs.mkdirSync(path.join(wt, 'sub'), { recursive: true });
+      // A FIFO blocks a reader until somebody writes, and nobody will. This
+      // runs on the daemon's own thread, so waiting is every workspace and
+      // every session waiting with it.
+      execFileSync('mkfifo', [path.join(wt, 'sub', '.git')]);
+
+      expect(await worktreeHoldsSubmodules(wt)).toBe('absent');
+    },
+    20_000,
+  );
 });
 
 describe('worktreeAdminHoldsModules', () => {
@@ -405,7 +463,7 @@ describe('worktreeAdminHoldsModules', () => {
     git(outer, 'worktree', 'add', '-q', plain, '-b', 'other');
 
     // Registered, but nothing has built a repository under it yet.
-    expect(await worktreeAdminHoldsModules(outer, wt)).toBe(false);
+    expect(await worktreeAdminHoldsModules(outer, wt)).toBe('absent');
 
     git(
       wt,
@@ -416,19 +474,19 @@ describe('worktreeAdminHoldsModules', () => {
       '--init',
       '-q',
     );
-    expect(await worktreeAdminHoldsModules(outer, wt)).toBe(true);
+    expect(await worktreeAdminHoldsModules(outer, wt)).toBe('present');
     // Answered about the worktree it was asked about: every admin entry of
     // this repository is in the same directory, and the one next door now
     // has a `modules` of its own to be confused with.
-    expect(await worktreeAdminHoldsModules(outer, plain)).toBe(false);
+    expect(await worktreeAdminHoldsModules(outer, plain)).toBe('absent');
 
     // `git submodule status` marks a deinitialised submodule with `-` and
     // says nothing more about it, but the repository it built is still under
     // the admin directory — and still goes with the worktree. This is the
     // whole reason the admin side is asked as well as the checkout.
     git(wt, 'submodule', 'deinit', '-f', 'sub');
-    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
-    expect(await worktreeAdminHoldsModules(outer, wt)).toBe(true);
+    expect(await worktreeHoldsSubmodules(wt)).toBe('absent');
+    expect(await worktreeAdminHoldsModules(outer, wt)).toBe('present');
   }, 30_000);
 
   it('does not call a plain file a repository, and answers when it cannot look', async () => {
@@ -438,17 +496,17 @@ describe('worktreeAdminHoldsModules', () => {
     const admin = path.join(repo, '.git', 'worktrees', 'wt');
 
     fs.writeFileSync(path.join(admin, 'modules'), 'not a repository\n');
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(false);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('absent');
     fs.rmSync(path.join(admin, 'modules'));
 
     // git refuses a removal on this directory merely existing, but an empty
     // one holds nothing to lose, and a confident sentence about a repository
     // that is not there is worse than git's own.
     fs.mkdirSync(path.join(admin, 'modules'));
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(false);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('absent');
 
     fs.mkdirSync(path.join(admin, 'modules', 'sub'), { recursive: true });
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('present');
   }, 20_000);
 
   it('answers about this worktree, not the entry its gitfile happens to name', async () => {
@@ -469,7 +527,7 @@ describe('worktreeAdminHoldsModules', () => {
     fs.mkdirSync(path.join(adminOf('alpha'), 'modules', 'sub'), {
       recursive: true,
     });
-    expect(await worktreeAdminHoldsModules(repo, beta)).toBe(false);
+    expect(await worktreeAdminHoldsModules(repo, beta)).toBe('absent');
 
     fs.rmSync(path.join(adminOf('alpha'), 'modules'), { recursive: true });
     fs.mkdirSync(path.join(adminOf('beta'), 'modules', 'sub'), {
@@ -480,31 +538,38 @@ describe('worktreeAdminHoldsModules', () => {
       path.join(adminOf('beta'), 'gitdir'),
       `${path.join(beta, '.git')}\n`,
     );
-    expect(await worktreeAdminHoldsModules(repo, beta)).toBe(true);
+    expect(await worktreeAdminHoldsModules(repo, beta)).toBe('present');
   }, 20_000);
 
-  it('never lets "cannot look" pass for "nothing is there"', async () => {
-    const repo = makeRepo();
-    const wt = path.join(path.dirname(repo), 'wt');
-    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
-    const modules = path.join(repo, '.git', 'worktrees', 'wt', 'modules');
-    fs.mkdirSync(path.join(modules, 'sub'), { recursive: true });
+  // POSIX fixtures: Windows ignores a directory's mode bits, and a relative
+  // link loop needs the symlink privilege. Measured on windows-2022.
+  it.skipIf(process.platform === 'win32')(
+    'never lets "cannot look" pass for "nothing is there"',
+    async () => {
+      const repo = makeRepo();
+      const wt = path.join(path.dirname(repo), 'wt');
+      git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+      const modules = path.join(repo, '.git', 'worktrees', 'wt', 'modules');
+      fs.mkdirSync(path.join(modules, 'sub'), { recursive: true });
 
-    fs.chmodSync(modules, 0o000);
-    try {
-      // git refuses the removal over this directory whether or not anyone
-      // can list it, and the one thing that must not happen is a second
-      // click that deletes it with nothing said.
-      expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
-    } finally {
-      fs.chmodSync(modules, 0o755);
-    }
+      fs.chmodSync(modules, 0o000);
+      try {
+        // git refuses the removal over this directory whether or not anyone
+        // can list it, and the one thing that must not happen is a second
+        // click that deletes it with nothing said — so the answer is that it
+        // could not be told, which a caller cannot mistake for "nothing".
+        expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+      } finally {
+        fs.chmodSync(modules, 0o755);
+      }
 
-    // Nor can it even be looked at: a loop is not "nothing is there".
-    fs.rmSync(modules, { recursive: true });
-    fs.symlinkSync('modules', modules);
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
-  }, 20_000);
+      // Nor can it even be looked at: a loop is not "nothing is there".
+      fs.rmSync(modules, { recursive: true });
+      fs.symlinkSync('modules', modules);
+      expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+    },
+    20_000,
+  );
 
   it('answers for any admin entry that points here, not just the first', async () => {
     const repo = makeRepo();
@@ -521,8 +586,250 @@ describe('worktreeAdminHoldsModules', () => {
     fs.mkdirSync(path.join(admin, 'wt', 'modules', 'sub'), { recursive: true });
     fs.rmSync(path.join(wt, '.git'));
 
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('present');
   }, 20_000);
+
+  it('stays unsure when a second entry names the same worktree', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    const admin = path.join(repo, '.git', 'worktrees');
+    // The worktree's own entry: a pointer this will not read, and a
+    // repository inside it.
+    const elsewhere = path.join(path.dirname(repo), 'pointer');
+    fs.writeFileSync(elsewhere, `${path.join(wt, '.git')}\n`);
+    fs.rmSync(path.join(admin, 'wt', 'gitdir'));
+    fs.symlinkSync(elsewhere, path.join(admin, 'wt', 'gitdir'));
+    fs.mkdirSync(path.join(admin, 'wt', 'modules', 'sub'), { recursive: true });
+    // A second entry naming the same path, readable and empty.
+    fs.mkdirSync(path.join(admin, 'copy'));
+    fs.writeFileSync(
+      path.join(admin, 'copy', 'gitdir'),
+      `${path.join(wt, '.git')}\n`,
+    );
+    // No checkout left to say which entry is its own: git picks by
+    // directory order, and the unreadable one may be the pick.
+    fs.rmSync(wt, { recursive: true, force: true });
+
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+  }, 20_000);
+
+  describe('reading the worktree\u2019s own gitfile to settle a doubt', () => {
+    // A doubt to settle: entry `u` names this worktree through a pointer
+    // this will not read, and holds a repository. The worktree's own entry
+    // is readable and empty. Only the gitfile says which one git uses.
+    const setUp = () => {
+      const repo = makeRepo();
+      const wt = path.join(path.dirname(repo), 'wt');
+      git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+      const admin = path.join(repo, '.git', 'worktrees');
+      const pointer = path.join(path.dirname(repo), 'pointer');
+      fs.writeFileSync(pointer, `${path.join(wt, '.git')}\n`);
+      fs.mkdirSync(path.join(admin, 'u', 'modules', 'sub'), {
+        recursive: true,
+      });
+      fs.symlinkSync(pointer, path.join(admin, 'u', 'gitdir'));
+      const gitfile = fs.readFileSync(path.join(wt, '.git'), 'utf8');
+      return { repo, wt, admin, gitfile };
+    };
+
+    it('settles it when the gitfile names the entry that was read', async () => {
+      const { repo, wt } = setUp();
+      expect(await worktreeAdminHoldsModules(repo, wt)).toBe('absent');
+    });
+
+    it('resolves a relative gitfile against the real worktree directory', async () => {
+      const { repo, wt, admin } = setUp();
+      // Written as git writes it under `worktree.useRelativePaths`, and
+      // reached through a link at a different depth: resolving against the
+      // spelling rather than the directory would name somewhere else.
+      fs.writeFileSync(
+        path.join(wt, '.git'),
+        `gitdir: ${path.relative(wt, path.join(admin, 'wt'))}\n`,
+      );
+      const alias = path.join(path.dirname(repo), 'deeper', 'alias');
+      fs.mkdirSync(path.dirname(alias));
+      fs.symlinkSync(wt, alias);
+      expect(await worktreeAdminHoldsModules(repo, alias)).toBe('absent');
+    });
+
+    it('keeps it when the gitfile is a link, however right its content', async () => {
+      const { repo, wt, gitfile } = setUp();
+      const copy = path.join(path.dirname(repo), 'gitfile-copy');
+      fs.writeFileSync(copy, gitfile);
+      fs.rmSync(path.join(wt, '.git'));
+      fs.symlinkSync(copy, path.join(wt, '.git'));
+      expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+    });
+
+    it('keeps it when the gitfile runs past the bound, however it begins', async () => {
+      const { repo, wt, gitfile } = setUp();
+      fs.writeFileSync(path.join(wt, '.git'), gitfile + ' '.repeat(9000));
+      expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+    });
+
+    // Windows has no FIFOs on disk; Git Bash's `mkfifo` makes a plain file.
+    it.skipIf(process.platform === 'win32')(
+      'keeps it, without waiting, when the gitfile is a FIFO',
+      async () => {
+        const { repo, wt } = setUp();
+        fs.rmSync(path.join(wt, '.git'));
+        execFileSync('mkfifo', [path.join(wt, '.git')]);
+        expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+      },
+      20_000,
+    );
+
+    // POSIX fixture: Windows ignores a directory's mode bits.
+    it.skipIf(process.platform === 'win32')(
+      'keeps it when the unreadable entry cannot even be looked into',
+      async () => {
+        const { repo, wt, admin } = setUp();
+        // Its gitfile gone, the worktree cannot settle anything; and the
+        // entry that might be its own will not show what it holds.
+        fs.rmSync(path.join(wt, '.git'));
+        fs.chmodSync(path.join(admin, 'u'), 0o000);
+        try {
+          expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+        } finally {
+          fs.chmodSync(path.join(admin, 'u'), 0o755);
+        }
+      },
+      20_000,
+    );
+  });
+
+  it('only doubts where an unreadable entry might hold a repository', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    const admin = path.join(repo, '.git', 'worktrees', 'wt');
+    const elsewhere = path.join(path.dirname(repo), 'pointer');
+    fs.writeFileSync(elsewhere, `${path.join(wt, '.git')}\n`);
+    fs.rmSync(path.join(admin, 'gitdir'));
+    fs.symlinkSync(elsewhere, path.join(admin, 'gitdir'));
+    fs.rmSync(path.join(wt, '.git'));
+
+    // Unattributable, but holding nothing: there is nothing to be unsure of.
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('absent');
+    // Holding something: now it may be this worktree's repository.
+    fs.mkdirSync(path.join(admin, 'modules', 'sub'), { recursive: true });
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+  }, 20_000);
+
+  it('answers present when any entry naming this worktree holds one', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    const admin = path.join(repo, '.git', 'worktrees');
+    // Two readable entries for one path, sorted so the one holding the
+    // repository comes first and an empty one after it.
+    fs.mkdirSync(path.join(admin, 'a-first', 'modules', 'sub'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(admin, 'a-first', 'gitdir'),
+      `${path.join(wt, '.git')}\n`,
+    );
+    fs.mkdirSync(path.join(admin, 'z-last'));
+    fs.writeFileSync(
+      path.join(admin, 'z-last', 'gitdir'),
+      `${path.join(wt, '.git')}\n`,
+    );
+
+    // A later empty match does not take back what an earlier one found.
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('present');
+  }, 20_000);
+
+  it('is not made unsure by an entry that belongs to somebody else', async () => {
+    const repo = makeRepo();
+    const a = path.join(path.dirname(repo), 'a');
+    const b = path.join(path.dirname(repo), 'b');
+    git(repo, 'worktree', 'add', '-q', a, '-b', 'a');
+    git(repo, 'worktree', 'add', '-q', b, '-b', 'b');
+    const adminOf = (id: string) => path.join(repo, '.git', 'worktrees', id);
+    // b's pointer is a link this will not read, and b holds a repository.
+    const elsewhere = path.join(path.dirname(repo), 'pointer');
+    fs.writeFileSync(elsewhere, `${path.join(b, '.git')}\n`);
+    fs.rmSync(path.join(adminOf('b'), 'gitdir'));
+    fs.symlinkSync(elsewhere, path.join(adminOf('b'), 'gitdir'));
+    fs.mkdirSync(path.join(adminOf('b'), 'modules', 'x'), {
+      recursive: true,
+    });
+
+    // a's own entry is found and readable, so b's is b's: a clean worktree
+    // is not refused over a doubt about a different one.
+    expect(await worktreeAdminHoldsModules(repo, a)).toBe('absent');
+    // And b itself, whose own entry is the unreadable one, stays in doubt.
+    expect(await worktreeAdminHoldsModules(repo, b)).toBe('unknown');
+  }, 20_000);
+
+  // POSIX fixtures: Windows ignores a directory's mode bits and needs a
+  // privilege to make a link. Measured on windows-2022.
+  it.skipIf(process.platform === 'win32')(
+    'says it cannot tell wherever it could not look',
+    async () => {
+      const repo = makeRepo();
+      const wt = path.join(path.dirname(repo), 'wt');
+      git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+      const admin = path.join(repo, '.git', 'worktrees');
+
+      // The admin directory itself cannot be listed.
+      fs.chmodSync(admin, 0o000);
+      try {
+        expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+      } finally {
+        fs.chmodSync(admin, 0o755);
+      }
+
+      // A gitlink whose `.git` directory cannot be looked into for HEAD.
+      const head = git(repo, 'rev-parse', 'HEAD').trim();
+      git(wt, 'update-index', '--add', '--cacheinfo', `160000,${head},sub`);
+      const dot = path.join(wt, 'sub', '.git');
+      fs.mkdirSync(dot, { recursive: true });
+      fs.writeFileSync(path.join(dot, 'HEAD'), 'ref: refs/heads/main\n');
+      fs.chmodSync(dot, 0o000);
+      try {
+        expect(await worktreeHoldsSubmodules(wt)).toBe('unknown');
+      } finally {
+        fs.chmodSync(dot, 0o755);
+      }
+
+      // A `.git` file that is a link, which this will not open.
+      fs.rmSync(dot, { recursive: true });
+      const target = path.join(path.dirname(repo), 'gitfile');
+      fs.writeFileSync(target, 'gitdir: /somewhere\n');
+      fs.symlinkSync(target, dot);
+      expect(await worktreeHoldsSubmodules(wt)).toBe('unknown');
+
+      // A `.git` file far longer than any pointer git writes.
+      fs.rmSync(dot);
+      fs.writeFileSync(dot, `gitdir: /x${' '.repeat(9000)}\n`);
+      expect(await worktreeHoldsSubmodules(wt)).toBe('unknown');
+    },
+    20_000,
+  );
+
+  // Windows has no FIFOs on disk; Git Bash's `mkfifo` makes an ordinary file
+  // there (measured on windows-2022), so this fixture means nothing on it.
+  it.skipIf(process.platform === 'win32')(
+    'does not wait on a back-pointer that never ends',
+    async () => {
+      const repo = makeRepo();
+      const wt = path.join(path.dirname(repo), 'wt');
+      git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+      const admin = path.join(repo, '.git', 'worktrees', 'wt');
+      fs.mkdirSync(path.join(admin, 'modules', 'sub'), { recursive: true });
+      fs.rmSync(path.join(wt, '.git'));
+      // Nor wait on one that never ends: a FIFO blocks a reader until somebody
+      // writes, and this is a removal request's own thread. Not waiting is not
+      // the same as having looked, so this too is an answer of "cannot tell".
+      fs.rmSync(path.join(admin, 'gitdir'));
+      execFileSync('mkfifo', [path.join(admin, 'gitdir')]);
+      expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
+    },
+    20_000,
+  );
 
   it('falls back to the back-pointer, and will not follow a link to one', async () => {
     const repo = makeRepo();
@@ -536,23 +843,23 @@ describe('worktreeAdminHoldsModules', () => {
     // exists for, since git deletes that admin directory without a word once
     // the checkout is gone.
     fs.rmSync(path.join(wt, '.git'));
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('present');
 
     // And read without following a symlink: what a link points at is chosen
-    // by whatever wrote it, and the same reader authorises a prune. An entry
-    // whose pointer is a link stays unattributed — even when the link would
-    // have led to a pointer naming this very worktree.
+    // by whatever wrote it, and the same reader authorises a prune. But git
+    // does follow it, so this entry may be the very one git listed the
+    // worktree through — and it holds a repository. An entry that cannot be
+    // attributed and holds one is one that cannot be ruled out.
     const elsewhere = path.join(path.dirname(repo), 'pointer');
     fs.writeFileSync(elsewhere, `${path.join(wt, '.git')}\n`);
     fs.rmSync(path.join(admin, 'gitdir'));
     fs.symlinkSync(elsewhere, path.join(admin, 'gitdir'));
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(false);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
 
-    // Nor wait on one that never ends: a FIFO blocks a reader until somebody
-    // writes, and this is a removal request's own thread.
+    // And an entry with no pointer at all is not one git listed anything
+    // through, so it is not this worktree's however much it holds.
     fs.rmSync(path.join(admin, 'gitdir'));
-    execFileSync('mkfifo', [path.join(admin, 'gitdir')]);
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(false);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe('absent');
   }, 20_000);
 });
 
@@ -575,6 +882,27 @@ describe('realpathOrSelf / realpathOnDiskOrSelf', () => {
     expect(realpathOnDiskOrSelf(asked)).toBe(
       folds ? path.join(root, 'MiXeD') : asked,
     );
+  });
+
+  it('asks the platform for one spelling and not the other', () => {
+    // Where the volume does not fold case the two answer alike for every
+    // real path, so which one asks the platform is only visible by asking
+    // it something distinctive — and a helper that quietly became the other
+    // would leave every gate that compares a daemon-held path with a
+    // git-recorded one blind to case on the volumes where it matters.
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-rp-')),
+    );
+    tmpRoots.push(root);
+    const onDisk = vi
+      .spyOn(fs.realpathSync, 'native')
+      .mockReturnValue('/as/the/disk/Spells/It');
+    try {
+      expect(realpathOnDiskOrSelf(root)).toBe('/as/the/disk/Spells/It');
+      expect(realpathOrSelf(root)).toBe(root);
+    } finally {
+      onDisk.mockRestore();
+    }
   });
 
   it('answers for a path that is not there at all', () => {
@@ -607,6 +935,49 @@ describe('dryRunGitWorktreePrune', () => {
     ]);
   }, 20_000);
 
+  it('counts any link in the admin directory against the prune', async () => {
+    const repo = makeRepo();
+    const stale = path.join(path.dirname(repo), 'stale');
+    git(repo, 'worktree', 'add', '-q', stale, '-b', 'go');
+    fs.rmSync(path.join(stale, '.git'));
+    // A stray file is litter: prune names it, and nothing is behind it.
+    fs.writeFileSync(path.join(adminDir(repo), '.DS_Store'), '');
+    // A link is not litter even where it leads nowhere today: what it leads
+    // to is only known at this moment, the prune runs after it, and a
+    // directory made at its target in between is one prune would empty.
+    fs.symlinkSync(
+      path.join(repo, 'nowhere'),
+      path.join(adminDir(repo), 'dangling'),
+    );
+
+    expect(await dryRunGitWorktreePrune(repo)).toEqual([
+      { id: 'dangling', worktreePath: null },
+      { id: 'stale', worktreePath: fs.realpathSync(stale) },
+    ]);
+  }, 20_000);
+
+  it('never lets a link in the admin directory authorise a prune', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    fs.rmSync(wt, { recursive: true, force: true });
+    // A directory outside the repository, holding a pointer that names the
+    // very worktree being removed. Prune follows the link and empties it;
+    // the pointer must not be what says that is the entry asked about.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    tmpRoots.push(outside);
+    fs.writeFileSync(
+      path.join(outside, 'gitdir'),
+      `${path.join(wt, '.git')}\n`,
+    );
+    fs.writeFileSync(path.join(outside, 'precious.txt'), 'keep\n');
+    fs.rmSync(path.join(adminDir(repo), 'wt'), { recursive: true });
+    fs.symlinkSync(outside, path.join(adminDir(repo), 'wt'));
+
+    const report = await dryRunGitWorktreePrune(repo);
+    expect(report).toEqual([{ id: 'wt', worktreePath: null }]);
+  }, 20_000);
+
   it('sees a registration the listing cannot show', async () => {
     const repo = makeRepo();
     const wt = path.join(path.dirname(repo), 'wt');
@@ -622,53 +993,65 @@ describe('dryRunGitWorktreePrune', () => {
     ]);
   }, 20_000);
 
-  it('does not let an unreadable name hide a registration', async () => {
-    const repo = makeRepo();
-    const target = path.join(path.dirname(repo), 'target');
-    git(repo, 'worktree', 'add', '-q', target, '-b', 'go');
-    fs.rmSync(path.join(target, '.git'));
+  // A newline is not allowed in a Windows file name (EINVAL on windows-2022),
+  // so this admin directory cannot exist there.
+  it.skipIf(process.platform === 'win32')(
+    'does not let an unreadable name hide a registration',
+    async () => {
+      const repo = makeRepo();
+      const target = path.join(path.dirname(repo), 'target');
+      git(repo, 'worktree', 'add', '-q', target, '-b', 'go');
+      fs.rmSync(path.join(target, '.git'));
 
-    // The admin directory belongs to the repository, and git writes whatever
-    // name is there into a `-v` line verbatim. A name holding a newline
-    // splits that line in two, and neither half parses — so a line-by-line
-    // reader loses the registration entirely and answers that the only thing
-    // prune would take is the one that was asked for. It is not: prune takes
-    // this one too, with the HEAD and reflog that may be the last anchor for
-    // its commits.
-    const ghost = path.join(adminDir(repo), 'ghost\nsecond-line');
-    fs.mkdirSync(ghost);
-    fs.writeFileSync(path.join(ghost, 'HEAD'), 'ref: refs/heads/ghost\n');
+      // The admin directory belongs to the repository, and git writes whatever
+      // name is there into a `-v` line verbatim. A name holding a newline
+      // splits that line in two, and neither half parses — so a line-by-line
+      // reader loses the registration entirely and answers that the only thing
+      // prune would take is the one that was asked for. It is not: prune takes
+      // this one too, with the HEAD and reflog that may be the last anchor for
+      // its commits.
+      const ghost = path.join(adminDir(repo), 'ghost\nsecond-line');
+      fs.mkdirSync(ghost);
+      fs.writeFileSync(path.join(ghost, 'HEAD'), 'ref: refs/heads/ghost\n');
 
-    const report = await dryRunGitWorktreePrune(repo);
-    expect(report).toHaveLength(2);
-    // Named or not, it is counted — which is what makes a caller refuse.
-    expect(report.filter((one) => one.id === null)).toEqual([
-      { id: null, worktreePath: null },
-    ]);
-  }, 20_000);
+      const report = await dryRunGitWorktreePrune(repo);
+      expect(report).toHaveLength(2);
+      // Named or not, it is counted — which is what makes a caller refuse.
+      expect(report.filter((one) => one.id === null)).toEqual([
+        { id: null, worktreePath: null },
+      ]);
+    },
+    20_000,
+  );
 
-  it('reads a name git would not have chosen itself', async () => {
-    const repo = makeRepo();
-    const wt = path.join(path.dirname(repo), 'wt');
-    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
-    // git sanitises the id it derives from a basename, but the admin
-    // directory belongs to the repository. The reason follows a `: `, so the
-    // id is everything before that — cut at the first colon instead, this
-    // would name a directory that is not there.
-    const odd = path.join(adminDir(repo), 'co: lon');
-    fs.renameSync(path.join(adminDir(repo), 'wt'), odd);
-    fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${odd}\n`);
-    const gone = path.join(path.dirname(repo), 'gone');
-    fs.renameSync(wt, gone);
-    fs.rmSync(gone, { recursive: true, force: true });
+  // `:` is reserved in Windows file names, so this admin directory cannot
+  // exist there.
+  it.skipIf(process.platform === 'win32')(
+    'reads a name git would not have chosen itself',
+    async () => {
+      const repo = makeRepo();
+      const wt = path.join(path.dirname(repo), 'wt');
+      git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+      // git sanitises the id it derives from a basename, but the admin
+      // directory belongs to the repository. The reason follows a `: `, so the
+      // id is everything before that — cut at the first colon instead, this
+      // would name a directory that is not there.
+      const odd = path.join(adminDir(repo), 'co: lon');
+      fs.renameSync(path.join(adminDir(repo), 'wt'), odd);
+      fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${odd}\n`);
+      const gone = path.join(path.dirname(repo), 'gone');
+      fs.renameSync(wt, gone);
+      fs.rmSync(gone, { recursive: true, force: true });
 
-    expect(await dryRunGitWorktreePrune(repo)).toEqual([
-      {
-        id: 'co: lon',
-        worktreePath: fs.realpathSync(path.dirname(wt)) + path.sep + 'wt',
-      },
-    ]);
-  }, 20_000);
+      expect(await dryRunGitWorktreePrune(repo)).toEqual([
+        {
+          id: 'co: lon',
+          worktreePath: fs.realpathSync(path.dirname(wt)) + path.sep + 'wt',
+        },
+      ]);
+    },
+    20_000,
+  );
 
   it('reads a relative back-pointer against the entry that holds it', async () => {
     const repo = makeRepo();
@@ -692,20 +1075,27 @@ describe('dryRunGitWorktreePrune', () => {
     ]);
   }, 20_000);
 
-  it('will not read a pointer that says nothing', async () => {
-    const repo = makeRepo();
-    const wt = path.join(path.dirname(repo), 'wt');
-    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
-    fs.rmSync(wt, { recursive: true, force: true });
-    // Trailing whitespace is git's line ending, not part of the path; a
-    // pointer that is nothing but whitespace would otherwise resolve to the
-    // admin directory holding it.
-    fs.writeFileSync(path.join(adminDir(repo), 'wt', 'gitdir'), '  \n');
+  // git for Windows does not announce an entry whose pointer is only
+  // whitespace (measured on windows-2022: nothing to prune, nothing to
+  // parse), so there is no report here to read.
+  it.skipIf(process.platform === 'win32')(
+    'will not read a pointer that says nothing',
+    async () => {
+      const repo = makeRepo();
+      const wt = path.join(path.dirname(repo), 'wt');
+      git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+      fs.rmSync(wt, { recursive: true, force: true });
+      // Trailing whitespace is git's line ending, not part of the path; a
+      // pointer that is nothing but whitespace would otherwise resolve to the
+      // admin directory holding it.
+      fs.writeFileSync(path.join(adminDir(repo), 'wt', 'gitdir'), '  \n');
 
-    expect(await dryRunGitWorktreePrune(repo)).toEqual([
-      { id: 'wt', worktreePath: null },
-    ]);
-  }, 20_000);
+      expect(await dryRunGitWorktreePrune(repo)).toEqual([
+        { id: 'wt', worktreePath: null },
+      ]);
+    },
+    20_000,
+  );
 
   it('will not read a pointer too long to be one', async () => {
     const repo = makeRepo();

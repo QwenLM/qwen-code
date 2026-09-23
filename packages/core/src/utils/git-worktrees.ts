@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { runGit, runGitCapture, streamGitRecords } from './git-branches.js';
+import { openNoFollow, openSyncNoFollow } from './no-follow-open.js';
 import { NO_EXEC_CONFIG } from './gitUtils.js';
 
 export interface GitWorktreeEntry {
@@ -27,6 +28,51 @@ export interface GitWorktreeEntry {
   prunable?: string;
   /** The repository's main worktree, which git lists first and never removes. */
   isMain: boolean;
+}
+
+/**
+ * What a look for a nested repository found.
+ *
+ * Three answers, not two, because the caller is about to delete a directory:
+ * a probe that could not look has not found nothing, and collapsing the two
+ * is how a repository the user was never told about goes with the removal.
+ */
+export type NestedRepositoryAnswer = 'present' | 'absent' | 'unknown';
+
+/** The answer that has to win when two looks disagree. */
+function weightier(
+  a: NestedRepositoryAnswer,
+  b: NestedRepositoryAnswer,
+): NestedRepositoryAnswer {
+  if (a === 'present' || b === 'present') return 'present';
+  if (a === 'unknown' || b === 'unknown') return 'unknown';
+  return 'absent';
+}
+
+/**
+ * Open a repository-written file without following a symlink or waiting on
+ * a FIFO.
+ *
+ * Where the platform has `O_NOFOLLOW` the kernel refuses the link, and
+ * `O_NONBLOCK` keeps a FIFO from holding the daemon's thread. Windows has no
+ * `O_NOFOLLOW` — or'ing it in there opens straight through a link (#8227) —
+ * so it goes through the shared helper's lstat-and-verify fallback instead;
+ * and a FIFO is not something a path on its filesystems can be.
+ */
+const NO_FOLLOW = fs.constants.O_NOFOLLOW as number | undefined;
+const POINTER_OPEN_FLAGS =
+  fs.constants.O_RDONLY | (NO_FOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+
+function openPointer(file: string): Promise<fsPromises.FileHandle> {
+  return NO_FOLLOW === undefined
+    ? openNoFollow(file)
+    : fsPromises.open(file, POINTER_OPEN_FLAGS);
+}
+
+function openPointerSync(file: string): number {
+  return NO_FOLLOW === undefined
+    ? openSyncNoFollow(file)
+    : fs.openSync(file, POINTER_OPEN_FLAGS);
 }
 
 /** How much of a repository-written pointer file is worth reading. */
@@ -84,33 +130,49 @@ export function realpathOnDiskOrSelf(target: string): string {
 async function readGitdirPointer(
   adminEntryDir: string,
 ): Promise<string | null> {
+  const read = await readGitdirPointerAnswer(adminEntryDir);
+  return typeof read === 'object' ? read.at : null;
+}
+
+/**
+ * {@link readGitdirPointer}, telling "there is no pointer" apart from "there
+ * is one this will not read".
+ *
+ * git lists a worktree only through a pointer it can read, so an entry with
+ * none — missing or empty — belongs to no listed worktree. One this refuses
+ * to read — a symlink, a FIFO, one past the bound, one it is not allowed to
+ * open — may well be the entry git read to list the worktree being asked
+ * about, and answering about that worktree then means saying so.
+ */
+async function readGitdirPointerAnswer(
+  adminEntryDir: string,
+): Promise<{ at: string } | 'missing' | 'unreadable'> {
   let handle: fsPromises.FileHandle | undefined;
   try {
-    handle = await fsPromises.open(
-      path.join(adminEntryDir, 'gitdir'),
-      fs.constants.O_RDONLY |
-        (fs.constants.O_NOFOLLOW ?? 0) |
-        (fs.constants.O_NONBLOCK ?? 0),
-    );
+    handle = await openPointer(path.join(adminEntryDir, 'gitdir'));
     const stat = await handle.stat();
     // Whole or nothing. A pointer longer than any path git writes is not one
     // this should read a prefix of: `path.dirname` of a cut-off path names a
     // real directory that was never meant, and the caller would authorise a
     // prune against it. Answer "cannot tell" instead.
-    if (!stat.isFile() || stat.size > GITDIR_POINTER_MAX_BYTES) return null;
+    if (!stat.isFile() || stat.size > GITDIR_POINTER_MAX_BYTES) {
+      return 'unreadable';
+    }
     const buffer = Buffer.alloc(stat.size);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     const raw = buffer.toString('utf8', 0, bytesRead).replace(/\s+$/, '');
-    if (!raw) return null;
+    if (!raw) return 'missing';
     // Against the real directory holding it, not the spelling the caller
     // happened to use: a relative pointer resolved against `/tmp/x` answers
     // with a path git never wrote, and the worktree it names is usually gone
     // — so nothing further can resolve it back.
-    return realpathOrSelf(
-      path.dirname(path.resolve(realpathOrSelf(adminEntryDir), raw)),
-    );
-  } catch {
-    return null;
+    return {
+      at: realpathOrSelf(
+        path.dirname(path.resolve(realpathOrSelf(adminEntryDir), raw)),
+      ),
+    };
+  } catch (err) {
+    return saysNothingIsThere(err) ? 'missing' : 'unreadable';
   } finally {
     await handle?.close().catch(() => {});
   }
@@ -255,29 +317,45 @@ export async function commitIsReachable(
  * one, which would take every properly mapped submodule beside it down with
  * the error.
  */
-export function worktreeHoldsSubmodules(
+export async function worktreeHoldsSubmodules(
   worktreePath: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<boolean> {
+): Promise<NestedRepositoryAnswer> {
+  let answer: NestedRepositoryAnswer = 'absent';
   // Streamed, not buffered: the index is as large as the repository, and a
-  // buffered read of a monorepo's index fails — which on this gate would
-  // read as "no nested repository here" and let the next click delete one.
-  return streamGitRecords(
+  // buffered read of a monorepo's index fails. Records stay bytes until a
+  // path is taken out of one, because git writes paths as the bytes they are
+  // and a decoded-then-split stream loses the ones that are not UTF-8.
+  await streamGitRecords(
     worktreePath,
     [...NO_EXEC_CONFIG, 'ls-files', '--stage', '-z'],
-    (entry) => {
+    (record) => {
       // `<mode> <sha> <stage>\t<path>`; gitlinks are mode 160000.
-      if (!entry.startsWith('160000 ')) return false;
-      const tab = entry.indexOf('\t');
+      if (!record.subarray(0, GITLINK_MODE.length).equals(GITLINK_MODE)) {
+        return false;
+      }
+      const tab = record.indexOf(0x09);
       if (tab === -1) return false;
-      const at = path.resolve(worktreePath, entry.slice(tab + 1));
-      // A gitlink with nothing at its path — never checked out, or
-      // deinitialised — has no repository here to lose.
-      return pathHoldsRepository(at);
+      const bytes = record.subarray(tab + 1);
+      const name = bytes.toString('utf8');
+      // A path that does not survive decoding names some other directory,
+      // so what is at its real path cannot be looked at — and a look that
+      // could not happen is not a look that found nothing.
+      answer = Buffer.from(name, 'utf8').equals(bytes)
+        ? weightier(
+            answer,
+            pathHoldsRepository(path.resolve(worktreePath, name)),
+          )
+        : weightier(answer, 'unknown');
+      return answer === 'present';
     },
     env,
   );
+  return answer;
 }
+
+/** `ls-files --stage` begins a gitlink's record with its mode. */
+const GITLINK_MODE = Buffer.from('160000 ');
 
 /**
  * The registrations `git worktree prune` would drop, by admin-directory name.
@@ -327,10 +405,25 @@ export async function dryRunGitWorktreePrune(
       entries.push({ id: null, worktreePath: null });
       continue;
     }
+    const entryPath = path.join(admin, id);
+    if (isSymlink(entryPath)) {
+      // An admin entry that is a link is not one git made, and prune
+      // follows a link to a directory and empties whatever it names — which
+      // can be anywhere on disk. So it is counted and never attributed: a
+      // pointer inside it naming the worktree being removed must not be
+      // able to authorise that. That holds for a link that leads nowhere or
+      // to a file too: what it leads to is only known now, and the prune
+      // runs later — a directory made at its target in between is what it
+      // would empty. Refusing costs a removal the user can retry once the
+      // link is gone; the alternative costs whatever directory it names.
+      entries.push({ id, worktreePath: null });
+      continue;
+    }
     let dir;
     try {
-      dir = fs.statSync(path.join(admin, id));
+      dir = fs.statSync(entryPath);
     } catch {
+      // Anything that cannot be looked at stays a registration.
       entries.push({ id, worktreePath: null });
       continue;
     }
@@ -362,42 +455,51 @@ function saysNothingIsThere(err: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
-/** Whether `<admin>/<id>/modules` holds a repository, not merely exists. */
-function adminEntryHoldsModules(adminEntryDir: string): boolean {
-  const modules = path.join(adminEntryDir, 'modules');
-  let entry;
+function isSymlink(target: string): boolean {
   try {
-    entry = fs.statSync(modules);
-  } catch (err) {
-    // Not there is an answer; not being allowed to look is not. git refuses
-    // the removal on this directory either way, and the one thing that must
-    // not happen is a forced second click that deletes it unmentioned.
-    return !saysNothingIsThere(err);
+    return fs.lstatSync(target).isSymbolicLink();
+  } catch {
+    return false;
   }
-  if (!entry.isDirectory()) return false;
+}
+
+/** What stat says about `target`, with "cannot look" kept apart from "no". */
+function lookAt(target: string): fs.Stats | 'absent' | 'unknown' {
+  try {
+    return fs.statSync(target);
+  } catch (err) {
+    return saysNothingIsThere(err) ? 'absent' : 'unknown';
+  }
+}
+
+/** Whether `<admin>/<id>/modules` holds a repository, not merely exists. */
+function adminEntryHoldsModules(adminEntryDir: string): NestedRepositoryAnswer {
+  const modules = path.join(adminEntryDir, 'modules');
+  const entry = lookAt(modules);
+  if (typeof entry === 'string') return entry;
+  if (!entry.isDirectory()) return 'absent';
   try {
     // git refuses a removal on the directory's mere existence, but an empty
     // one holds nothing to lose, and warning about it would name a loss that
     // cannot happen.
-    return fs.readdirSync(modules).length > 0;
+    return fs.readdirSync(modules).length > 0 ? 'present' : 'absent';
   } catch {
-    return true;
+    return 'unknown';
   }
 }
 
 /** Whether `<at>` holds a repository of its own, rather than any `.git`. */
-function pathHoldsRepository(at: string): boolean {
-  try {
-    if (fs.statSync(path.join(at, '.git')).isDirectory()) {
-      // An empty `.git` directory, or a directory of unrelated files, is not
-      // a repository — and calling it one puts a sentence about a loss in
-      // front of git's own, more exact, refusal.
-      return fs.existsSync(path.join(at, '.git', 'HEAD'));
-    }
-  } catch (err) {
-    return !saysNothingIsThere(err);
+function pathHoldsRepository(at: string): NestedRepositoryAnswer {
+  const dot = lookAt(path.join(at, '.git'));
+  if (typeof dot === 'string') return dot;
+  if (dot.isDirectory()) {
+    // An empty `.git` directory, or a directory of unrelated files, is not
+    // a repository — and calling it one puts a sentence about a loss in
+    // front of git's own, more exact, refusal.
+    const head = lookAt(path.join(at, '.git', 'HEAD'));
+    return typeof head === 'string' ? head : 'present';
   }
-  return readGitfileTarget(at) !== null;
+  return gitfileAnswer(at);
 }
 
 /**
@@ -425,7 +527,7 @@ export async function worktreeAdminHoldsModules(
   cwd: string,
   worktreePath: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<boolean> {
+): Promise<NestedRepositoryAnswer> {
   const commonDir = (
     await runGit(cwd, [...NO_EXEC_CONFIG, 'rev-parse', '--git-common-dir'], env)
   ).trim();
@@ -434,37 +536,52 @@ export async function worktreeAdminHoldsModules(
   let ids: string[];
   try {
     ids = fs.readdirSync(admin);
-  } catch {
-    return false;
+  } catch (err) {
+    return saysNothingIsThere(err) ? 'absent' : 'unknown';
   }
+  let answer: NestedRepositoryAnswer = 'absent';
+  const found: string[] = [];
+  let doubt = false;
   for (const id of ids) {
-    const back = await readGitdirPointer(path.join(admin, id));
-    if (back === null || back !== wanted) continue;
+    const back = await readGitdirPointerAnswer(path.join(admin, id));
+    // No pointer at all: git cannot have listed this worktree through it.
+    if (back === 'missing') continue;
+    if (back === 'unreadable') {
+      // git may have read this pointer where this will not, so it may be
+      // the entry being asked about — and if it holds a repository, that is
+      // one this cannot rule out. Held until the scan is over, and set
+      // aside only if the worktree's own gitfile names an entry that was
+      // read: that is the entry git validates and acts on. Without that —
+      // no checkout left, or two entries naming the same path — git picks
+      // by directory order, and the unreadable one may be its pick.
+      if (adminEntryHoldsModules(path.join(admin, id)) !== 'absent') {
+        doubt = true;
+      }
+      continue;
+    }
+    if (back.at !== wanted) continue;
+    found.push(realpathOrSelf(path.join(admin, id)));
     // Any of them may be the one holding it: a first match without `modules`
     // answering for the rest would miss the repository behind it.
-    if (adminEntryHoldsModules(path.join(admin, id))) return true;
+    answer = weightier(answer, adminEntryHoldsModules(path.join(admin, id)));
+    if (answer === 'present') return answer;
   }
-  return false;
+  if (!doubt) return answer;
+  const own = gitfileTarget(worktreePath);
+  return own !== null && found.includes(own)
+    ? answer
+    : weightier(answer, 'unknown');
 }
 
 /**
- * Where `<worktree>/.git` points, or `null` when it is not a gitfile.
- *
- * Bounded, symlink-free and non-blocking for the same reason the
- * back-pointer is: the worktree is somewhere a repository can write, and
- * this runs on the daemon's own thread. A FIFO left here would otherwise
- * hold that thread — and so every workspace and every session — until
- * somebody wrote to it.
+ * The admin entry `<worktree>/.git` names, or `null` when there is no
+ * gitfile this will read. Opened like every pointer here: without following
+ * a link or waiting on a FIFO, and never past the bound.
  */
-function readGitfileTarget(worktreePath: string): string | null {
+function gitfileTarget(worktreePath: string): string | null {
   let fd: number | undefined;
   try {
-    fd = fs.openSync(
-      path.join(worktreePath, '.git'),
-      fs.constants.O_RDONLY |
-        (fs.constants.O_NOFOLLOW ?? 0) |
-        (fs.constants.O_NONBLOCK ?? 0),
-    );
+    fd = openPointerSync(path.join(worktreePath, '.git'));
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > GITDIR_POINTER_MAX_BYTES) return null;
     const buffer = Buffer.alloc(stat.size);
@@ -476,6 +593,41 @@ function readGitfileTarget(worktreePath: string): string | null {
     );
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+}
+
+/**
+ * Whether `<at>/.git`, a file, is a gitfile naming a repository.
+ *
+ * Bounded, symlink-free and non-blocking for the same reason the
+ * back-pointer is: the checkout is somewhere a repository can write, and
+ * this runs on the daemon's own thread. A FIFO left here would otherwise
+ * hold that thread — and so every workspace and every session — until
+ * somebody wrote to it.
+ */
+function gitfileAnswer(at: string): NestedRepositoryAnswer {
+  let fd: number | undefined;
+  try {
+    fd = openPointerSync(path.join(at, '.git'));
+    const stat = fs.fstatSync(fd);
+    // A FIFO, a socket: not a repository, and nothing that holds one.
+    if (!stat.isFile()) return 'absent';
+    if (stat.size > GITDIR_POINTER_MAX_BYTES) return 'unknown';
+    const buffer = Buffer.alloc(stat.size);
+    const read = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.toString('utf8', 0, read).startsWith('gitdir: ')
+      ? 'present'
+      : 'absent';
+  } catch (err) {
+    return saysNothingIsThere(err) ? 'absent' : 'unknown';
   } finally {
     if (fd !== undefined) {
       try {
