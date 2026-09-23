@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import {
   clampInlineMediaPart,
   getMaxInlineMediaBytes,
+  TOOL_RESULT_MEDIA_REMEDY,
 } from '../core/inlineMediaLimit.js';
 import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 import { boundImageBuffer, ImageViewError } from '../utils/image-view.js';
@@ -39,24 +40,10 @@ const MAX_UPLOADS_PER_TOOL_RESULT = 8;
 const MAX_UPLOAD_BYTES_PER_TOOL_RESULT = 128 * 1024 * 1024;
 
 /**
- * Recovery advice for a declined image dropped from a tool result. The
- * shared default points the user at an `@file` path, which cannot exist for
- * bytes that live only inside a tool response.
- */
-const DECLINED_MEDIA_REMEDY =
-  'Ask the user to have the tool return a smaller or lower-resolution payload.';
-
-/**
- * Bound an image the funnel is about to keep inline. A producer that sees omni
- * delivery active (e.g. `DiscoveredMCPTool.boundInlineParts`) stands its two
- * WITHHOLDING clamps down precisely because this funnel is contracted to take
- * over the bytes — a premise that only holds on the upload branches. Every
- * keep-inline exit would otherwise deliver the ORIGINAL bytes inline, so the
- * bound the producer forgone is applied here: the same visual budget and the
- * same trailing inline clamp, fail-open on a renderer failure (an abort still
- * propagates). Uploaded parts never reach this helper — they are already
- * `fileData` — so the omni "upload the ORIGINAL bytes, no local resize"
- * contract is untouched.
+ * Bound an image the funnel keeps inline. Producers skip their inline clamp
+ * under omni delivery because this funnel takes the bytes over, which only
+ * holds on the upload branches; every decline exit bounds here instead, with
+ * the same visual budget and inline clamp. Uploaded parts never get here.
  */
 async function boundDeclinedInlineImage(
   part: Part,
@@ -65,10 +52,6 @@ async function boundDeclinedInlineImage(
 ): Promise<Part> {
   const inline = part.inlineData;
   if (!inline?.data) return part;
-  // One ceiling read shared by both bounds below, so the renderer's adopt
-  // decision and the trailing clamp cannot disagree — the producer-side
-  // pipeline's invariant, mirrored. Without it an image that fits the visual
-  // budget but exceeds the byte ceiling is withheld instead of re-encoded.
   const inlineByteCeiling = getMaxInlineMediaBytes();
   let boundedPart = part;
   try {
@@ -95,13 +78,13 @@ async function boundDeclinedInlineImage(
       `tool-result media kept inline could not be bounded: ${error.message}`,
     );
   }
-  // Only what ends up image-typed is subject to the inline byte limit: an
-  // untyped blob the renderer could not decode stays verbatim (the
-  // producer-side pipeline's rule, mirrored).
+  // Only what ends up image-typed is subject to the inline limit.
   return isImagePart(boundedPart)
-    ? clampInlineMediaPart(boundedPart, inlineByteCeiling, {
-        remedy: DECLINED_MEDIA_REMEDY,
-      })
+    ? clampInlineMediaPart(
+        boundedPart,
+        inlineByteCeiling,
+        TOOL_RESULT_MEDIA_REMEDY,
+      )
     : boundedPart;
 }
 
@@ -126,10 +109,8 @@ async function boundDeclinedInlineImage(
  *   transport-guard rejections, which are policy verdicts rather than
  *   transfer failures: those parts are withheld with a text placeholder,
  *   never delivered inline (that would bypass the enabled guard);
- * - an IMAGE kept inline by any decline exit is bounded first
- *   (`boundDeclinedInlineImage`): producers stand their withholding clamps
- *   down because this funnel is contracted to take over the bytes, so a
- *   decline must not strand the source-resolution original on the inline path;
+ * - an image kept inline by any decline exit is bounded first
+ *   (`boundDeclinedInlineImage`);
  * - user aborts propagate.
  */
 export async function processToolResultOmniMedia(
@@ -148,11 +129,7 @@ export async function processToolResultOmniMedia(
   let uploadsRemaining = MAX_UPLOADS_PER_TOOL_RESULT;
   let uploadBytesRemaining = MAX_UPLOAD_BYTES_PER_TOOL_RESULT;
 
-  /** Keep-inline exit for a part the funnel declines to upload. An image
-   * must still leave bounded: the producer stood its withholding clamps down
-   * on the premise that this funnel takes over the bytes, so an unbounded
-   * decline would deliver the source-resolution original inline. Non-image
-   * parts keep the historical verbatim pass-through. */
+  /** Keep-inline exit for a declined part; only images are bounded. */
   const keepInline = async (
     part: Part,
     bytes: Buffer,
@@ -172,20 +149,7 @@ export async function processToolResultOmniMedia(
     const inline = part.inlineData;
     if (!inline?.data || !inline.mimeType) return [part];
     const top = inline.mimeType.split('/')[0];
-    if (top !== 'image' && top !== 'audio' && top !== 'video') {
-      // An untyped blob (an MCP resource whose mime the server omitted,
-      // defaulted to application/octet-stream) can still carry image bytes:
-      // the producer-side bound admits exactly those by sniffing, so one
-      // the funnel declines must not stay inline unbounded on the strength
-      // of its missing label. Other non-media tops pass through verbatim.
-      if (inline.mimeType === 'application/octet-stream') {
-        const bytes = Buffer.from(inline.data, 'base64');
-        if (sniffMediaType(bytes.subarray(0, 4096))?.modality === 'image') {
-          return keepInline(part, bytes, true);
-        }
-      }
-      return [part];
-    }
+    if (top !== 'image' && top !== 'audio' && top !== 'video') return [part];
 
     // Sniff the decoded bytes before touching disk — non-media or
     // unsupported containers stay inline untouched. The SNIFFED modality
@@ -194,12 +158,7 @@ export async function processToolResultOmniMedia(
     // config on the strength of its declared MIME type.
     const bytes = Buffer.from(inline.data, 'base64');
     const sniffed = sniffMediaType(bytes.subarray(0, 4096));
-    if (!sniffed) {
-      // A declared image the sniffer cannot place may still decode in the
-      // renderer; attempt the bound fail-open rather than deliver the
-      // original bytes inline unbounded on the strength of a failed sniff.
-      return keepInline(part, bytes, top === 'image');
-    }
+    if (!sniffed) return keepInline(part, bytes, top === 'image');
     if (!modalities[sniffed.modality]) {
       return keepInline(part, bytes, sniffed.modality === 'image');
     }

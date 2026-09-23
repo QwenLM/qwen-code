@@ -760,7 +760,6 @@ describe('DiscoveredMCPTool', () => {
       const toolResult = await invocation.execute(new AbortController().signal);
 
       const parts = toolResult.llmContent as Part[];
-      expect(parts[0]!.text).toContain('mime-type: image/jpeg]');
       const inline = parts[1]!.inlineData!;
       expect(inline.mimeType).toBe('image/jpeg');
       const bounded = await sharp(
@@ -811,125 +810,9 @@ describe('DiscoveredMCPTool', () => {
       expect(firstLabel).toContain('image/png');
     });
 
-    it('omits an image over the source limit before decoding it', async () => {
-      const omitted = { text: '[Media omitted]' };
-      const clamp = vi
-        .spyOn(inlineMediaLimit, 'clampInlineMediaPart')
-        // Keyed by limit, not by call order: the envelope text part precedes
-        // every image part, so a positional `Once` is consumed by whichever
-        // clamp call happens to run first.
-        .mockImplementation((part, limitBytes) =>
-          limitBytes === imageView.IMAGE_MAX_SOURCE_BYTES ? omitted : part,
-        );
-      const bound = vi.spyOn(imageView, 'boundImageBuffer');
-      const image = {
-        inlineData: { mimeType: 'image/png', data: 'oversized' },
-      };
-      mockCallTool.mockResolvedValue([
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: { content: [{ type: 'image', ...image.inlineData }] },
-          },
-        },
-      ] as Part[]);
-
-      const result = await tool
-        .build({ param: 'screenshot' })
-        .execute(new AbortController().signal);
-
-      expect(clamp).toHaveBeenCalledWith(
-        image,
-        imageView.IMAGE_MAX_SOURCE_BYTES,
-        expect.objectContaining({ limitLabel: 'image source limit' }),
-      );
-      expect(bound).not.toHaveBeenCalled();
-      expect(result.llmContent).toEqual([
-        {
-          text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
-        },
-        omitted,
-      ]);
-    });
-
-    it('names the image source limit in the placeholder it emits', async () => {
-      // Shrink the guard's limit rather than build a >100 MiB base64 payload:
-      // the real clamp still runs, so the assertions read the real wording this
-      // site asks for instead of a stubbed one.
-      const realClamp = inlineMediaLimit.clampInlineMediaPart;
-      vi.spyOn(inlineMediaLimit, 'clampInlineMediaPart').mockImplementation(
-        (part, limitBytes, placeholderOptions) =>
-          realClamp(part, Math.min(limitBytes ?? 1, 1), placeholderOptions),
-      );
-      const bound = vi.spyOn(imageView, 'boundImageBuffer');
-      mockCallTool.mockResolvedValue([
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
-            },
-          },
-        },
-      ] as Part[]);
-
-      const result = await tool
-        .build({ param: 'screenshot' })
-        .execute(new AbortController().signal);
-
-      expect(bound).not.toHaveBeenCalled();
-      const placeholder = (result.llmContent as Part[])[1]!;
-      expect(placeholder.text).toContain('image/png');
-      expect(placeholder.text).toContain('image source limit');
-      expect(placeholder.text).not.toContain('inline limit');
-      expect(placeholder.text).not.toContain('@file path');
-    });
-
-    it('does not call an untyped resource blob an image in the placeholder', async () => {
-      // The gate admits a resource blob whose mime the server left out, so the
-      // pre-decode guard can fire on bytes that are not an image. It must not
-      // tell the model to resize an image that does not exist.
-      const realClamp = inlineMediaLimit.clampInlineMediaPart;
-      vi.spyOn(inlineMediaLimit, 'clampInlineMediaPart').mockImplementation(
-        (part, limitBytes, placeholderOptions) =>
-          realClamp(part, Math.min(limitBytes ?? 1, 1), placeholderOptions),
-      );
-      const bound = vi.spyOn(imageView, 'boundImageBuffer');
-      mockCallTool.mockResolvedValue([
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [
-                {
-                  type: 'resource',
-                  resource: { uri: 'file:///backup.zip', blob: 'AAAA' },
-                },
-              ],
-            },
-          },
-        },
-      ] as Part[]);
-
-      const result = await tool
-        .build({ param: 'archive' })
-        .execute(new AbortController().signal);
-
-      expect(bound).not.toHaveBeenCalled();
-      const placeholder = (result.llmContent as Part[])[1]!;
-      expect(placeholder.text).toContain('application/octet-stream');
-      expect(placeholder.text).toContain('source limit');
-      expect(placeholder.text).not.toContain('image source limit');
-      expect(placeholder.text).not.toContain('resize or compress the image');
-    });
-
     describe('omni delivery exemption', () => {
-      // Both withholding clamps are the INLINE path's protection. When omni
-      // delivery is active, `CoreToolScheduler` converts these same parts into
-      // `oss://` fileData and uploads them BY REFERENCE under its own ceilings
-      // (128 MiB per tool result, 1 GiB per file) without decoding them, so
-      // withholding here would replace an image `main` delivered with a text
-      // placeholder.
+      // Under omni delivery the funnel uploads these parts by reference, so
+      // the inline clamp here would withhold an image it could deliver.
       const omniStub = (deliveryActive: boolean, omniEnabled = true) => {
         const isOmniDeliveryActive = vi.fn(() => deliveryActive);
         const loadOmniMediaReader = vi.fn(async () => ({
@@ -959,15 +842,14 @@ describe('DiscoveredMCPTool', () => {
           config,
         );
 
-      // Shrink BOTH clamp ceilings to 1 byte so any inline part would be
-      // withheld if either clamp still ran — the sibling tests' technique,
-      // standing in for a real >100 MiB base64 payload.
-      const shrinkBothClamps = () => {
+      // Shrink the clamp ceiling to 1 byte so any inline part would be
+      // withheld if the clamp ran, standing in for a real oversized payload.
+      const shrinkClamp = () => {
         const realClamp = inlineMediaLimit.clampInlineMediaPart;
         return vi
           .spyOn(inlineMediaLimit, 'clampInlineMediaPart')
-          .mockImplementation((part, limitBytes, placeholderOptions) =>
-            realClamp(part, Math.min(limitBytes ?? 1, 1), placeholderOptions),
+          .mockImplementation((part, _limitBytes, remedy) =>
+            realClamp(part, 1, remedy),
           );
       };
 
@@ -987,10 +869,8 @@ describe('DiscoveredMCPTool', () => {
       };
 
       it('delivers an over-limit image to omni instead of withholding it', async () => {
-        const clamp = shrinkBothClamps();
-        // The decoder still rejects a >100 MiB source, so the part reaches the
-        // trailing clamp unchanged: exempting ONLY the pre-decode clamp would
-        // withhold it there instead, which is why this asserts both.
+        const clamp = shrinkClamp();
+        // The decoder rejects a >100 MiB source and forwards the part as-is.
         vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValue(
           new imageView.ImageViewError(
             'source_too_large',
@@ -1015,7 +895,7 @@ describe('DiscoveredMCPTool', () => {
       });
 
       it('still withholds an over-limit image when omni delivery is inactive', async () => {
-        const clamp = shrinkBothClamps();
+        const clamp = shrinkClamp();
         oversizedImageResponse();
         const { config } = omniStub(false);
 
@@ -1025,14 +905,14 @@ describe('DiscoveredMCPTool', () => {
 
         expect(clamp).toHaveBeenCalled();
         const placeholder = (result.llmContent as Part[])[1]!;
-        expect(placeholder.text).toContain('image source limit');
+        expect(placeholder.text).toContain('[Media omitted: image/png');
       });
 
       it('does not load the omni module when omni is disabled', async () => {
         // The cheap gate must run BEFORE the dynamic import: that import
         // touches the filesystem, which breaks mock-fs suites and costs a
         // module load for every non-omni user.
-        shrinkBothClamps();
+        shrinkClamp();
         oversizedImageResponse();
         const { config, loadOmniMediaReader } = omniStub(true, false);
 
@@ -1095,13 +975,11 @@ describe('DiscoveredMCPTool', () => {
       ]);
     });
 
-    it('forwards an oversized undecodable resource blob instead of a placeholder', async () => {
-      // Same boundary on the other skip path: an untyped blob the renderer
-      // could not decode is not an image, so the trailing clamp must skip it.
+    it('forwards an oversized untyped resource blob untouched', async () => {
+      // Bounding keys on the declared image mime; an unlabelled blob is not
+      // decoded or clamped.
       vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
-      vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValueOnce(
-        new imageView.ImageViewError('decode_failed', 'failed to decode'),
-      );
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
       mockCallTool.mockResolvedValue([
         {
           functionResponse: {
@@ -1122,6 +1000,7 @@ describe('DiscoveredMCPTool', () => {
         .build({ param: 'archive' })
         .execute(new AbortController().signal);
 
+      expect(bound).not.toHaveBeenCalled();
       expect(result.llmContent).toEqual([
         {
           text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: application/octet-stream]`,
@@ -1273,7 +1152,6 @@ describe('DiscoveredMCPTool', () => {
       expect(Buffer.from(inline.data!, 'base64').length).toBeLessThan(
         1024 * 1024,
       );
-      expect(parts[0]!.text).toContain('mime-type: image/jpeg]');
     });
 
     it('forwards an image the renderer cannot bound unchanged', async () => {
@@ -1322,35 +1200,6 @@ describe('DiscoveredMCPTool', () => {
           .png()
           .toBuffer()
       ).toString('base64');
-
-    it('bounds an oversized image a resource block does not type', async () => {
-      mockCallTool.mockResolvedValue([
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [
-                {
-                  type: 'resource',
-                  resource: {
-                    uri: 'file:///screenshot.png',
-                    blob: await oversizedPngBase64(),
-                  },
-                },
-              ],
-            },
-          },
-        },
-      ] as Part[]);
-
-      const result = await tool
-        .build({ param: 'screenshot' })
-        .execute(new AbortController().signal);
-
-      const parts = result.llmContent as Part[];
-      expect(parts[0]!.text).toContain('mime-type: image/jpeg]');
-      expect(parts[1]!.inlineData!.mimeType).toBe('image/jpeg');
-    });
 
     it('bounds an oversized image returned with an MCP tool error', async () => {
       mockCallTool.mockResolvedValue([

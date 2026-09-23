@@ -34,12 +34,9 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   clampInlineMediaPart,
   getMaxInlineMediaBytes,
+  TOOL_RESULT_MEDIA_REMEDY,
 } from '../core/inlineMediaLimit.js';
-import {
-  boundImageBuffer,
-  IMAGE_MAX_SOURCE_BYTES,
-  ImageViewError,
-} from '../utils/image-view.js';
+import { boundImageBuffer, ImageViewError } from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   getAllMCPServerStatuses,
@@ -966,27 +963,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Whether the omni funnel takes over this result's media.
-   *
-   * `CoreToolScheduler` runs `processToolResultOmniMedia` over the parts this
-   * tool returns, converting inline base64 into `oss://` fileData under omni's
-   * own ceilings (128 MiB per tool result, 1 GiB per file) without decoding
-   * them. Both withholding clamps in `boundInlineImageParts` protect the INLINE
-   * path — its decoder's source cap and its request-size budget — so leaving
-   * them armed here replaces an image omni could have delivered with a text
-   * placeholder.
-   *
-   * A part the funnel DECLINES to upload does not escape bounding either: the
-   * funnel puts every image it keeps inline through this pipeline's own visual
-   * budget and trailing inline clamp (`boundDeclinedInlineImage`), so exempting
-   * the clamps here never strands source-resolution bytes on the inline path.
-   * This gate is per-config while the funnel's upload decision is per-part;
-   * that is sound only because of the funnel-side bound.
-   *
-   * Same rule and same gate shape as the 100 MB source cap in `fileUtils`:
-   * cheap `isOmniEnabled()` BEFORE the dynamic import, so a non-omni session
-   * never pays the module load and the import never touches the filesystem
-   * behind a mock-fs suite.
+   * Whether the omni funnel (`processToolResultOmniMedia`) takes over this
+   * result's media. It uploads by reference under its own ceilings and bounds
+   * any image it declines to upload, so the inline clamp must not pre-empt it.
+   * `isOmniEnabled()` runs first so non-omni sessions skip the dynamic import,
+   * as in `fileUtils`.
    */
   private async isOmniMediaDeliveryActive(): Promise<boolean> {
     if (!this.cliConfig?.isOmniEnabled?.()) return false;
@@ -1352,32 +1333,15 @@ function transformImageAudioBlock(
 }
 
 /**
- * Recovery advice for media dropped from a tool result. The shared default
- * points the user at an `@file` path, which cannot exist for bytes that live
- * only inside an MCP response.
- */
-const MCP_MEDIA_REMEDY =
-  'Ask the user to have the tool return a smaller or lower-resolution payload.';
-
-/**
  * Shrink oversized inline images to the same visual budget `read_file`
- * applies, so a full-resolution screenshot from a browser automation server
- * does not enter the conversation verbatim. Images that already fit, and any
- * the renderer cannot handle, are forwarded unchanged; images too large to
- * send inline at all become a text placeholder instead.
+ * applies, so a full-resolution screenshot does not enter the conversation
+ * verbatim. Images that already fit, and any the renderer cannot handle, are
+ * forwarded unchanged; images still over the inline limit become a text
+ * placeholder. `subject` names the server and tool in renderer errors, since
+ * these bytes have no file path.
  *
- * `subject` names the server and tool the bytes came from. It is the only way
- * to tell configured MCP servers apart in a bounding failure, since these bytes
- * have no file path to label them with.
- *
- * `omniDeliveryActive` reports that the omni funnel takes over this result's
- * media: it uploads what it accepts as `oss://` fileData BY REFERENCE, under
- * ceilings far above either limit below, and it bounds every image it DECLINES
- * to upload with this same pipeline before leaving it inline. Both withholding
- * clamps exist to protect the inline path, so both are exempted together —
- * dropping only the pre-decode one would merely move the placeholder: the
- * renderer rejects >100 MiB with `source_too_large`, the catch forwards the
- * part unchanged, and the trailing inline clamp withholds it anyway.
+ * Under omni delivery the inline limit is skipped: the funnel uploads the part
+ * by reference or applies the same bound itself before keeping it inline.
  */
 async function boundInlineImageParts(
   parts: Part[],
@@ -1385,74 +1349,21 @@ async function boundInlineImageParts(
   subject: string,
   omniDeliveryActive: boolean,
 ): Promise<Part[]> {
-  // One ceiling read shared by both guards below, so the renderer's adopt
-  // decision and the trailing clamp cannot disagree within a single result.
+  // One ceiling read shared by the renderer and the clamp, so its adopt
+  // decision and the clamp cannot disagree within a single result.
   const inlineByteCeiling = getMaxInlineMediaBytes();
-  const clampToInlineLimit = (part: Part) =>
-    clampInlineMediaPart(part, inlineByteCeiling, {
-      remedy: MCP_MEDIA_REMEDY,
-    });
   const boundedParts: Part[] = [];
   for (const part of parts) {
     const inline = part.inlineData;
-    // Gate on the shared predicate the vision bridge and
-    // `getMcpErrorImageContent` already use, so this bound cannot drift from
-    // the definition of "image" (and keeps excluding MCP audio blocks, which
-    // carry the identical `inlineData` shape). An untyped embedded resource
-    // blob is attempted as well: MCP makes a resource's mime optional and
-    // `transformResourceBlock` defaults it to `application/octet-stream`, so an
-    // image can arrive unlabelled — the renderer sniffs the real format, and a
-    // genuine non-image falls through the `decode_failed` fail-open below. The
-    // `typeof` checks add no policy; they only narrow the optional fields for
-    // TypeScript.
-    if (
-      !inline ||
-      typeof inline.mimeType !== 'string' ||
-      typeof inline.data !== 'string' ||
-      !(isImagePart(part) || inline.mimeType === 'application/octet-stream')
-    ) {
+    if (!isImagePart(part) || !inline?.mimeType || !inline.data) {
       boundedParts.push(part);
       continue;
-    }
-    const { mimeType, data } = inline;
-    // This cap protects the overview DECODER, so — exactly as in `fileUtils` —
-    // it only applies when the bytes will actually reach it. Under omni
-    // delivery this pipeline is not the one that decides their fate: the funnel
-    // either uploads them by reference or bounds them itself before leaving
-    // them inline.
-    if (!omniDeliveryActive) {
-      // The gate above also admits untyped resource blobs, whose real format is
-      // only known once the renderer sniffs them. This guard runs before that,
-      // so it must not describe a non-image as an image: pick the wording from
-      // what is actually known here.
-      const labelledImage = isImagePart(part);
-      const sourceLimitedPart = clampInlineMediaPart(
-        part,
-        IMAGE_MAX_SOURCE_BYTES,
-        labelledImage
-          ? {
-              // This is the decoder's source cap, not the inline-media limit,
-              // and the bytes exist only in this tool result — no `@file` can
-              // supply them. Say so instead of borrowing the default wording.
-              limitLabel: 'image source limit',
-              remedy:
-                'Ask the user to resize or compress the image, or return it as a resource link instead of inline bytes.',
-            }
-          : {
-              limitLabel: 'source limit',
-              remedy: 'Ask the user to have the tool return a smaller payload.',
-            },
-      );
-      if (sourceLimitedPart !== part) {
-        boundedParts.push(sourceLimitedPart);
-        continue;
-      }
     }
     let boundedPart = part;
     try {
       const view = await boundImageBuffer(
-        Buffer.from(data, 'base64'),
-        `${subject} ${mimeType}`,
+        Buffer.from(inline.data, 'base64'),
+        `${subject} ${inline.mimeType}`,
         signal,
         inlineByteCeiling,
       );
@@ -1464,44 +1375,27 @@ async function boundInlineImageParts(
             mimeType: view.mimeType,
           },
         };
-        // The envelope text part precedes its media part and still announces
-        // the server's original mime.
-        const envelope = boundedParts.at(-1);
-        const stated = `mime-type: ${mimeType}]`;
-        if (
-          typeof envelope?.text === 'string' &&
-          envelope.text.endsWith(stated)
-        ) {
-          const prefix = envelope.text.slice(0, -stated.length);
-          boundedParts[boundedParts.length - 1] = {
-            text: `${prefix}mime-type: ${view.mimeType}]`,
-          };
-        }
       }
     } catch (error) {
       if (!(error instanceof ImageViewError)) {
         throw error;
       }
-      const message = `Unable to bound MCP image from ${subject} (${mimeType}): ${getErrorMessage(error)}`;
-      // A renderer that cannot load is a persistent host condition, not a
-      // per-image one: every image of every call will fail the same way, so
-      // surface it at warn while single-image decode failures stay at debug.
+      const message = `Unable to bound MCP image from ${subject} (${inline.mimeType}): ${getErrorMessage(error)}`;
+      // A missing renderer fails every image of every call, so surface it.
       if (error.code === 'renderer_unavailable') {
         debugLogger.warn(message);
       } else {
         debugLogger.debug(message);
       }
     }
-    // Only what ends up being an image is subject to the inline limit: an
-    // untyped blob the renderer could not decode is forwarded exactly as the
-    // server sent it. Under omni delivery neither runs here — the inline
-    // ceiling is the inline path's request-size budget, and the funnel owns
-    // both decisions for these bytes, applying the same two bounds to any
-    // image it keeps inline.
     boundedParts.push(
-      isImagePart(boundedPart) && !omniDeliveryActive
-        ? clampToInlineLimit(boundedPart)
-        : boundedPart,
+      omniDeliveryActive
+        ? boundedPart
+        : clampInlineMediaPart(
+            boundedPart,
+            inlineByteCeiling,
+            TOOL_RESULT_MEDIA_REMEDY,
+          ),
     );
   }
   return boundedParts;

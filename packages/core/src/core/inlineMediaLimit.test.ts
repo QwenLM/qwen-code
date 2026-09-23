@@ -92,13 +92,7 @@ describe('clampInlineMediaPart', () => {
   });
 
   it('names the default limit and remedy at the call sites that override neither', () => {
-    // This diff rebuilt the shared sentence from concatenated literals into a
-    // template with two fallbacks. Every caller that does not pass
-    // `placeholderOptions` — nine production sites — emits the defaults, while
-    // the MCP sites override both halves and only ever assert their own
-    // wording. Pin the default remedy positively: emptying `DEFAULT_REMEDY`,
-    // or dropping the sentence separator in a future template edit, must not
-    // leave the suite green.
+    // Most callers take the default remedy; the tool-result sites override it.
     const part = {
       inlineData: { mimeType: 'image/png', data: 'A'.repeat(2000) },
     };

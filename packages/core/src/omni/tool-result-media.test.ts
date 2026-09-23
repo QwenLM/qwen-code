@@ -735,11 +735,11 @@ describe('processToolResultOmniMedia', () => {
   });
 
   it('bounds an over-budget image it keeps inline instead of delivering source-resolution bytes', async () => {
-    // Producer-side bounding is skipped while omni delivery owns the media,
+    // Producers skip their inline clamp while omni delivery owns the media,
     // so an image the funnel DECLINES must still be bounded here — else the
-    // original bytes reach the model inline at source resolution on every
-    // turn. Nine images exhaust the eight-upload budget; the ninth must
-    // come back re-encoded, not as the server's original 3840x2160 PNG.
+    // original bytes reach the model inline on every turn. Nine images
+    // exhaust the eight-upload budget; the ninth must come back re-encoded,
+    // not as the server's original 3840x2160 PNG.
     // Removing the keep-inline bound turns this test red.
     const oversized = await sharp({
       create: {

@@ -58,25 +58,15 @@ function formatMb(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1);
 }
 
-/**
- * Site-specific wording for {@link oversizedMediaPlaceholder}.
- *
- * The defaults describe the inline-media ceiling for bytes the user can point
- * at through an `@file` path. A caller enforcing a *different* ceiling on bytes
- * that exist nowhere on disk (an MCP tool result, say) must override them, or
- * the model reads a limit that does not apply and is told to reference a file
- * that cannot exist.
- */
-export interface OversizedMediaPlaceholderOptions {
-  /** How to name `limitBytes`. Defaults to `inline limit`. */
-  limitLabel?: string;
-  /** Recovery advice for the model. Defaults to the resize/`@file` hint. */
-  remedy?: string;
-}
-
-const DEFAULT_LIMIT_LABEL = 'inline limit';
 const DEFAULT_REMEDY =
   'Ask the user to resize/compress it, or reference it via an @file path so it can be read from disk.';
+
+/**
+ * Remedy for media that lives only inside a tool result, where no `@file`
+ * path can supply it.
+ */
+export const TOOL_RESULT_MEDIA_REMEDY =
+  'Ask the user to have the tool return a smaller or lower-resolution payload.';
 
 /**
  * Build the placeholder text substituted for an oversized inline media part.
@@ -85,16 +75,15 @@ export function oversizedMediaPlaceholder(
   mimeType: string,
   bytes: number,
   limitBytes: number,
-  options?: OversizedMediaPlaceholderOptions,
+  remedy: string = DEFAULT_REMEDY,
 ): string {
   // Sanitize: the mime can originate from an untrusted resource/MCP server,
   // and is embedded into a bracketed envelope the model reads as text.
   const mime = sanitizeMimeForPlaceholder(mimeType);
-  const limitLabel = options?.limitLabel ?? DEFAULT_LIMIT_LABEL;
-  const remedy = options?.remedy ?? DEFAULT_REMEDY;
-  return `[Media omitted: ${mime} is ~${formatMb(bytes)}MB, exceeding the ${formatMb(
-    limitBytes,
-  )}MB ${limitLabel}. ${remedy}]`;
+  return (
+    `[Media omitted: ${mime} is ~${formatMb(bytes)}MB, exceeding the ` +
+    `${formatMb(limitBytes)}MB inline limit. ${remedy}]`
+  );
 }
 
 /**
@@ -105,7 +94,7 @@ export function oversizedMediaPlaceholder(
 export function clampInlineMediaPart(
   part: Part,
   limitBytes: number = getMaxInlineMediaBytes(),
-  placeholderOptions?: OversizedMediaPlaceholderOptions,
+  remedy?: string,
 ): Part {
   const data = part.inlineData?.data;
   if (!data) {
@@ -117,11 +106,6 @@ export function clampInlineMediaPart(
   }
   const mimeType = part.inlineData?.mimeType ?? 'application/octet-stream';
   return {
-    text: oversizedMediaPlaceholder(
-      mimeType,
-      bytes,
-      limitBytes,
-      placeholderOptions,
-    ),
+    text: oversizedMediaPlaceholder(mimeType, bytes, limitBytes, remedy),
   };
 }
