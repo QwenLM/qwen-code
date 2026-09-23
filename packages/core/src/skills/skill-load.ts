@@ -261,6 +261,14 @@ export async function loadSkillsFromDir(
                 `Skipping symlink ${entry.name} that does not point to a directory`,
               );
             } else {
+              // validateSymlinkTarget folds every realpath/stat failure into
+              // this per-entry skip, but a resource-exhaustion errno (ENOMEM
+              // is the reachable member — those syscalls allocate no
+              // descriptor) must fail the load closed like the readFile and
+              // readdir legs, not resolve a truncated skill set.
+              if (isResourceExhaustion(check.error)) {
+                throw check.error;
+              }
               debugLogger.warn(
                 `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
               );

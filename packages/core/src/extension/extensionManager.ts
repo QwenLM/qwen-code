@@ -457,30 +457,95 @@ function getContextFileNames(config: ExtensionConfig): string[] {
 }
 
 async function loadCommandsFromDir(dir: string): Promise<string[]> {
-  try {
-    // fs.promises.readdir, not glob: path-scurry swallows readdir errors
-    // internally and resolves an empty or short listing, so under descriptor
-    // pressure the refresh would commit a truncated command set and stamp it
-    // up to date. readdir surfaces its errno, so resource exhaustion fails
-    // the refresh closed instead. This traversal is NOT admitted through the
-    // shared descriptor gate (SKILL_LOAD_CONCURRENCY in skill-load.ts): one
-    // recursive readdir opens, drains and closes each directory inside libuv
-    // threadpool tasks with no worker knob to cite, and at most
-    // EXTENSION_SCAN_CONCURRENCY traversals run at once (one per in-flight
-    // extension).
-    const entries = await fs.promises.readdir(dir, {
-      recursive: true,
-      withFileTypes: true,
-    });
-    const commandNames: string[] = [];
+  // Per-directory walk with an explicit stack — neither one recursive
+  // readdir nor glob:
+  //
+  // - glob's path-scurry swallows readdir errors internally and resolves an
+  //   empty or short listing, so under descriptor pressure the refresh would
+  //   commit a truncated command set and stamp it up to date. Every readdir
+  //   leg below surfaces its errno, and resource exhaustion is rethrown so
+  //   the refresh fails closed instead.
+  // - A single recursive readdir rejects the WHOLE walk when any one
+  //   subdirectory is unreadable (EACCES on a foreign-owned subtree), which
+  //   the non-exhaustion path would launder into `[]` for the extension.
+  //   Reading each directory separately keeps glob's old short-listing
+  //   behavior: an unreadable subdirectory loses only its own subtree.
+  //
+  // The removed glob ran with `follow: true`, so symlinked directories are
+  // descended into explicitly — a realpath visited-set cuts cycles instead
+  // of recursing until the kernel's ELOOP limit — and a symlinked command
+  // file is matched on the link's own name, as glob matched it. Broken or
+  // unreadable links are skipped.
+  //
+  // The extension match is case-insensitive exactly where glob's
+  // platform-default `nocase` is (macOS/Windows), so the discovered set
+  // stays identical to what FileCommandLoader registers on each platform.
+  //
+  // This traversal is NOT admitted through the shared descriptor gate
+  // (SKILL_LOAD_CONCURRENCY in skill-load.ts): it holds at most one
+  // directory handle at a time per in-flight extension
+  // (EXTENSION_SCAN_CONCURRENCY at most), each opened, drained and closed
+  // inside a single libuv threadpool task.
+  const ignoreCase =
+    process.platform === 'darwin' || process.platform === 'win32';
+  const commandNames: string[] = [];
+  const visitedSymlinkDirs = new Set<string>();
+  const pending: string[] = [dir];
+  while (pending.length > 0) {
+    const currentDir = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(currentDir, {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      if (isResourceExhaustion(error)) throw error;
+      if (currentDir === dir) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          debugLogger.error(`Error loading commands from ${dir}:`, error);
+        }
+        return [];
+      }
+      debugLogger.error(`Error loading commands from ${currentDir}:`, error);
+      continue;
+    }
     for (const entry of entries) {
-      if (entry.isDirectory()) continue;
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(fullPath);
+        continue;
+      }
+      let isFile = entry.isFile();
+      if (entry.isSymbolicLink()) {
+        let target: fs.Stats;
+        try {
+          target = await fs.promises.stat(fullPath);
+        } catch (error) {
+          if (isResourceExhaustion(error)) throw error;
+          // Dangling or unreadable link — not a command.
+          continue;
+        }
+        if (target.isDirectory()) {
+          let realPath: string;
+          try {
+            realPath = await fs.promises.realpath(fullPath);
+          } catch (error) {
+            if (isResourceExhaustion(error)) throw error;
+            continue;
+          }
+          if (!visitedSymlinkDirs.has(realPath)) {
+            visitedSymlinkDirs.add(realPath);
+            pending.push(fullPath);
+          }
+          continue;
+        }
+        isFile = target.isFile();
+      }
+      if (!isFile) continue;
       const ext = path.extname(entry.name);
-      if (ext !== '.md' && ext !== '.toml') continue;
-      const relativePath = path.relative(
-        dir,
-        path.join(entry.parentPath, entry.name),
-      );
+      const normalizedExt = ignoreCase ? ext.toLowerCase() : ext;
+      if (normalizedExt !== '.md' && normalizedExt !== '.toml') continue;
+      const relativePath = path.relative(dir, fullPath);
       commandNames.push(
         relativePath
           .substring(0, relativePath.length - ext.length)
@@ -489,14 +554,8 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
           .join(':'),
       );
     }
-    return commandNames;
-  } catch (error) {
-    if (isResourceExhaustion(error)) throw error;
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      debugLogger.error(`Error loading commands from ${dir}:`, error);
-    }
-    return [];
   }
+  return commandNames;
 }
 
 /**
@@ -1473,8 +1532,28 @@ export class ExtensionManager {
               ]),
             });
           } else {
+            // A tombstone must not advertise subresources the failed refresh
+            // never committed — it exists to carry the refusals. Build it as
+            // an allowlist, never by spreading the rejected load: the runtime
+            // reads MCP servers through `config.mcpServers`
+            // (Config.getMergedMcpServers) and language servers through
+            // `config.lspServers` (LspConfigLoader), both of which a spread
+            // would carry onto a refused extension, and `isActive` passes
+            // getActiveExtensions. `config` keeps only the required
+            // name/version so the cache key and by-name lookups still work.
             const tombstone: Extension = {
-              ...extension,
+              id: extension.id,
+              name: extension.name,
+              displayName: extension.displayName,
+              version: extension.version,
+              isActive: extension.isActive,
+              path: extension.path,
+              format: extension.format,
+              installMetadata: extension.installMetadata,
+              config: {
+                name: extension.config.name,
+                version: extension.config.version,
+              },
               contextFiles: [],
               commands: [],
               skills: [],
@@ -1482,10 +1561,6 @@ export class ExtensionManager {
               workflows: [],
               agentExecutorRefusals: refusals,
             };
-            // A tombstone must not advertise subresources the failed refresh
-            // never committed — it exists to carry the refusals.
-            delete tombstone.mcpServers;
-            delete tombstone.hooks;
             cache.set(name, tombstone);
           }
         }
@@ -2110,6 +2185,13 @@ export class ExtensionManager {
           });
         }
         throw e;
+      }
+      // The load is skipped, so withdraw the refusal record it may have
+      // made before failing: a rejected extension must not be materialized
+      // into the cache as a tombstone if a sibling's death rejects the
+      // refresh (refreshCacheWithSnapshot merges this ledger on rejection).
+      if (extension !== undefined) {
+        options.scanRefusals?.delete(extension.name);
       }
       debugLogger.warn(
         `Warning: Skipping extension in ${(e as Error & { manifestPath?: string }).manifestPath ?? extension?.path ?? extensionDir}: ${getErrorMessage(

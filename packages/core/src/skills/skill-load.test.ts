@@ -493,6 +493,29 @@ Symlinked skill body.
 
       expect(skills).toHaveLength(0);
     });
+
+    it('rejects the whole load when a symlink target check hits resource exhaustion', async () => {
+      // validateSymlinkTarget folds every realpath/stat failure into a
+      // per-entry skip; an exhaustion errno (ENOMEM is the reachable member
+      // — realpath/stat allocate no descriptor) must instead fail the load
+      // closed, like the readFile and readdir legs, or the truncated skill
+      // set is committed and stamped as a successful refresh.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'linked-skill',
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.realpath).mockRejectedValue(
+        Object.assign(new Error('ENOMEM: not enough memory'), {
+          code: 'ENOMEM',
+        }),
+      );
+
+      await expect(loadSkillsFromDir(testBaseDir)).rejects.toThrow('ENOMEM');
+    });
   });
 
   describe('validateConfig', () => {

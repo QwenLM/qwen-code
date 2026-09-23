@@ -3608,6 +3608,145 @@ describe('extension tests', () => {
         const ext = extensions.find((e) => e.config.name === 'no-commands-ext');
         expect(ext?.commands).toEqual([]);
       });
+
+      it('should discover commands under symlinked subdirectories', async () => {
+        // The pre-readdir glob ran with `follow: true`, so a linked
+        // subdirectory's commands were discovered; the traversal must
+        // descend into it or a `type: 'link'` install's command set is
+        // silently truncated (and stamped up to date).
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'linked-commands-ext',
+          version: '1.0.0',
+        });
+        const realDir = path.join(extDir, 'real-commands');
+        fs.mkdirSync(path.join(realDir, 'sub'), { recursive: true });
+        fs.writeFileSync(path.join(realDir, 'a.md'), 'A');
+        fs.writeFileSync(path.join(realDir, 'sub', 'b.md'), 'B');
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'linkfile.md'), 'linkfile');
+        fs.symlinkSync(realDir, path.join(commandsDir, 'linked'), 'dir');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const ext = manager
+          .getLoadedExtensions()
+          .find((e) => e.config.name === 'linked-commands-ext');
+        expect(ext?.commands?.slice().sort()).toEqual([
+          'linked:a',
+          'linked:sub:b',
+          'linkfile',
+        ]);
+      });
+
+      it('should discover symlinked command files and skip dangling links', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'symlink-file-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'real.md'), 'real');
+        fs.symlinkSync(
+          path.join(commandsDir, 'real.md'),
+          path.join(commandsDir, 'alias.md'),
+        );
+        fs.symlinkSync(
+          path.join(commandsDir, 'gone.md'),
+          path.join(commandsDir, 'dangling.md'),
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const ext = manager
+          .getLoadedExtensions()
+          .find((e) => e.config.name === 'symlink-file-commands-ext');
+        expect(ext?.commands?.slice().sort()).toEqual(['alias', 'real']);
+      });
+
+      it('should terminate on symlinked directory cycles', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'cycle-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'top.md'), 'top');
+        fs.symlinkSync(commandsDir, path.join(commandsDir, 'loop'), 'dir');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const ext = manager
+          .getLoadedExtensions()
+          .find((e) => e.config.name === 'cycle-commands-ext');
+        // The cycle is followed once and then cut by the realpath
+        // visited-set, so the walk terminates instead of recursing until
+        // the kernel's ELOOP limit.
+        expect(ext?.commands?.slice().sort()).toEqual(['loop:top', 'top']);
+      });
+
+      it.skipIf(
+        process.platform === 'win32' ||
+          (typeof process.getuid === 'function' && process.getuid() === 0),
+      )(
+        'should keep the readable commands when a subdirectory is unreadable',
+        async () => {
+          // A single recursive readdir rejects the whole walk on an EACCES
+          // subdirectory, which the catch would launder into `commands: []`
+          // for the extension; walking per directory keeps glob's old
+          // short-listing behavior — only the unreadable subtree is lost.
+          const extDir = createExtension({
+            extensionsDir: userExtensionsDir,
+            name: 'locked-commands-ext',
+            version: '1.0.0',
+          });
+          const commandsDir = path.join(extDir, 'commands');
+          fs.mkdirSync(path.join(commandsDir, 'ok'), { recursive: true });
+          const lockedDir = path.join(commandsDir, 'locked');
+          fs.mkdirSync(lockedDir, { recursive: true });
+          fs.writeFileSync(path.join(commandsDir, 'ok', 'deploy.md'), 'Deploy');
+          fs.writeFileSync(path.join(lockedDir, 'hidden.md'), 'Hidden');
+          fs.chmodSync(lockedDir, 0o000);
+          try {
+            const manager = createExtensionManager();
+            await manager.refreshCache();
+            const ext = manager
+              .getLoadedExtensions()
+              .find((e) => e.config.name === 'locked-commands-ext');
+            expect(ext?.commands).toEqual(['ok:deploy']);
+          } finally {
+            fs.chmodSync(lockedDir, 0o755);
+          }
+        },
+      );
+
+      it('should match command extensions case-insensitively only where the platform glob did', async () => {
+        // The removed glob matched case-insensitively via its platform
+        // default (nocase on macOS/Windows); FileCommandLoader still globs
+        // with that default, so the discovery set must follow the same
+        // platform split or the consent listing and the runnable set
+        // diverge.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'case-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'Upper.MD'), 'upper');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const ext = manager
+          .getLoadedExtensions()
+          .find((e) => e.config.name === 'case-commands-ext');
+        const platformGlobMatched =
+          process.platform === 'darwin' || process.platform === 'win32';
+        expect(ext?.commands).toEqual(platformGlobMatched ? ['Upper'] : []);
+      });
     });
 
     it('loads valid extensions concurrently and skips invalid ones', async () => {
@@ -4343,6 +4482,105 @@ describe('extension tests', () => {
         expect(
           tombstone?.agentExecutorRefusals?.get('reviewer'),
         ).toBeInstanceOf(SubagentError);
+      });
+
+      it('strips config-borne runtime surface from a failed scan tombstone', async () => {
+        // The tombstone exists to carry executor refusals, not the rejected
+        // load's runtime surface: MCP servers and LSP servers are read
+        // through `config` (Config.getMergedMcpServers, LspConfigLoader), so
+        // scrubbing only the top-level fields would still let a refused
+        // extension's servers spawn on the next tools refresh.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'tombstone-ext',
+        });
+        fs.writeFileSync(
+          path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: 'tombstone-ext',
+            version: '1.0.0',
+            mcpServers: {
+              'refused-server': { command: 'node', args: ['server.js'] },
+            },
+            lspServers: { probeLsp: { command: 'probe-lsp' } },
+          }),
+        );
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+        fs.writeFileSync(
+          path.join(agentsDir, 'other.md'),
+          '---\nname: other\ndescription: Other agent\n---\nYou are a benchmark agent prompt.',
+        );
+
+        const disarm = armReadFileProbe('other.md');
+        const manager = createExtensionManager();
+        await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        disarm();
+
+        const tombstone = manager
+          .getLoadedExtensions()
+          .find((extension) => extension.name === 'tombstone-ext');
+        // The refusal surface is the whole point of the tombstone.
+        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
+          SubagentError,
+        );
+        expect(tombstone?.isActive).toBe(true);
+        // ...and nothing else may ride along, on either representation.
+        expect(tombstone?.mcpServers).toBeUndefined();
+        expect(tombstone?.hooks).toBeUndefined();
+        expect(tombstone?.config.mcpServers).toBeUndefined();
+        expect(tombstone?.config.lspServers).toBeUndefined();
+        expect(tombstone?.config.name).toBe('tombstone-ext');
+        expect(tombstone?.config.version).toBe('1.0.0');
+      });
+
+      it('does not tombstone an extension the loader skipped when a sibling kills the refresh', async () => {
+        // aaa-broken records an executor refusal mid-load, then its own
+        // malformed hooks config makes the load throw a non-exhaustion
+        // error and skip (return null). The skip verdict must stand when
+        // the refresh later rejects on the sibling's exhaustion — a
+        // rejected extension must not materialize as a tombstone.
+        const brokenDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'aaa-broken',
+        });
+        fs.writeFileSync(
+          path.join(brokenDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: 'aaa-broken',
+            version: '1.0.0',
+            hooks: { PreToolUse: [null] },
+          }),
+        );
+        const brokenAgentsDir = path.join(brokenDir, 'agents');
+        fs.mkdirSync(brokenAgentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(brokenAgentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+        const dyingDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'zzz-dying',
+        });
+        const dyingSkillDir = path.join(dyingDir, 'skills', 's1');
+        fs.mkdirSync(dyingSkillDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(dyingSkillDir, 'SKILL.md'),
+          '---\nname: s1\ndescription: S1\n---\nBody',
+        );
+
+        const disarm = armReadFileProbe(`${path.sep}zzz-dying${path.sep}`);
+        const manager = createExtensionManager();
+        await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        disarm();
+
+        expect(
+          manager.getLoadedExtensions().map((extension) => extension.name),
+        ).not.toContain('aaa-broken');
       });
     });
   });
