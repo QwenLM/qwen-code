@@ -172,9 +172,14 @@ describe.skipIf(process.platform === 'win32')(
           encoding: 'utf-8',
         }).trim(),
       ).toBe('feature');
-      // Trailer alignment (issue #12514 constraint): a spelling that earns
-      // the amend exemption must also earn the Co-authored-by trailer, or
-      // the commit carries no provenance marker at all.
+      // Trailer alignment (issue #12514 constraint): for the spellings
+      // this suite drives, a commit that earns the amend exemption also
+      // earns the Co-authored-by trailer. That is recognition alignment
+      // between the two walks, not a universal invariant — a commit
+      // hidden inside a `bash -c` wrapper registers while the rewriter
+      // is deliberately a no-op (see `findAttributableCommitSegment`),
+      // and a `cd` behind a noise keyword suppresses both (pinned by the
+      // never-executing-branch row below).
       expect(
         execSync('git log -1 --pretty=%B', {
           cwd: repoDir,
@@ -479,6 +484,141 @@ describe.skipIf(process.platform === 'win32')(
       expect(amendVerdict()?.blocked).toBe(true);
     });
 
+    // R1-11: `COMMIT_RECOGNITION_LEADING_NOISE` is consumed by the one
+    // shared helper both recognisers call, so a row per token pins both
+    // consumers (registration and the trailer rewrite) at once. Each
+    // spelling puts its token at the head of the segment that carries
+    // the `git commit` — the only position where the token is
+    // load-bearing. `for`, `fi`, `done` and `}` are deliberately absent:
+    // a closer is always followed by `;`, a newline or an operator (all
+    // of which `splitCommands` splits on) and `for` requires
+    // `name [in words]` before any command, so none of the four can lead
+    // a commit-bearing segment in valid shell. They stay in the set as
+    // the structural pairs of `if`/`do`/`{`.
+    it.each([
+      [
+        'if',
+        'git add feature.txt && if git commit -m "feature"; then echo ok; fi',
+      ],
+      [
+        'elif',
+        'git add feature.txt && if false; then echo no; elif git commit -m "feature"; then echo ok; fi',
+      ],
+      [
+        'else',
+        'git add feature.txt && if false; then echo no; else git commit -m "feature"; fi',
+      ],
+      [
+        'while',
+        'git add feature.txt && while git commit -m "feature"; do break; done',
+      ],
+      [
+        'until',
+        'git add feature.txt && until git commit -m "feature"; do break; done',
+      ],
+      [
+        'do',
+        'git add feature.txt && for i in 1; do git commit -m "feature"; done',
+      ],
+      ['{', 'git add feature.txt && { git commit -m "feature"; }'],
+      // `!` inverts the exit status, so this chain exits non-zero even
+      // though the commit lands; registration is not exit-code gated.
+      ['!', 'git add feature.txt && ! git commit -m "feature"'],
+    ])(
+      'registers a commit whose segment leads with the noise token `%s` (issue #12514)',
+      async (_token, command) => {
+        fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+        const preHead = headSha();
+
+        await runShellCommand(command);
+
+        expectFeatureCommitLanded(preHead);
+        expect(amendVerdict()).toBeNull();
+      },
+    );
+
+    it('gives the trailer to a later in-cwd commit after a redirected `git -C <other> commit`', async () => {
+      // R1-16(b): `gitCommitContext` latches its cwd-shift only on a
+      // NON-commit `git -C …` (the `else if (changesCwd && !hasCommit)`
+      // arm), so for this chain it calls the second commit attributable
+      // and registers it. The trailer walk must not latch where the
+      // registration walk does not, or the commit earns the amend
+      // exemption while carrying no provenance marker at all.
+      const otherDir = makeOtherRepo();
+      fs.writeFileSync(path.join(otherDir, 'work.txt'), 'other work\n');
+      execSync('git add work.txt', { cwd: otherDir });
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      const preHead = headSha();
+
+      await runShellCommand(
+        `git -C ${otherDir} commit -m "other work" && git add feature.txt && git commit -m "feature"`,
+      );
+
+      expectFeatureCommitLanded(preHead);
+      expect(amendVerdict()).toBeNull();
+      // The redirected commit landed in the OTHER repository and must
+      // not carry our trailer: that wrong-repo stamping is what the
+      // latch exists for, and why the fix is "don't latch on a commit
+      // segment" rather than "don't latch at all".
+      expect(
+        execSync('git log -1 --pretty=%B', {
+          cwd: otherDir,
+          encoding: 'utf-8',
+        }),
+      ).not.toContain('Co-authored-by: Qwen-Coder');
+    });
+
+    it('keeps recognition conservative when a `cd` hides behind a keyword in a branch that never runs', async () => {
+      // R1-17: `skipCommitRecognitionNoise` runs BEFORE the cd latch, so
+      // `then cd <other>` reaches `cdTargetMayChangeRepo` and suppresses
+      // recognition — even though that branch never executes and the
+      // commit really lands here. Pre-#12514 the `tokens[0]`-only walk
+      // saw `then`, ignored the `cd`, and both registered and spliced
+      // the trailer, so this row is red at the merge base.
+      //
+      // The narrowing is the conservative half of a trade-off that
+      // cannot be resolved statically: `splitCommands` evaluates
+      // nothing, so a false-branch and a true-branch `cd` produce
+      // identical segment sequences, and any loosening that recovers
+      // this row also re-admits stamping our trailer onto a commit in a
+      // DIFFERENT repository (`if true; then cd <other>; fi && git
+      // commit`). Pinned as-is so loosening has to be a deliberate,
+      // reviewed act instead of a silent regression.
+      const otherDir = makeOtherRepo();
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      const preHead = headSha();
+
+      await runShellCommand(
+        `if false; then cd ${otherDir}; fi && git add feature.txt && git commit -m "feature"`,
+      );
+
+      // The commit landed in OUR repository (the branch never ran)…
+      expect(headSha()).not.toBe(preHead);
+      expect(
+        execSync('git log -1 --pretty=%s', {
+          cwd: repoDir,
+          encoding: 'utf-8',
+        }).trim(),
+      ).toBe('feature');
+      // …with no trailer, and recognition stays off, so the follow-up
+      // amend is blocked. That false block is accepted here because the
+      // alternative is wrong-repo stamping; the other repository must
+      // stay untouched either way.
+      expect(
+        execSync('git log -1 --pretty=%B', {
+          cwd: repoDir,
+          encoding: 'utf-8',
+        }),
+      ).not.toContain('Co-authored-by: Qwen-Coder');
+      expect(amendVerdict()?.blocked).toBe(true);
+      expect(
+        execSync('git log -1 --pretty=%s', {
+          cwd: otherDir,
+          encoding: 'utf-8',
+        }).trim(),
+      ).toBe('other seed');
+    });
+
     it('registers a commit landed by a Ctrl+B-promoted foreground command once it settles (issue #12514)', async () => {
       // #12514-A.3: `handlePromotedForeground` returns before the
       // attribution/registration block in `execute()`, so a commit landed
@@ -622,6 +762,48 @@ describe.skipIf(process.platform === 'win32')(
       // registry never adopted it, and amending it stays hard-blocked.
       await new Promise((resolve) => setTimeout(resolve, 500));
       expect(headSha()).toBe(foreignSha);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
+    it('does not resurrect a promoted exemption across a session-commit registry clear', async () => {
+      // R1-7: promoted registration fires when the backgrounded child
+      // exits, arbitrarily later than the promote.
+      // `Config.setApprovalMode` clears the registry on every real
+      // transition precisely because exemptions must not carry across
+      // that boundary, so a settle landing after such a transition must
+      // not write the exemption straight back into the cleared registry.
+      // The boundary is modelled by the clear itself — that call is the
+      // transition's only effect on this registry. The generation counter
+      // rather than `Config.getApprovalModeRevision()` is the staleness
+      // signal because the revision also moves on the AUTO → PLAN → AUTO
+      // excursion the clear is deliberately gated off, and dropping a
+      // registration there would cost the agent a false block on its own
+      // commit.
+      simulatePromote = true;
+      deferPromoteSettle = true;
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+      const preHead = headSha();
+
+      const result = await runShellCommand(
+        'git add feature.txt && git commit -m "feature"',
+      );
+      expect(result.llmContent).toContain('Status: running');
+      expect(headSha()).not.toBe(preHead);
+
+      // The boundary: the registry is cleared while the promoted child is
+      // still counted as running, i.e. before `onSettleWired` can fire.
+      clearSessionCommits();
+      expect(amendVerdict()?.blocked).toBe(true);
+
+      firePromoteSettle!();
+      // Nothing observable appears when registration is correctly
+      // skipped, so give the settle-time probe room and then assert the
+      // fail-closed outcome (same pattern as the foreign-commit row).
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // The commit is still on disk and untouched; only the exemption
+      // may not come back. The control for the no-boundary path is the
+      // deferred-settle row above, which still registers.
+      expect(headSha()).not.toBe(preHead);
       expect(amendVerdict()?.blocked).toBe(true);
     });
 

@@ -24,7 +24,10 @@ import type {
   ToolConfirmationPayload,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { registerSessionCommit } from '../permissions/destructive-commands.js';
+import {
+  getSessionCommitGeneration,
+  registerSessionCommit,
+} from '../permissions/destructive-commands.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -938,11 +941,36 @@ function isAmendCommit(command: string): boolean {
  * Recognition is the loose one shared with `gitCommitContext`
  * (`skipCommitRecognitionNoise`, #12514): leading
  * control-flow/noise keywords are skipped and the program is matched
- * on its basename, so a spelling that earns the amend exemption also
- * earns its `Co-authored-by` trailer here — otherwise the commit
- * would carry no provenance marker at all. The returned range covers
- * the whole segment including any skipped keyword; the caller's `-m`
- * rewrite is scoped by regex and unaffected by the prefix.
+ * on its basename, so the spellings that walk accepts (`then git
+ * commit`, `time git commit`, `! git commit`, `/usr/bin/git commit`)
+ * earn their `Co-authored-by` trailer here too. The returned range
+ * covers the whole segment including any skipped keyword; the caller's
+ * `-m` rewrite is scoped by regex and unaffected by the prefix.
+ *
+ * That is recognition alignment, NOT a universal "amend-exempt implies
+ * trailer" invariant, and no edit to this function can make it one:
+ * this walk reads the RAW command while registration reads
+ * `stripShellWrapper(this.params.command)`, so a commit hidden inside a
+ * `bash -c '…'` wrapper registers (and earns the exemption) while the
+ * rewriter is deliberately a no-op — see the wrapper note in
+ * `addCoAuthorToGitCommit`.
+ *
+ * Skipping the noise keywords also NARROWS one case, deliberately: a
+ * `cd` spelled behind a keyword (`if …; then cd "$CI_DIR"; fi && git
+ * commit`) now reaches the `cdTargetMayChangeRepo` latch and suppresses
+ * recognition — the trailer here and, through the same shared helper,
+ * `gitCommitContext`'s `attributableInCwd` (registration + git-notes) —
+ * where the pre-#12514 `tokens[0]`-only walk saw `then` and ignored the
+ * `cd` entirely. That includes a branch that never executes.
+ * `splitCommands` evaluates nothing, so a false
+ * branch and a true branch produce identical segment sequences: any
+ * loosening that recovers the never-executed `cd` also recovers
+ * stamping our trailer onto a commit in a DIFFERENT repository
+ * (`if true; then cd <other>; fi && git commit`). Missing a trailer is
+ * the conservative half of that trade-off, matching `cwdShifted`'s
+ * stated intent ("better miss than corrupt unrelated repos"). Pinned by
+ * the `if false; then cd …` row in
+ * `shell.session-commit-tracking.test.ts`.
  *
  * Used by `addCoAuthorToGitCommit` to scope the `-m` regex rewrite
  * so a later `git tag -m "..."` (different sub-command in the same
@@ -992,7 +1020,17 @@ function findAttributableCommitSegment(
       if (subcommand === 'commit' && !cwdShifted && !changesCwd) {
         return { start, end };
       }
-      if (changesCwd && !cwdShifted) cwdShifted = true;
+      // Mirror `gitCommitContext`'s latch, which only trips on a
+      // NON-commit `git -C …`: a redirected `git -C ../other commit` is
+      // a commit this walk has already decided about (not attributable
+      // in our cwd, so not returned above), and latching on it would
+      // cost a *later* in-cwd commit its trailer — the exact chain
+      // `gitCommitContext` still calls attributable, so the two sides
+      // would disagree. `git -C ../other status` keeps latching: that
+      // is the cwd-elsewhere intent signal the latch exists for.
+      if (subcommand !== 'commit' && changesCwd && !cwdShifted) {
+        cwdShifted = true;
+      }
     }
   }
   return null;
@@ -3860,9 +3898,41 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // landing in our cwd — `cd /elsewhere && git commit` stays
     // unregistered exactly as the foreground path leaves it, and
     // `head.sha !== preHead` can never be trivially true.
+    //
+    // Registration is settle-only by design: the commit can land at any
+    // point in the backgrounded child's life, and the only moment this
+    // path can observe "the child is done" is its settle. So for a child
+    // that is still running the exemption arrives later than the
+    // ToolResult that precedes it (pinned by the deferred-settle row in
+    // `shell.session-commit-tracking.test.ts`), and for a child that
+    // never settles (`npm run dev`, `tail -f`) it never arrives. Closing
+    // that needs a probe independent of the settle, which is a different
+    // mechanism than this PR's; the promote handoff probe alone would
+    // still miss a commit that lands after the user pressed Ctrl+B.
     let promotedCommitRegistration: Promise<void> | null = null;
+    // Snapshot the registry generation at promote time. `Config.
+    // setApprovalMode` clears the session-commit registry on every real
+    // transition because exemptions must not carry across that boundary
+    // — but this registration fires when the child exits, arbitrarily
+    // later, so without the check a settle landing after such a
+    // transition writes the exemption straight back into the cleared
+    // registry.
+    const registrationGeneration = getSessionCommitGeneration();
     const registerPromotedCommit = (): void => {
       if (preHead === null || promotedCommitRegistration !== null) return;
+      if (getSessionCommitGeneration() !== registrationGeneration) {
+        // Fail-closed: the registry this decision was made against no
+        // longer exists, so the exemption it would grant is stale. The
+        // agent's own commit stays amend-blocked until it commits again
+        // inside the current registry generation.
+        debugLogger.warn(
+          `promote: skipping session-commit registration in ${cwd}: the ` +
+            `session-commit registry was cleared (approval-mode transition or ` +
+            `session end) after this command was promoted, so the exemption ` +
+            `must not carry across that boundary.`,
+        );
+        return;
+      }
       promotedCommitRegistration = this.trackSessionCommit(
         cwd,
         preHead,
