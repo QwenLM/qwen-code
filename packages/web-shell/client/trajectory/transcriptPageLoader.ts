@@ -55,11 +55,13 @@ export function createTrajectoryPageLoader(
   }
   const existing = bySession.get(sessionId);
   if (existing) return existing;
+  // A cursor already carries its direction, and the daemon refuses one sent
+  // alongside `direction` as an invalid combination — so it is one or the
+  // other, never both.
   const loader: TrajectoryPageLoader = ({ limit, cursor }) =>
     client.getSessionTranscriptPage(sessionId, {
-      direction: 'backward',
+      ...(cursor !== undefined ? { cursor } : { direction: 'backward' }),
       limit,
-      ...(cursor !== undefined ? { cursor } : {}),
     });
   bySession.set(sessionId, loader);
   return loader;

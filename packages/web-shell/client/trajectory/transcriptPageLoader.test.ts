@@ -39,9 +39,8 @@ describe('createTrajectoryPageLoader', () => {
       cursor: 'older-1',
     });
 
-    expect(calls).toEqual([
-      ['s-1', { direction: 'backward', limit: 100, cursor: 'older-1' }],
-    ]);
+    // The cursor carries the direction; the daemon rejects both together.
+    expect(calls).toEqual([['s-1', { cursor: 'older-1', limit: 100 }]]);
   });
 
   it('never asks for the summary projection', async () => {
