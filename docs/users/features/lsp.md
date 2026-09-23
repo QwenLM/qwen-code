@@ -104,10 +104,10 @@ Example:
 
 #### Transport Fields
 
-| Option    | Type             | Description                                                             |
-| --------- | ---------------- | ----------------------------------------------------------------------- |
-| `command` | string           | Required only for `stdio`. Resolved through `PATH` or an absolute path. |
-| `socket`  | string or object | Required for `tcp` and `socket`. Accepts `host`/`port` or `path`.       |
+| Option    | Type             | Description                                                                                                                                |
+| --------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `command` | string           | Required only for `stdio`. Resolved through `PATH` or an absolute path.                                                                    |
+| `socket`  | string or object | Required for `tcp` and `socket`: `host`/`port` or `path`. The same fields (or `socketPath`) may also be set at the top level of the entry. |
 
 #### Optional Fields
 
@@ -133,14 +133,14 @@ entries both within one source and across sources. When several entries resolve
 to the same name, the last entry in a source wins, and project configuration
 replaces extension configuration. To use one command for several file types,
 prefer one entry with an `extensionToLanguage` map instead of repeating the
-command under several language keys. The map must list every file extension the
-server handles; unmapped files are opened as `plaintext`.
+command under several language keys. A map applies only to files with extensions;
+unmapped extensions use `plaintext`; otherwise the entry's language key is used.
 
 Qwen Code watches the project-root `.lsp.json` for semantic changes and
 reconciles added, removed, and changed servers. Invalid JSON leaves the current
 LSP runtime unchanged and logs the configuration error (visible with
-`--debug`). Configurations using `tcp` or `socket` without `socket` connection
-details are ignored with a debug-log warning.
+`--debug`). At startup, invalid `tcp` or `socket` entries are skipped; on hot
+reload, any invalid entry aborts the reload. Both are logged only under `--debug`.
 
 ### TCP/Socket Transport
 
@@ -385,7 +385,7 @@ all configured servers require trust.
 ### No Results
 
 1. **Server not ready**: The server may still be indexing. For C/C++ projects with clangd, ensure `--background-index` is in the args and a `compile_commands.json` (or `compile_flags.txt`) exists in the project root or a parent directory. Use `--compile-commands-dir=<path>` if it is in a build subdirectory
-2. **Changed file contents**: Saved on-disk changes are sent before the next location or document query using `textDocument/didChange` when the server supports it. Unsaved editor buffers are not covered
+2. **Changed file contents**: Saved on-disk changes are sent before the next location or document query using `textDocument/didChange` when the server supports it. Unsaved editor buffers are not covered. A server that advertises open/close but no change sync cannot receive edits: the first query after a save returns no result (or a diagnostics error), and the next query reopens the file
 3. **Wrong language**: Check if the correct server is running for your language
 4. **Check the process**: Run `ps aux | grep <server-name>` to verify the server is actually running
 
