@@ -2,20 +2,26 @@ import { Buffer } from 'node:buffer';
 import { createServer } from 'node:http';
 import process from 'node:process';
 
-const boot = JSON.parse(await new Promise((resolve, reject) => {
-  const chunks = [];
-  process.stdin.on('data', (chunk) => chunks.push(chunk));
-  process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-  process.stdin.on('error', reject);
-}));
+const boot = JSON.parse(
+  await new Promise((resolve, reject) => {
+    const chunks = [];
+    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('end', () =>
+      resolve(Buffer.concat(chunks).toString('utf8')),
+    );
+    process.stdin.on('error', reject);
+  }),
+);
 
 const server = createServer((request, response) => {
   const chunks = [];
   request.on('data', (chunk) => chunks.push(chunk));
   request.on('end', () => {
     const path = request.url.split('?')[0];
-    if (request.method === 'POST'
-        && path === '/internal/managed-runtime/v2/attest') {
+    if (
+      request.method === 'POST' &&
+      path === '/internal/managed-runtime/v2/attest'
+    ) {
       const body = JSON.stringify({
         protocolVersion: 2,
         runtimeInstanceId: boot.runtimeInstanceId,
@@ -47,15 +53,17 @@ const server = createServer((request, response) => {
 
 server.listen(0, '127.0.0.1', () => {
   const address = server.address();
-  process.stdout.write(`${JSON.stringify({
-    type: 'ready',
-    version: 1,
-    runtimeInstanceId: boot.runtimeInstanceId,
-    runtimeIncarnation: boot.runtimeIncarnation,
-    leaseId: boot.leaseId,
-    epoch: boot.epoch,
-    url: `http://127.0.0.1:${address.port}`,
-  })}\n`);
+  process.stdout.write(
+    `${JSON.stringify({
+      type: 'ready',
+      version: 1,
+      runtimeInstanceId: boot.runtimeInstanceId,
+      runtimeIncarnation: boot.runtimeIncarnation,
+      leaseId: boot.leaseId,
+      epoch: boot.epoch,
+      url: `http://127.0.0.1:${address.port}`,
+    })}\n`,
+  );
 });
 
 const stop = () => server.close(() => process.exit(0));
