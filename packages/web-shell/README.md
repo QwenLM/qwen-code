@@ -131,7 +131,10 @@ Tailwind/shadcn 组件；现有 CSS Modules 的主题色值保持不变。组件
   变量以及外部配置的 z-index 才能正确继承。
 - 保留组件上的 `data-web-shell-*` 属性和公开 CSS 变量。接入方可能通过这些属性或
   `--web-shell-dialog-backdrop-z-index`、`--web-shell-popover-z-index`、
-  `--web-shell-tooltip-z-index` 等变量定制样式和层级。
+  `--web-shell-tooltip-z-index` 等变量定制样式和层级。宿主自己的标题栏覆盖在
+  shell 之上但并不裁剪它时，必须通过 `--web-shell-popover-safe-top` 声明顶部
+  安全区，向上展开的浮层（输入历史、@ 引用）才能避开它；显式声明 `0px` 表示
+  没有顶部安全区，不会被默认值覆盖。
 
 在 `packages/web-shell` 目录添加后续组件，例如：
 
@@ -357,6 +360,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 | 属性                   | 类型                                  | 说明                                                                                                                                           |
 | ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `urlNavigation`        | `WebShellUrlNavigationOptions`        | 可选 URL 管理，含 `basePath`；默认关闭。详见 [URL 导航](#url-导航可选)。                                                                       |
 | `browserNotifications` | `WebShellBrowserNotificationsOptions` | 可选接入通知；`appName` 默认 QwenCode，`iconUrl` 默认内联 PNG（支持 CDN），`defaultEnabled` 默认 false；已保存偏好优先；不传时停用，不重建会话 |
 | `baseUrl`              | `string`                              | daemon API 地址，未传时使用 `window.location.origin`                                                                                           |
 | `token`                | `string`                              | daemon API Bearer token                                                                                                                        |
@@ -737,3 +741,22 @@ const result = await shellRef.current?.navigateToMessage({
 `cancelled` 或 `error`；`located` 不代表滚动动画已结束。未就绪时宿主须等待会话/视图就绪后再调用。聊天被面板或全页视图覆盖时返回 `not_ready`，宿主应先恢复聊天视图。
 新请求、会话/工作目录变化、卸载或 AbortSignal 取消会使旧请求失效。
 现有跨会话搜索接口仅返回会话和摘要，不提供 `recordId`；宿主搜索需补齐记录 ID 后才可精确定位。
+
+## URL 导航（可选）
+
+`WebShellWithProviders` 支持 `urlNavigation={{ basePath: '/agentic-code' }}`。
+独立入口默认启用同一实现，并推断既有部署基础路径（默认根路径）。嵌入组件默认不启用，原有受控
+`sessionId`、`workspaceId`、`workspaceCwd` 和 `sessionContext` 接入保持兼容。
+启用后，显式初始会话目标 props 优先于 URL，后续目标 props 变化 replace 地址；
+宿主必须停止自行写 history，避免双重控制。`lockWorkspaceCwd` 仍是宿主约束。
+
+基础路径下支持 `/session/<id>`、`/plugins`、`/channels`、`/scheduled-tasks`、
+`/goals` 和 `/settings`。会话保留原有 `workspace` / `context` 协议，页面仅定位
+页面，设置不持久化分类或作用域。无关参数（包括宿主的实例参数）和 fragment 保留。
+主动导航新增历史，重复点击不新增；浏览器前进后退恢复页面和会话。页面来源保存在
+history.state，直接打开或复制到新标签页的页面没有来源时返回空白聊天，不创建会话。
+
+宿主部署必须把基础路径和上述深层路径的文档请求返回宿主 HTML，并保留 API 路由。
+`basePath` 只配置客户端，不创建服务端 rewrite。Qwen daemon 自带五个页面的文档
+GET/HEAD 入口，JSON 请求、子路径和写请求仍走原有鉴权/API。
+详见[导航协议设计](../../docs/design/web-shell-url-navigation.zh-CN.md)。

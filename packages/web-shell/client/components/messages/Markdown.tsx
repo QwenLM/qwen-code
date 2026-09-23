@@ -1119,9 +1119,12 @@ export const Markdown = memo(function Markdown({
   const renderedContent = useMemo(
     () =>
       throttledContent && source && sourceMarkdown?.transformMarkdown
-        ? sourceMarkdown.transformMarkdown(throttledContent, { source })
+        ? sourceMarkdown.transformMarkdown(throttledContent, {
+            source,
+            isStreaming: isStreaming === true,
+          })
         : throttledContent,
-    [source, sourceMarkdown, throttledContent],
+    [source, sourceMarkdown, throttledContent, isStreaming],
   );
 
   const effectiveTableMode = isStreaming

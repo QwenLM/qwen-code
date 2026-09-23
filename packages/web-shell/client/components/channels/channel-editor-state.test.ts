@@ -468,6 +468,111 @@ describe('Channel editor state', () => {
     });
   });
 
+  it('leaves an unset group senders default out of the saved config', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: false } },
+      },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+
+    expect(draft.groupSenders).toBe('');
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-senders',
+        instance,
+      ).config.groups,
+    ).toEqual({ '*': { requireMention: false } });
+  });
+
+  it('writes the chosen group senders into groups["*"] beside its other settings', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        groupPolicy: 'open',
+        groups: {
+          '*': { requireMention: false },
+          ops: { senders: 'inherit' },
+        },
+      },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.groupSenders = 'allowlist';
+    draft.groupAllowedUsers = 'alice, bob, alice';
+
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-senders',
+        instance,
+      ).config.groups,
+    ).toEqual({
+      '*': {
+        requireMention: false,
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+      ops: { senders: 'inherit' },
+    });
+  });
+
+  it('round-trips configured group senders and their member list', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        groupPolicy: 'open',
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+      },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+
+    expect(draft.groupSenders).toBe('allowlist');
+    expect(draft.groupAllowedUsers).toBe('alice');
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-senders',
+        instance,
+      ).config.groups,
+    ).toEqual({ '*': { senders: 'allowlist', allowedUsers: ['alice'] } });
+  });
+
+  it('keeps an explicitly empty list instead of widening it to unset', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK_WITH_ACCESS,
+      fields: [
+        ...DINGTALK_WITH_ACCESS.fields,
+        { key: 'operators', label: 'Session Operators', kind: 'string-list' },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: { ...configuredInstance().config, operators: [] },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.operators).toBe('');
+    expect(
+      buildChannelUpsertRequest(descriptor, draft, 'revision-ops', instance)
+        .config.operators,
+    ).toEqual([]);
+
+    draft.values.operators = 'admin';
+    expect(
+      buildChannelUpsertRequest(descriptor, draft, 'revision-ops', instance)
+        .config.operators,
+    ).toEqual(['admin']);
+  });
+
   it('rejects unsafe group allowlist keys before building the request', () => {
     const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
     draft.name = 'release-bot';

@@ -12,6 +12,69 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.24.4](https://github.com/QwenLM/qwen-code/releases/tag/v0.24.4) - 2026-09-22
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- feat(core): add monitor tool to system prompt guidance ([#12408](https://github.com/QwenLM/qwen-code/pull/12408)) by @yiliang114
+- feat(daemon): Add batched workspace session catalogs ([#12254](https://github.com/QwenLM/qwen-code/pull/12254)) by @samuelhsin
+- feat(review): record what a plan was computed from, and report drift ([#12369](https://github.com/QwenLM/qwen-code/pull/12369)) by @wenshao
+- feat(java): Add managed tool execution state ([#12391](https://github.com/QwenLM/qwen-code/pull/12391)) by @doudouOUC
+- feat(serve): support SSH workspaces without a remote daemon ([#12255](https://github.com/QwenLM/qwen-code/pull/12255)) by @wenshao
+- feat(web-shell): enable expiring QR pairing on non-loopback listeners ([#12322](https://github.com/QwenLM/qwen-code/pull/12322)) by @wenshao
+- feat(mobile): add encrypted, isolated connection profiles (Phase 2) ([#12121](https://github.com/QwenLM/qwen-code/pull/12121)) by @jabrailkhalil
+- feat(java): Add runtime broker service core ([#12438](https://github.com/QwenLM/qwen-code/pull/12438)) by @doudouOUC
+- feat(cli): Add managed runtime attestation contract ([#12447](https://github.com/QwenLM/qwen-code/pull/12447)) by @doudouOUC
+- feat(serve): Add opt-in fixed ACP child heap enforcement ([#12353](https://github.com/QwenLM/qwen-code/pull/12353)) by @doudouOUC
+- feat(cli): Move bwrap sandboxing to tool execution ([#12267](https://github.com/QwenLM/qwen-code/pull/12267)) by @doudouOUC
+- feat(serve): add --token-qr escape hatch and address-only QR fallback ([#12266](https://github.com/QwenLM/qwen-code/pull/12266)) by @wenshao
+- feat(java): Persist managed tool executions with JDBC ([#12445](https://github.com/QwenLM/qwen-code/pull/12445)) by @doudouOUC
+
+#### Bug Fixes
+
+- fix(review): keep unplanned chunks out of coverage, and read the denominator from the plan ([#12370](https://github.com/QwenLM/qwen-code/pull/12370)) by @wenshao
+- fix(core): accept nullable pagination when reading notebooks ([#12421](https://github.com/QwenLM/qwen-code/pull/12421)) by @DragonnZhang
+- fix(cli): clean up stale session debug logs ([#12374](https://github.com/QwenLM/qwen-code/pull/12374)) by @doudouOUC
+- fix(web-shell): isolate npm pack diagnostics from verifier output ([#12367](https://github.com/QwenLM/qwen-code/pull/12367)) by @dvd233
+- fix(live): spend JPEG quality, not pixels, when a shared screen will not fit ([#12397](https://github.com/QwenLM/qwen-code/pull/12397)) by @qqqys
+- fix(web-shell): expose markdown message completion state ([#12431](https://github.com/QwenLM/qwen-code/pull/12431)) by @callmeYe
+- fix(web-shell): verify wildcard export targets against the packed file list ([#12364](https://github.com/QwenLM/qwen-code/pull/12364)) by @yiliang114
+- fix(web-shell): recover queued prompt binding after refresh failure ([#12279](https://github.com/QwenLM/qwen-code/pull/12279)) by @elizabethbrunette21
+- fix(desktop): restore window zoom in the Tauri shell ([#12410](https://github.com/QwenLM/qwen-code/pull/12410)) by @yiliang114
+- fix(web-shell): preserve reference tags across reloads ([#12404](https://github.com/QwenLM/qwen-code/pull/12404)) by @ytahdn
+- fix(web-shell): browse remote workspace folders without page refresh ([#12412](https://github.com/QwenLM/qwen-code/pull/12412)) by @yiliang114
+- fix(cli): close the remaining OpenTUI parity gaps against ink ([#12309](https://github.com/QwenLM/qwen-code/pull/12309)) by @chiga0
+- fix(core): warn when tools.eager entries match no discovered tool ([#12451](https://github.com/QwenLM/qwen-code/pull/12451)) by @yiliang114
+- fix(web-shell): open a Live session on a daemon serving one project ([#12441](https://github.com/QwenLM/qwen-code/pull/12441)) by @qqqys
+- fix(web-shell): show edit diffs before approval ([#12443](https://github.com/QwenLM/qwen-code/pull/12443)) by @yiliang114
+
+#### Documentation
+
+- docs: update README hero image ([#12474](https://github.com/QwenLM/qwen-code/pull/12474)) by @yiliang114
+
+#### Internal Changes
+
+- refactor(build,release): Use pnpm workspace builds and publishing ([#12400](https://github.com/QwenLM/qwen-code/pull/12400)) by @yiliang114
+- test(scripts): warm the pinned corepack pnpm cache before workers fork (#12436) ([#12446](https://github.com/QwenLM/qwen-code/pull/12446)) by @qwen-code-dev-bot
+- chore(cli): bump the OpenTUI renderer to 0.5.10 ([#12321](https://github.com/QwenLM/qwen-code/pull/12321)) by @chiga0
+- chore(sdk-java): bump fastjson2 to 2.0.65 ([#12465](https://github.com/QwenLM/qwen-code/pull/12465)) by @wenshao
+
+### New Contributors
+
+- @elizabethbrunette21 made their first contribution in [#12279](https://github.com/QwenLM/qwen-code/pull/12279)
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.24.3...v0.24.4
+
 ## [0.24.3](https://github.com/QwenLM/qwen-code/releases/tag/v0.24.3) - 2026-09-21
 
 ### Highlights

@@ -13,6 +13,8 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 export type ChannelSenderPolicy = 'pairing' | 'open' | '';
+/** `groups["*"].senders`; `''` means the config leaves it unset. */
+export type ChannelGroupSenders = 'inherit' | 'open' | 'allowlist' | '';
 
 export interface ChannelSecretDraft {
   operation: DaemonChannelSecretUpdate['operation'];
@@ -25,6 +27,8 @@ export interface ChannelEditorDraft {
   secrets: Record<string, ChannelSecretDraft>;
   senderPolicy: ChannelSenderPolicy;
   allowedGroupIds: string;
+  groupSenders: ChannelGroupSenders;
+  groupAllowedUsers: string;
 }
 
 export type ChannelEditorValidationCode =
@@ -67,6 +71,41 @@ function configuredGroupIds(instance?: DaemonChannelInstanceSnapshot): string {
   return Object.keys(groups)
     .filter((groupId) => groupId !== '*')
     .join(', ');
+}
+
+function wildcardGroup(
+  instance?: DaemonChannelInstanceSnapshot,
+): Record<string, unknown> {
+  const groups = instance?.config['groups'];
+  return isRecord(groups) && isRecord(groups['*']) ? groups['*'] : {};
+}
+
+function configuredGroupSenders(
+  instance?: DaemonChannelInstanceSnapshot,
+): ChannelGroupSenders {
+  const senders = wildcardGroup(instance)['senders'];
+  return senders === 'inherit' || senders === 'open' || senders === 'allowlist'
+    ? senders
+    : '';
+}
+
+function configuredGroupAllowedUsers(
+  instance?: DaemonChannelInstanceSnapshot,
+): string {
+  const users = wildcardGroup(instance)['allowedUsers'];
+  return Array.isArray(users)
+    ? users.filter((user) => typeof user === 'string').join(', ')
+    : '';
+}
+
+/**
+ * What an unset `senders` means for a group policy: an approved pairing group
+ * admits all of its members, any other group follows `senderPolicy`.
+ */
+export function defaultGroupSenders(
+  groupPolicy: string,
+): Exclude<ChannelGroupSenders, ''> {
+  return groupPolicy === 'pairing' ? 'open' : 'inherit';
 }
 
 function initialFieldValue(
@@ -142,6 +181,8 @@ export function createChannelEditorDraft(
           ? ''
           : 'pairing',
     allowedGroupIds: configuredGroupIds(instance),
+    groupSenders: configuredGroupSenders(instance),
+    groupAllowedUsers: configuredGroupAllowedUsers(instance),
   };
 }
 
@@ -250,6 +291,16 @@ function assignField(
   }
   const value = typeof rawValue === 'string' ? rawValue.trim() : '';
   if (!value) {
+    // An explicitly empty list can mean "nobody" (`operators: []`), which an
+    // empty input cannot express; keep it rather than widen to "unset".
+    const previous = config[field.key];
+    if (
+      field.kind === 'string-list' &&
+      Array.isArray(previous) &&
+      previous.length === 0
+    ) {
+      return;
+    }
     delete config[field.key];
     return;
   }
@@ -320,6 +371,22 @@ function assignGroups(
   }
 }
 
+/** Write the group speaker default once the editor has chosen one. */
+function assignGroupSenders(
+  config: Record<string, unknown>,
+  draft: ChannelEditorDraft,
+): void {
+  if (!draft.groupSenders) return;
+  const groups = isRecord(config['groups']) ? { ...config['groups'] } : {};
+  const wildcard = isRecord(groups['*']) ? { ...groups['*'] } : {};
+  wildcard['senders'] = draft.groupSenders;
+  if (draft.groupSenders === 'allowlist') {
+    wildcard['allowedUsers'] = splitList(draft.groupAllowedUsers);
+  }
+  groups['*'] = wildcard;
+  config['groups'] = groups;
+}
+
 function removeGroupAllowlistMembership(
   config: Record<string, unknown>,
   instance: DaemonChannelInstanceSnapshot,
@@ -374,6 +441,7 @@ export function buildChannelUpsertRequest(
     } else if (instance?.config['groupPolicy'] === 'allowlist') {
       removeGroupAllowlistMembership(config, instance);
     }
+    assignGroupSenders(config, draft);
   }
   return { expectedRevision, config, secrets };
 }

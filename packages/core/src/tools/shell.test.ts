@@ -66,6 +66,7 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
 }));
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
   ShellTool,
   type ShellToolInvocation,
@@ -9035,6 +9036,37 @@ describe('ShellTool', () => {
         'Exact cmd.exe command to execute as `cmd.exe /d /s /c <command>`',
       );
     });
+
+    it.each(['cmd.exe', 'powershell.exe'])(
+      'advertises Bash for SSH when the local shell is %s',
+      async (localShell) => {
+        vi.mocked(os.platform).mockReturnValue('win32');
+        process.env['ComSpec'] = localShell;
+        delete process.env['MSYSTEM'];
+        delete process.env['TERM'];
+        const local = new ShellTool(mockConfig);
+        expect(getCommandParameterDescription(local)).not.toContain('bash -c');
+        const remote = new SshExecutionEnvironment(
+          { host: 'test-host', directory: '/remote' },
+          'C:\\ssh-anchor',
+        );
+        mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue(remote);
+        try {
+          const tool = new ShellTool(mockConfig);
+          expect(tool.description).toContain('The active shell is Bash.');
+          expect(tool.schema.description).toContain('`bash -c <command>`');
+          expect(tool.description).not.toContain(
+            'The active shell is PowerShell.',
+          );
+          expect(tool.description).not.toContain('cmd.exe');
+          expect(getCommandParameterDescription(tool)).toBe(
+            'Exact bash command to execute as `bash -c <command>`',
+          );
+        } finally {
+          await remote.dispose();
+        }
+      },
+    );
 
     it('should return the non-windows description when not on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('linux');
