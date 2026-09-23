@@ -88,15 +88,6 @@
   font-size: 11px;
 }
 
-.notice {
-  margin-top: 6px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--muted);
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
 .tableWrap {
   flex: 1;
   min-height: 0;

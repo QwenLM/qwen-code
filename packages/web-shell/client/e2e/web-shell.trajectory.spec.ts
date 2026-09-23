@@ -18,6 +18,12 @@ import {
  */
 const TURNS = 40;
 const ROWS_PER_TURN = 5;
+/**
+ * Turns start a minute apart and each is busy for about a second, so the
+ * overview's idle-time cut is what makes the spans wide enough to click.
+ */
+const SESSION_START = 1_760_000_000_000;
+const turnStart = (turn: number) => SESSION_START + turn * 60_000;
 
 function sessionUpdate(update: Record<string, unknown>): DaemonEvent {
   return {
@@ -56,6 +62,7 @@ function transcriptEvents(turns: number): DaemonEvent[] {
           timing: {
             kind: 'request',
             durationMs: 1000 + turn,
+            startedAt: turnStart(turn),
             ttftMs: 400 + turn,
             status: 'ok',
             model: 'qwen3.8-max',
@@ -85,6 +92,8 @@ function transcriptEvents(turns: number): DaemonEvent[] {
           timing: {
             kind: 'tool',
             durationMs: 20 + turn,
+            // The request's end: the tool ran as soon as the model asked.
+            startedAt: turnStart(turn) + 1000 + turn,
             callId,
             toolName: 'read_file',
             toolStatus: 'success',
@@ -126,6 +135,20 @@ async function openTrajectory(
   const grid = page.getByTestId('trajectory-rows');
   await expect(grid).toBeVisible();
   return grid;
+}
+
+function overviewSpans(page: Page): Locator {
+  return page.locator(
+    '[data-testid="trajectory-overview"] [data-testid="trajectory-span"]',
+  );
+}
+
+async function activeRowOf(page: Page, grid: Locator): Promise<Locator> {
+  const active = await grid.getAttribute('aria-activedescendant');
+  expect(active).toBeTruthy();
+  // Matched as an attribute, not as `#id`: React's `useId` puts colons in
+  // the value, which a CSS id selector cannot carry.
+  return page.locator(`[id="${active}"]`);
 }
 
 /** Rows the virtualizer has mounted, which is never the whole page. */
@@ -253,5 +276,101 @@ test.describe('trajectory panel', () => {
     });
 
     await expect(page.getByTestId('trajectory-truncated')).toBeVisible();
+  });
+
+  test('draws one span per timed record @smoke', async ({ page }, testInfo) => {
+    await openTrajectory(page, String(testInfo.project.use.baseURL));
+
+    await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+    await expect(
+      page.locator('[data-testid="trajectory-span"][data-lane="0"]'),
+    ).toHaveCount(TURNS);
+    await expect(
+      page.locator('[data-testid="trajectory-span"][data-lane="1"]'),
+    ).toHaveCount(TURNS);
+  });
+
+  test('clicking a span selects and reveals its row @smoke', async ({
+    page,
+  }, testInfo) => {
+    const grid = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+    );
+    // Opened at the tail, so turn 3 is far above the viewport and unmounted.
+    await expect(grid.getByText('note-3.txt')).toHaveCount(0);
+
+    // Spans run in time order, request then tool, one pair per turn.
+    await overviewSpans(page)
+      .nth(2 * (3 - 1) + 1)
+      .click();
+
+    const row = await activeRowOf(page, grid);
+    await expect(row).toContainText('note-3.txt');
+    const [rowBox, gridBox] = await Promise.all([
+      row.boundingBox(),
+      grid.boundingBox(),
+    ]);
+    expect(rowBox).not.toBeNull();
+    expect(gridBox).not.toBeNull();
+    expect(rowBox!.y).toBeGreaterThanOrEqual(gridBox!.y - 1);
+    expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(
+      gridBox!.y + gridBox!.height + 1,
+    );
+  });
+
+  test('lights the span of the row the keyboard selected @smoke', async ({
+    page,
+  }, testInfo) => {
+    const grid = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+    );
+    await grid.click();
+
+    // The last row is the last turn's tool call, which is the last span.
+    await page.keyboard.press('End');
+
+    const current = page.locator(
+      '[data-testid="trajectory-span"][data-current]',
+    );
+    await expect(current).toHaveCount(1);
+    await expect(current).toHaveAttribute('data-lane', '1');
+    await expect(overviewSpans(page).last()).toHaveAttribute(
+      'data-current',
+      'true',
+    );
+  });
+
+  test('holds the table still while the overview reloads @smoke', async ({
+    page,
+  }, testInfo) => {
+    const grid = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+    );
+    const overview = page.getByTestId('trajectory-overview');
+    const refresh = page
+      .getByTestId('trajectory-panel')
+      .getByRole('button', { name: 'Refresh' });
+    await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+    const before = await Promise.all([
+      overview.boundingBox(),
+      grid.boundingBox(),
+    ]);
+
+    await refresh.click();
+    await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+    await expect(refresh).toBeEnabled();
+
+    const after = await Promise.all([
+      overview.boundingBox(),
+      grid.boundingBox(),
+    ]);
+    // The overview is a flex sibling of the scrolled rows: if its height moved
+    // at all, so would every row under the reader.
+    expect(before[0]!.height).toBe(64);
+    expect(after[0]!.height).toBe(64);
+    expect(after[1]!.y).toBe(before[1]!.y);
   });
 });

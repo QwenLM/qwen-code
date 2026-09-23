@@ -255,9 +255,11 @@ describe('TrajectoryPanel', () => {
   it('says so when the window holds no recorded timing', async () => {
     const container = await render(async () => page([userText('go', 'rec-1')]));
 
-    expect(container.textContent).toContain(
-      'No request or tool durations are recorded',
-    );
+    // Inside the overview's fixed box: a notice of its own above the table
+    // would be one more thing that moves the rows when it comes and goes.
+    expect(
+      text(container.querySelector('[data-testid="trajectory-overview"]')),
+    ).toContain('No request or tool durations are recorded');
   });
 
   it('counts a tool duration as recorded timing', async () => {
@@ -409,6 +411,121 @@ describe('TrajectoryPanel', () => {
     expect(container.querySelectorAll('[data-selected="true"]')).toHaveLength(
       1,
     );
+  });
+
+  describe('overview', () => {
+    const START = 1_760_000_000_000;
+    /** Two timed turns: a request with its first token, then a tool. */
+    const timedTurns = () => [
+      userText('first', 'rec-1'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          ttftMs: 400,
+          startedAt: START,
+          status: 'ok',
+          model: 'qwen3.8-max',
+        },
+        'rec-2',
+      ),
+      toolCall('call-1', 'read_file', 'ReadFile: note.txt', 'rec-3'),
+      timingFrame(
+        {
+          kind: 'tool',
+          durationMs: 250,
+          startedAt: START + 1000,
+          callId: 'call-1',
+          toolName: 'read_file',
+          toolStatus: 'success',
+        },
+        'rec-4',
+      ),
+      userText('second', 'rec-5'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 500,
+          startedAt: START + 60_000,
+          status: 'error',
+          model: 'qwen3.8-max',
+        },
+        'rec-6',
+      ),
+    ];
+    const spansIn = (container: HTMLElement) =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="trajectory-span"]',
+        ),
+      );
+    const activeRow = (container: HTMLElement) => {
+      const grid = container.querySelector('[role="grid"]') as HTMLElement;
+      const id = grid.getAttribute('aria-activedescendant');
+      return id ? document.getElementById(id) : null;
+    };
+
+    it('sits above the table, outside the scrolled rows', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const overview = container.querySelector(
+        '[data-testid="trajectory-overview"]',
+      )!;
+      const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+
+      expect(scroll.contains(overview)).toBe(false);
+      expect(
+        overview.compareDocumentPosition(scroll) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(scroll.children).toHaveLength(1);
+    });
+
+    it('draws the timed records of a real page', async () => {
+      const container = await render(async () => page(REAL_EVENTS));
+      expect(spansIn(container).length).toBeGreaterThan(0);
+    });
+
+    it('selects the row a clicked span stands for', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const tool = spansIn(container).find((el) => el.dataset['lane'] === '1')!;
+
+      await act(async () => tool.click());
+
+      expect(text(activeRow(container))).toContain('ReadFile: note.txt');
+    });
+
+    it('lights the span of the row the keyboard selected', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const grid = container.querySelector('[role="grid"]') as HTMLElement;
+      const press = async (key: string) => {
+        await act(async () => {
+          grid.dispatchEvent(
+            new KeyboardEvent('keydown', { key, bubbles: true }),
+          );
+        });
+      };
+
+      // Turn header, prompt, then the first request.
+      await press('ArrowDown');
+      await press('ArrowDown');
+      await press('ArrowDown');
+
+      const current = spansIn(container).filter(
+        (el) => el.dataset['current'] === 'true',
+      );
+      expect(current).toHaveLength(1);
+      expect(current[0]!.dataset['lane']).toBe('0');
+      expect(current[0]!.dataset['ttft']).toBe('true');
+    });
+
+    it('names a span the way its row reads, with the failure in words', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const [first, , failed] = spansIn(container);
+
+      expect(first!.title).toBe('qwen3.8-max · 1.0s · TTFT 400ms');
+      expect(failed!.dataset['error']).toBe('true');
+      expect(failed!.title).toBe('qwen3.8-max · Request failed · 500ms');
+    });
   });
 
   it('names a subagent whose spawning call is outside the window', async () => {
