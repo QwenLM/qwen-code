@@ -296,12 +296,20 @@ try {
   );
 
   // 4. idempotent re-collect
-  const before = fs.readdirSync(
-    path.join(home, 'tasks', taskId, 'attempt-001'),
-  );
+  const attemptDir = path.join(home, 'tasks', taskId, 'attempt-001');
+  const filesBefore = fs.readdirSync(attemptDir).sort().join(',');
+  const deletesBefore = state.deleted.length;
   const again = await run(project, env, ['collect', taskId]);
   check('re-collect is a no-op success', /2 delivered/.test(again.stdout));
-  check('no extra remote deletes on re-collect', state.deleted.length >= 2);
+  check(
+    'no extra remote deletes on re-collect',
+    state.deleted.length === deletesBefore,
+    state.deleted.join(','),
+  );
+  check(
+    'no re-download on re-collect',
+    fs.readdirSync(attemptDir).sort().join(',') === filesBefore,
+  );
 
   // 5. list
   const listOut = await run(project, env, ['list']);
