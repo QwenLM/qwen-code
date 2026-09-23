@@ -276,7 +276,7 @@ describe('session dispatch port', () => {
         ...TURN,
       });
       if (result.status !== 'started') throw new Error(result.status);
-      result.activate();
+      result.activate?.();
       await vi.waitFor(() => expect(bridge.sendPrompt).toHaveBeenCalled());
       const inspect = () =>
         port.inspect({ agent: AGENT, threadId: TURN.threadId });

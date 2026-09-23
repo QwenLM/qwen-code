@@ -89,10 +89,9 @@ function queueChange(hub: Hub, threadId: string): void {
 function watchDir(hub: Hub, dir: string, threadIds: boolean): void {
   try {
     const watcher = watch(dir, (_event, name) => {
-      const file = typeof name === 'string' ? name : name?.toString();
       // Lock directories and atomic-write temp files are not state.
-      if (!file?.endsWith('.json')) return;
-      queueChange(hub, threadIds ? file.slice(0, -5) : WORKSPACE_CHANGE);
+      if (!name?.endsWith('.json')) return;
+      queueChange(hub, threadIds ? name.slice(0, -5) : WORKSPACE_CHANGE);
     });
     watcher.on('error', () => watcher.close());
     watcher.unref();
