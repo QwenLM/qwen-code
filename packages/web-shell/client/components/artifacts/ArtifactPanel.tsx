@@ -106,6 +106,7 @@ import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
+import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
@@ -442,6 +443,8 @@ interface ArtifactPanelProps {
     todos: readonly TodoItem[];
     tools: readonly ACPToolCall[];
     tasks: readonly DaemonSessionTaskStatus[];
+    /** Shared per-render projection; also feeds the cockpit and its graph. */
+    projection?: SessionWorkflowProjection;
     artifacts: readonly DaemonSessionArtifact[];
     selectedTodoId?: string;
     onSelectedTodoIdChange: (todoId: string | undefined) => void;
