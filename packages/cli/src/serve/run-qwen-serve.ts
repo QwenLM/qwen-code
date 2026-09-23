@@ -7641,6 +7641,8 @@ async function runQwenServeImpl(
                 ),
                 512,
               )}`,
+              null,
+              { workspaceCwd },
             );
           } finally {
             writeChannelWorkerPidfile();

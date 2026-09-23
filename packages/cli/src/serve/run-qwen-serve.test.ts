@@ -15562,6 +15562,20 @@ describe('runQwenServe channel worker supervisor', () => {
           }),
         ),
       );
+      // The failure names the workspace that lost its list, so it is not
+      // left to adjacency in the log to guess whose restore failed.
+      await vi.waitFor(() => {
+        const failure = fs
+          .readFileSync(
+            path.join(tmpDir!, 'debug', 'daemon', 'daemon.log'),
+            'utf8',
+          )
+          .split('\n')
+          .find((line) => line.includes('were not restored'));
+        expect(failure).toContain(
+          `workspaceCwd=${canonicalizeWorkspace(broken)}`,
+        );
+      });
     } finally {
       await handle.close();
     }
