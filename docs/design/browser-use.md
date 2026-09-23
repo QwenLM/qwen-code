@@ -78,9 +78,11 @@ come from. After changing Browser Use sources or dependencies, run
 again to refresh the development copy. CLI and Core continue to run directly
 from TypeScript source. If the runtime entry is missing, the import fails and
 the skill tells the model to stop and report an incomplete runtime. If its
-pinned `playwright-core` is missing, the SDK reports the incomplete runtime
-itself, and it also refuses a `playwright-core` of another version that Node's
-lookup finds further up the directory tree.
+pinned `playwright-core` cannot be found, the SDK reports the incomplete
+runtime itself. Node's lookup continues into parent directories, so the SDK
+checks the version of the copy it finds: another version is refused as an
+incomplete runtime, while a copy of the pinned version is used, because it runs
+the same code.
 
 Browser Use is available to the model by default and is selected according to
 the user's task. Users can disable it through `/skills` or `skills.disabled`,

@@ -44,7 +44,10 @@ function loadPlaywrightCore(): typeof PlaywrightCore {
     createRequire(import.meta.url).resolve('playwright-core/package.json'),
   );
   // That lookup continues into every node_modules above the runtime, so a
-  // missing bundled copy can fall through to an unrelated install.
+  // missing bundled copy can fall through to another install. Only the
+  // version is enforced: a copy of the pinned version elsewhere runs the same
+  // code, and outside the staged runtime (dist, tests, smoke scripts) the
+  // package's own node_modules is the legitimate source.
   const packageRequire = createRequire(manifestPath);
   const { version } = orIncomplete(
     () => packageRequire(manifestPath) as { version?: unknown },
