@@ -7152,6 +7152,223 @@ describe('multi-workspace session dispatch', () => {
   });
 });
 
+describe('batch workspace session live-state route', () => {
+  const batch = (
+    app: ReturnType<typeof makeHarness>['app'],
+    workspaces: string[],
+  ) =>
+    request(app)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces });
+
+  it('returns ordered, complete primary and secondary memory snapshots', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, {
+          hasActivePrompt: true,
+          isWaitingForPermission: true,
+        }),
+      ],
+      secondarySummaries: [
+        makeSummary('secondary-session', SECONDARY_CWD, {
+          hasActivePrompt: false,
+          isWaitingForUserQuestion: true,
+        }),
+      ],
+    });
+    const res = await batch(app, ['secondary-id', PRIMARY_CWD]).expect(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body.workspaces).toEqual([
+      {
+        workspace: 'secondary-id',
+        workspaceId: 'secondary-id',
+        cwd: SECONDARY_CWD,
+        v: 1,
+        catalogVersion: expect.objectContaining({ revision: 0 }),
+        sessions: [
+          expect.objectContaining({
+            sessionId: 'secondary-session',
+            hasActivePrompt: false,
+            isWaitingForUserQuestion: true,
+          }),
+        ],
+      },
+      {
+        workspace: PRIMARY_CWD,
+        workspaceId: 'primary-id',
+        cwd: PRIMARY_CWD,
+        v: 1,
+        catalogVersion: expect.objectContaining({ revision: 0 }),
+        sessions: [
+          expect.objectContaining({
+            sessionId: 'primary-session',
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+          }),
+        ],
+      },
+    ]);
+    expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+    expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+  });
+
+  it('reflects running and waiting changes without advancing catalogVersion', async () => {
+    const { app, primaryBridge } = makeHarness();
+    let state = { hasActivePrompt: true, isWaitingForPermission: false };
+    vi.spyOn(primaryBridge, 'listWorkspaceSessions').mockImplementation(() => [
+      makeSummary('changing-session', PRIMARY_CWD, state),
+    ]);
+    const versions: unknown[] = [];
+    for (const next of [
+      { hasActivePrompt: true, isWaitingForPermission: false },
+      { hasActivePrompt: false, isWaitingForPermission: true },
+      { hasActivePrompt: true, isWaitingForPermission: false },
+      { hasActivePrompt: false, isWaitingForPermission: false },
+    ]) {
+      state = next;
+      const res = await batch(app, ['primary-id']).expect(200);
+      versions.push(res.body.workspaces[0].catalogVersion);
+      expect(res.body.workspaces[0].sessions[0]).toMatchObject(next);
+    }
+    expect(versions[0]).toMatchObject({
+      generation: expect.any(String),
+      revision: 0,
+    });
+    expect(versions).toEqual(Array(4).fill(versions[0]));
+  });
+
+  it('isolates unknown and untrusted members without reading their bridges', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+    });
+    const res = await batch(app, [
+      'primary-id',
+      'missing-id',
+      'secondary-id',
+    ]).expect(200);
+    expect(res.body.workspaces[0].sessions).toHaveLength(1);
+    expect(res.body.workspaces[1]).toEqual({
+      workspace: 'missing-id',
+      error: {
+        status: 404,
+        code: 'workspace_not_found',
+        message: expect.any(String),
+      },
+    });
+    expect(res.body.workspaces[2]).toMatchObject({
+      workspaceId: 'secondary-id',
+      cwd: SECONDARY_CWD,
+      error: { status: 403, code: 'untrusted_workspace' },
+    });
+    expect(res.body.workspaces[2]).not.toHaveProperty('sessions');
+    expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects an untrusted primary while reading a trusted secondary', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      primaryTrusted: false,
+    });
+    const res = await batch(app, ['primary-id', 'secondary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 403, code: 'untrusted_workspace' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+    expect(primaryBridge.listCalls).toEqual([]);
+    expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+  });
+
+  it('hides internal workspaces without reading their bridges', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    registry.add(
+      makeRuntime({
+        workspaceId: 'internal-id',
+        workspaceCwd: path.resolve(path.sep, 'work', 'internal'),
+        primary: false,
+        trusted: true,
+        bridge: secondaryBridge,
+        provenance: 'live-conversation',
+      }),
+    );
+    const res = await batch(app, ['internal-id']).expect(200);
+    expect(res.body.workspaces).toEqual([
+      {
+        workspace: 'internal-id',
+        error: {
+          status: 404,
+          code: 'workspace_not_found',
+          message: expect.any(String),
+        },
+      },
+    ]);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects invalid envelopes before reading any bridge', async () => {
+    const { app, primaryBridge } = makeHarness();
+    for (const body of [
+      { workspaces: [] },
+      { workspaces: Array.from({ length: 21 }, () => 'primary-id') },
+      { workspaces: ['primary-id'], extra: true },
+      { workspaces: [42] },
+      { workspaces: ['x'.repeat(4097)] },
+    ]) {
+      const res = await request(app)
+        .post('/sessions/live-state')
+        .set('Host', host())
+        .send(body)
+        .expect(400);
+      expect(res.body.code).toBe('invalid_session_live_state_batch_request');
+    }
+    expect(primaryBridge.listCalls).toEqual([]);
+  });
+
+  it('bounds an oversized successful member without discarding another member', async () => {
+    const { app } = makeHarness({
+      secondarySummaries: [makeSummary('s'.repeat(600 * 1024), SECONDARY_CWD)],
+    });
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 413, code: 'live_state_response_too_large' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('returns 503 for a transitioning member while preserving a healthy member', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    registry.beginReplacement(entry, 'new-policy');
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('fails closed if the selected runtime is replaced during its read', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    const list = secondaryBridge.listWorkspaceSessions.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        registry.beginReplacement(entry, 'new-policy');
+        return sessions;
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+});
+
 describe('workspace session live-state route', () => {
   const liveStatePath = (selector: string) =>
     `/workspaces/${selector}/sessions/live-state`;
@@ -7447,10 +7664,11 @@ describe('workspace session live-state route', () => {
 
       // The live-state exposure invalidates both scopes before answering.
       const live = await request(app)
-        .get(liveStatePath('secondary-id'))
+        .post('/sessions/live-state')
         .set('Host', host())
+        .send({ workspaces: ['secondary-id'] })
         .expect(200);
-      expect(live.body.catalogVersion.revision).toBe(1);
+      expect(live.body.workspaces[0].catalogVersion.revision).toBe(1);
       expect(ids((await organized('')).body).sort()).toEqual([
         activeOne,
         activeTwo,

@@ -8,6 +8,11 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { inspect } from 'node:util';
+import { z } from 'zod';
+import {
+  hashDaemonWorkspace,
+  withDaemonSpan,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
@@ -190,6 +195,8 @@ import {
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 import {
+  isGenerationClosedError,
+  resolveWorkspaceEntryBySelector,
   resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
@@ -8651,54 +8658,183 @@ export function registerSessionRoutes(
     BridgeSessionCatalogVersion
   >();
 
+  const readWorkspaceLiveState = (runtime: WorkspaceRuntime) => {
+    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
+    const bridge = runtime.bridge;
+    assertRuntimeOpen?.();
+    const catalogVersion = bridge.getSessionCatalogVersion();
+    const lastExposed = lastExposedCatalogVersions.get(bridge);
+    if (
+      lastExposed === undefined ||
+      lastExposed.generation !== catalogVersion.generation ||
+      lastExposed.revision !== catalogVersion.revision
+    ) {
+      invalidateSessionLists(runtime, ['active', 'archived']);
+    }
+    const sessions = bridge
+      .listWorkspaceSessions(runtime.workspaceCwd)
+      .map((session) => ({
+        sessionId: session.sessionId,
+        clientCount: session.clientCount,
+        hasActivePrompt: session.hasActivePrompt,
+        ...(session.activeWorkState !== undefined
+          ? { activeWorkState: session.activeWorkState }
+          : {}),
+        hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
+        ...(session.backgroundTurn
+          ? { backgroundTurn: session.backgroundTurn }
+          : {}),
+        isWaitingForPermission: session.isWaitingForPermission ?? false,
+        isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        // Bridge-local activity watermark, absent until a running prompt in
+        // this bridge publishes its first terminal. Reading it costs nothing
+        // extra: the summary is already in memory.
+        ...(session.updatedAt !== undefined
+          ? { updatedAt: session.updatedAt }
+          : {}),
+      }));
+    assertRuntimeOpen?.();
+    lastExposedCatalogVersions.set(bridge, catalogVersion);
+    return { v: 1 as const, catalogVersion, sessions };
+  };
+
   app.get('/workspaces/:workspace/sessions/live-state', async (req, res) => {
     const route = 'GET /workspaces/:workspace/sessions/live-state';
     // Strict trust gate: live state is never read from an untrusted
     // runtime, and an unknown selector never falls back to primary.
     const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
     if (runtime === null) return;
-    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
-    const bridge = runtime.bridge;
     try {
-      assertRuntimeOpen?.();
-      const catalogVersion = bridge.getSessionCatalogVersion();
-      const lastExposed = lastExposedCatalogVersions.get(bridge);
-      if (
-        lastExposed === undefined ||
-        lastExposed.generation !== catalogVersion.generation ||
-        lastExposed.revision !== catalogVersion.revision
-      ) {
-        invalidateSessionLists(runtime, ['active', 'archived']);
-      }
-      const sessions = bridge
-        .listWorkspaceSessions(runtime.workspaceCwd)
-        .map((session) => ({
-          sessionId: session.sessionId,
-          clientCount: session.clientCount,
-          hasActivePrompt: session.hasActivePrompt,
-          ...(session.activeWorkState !== undefined
-            ? { activeWorkState: session.activeWorkState }
-            : {}),
-          hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
-          ...(session.backgroundTurn
-            ? { backgroundTurn: session.backgroundTurn }
-            : {}),
-          isWaitingForPermission: session.isWaitingForPermission ?? false,
-          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
-          // Bridge-local activity watermark, absent until a running prompt in
-          // this bridge publishes its first terminal. Reading it costs nothing
-          // extra: the summary is already in memory.
-          ...(session.updatedAt !== undefined
-            ? { updatedAt: session.updatedAt }
-            : {}),
-        }));
-      assertRuntimeOpen?.();
-      lastExposedCatalogVersions.set(bridge, catalogVersion);
       res.setHeader('Cache-Control', 'no-store');
-      res.status(200).json({ v: 1, catalogVersion, sessions });
+      res.status(200).json(readWorkspaceLiveState(runtime));
     } catch (err) {
       sendBridgeError(res, err, { route });
     }
+  });
+
+  const liveStateBatchRequest = z
+    .object({
+      workspaces: z.array(z.string().min(1).max(4096)).min(1).max(20),
+    })
+    .strict();
+
+  app.post('/sessions/live-state', async (req, res) => {
+    const parsed = liveStateBatchRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: 'invalid_session_live_state_batch_request',
+        error: 'Invalid session live-state batch request.',
+      });
+      return;
+    }
+
+    const failedMember = (
+      workspace: string,
+      entry: WorkspaceEntry | undefined,
+      status: number,
+      code: string,
+      message: string,
+    ) => ({
+      workspace,
+      ...(entry
+        ? { workspaceId: entry.workspaceId, cwd: entry.workspaceCwd }
+        : {}),
+      error: { code, message, status },
+    });
+
+    const readMember = async (workspace: string) => {
+      const entry = resolveWorkspaceEntryBySelector(
+        workspaceRegistry,
+        workspace,
+      );
+      if (!entry) {
+        return failedMember(
+          workspace,
+          undefined,
+          404,
+          'workspace_not_found',
+          'Workspace is not registered with this daemon.',
+        );
+      }
+      const unavailable = () =>
+        failedMember(
+          workspace,
+          entry,
+          503,
+          'workspace_runtime_unavailable',
+          'Workspace runtime is not active.',
+        );
+      const generation = entry.current;
+      const isCurrent = () =>
+        workspaceRegistry.getEntryByWorkspaceId(entry.workspaceId) === entry &&
+        entry.state === 'active' &&
+        entry.current?.generationId === generation?.generationId &&
+        generation !== undefined &&
+        !generation.guard.closed;
+      if (!generation || !isCurrent()) return unavailable();
+      const runtime = generation.runtime;
+      if (!runtime.trusted) {
+        return failedMember(
+          workspace,
+          entry,
+          403,
+          'untrusted_workspace',
+          'Workspace is not trusted.',
+        );
+      }
+      try {
+        const snapshot = await withDaemonSpan(
+          'qwen-code.daemon.session_live_state_batch.member',
+          {
+            'qwen-code.workspace.hash': hashDaemonWorkspace(
+              runtime.workspaceCwd,
+            ),
+          },
+          async () => readWorkspaceLiveState(runtime),
+        );
+        if (!isCurrent()) return unavailable();
+        const member = {
+          workspace,
+          workspaceId: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          ...snapshot,
+        };
+        if (Buffer.byteLength(JSON.stringify(member)) > 512 * 1024) {
+          return failedMember(
+            workspace,
+            entry,
+            413,
+            'live_state_response_too_large',
+            'Live-state snapshot exceeds 512 KiB.',
+          );
+        }
+        return member;
+      } catch (error) {
+        if (isGenerationClosedError(error) || !isCurrent()) {
+          return unavailable();
+        }
+        return failedMember(
+          workspace,
+          entry,
+          500,
+          'session_live_state_failed',
+          'Failed to read workspace session live state.',
+        );
+      }
+    };
+
+    const workspaces = [];
+    for (const workspace of parsed.data.workspaces) {
+      if (req.aborted || res.destroyed) return;
+      workspaces.push(await readMember(workspace));
+    }
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_live_state_batch.members',
+      workspaces.length,
+    );
+    if (req.aborted || res.destroyed) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json({ workspaces });
   });
 
   const workspaceSessionInfoHandler =

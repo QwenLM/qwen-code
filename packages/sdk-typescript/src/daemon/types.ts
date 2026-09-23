@@ -1879,6 +1879,32 @@ export interface DaemonWorkspaceSessionLiveState {
   sessions: DaemonSessionLiveState[];
 }
 
+export interface DaemonSessionLiveStateBatchRequest {
+  /** 1–20 registered workspace ids or absolute cwd paths. */
+  workspaces: string[];
+}
+
+export interface DaemonSessionLiveStateBatchSnapshot
+  extends DaemonWorkspaceSessionLiveState {
+  /** Original selector from the request. */
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+}
+
+export interface DaemonSessionLiveStateBatchError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonSessionLiveStateBatchResult {
+  workspaces: Array<
+    DaemonSessionLiveStateBatchSnapshot | DaemonSessionLiveStateBatchError
+  >;
+}
+
 export interface DaemonWorkspaceSessionInfo {
   active: number;
   archived: number;

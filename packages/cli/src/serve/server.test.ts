@@ -737,6 +737,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_export',
   'workspace_archived_session_export',
   'workspace_session_live_state',
+  'workspace_session_live_state_batch',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -816,6 +817,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
       f !== 'workspace_session_live_state' &&
+      f !== 'workspace_session_live_state_batch' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
@@ -885,6 +887,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_export',
   'workspace_archived_session_export',
   'workspace_session_live_state',
+  'workspace_session_live_state_batch',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
