@@ -1524,7 +1524,8 @@ type NewSessionIntent =
   /**
    * Stay in the current context. From a Live chat that means a fresh Live
    * conversation, unless `leaveLive` sends the new chat to the trusted
-   * primary workspace the way a cold draft starts.
+   * primary workspace the way a cold draft starts (or to a standalone draft
+   * when there is no trusted primary).
    */
   | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
@@ -13203,12 +13204,22 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live' && intent.leaveLive) {
+          // Clearing keeps the connection's live context, so an undefined
+          // pending context would send the first prompt back to Live. Without
+          // a trusted primary, leave for a standalone draft when the daemon
+          // offers one and otherwise keep the Live path.
           const primaryCwd = workspacesRef.current.find(
             (entry) => entry.primary && entry.trusted !== false,
           )?.cwd;
-          nextContext = primaryCwd
-            ? { kind: 'workspace', cwd: primaryCwd }
-            : undefined;
+          if (primaryCwd) {
+            nextContext = { kind: 'workspace', cwd: primaryCwd };
+          } else if (
+            workspaceCapabilitiesRef.current?.features?.includes(
+              STANDALONE_SESSIONS_CAPABILITY,
+            )
+          ) {
+            nextContext = { kind: 'standalone' };
+          }
         }
         if (nextContext?.kind === 'live') {
           pendingManualTitleRef.current = undefined;

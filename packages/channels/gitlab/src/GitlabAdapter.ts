@@ -5,7 +5,10 @@ import type {
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
-import { PollingChannelBase } from '@qwen-code/channel-base';
+import {
+  lowercaseGroupAllowedUsers,
+  PollingChannelBase,
+} from '@qwen-code/channel-base';
 import { Gitlab, type TodoSchema } from '@gitbeaker/rest';
 import { z } from 'zod';
 import { testBotMention, stripBotMention } from './mention.js';
@@ -99,13 +102,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     );
     this.config.allowedUsers = allowed;
     this.gate.replaceAllowedUsers(allowed);
-    if (this.config.allowedGroupUsers) {
-      const allowedGroup = this.config.allowedGroupUsers.map((u) =>
-        u.toLowerCase(),
-      );
-      this.config.allowedGroupUsers = allowedGroup;
-      this.groupSenderGate?.replaceAllowedUsers(allowedGroup);
-    }
+    lowercaseGroupAllowedUsers(this.config.groups);
     if (this.config.operators) {
       this.config.operators = this.config.operators.map((u) => u.toLowerCase());
     }

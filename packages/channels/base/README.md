@@ -82,8 +82,8 @@ In daemon-managed mode, every named channel's `cwd` must resolve to exactly one 
 Inbound:  Platform message
             → Envelope (with attachments)
             → GroupGate (group policy + mention gating)
-            → SenderGate (allowlist / pairing / open; group traffic follows
-              groupSenderPolicy when it is decoupled from senderPolicy)
+            → SenderGate (allowlist / pairing / open; a group follows its
+              `senders` setting in `groups`, else senderPolicy)
             → Slash commands (/clear, /help, /status)
             → SessionRouter (resolve or create agent session)
             → Resolve attachments (images → bridge, files → prompt text)
@@ -285,19 +285,20 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 | `allowlist` | Only `allowedUsers` allowed                                                                               |
 | `pairing`   | Check allowlist, then approved pairings, then generate a pairing code (8-char, 1hr expiry, max 3 pending) |
 
-**Two axes:** `ChannelBase` may hold a second `SenderGate` for group traffic
-(when `groupSenderPolicy` is `open` or `allowlist`). Any sender check an
-adapter makes itself must go through `this.senderGateFor(envelope.isGroup)`
-rather than `this.gate`, or the group axis is silently ignored on that lane.
-The group gate never carries `pairing`: an approval there would also unlock
-direct messages.
+**Per-conversation gate:** `this.gate` is the direct-message gate. A group
+resolves its own `senders` (`groups[chatId]`, then `groups["*"]`, field by
+field; an approved `groupPolicy: "pairing"` group defaults to `open`). Any
+sender check an adapter makes itself must go through
+`this.senderGateFor({ isGroup, chatId })` rather than `this.gate`, or the
+group's setting is silently ignored on that lane. A group gate never carries
+`pairing`: an approval there would also unlock direct messages.
 
 **Operators:** commands that act on a shared session (`/approve`, `/cancel`,
 `/clear`, `/loop`, the loop tool, steering, ...) check
 `isSharedSessionOperator`, not the sender gates. `config.operators` decides
 when set; otherwise a non-empty `allowedUsers`; otherwise anyone who may speak,
-except that an `open` group axis defers to `this.gate` because it vouches for
-no one by name.
+except that a `senders: "open"` group defers to `this.gate` because it vouches
+for no one by name (an approved pairing group's approval does vouch).
 
 ### GroupGate
 

@@ -1021,13 +1021,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     return TODO_POLL_INTERVAL_MS;
   }
 
+  /** Document comments and native todos are one person's requests. */
+  protected override isPersonalConversation(target: {
+    chatId: string;
+  }): boolean {
+    return (
+      this.documentSet.has(target.chatId) || this.todoTargets.has(target.chatId)
+    );
+  }
+
   protected override preflightInbound(
     envelope: Envelope,
   ): boolean | Promise<boolean> {
-    if (
-      !this.documentSet.has(envelope.chatId) &&
-      !this.todoTargets.has(envelope.chatId)
-    ) {
+    if (!this.isPersonalConversation(envelope)) {
       return super.preflightInbound(envelope);
     }
     const result = this.gate.check(envelope.senderId, envelope.senderName);
@@ -1405,8 +1411,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return this.config.groupPolicy === 'pairing' ? 'unknown' : 'denied';
     }
     if (!this.dmGate.check(envelope).allowed) return 'denied';
-    if (isGroup && this.config.groupPolicy === 'pairing') return 'allowed';
-    const senderGate = this.senderGateFor(isGroup);
+    const senderGate = this.senderGateFor(envelope);
     if (senderGate.isAllowed(delivery.senderId)) return 'allowed';
     return senderGate === this.gate && this.config.senderPolicy === 'pairing'
       ? 'unknown'

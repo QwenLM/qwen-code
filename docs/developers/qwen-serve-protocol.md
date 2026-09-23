@@ -865,11 +865,14 @@ channel-service lease if nothing else has. That restore:
   keeps the rest, a name that cannot be attributed leaves that workspace's
   whole list unrestored, with the error logged.
 
-Registration does not wait for those channels: the restore is detached, so the
-response can be written while it is still starting workers. The registration
-still performs its own channel-control bookkeeping on the same serialized lane,
-though, so a worker that never becomes ready can delay _other_ registrations,
-and trust reconciles, for up to the channel startup budget (30 s).
+Registration does not wait on channel control at all. The restore is queued
+on the channel-control lane and the response is written without waiting for
+it, and so is the reconcile a registration or trust change triggers for
+channels the daemon already hosts. A worker that never becomes ready therefore
+delays only the channel work queued behind it, never another registration or a
+trust reconcile. The flip side is that a `201` from `POST /workspaces` does not
+mean that workspace's channels are up, or that an already-hosted channel it
+owns has finished restarting; read `GET /workspace/channel` for that.
 
 Without an explicit selection, a boot-time `serve.channels` restore, or a
 registration like the one above, channel runtime loading stays lazy.

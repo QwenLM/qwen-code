@@ -1061,10 +1061,9 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
-    it('normalizes allowedGroupUsers to lowercase for the group sender gate', async () => {
+    it('normalizes per-group allowedUsers to lowercase for the group sender gate', async () => {
       const config = makeConfig({
-        groupSenderPolicy: 'allowlist',
-        allowedGroupUsers: ['Alice'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['Alice'] } },
       });
       channel = new TestableGithubChannel('test-github', config, makeBridge());
       mockOctokit.paginate.mockResolvedValue([]);
@@ -1072,12 +1071,14 @@ describe('GithubChannel', () => {
 
       const groupGate = (
         channel as unknown as {
-          groupSenderGate?: { isAllowed: (senderId: string) => boolean };
+          senderGateFor(target: { isGroup: boolean; chatId: string }): {
+            isAllowed: (senderId: string) => boolean;
+          };
         }
-      ).groupSenderGate;
-      expect(groupGate?.isAllowed('alice')).toBe(true);
-      expect(groupGate?.isAllowed('bob')).toBe(false);
-      expect(config.allowedGroupUsers).toEqual(['alice']);
+      ).senderGateFor({ isGroup: true, chatId: 'owner/repo' });
+      expect(groupGate.isAllowed('alice')).toBe(true);
+      expect(groupGate.isAllowed('bob')).toBe(false);
+      expect(config.groups['*']?.allowedUsers).toEqual(['alice']);
       channel.disconnect();
     });
 

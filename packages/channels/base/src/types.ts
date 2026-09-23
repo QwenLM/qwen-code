@@ -8,10 +8,10 @@ export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 /**
- * Who may use the bot inside a group the channel already admitted.
- * `inherit` keeps the historical behavior of following `senderPolicy`.
- * `pairing` is deliberately absent: pairing approvals are stored per user and
- * would also unlock direct messages, which is the coupling this axis removes.
+ * Who may speak inside a group the channel already admitted (`GroupConfig.senders`).
+ * `inherit` follows `senderPolicy`, like a direct message. `pairing` is
+ * deliberately absent: pairing approvals are stored per user and would also
+ * unlock direct messages. Admitting a whole group is `groupPolicy: "pairing"`.
  */
 export type GroupSenderPolicy = 'inherit' | 'open' | 'allowlist';
 export type DmPolicy = 'disabled' | 'open';
@@ -46,6 +46,13 @@ export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
   groupHistoryLimit?: number;
+  /**
+   * Who may speak in the group. Default: `open` in an approved group under
+   * `groupPolicy: "pairing"`, `inherit` otherwise.
+   */
+  senders?: GroupSenderPolicy;
+  /** Members allowed to speak when `senders` is `allowlist`. */
+  allowedUsers?: string[];
 }
 
 export interface ChannelConfig {
@@ -70,10 +77,6 @@ export interface ChannelConfig {
   outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
   dmPolicy: DmPolicy; // default: "open"
-  /** Who may use the bot inside an admitted group. Default: "inherit". */
-  groupSenderPolicy?: GroupSenderPolicy;
-  /** Member allowlist used when `groupSenderPolicy` is `allowlist`. */
-  allowedGroupUsers?: string[];
   /**
    * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
    * Authoritative when set, even when empty. Unset derives the operators from

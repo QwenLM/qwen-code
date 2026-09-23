@@ -528,38 +528,51 @@ describe('parseChannelConfig', () => {
     );
   });
 
-  it('rejects an unknown groupSenderPolicy instead of widening access', async () => {
+  it('rejects an unknown group senders value instead of widening access', async () => {
     await expect(
       parseChannelConfig('bot', {
         type: 'bare',
-        groupSenderPolicy: 'opne',
+        groups: { '*': { senders: 'opne' } },
       }),
     ).rejects.toThrow(
-      'Channel "bot" field "groupSenderPolicy" must be one of: inherit, open, allowlist.',
+      'Channel "bot" field "groups.*.senders" must be one of: inherit, open, allowlist.',
     );
   });
 
-  it('keeps the group sender axis when it is configured', async () => {
+  it('keeps per-group senders and allowedUsers when they are configured', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
-      groupSenderPolicy: 'allowlist',
-      allowedGroupUsers: ['member1'],
+      groups: { ops: { senders: 'allowlist', allowedUsers: ['member1'] } },
     });
 
-    expect(result.groupSenderPolicy).toBe('allowlist');
-    expect(result.allowedGroupUsers).toEqual(['member1']);
+    expect(result.groups['ops']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['member1'],
+    });
   });
 
-  it('rejects a non-array allowedGroupUsers', async () => {
+  it('rejects a non-array per-group allowedUsers', async () => {
     await expect(
       parseChannelConfig('bot', {
         type: 'bare',
-        allowedGroupUsers: 'member1',
+        groups: { ops: { allowedUsers: 'member1' } },
       }),
     ).rejects.toThrow(
-      'Channel "bot" field "allowedGroupUsers" must be an array of user IDs.',
+      'Channel "bot" field "groups.ops.allowedUsers" must be an array of user IDs.',
     );
   });
+
+  it.each([
+    ['groupSenderPolicy', 'open', 'groups["*"].senders'],
+    ['allowedGroupUsers', ['member1'], 'groups["*"].allowedUsers'],
+  ])(
+    'points the moved top-level %s at its new home',
+    async (key, value, newHome) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', [key]: value }),
+      ).rejects.toThrow(`Channel "bot" field "${key}" moved to ${newHome}.`);
+    },
+  );
 
   it('parses an operators list, keeping an empty one distinct from unset', async () => {
     const listed = await parseChannelConfig('bot', {
