@@ -50,6 +50,7 @@ import {
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CHANNEL_PROMPT_META_KEY,
+  DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
@@ -259,6 +260,24 @@ function redactSdkSurfaceReplay<
 >(session: T, workspaceTrusted: boolean): T {
   const shaped = omitSkillDetailsFromReplayArrays(session);
   return workspaceTrusted ? shaped : redactWorkflowsFromReplayArrays(shaped);
+}
+
+function exposeHostedManagedRuntimeRecovery<
+  T extends {
+    state?: { _meta?: Record<string, unknown> | null };
+    _meta?: Record<string, unknown>;
+  },
+>(session: T): T {
+  const recovery =
+    session.state?._meta?.[DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY];
+  if (recovery === undefined) return session;
+  return {
+    ...session,
+    _meta: {
+      ...session._meta,
+      [DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY]: recovery,
+    },
+  };
 }
 
 // Byte-length caps for branch names. git creates loose refs as files under
@@ -5047,7 +5066,7 @@ export function registerSessionRoutes(
         );
         // The load response embeds the replay snapshot inline; redact the
         // skill bodies there just like the SSE egress does (#9234).
-        const responseSession = withPromptTerminals(
+        let responseSession = withPromptTerminals(
           session,
           action === 'load' && managedSessionStore === undefined
             ? readRecentPromptTerminals(
@@ -5056,6 +5075,9 @@ export function registerSessionRoutes(
               )
             : undefined,
         );
+        if (managedSessionStore !== undefined) {
+          responseSession = exposeHostedManagedRuntimeRecovery(responseSession);
+        }
         res
           .status(200)
           .json(redactSdkSurfaceReplay(responseSession, runtime.trusted));
@@ -7316,6 +7338,60 @@ export function registerSessionRoutes(
             promptId,
             clientId,
           });
+        }
+        res.status(200).json(result);
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
+  app.post(
+    '/session/:id/managed-runtime/continue',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/managed-runtime/continue',
+      async (req, res, sessionId, runtime) => {
+        if (deps.hostedHarness !== true) {
+          res.status(404).json({
+            error: 'Hosted Harness route not found',
+            code: 'hosted_harness_route_not_found',
+          });
+          return;
+        }
+        const body = safeBody(req);
+        const parsedPromptId = parseCallerSuppliedSessionId(body['promptId']);
+        const checkpointId = body['checkpointId'];
+        const activationId = body['activationId'];
+        if (
+          parsedPromptId.kind !== 'valid' ||
+          typeof checkpointId !== 'string' ||
+          checkpointId.length === 0 ||
+          Buffer.byteLength(checkpointId, 'utf8') > 512 ||
+          checkpointId.includes('\0') ||
+          typeof activationId !== 'string' ||
+          activationId.length === 0 ||
+          Buffer.byteLength(activationId, 'utf8') > 512 ||
+          activationId.includes('\0')
+        ) {
+          res.status(400).json({
+            error: 'Invalid managed Runtime continuation identity',
+            code: 'invalid_managed_runtime_continuation',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = await runtime.bridge.continueSession(sessionId, {
+          ...(clientId !== undefined ? { clientId } : {}),
+          promptId: parsedPromptId.sessionId,
+          managedRuntimeContinuation: { checkpointId, activationId },
+        });
+        if (!result.accepted) {
+          res.status(409).json({
+            ...result,
+            code: 'managed_runtime_continuation_not_ready',
+          });
+          return;
         }
         res.status(200).json(result);
       },

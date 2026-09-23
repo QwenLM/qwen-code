@@ -108,6 +108,7 @@ function inProgressRuntime() {
       items: [
         {
           functionCallId: 'fc-1',
+          toolName: 'read_file',
           executionCallId: 'ex-1',
           modelMessageId: 'msg-1',
           partIndex: 0,
@@ -253,6 +254,7 @@ describe('harness checkpoint v1', () => {
         items: [
           {
             functionCallId: 'fc-1',
+            toolName: 'read_file',
             executionCallId: 'ex-1',
             modelMessageId: 'msg-1',
             partIndex: 0,

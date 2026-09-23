@@ -309,7 +309,8 @@ async function startBrokerResponseLossProxy(
         dropFirstExecutionResponse &&
         !droppedExecutionResponse &&
         method === 'POST' &&
-        target.pathname.endsWith('/executions')
+        target.pathname.includes('/executions/') &&
+        target.pathname.endsWith(':start')
       ) {
         droppedExecutionResponse = true;
         request.socket.destroy();

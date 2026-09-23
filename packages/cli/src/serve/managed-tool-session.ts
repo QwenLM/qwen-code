@@ -21,6 +21,7 @@ import {
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ManagedToolV2Client } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
 import type {
+  ManagedToolExecutionIdentity,
   ManagedToolSession,
   ManagedToolSessionFactory,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-session.js';
@@ -204,6 +205,24 @@ export function createManagedToolSessionFactory(options: {
         sessionId: request.sessionId,
         shellConfiguration: structuredClone(shellConfiguration),
         platform,
+        ...(isRoot && provider.inspectExecution
+          ? {
+              inspectExecution: (identity) =>
+                provider.inspectExecution!({
+                  harnessSessionId: rootConfig.getSessionId(),
+                  ...identity,
+                }),
+            }
+          : {}),
+        ...(isRoot && provider.reconcileExecution
+          ? {
+              reconcileExecution: (identity: ManagedToolExecutionIdentity) =>
+                provider.reconcileExecution!({
+                  harnessSessionId: rootConfig.getSessionId(),
+                  ...identity,
+                }),
+            }
+          : {}),
         createChild: (childConfig) => {
           assertOpen();
           return create(childConfig, false).session;
@@ -221,6 +240,26 @@ export function createManagedToolSessionFactory(options: {
               assertOpen();
               return operation();
             };
+            const execute = <T>(
+              reference: ManagedToolInvocationReference,
+              operation: () => Promise<T>,
+            ): Promise<T> => {
+              const pending = (async () => {
+                await historyTail;
+                assertOpen();
+                try {
+                  return await operation();
+                } finally {
+                  await sync();
+                }
+              })();
+              executions.set(reference, pending);
+              void pending.then(
+                () => executions.delete(reference),
+                () => {},
+              );
+              return pending;
+            };
             wrapped ??= {
               ...acquired,
               manifest: () => active(() => acquired.manifest()),
@@ -235,23 +274,22 @@ export function createManagedToolSessionFactory(options: {
                 ),
               preflight: (reference) =>
                 active(() => acquired.preflight(reference)),
-              execute: (reference) => {
-                const pending = (async () => {
-                  await historyTail;
-                  assertOpen();
-                  try {
-                    return await acquired.execute(reference);
-                  } finally {
-                    await sync();
+              ...(acquired.prepareExecution
+                ? {
+                    prepareExecution: (reference) =>
+                      active(() => acquired.prepareExecution!(reference)),
                   }
-                })();
-                executions.set(reference, pending);
-                void pending.then(
-                  () => executions.delete(reference),
-                  () => {},
-                );
-                return pending;
-              },
+                : {}),
+              ...(acquired.startExecution
+                ? {
+                    startExecution: (reference, executionCallId) =>
+                      execute(reference, () =>
+                        acquired.startExecution!(reference, executionCallId),
+                      ),
+                  }
+                : {}),
+              execute: (reference) =>
+                execute(reference, () => acquired.execute(reference)),
               status: async (reference, afterSeq) => {
                 const result = await acquired.status(reference, afterSeq);
                 await sync();

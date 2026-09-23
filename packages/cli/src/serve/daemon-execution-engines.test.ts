@@ -87,14 +87,42 @@ describe('daemon execution engines', () => {
   function restore(
     operation: 'load' | 'resume',
     id = sessionId,
+    request: Partial<
+      Extract<
+        BridgeExecutionSelection,
+        { operation: 'load' | 'resume' }
+      >['request']
+    > = {},
+    daemonOwnedStandalone = false,
   ): BridgeExecutionSelection {
     return {
       operation,
-      daemonOwnedStandalone: false,
+      daemonOwnedStandalone,
       request: {
         sessionId: id,
         workspaceCwd: workspace,
+        ...request,
       },
+    };
+  }
+
+  function managedSessionStore(
+    overrides: Partial<
+      NonNullable<
+        Extract<
+          BridgeExecutionSelection,
+          { operation: 'load' | 'resume' }
+        >['request']['managedSessionStore']
+      >
+    > = {},
+  ) {
+    return {
+      baseUrl: 'http://127.0.0.1:8080',
+      tenantId: 'tenant-1',
+      workspaceId: 'workspace-hash',
+      writerId: 'harness-boot-1',
+      leaseDurationMs: 1_000,
+      ...overrides,
     };
   }
 
@@ -335,6 +363,63 @@ describe('daemon execution engines', () => {
 
     await writeTranscript([record('user-1')]);
     await expect(pair.select(restore('load'))).resolves.toBe('legacy');
+  });
+
+  it('uses the Hosted Harness remote store as managed restore authority', async () => {
+    await expect(
+      engines(true, true).select(
+        restore('load', sessionId, {
+          managedSessionStore: managedSessionStore(),
+        }),
+      ),
+    ).resolves.toBe('managed');
+  });
+
+  it('does not let remote store metadata bypass restore ownership outside Hosted Harness', async () => {
+    const request = {
+      managedSessionStore: managedSessionStore(),
+    };
+    await expect(
+      engines().select(restore('load', sessionId, request)),
+    ).rejects.toThrow(/requires Hosted Harness session\/load/);
+    await expect(
+      engines(true, true).select(restore('resume', sessionId, request)),
+    ).rejects.toThrow(/requires Hosted Harness session\/load/);
+    await expect(
+      engines(true, true).select(restore('load', sessionId, request, true)),
+    ).rejects.toThrow(/requires Hosted Harness session\/load/);
+  });
+
+  it('fails closed when remote store scope or managed configuration differs', async () => {
+    await expect(
+      engines(true, true).select(
+        restore('load', sessionId, {
+          managedSessionStore: managedSessionStore({
+            workspaceId: 'another-workspace',
+          }),
+        }),
+      ),
+    ).rejects.toThrow(/belongs to another workspace/);
+    await expect(
+      engines(true, true).select(
+        restore('load', sessionId, {
+          workspaceCwd: path.join(root, 'another-workspace'),
+          managedSessionStore: managedSessionStore(),
+        }),
+      ),
+    ).rejects.toThrow(/belongs to another workspace/);
+
+    writeFileSync(
+      path.join(home, 'settings.json'),
+      JSON.stringify({ mcpServers: { demo: { command: 'echo' } } }),
+    );
+    await expect(
+      engines(true, true).select(
+        restore('load', sessionId, {
+          managedSessionStore: managedSessionStore(),
+        }),
+      ),
+    ).rejects.toThrow(/cannot execute with the current configuration/);
   });
 
   it('fails managed restore when current config is incompatible', async () => {

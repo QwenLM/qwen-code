@@ -112,6 +112,15 @@ export function createDaemonExecutionEngines(
     context: BridgeExecutionSelection,
   ): Promise<SessionExecutionEngine> => {
     if (context.operation !== 'spawn') {
+      if (context.request.managedSessionStore !== undefined) {
+        return selectRemoteManagedRestoreEngine(context, {
+          workspaceCwd,
+          workspaceId,
+          runtimeEnvironment,
+          workspaceTrusted,
+          hostedHarness: options.requireManagedForOrdinary === true,
+        });
+      }
       return selectRestoreEngine({
         sessionId: context.request.sessionId,
         workspaceCwd,
@@ -132,6 +141,46 @@ export function createDaemonExecutionEngines(
     managed,
     select,
   });
+}
+
+function selectRemoteManagedRestoreEngine(
+  context: Extract<BridgeExecutionSelection, { operation: 'load' | 'resume' }>,
+  input: {
+    workspaceCwd: string;
+    workspaceId: string;
+    runtimeEnvironment: Readonly<NodeJS.ProcessEnv>;
+    workspaceTrusted: boolean;
+    hostedHarness: boolean;
+  },
+): SessionExecutionEngine {
+  const store = context.request.managedSessionStore;
+  if (
+    context.operation !== 'load' ||
+    context.daemonOwnedStandalone ||
+    !input.hostedHarness
+  ) {
+    throw new SessionExecutionEngineError(
+      context.request.sessionId,
+      'remote Managed Session storage requires Hosted Harness session/load',
+    );
+  }
+  if (
+    path.resolve(context.request.workspaceCwd) !==
+      path.resolve(input.workspaceCwd) ||
+    store?.workspaceId !== input.workspaceId
+  ) {
+    throw new SessionExecutionEngineError(
+      context.request.sessionId,
+      'remote Managed Session storage belongs to another workspace',
+    );
+  }
+  if (!isSpawnCompatible(input)) {
+    throw new SessionExecutionEngineError(
+      context.request.sessionId,
+      'belongs to managed, cannot execute with the current configuration',
+    );
+  }
+  return 'managed';
 }
 
 async function selectRestoreEngine(input: {

@@ -196,14 +196,16 @@ The private API is:
 ```text
 POST /internal/runtime-broker/v1/tool-sessions:acquire
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}/control
-POST /internal/runtime-broker/v1/executions
+POST /internal/runtime-broker/v1/executions:prepare
+POST /internal/runtime-broker/v1/executions/{executionCallId}:start
+POST /internal/runtime-broker/v1/executions # compatibility create-and-start
 GET  /internal/runtime-broker/v1/executions/{executionCallId}
 GET  /internal/runtime-broker/v1/executions/{executionCallId}/events
 POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release
 ```
 
-The P2 client polls `GET /executions/{executionCallId}`. The `/events` route and its sequence semantics are reserved here and are implemented with the product event store in P3/P4.
+The Harness uses `executions:prepare` to reserve the durable identity without dispatch, commits that identity in its private `await_runtime` checkpoint, and calls `:start` only after the checkpoint succeeds. GET never starts a `PREPARED` record, while cancellation can settle it without a physical side effect. The original `/executions` create-and-start route remains compatible. The P2 client polls `GET /executions/{executionCallId}`. The `/events` route and its sequence semantics are reserved here and are implemented with the product event store in P3/P4.
 
 The qwen client produces a typed discriminated union for the existing Managed Tool v2 operations: manifest, file-history bind/checkpoint/snapshot, begin-turn, prepare, confirmation, confirm, and preflight. Java validates the closed operation-name set; the Managed Runtime remains the field-level payload validator in P2. This is not an arbitrary URL or HTTP-method proxy.
 
@@ -222,7 +224,7 @@ When Java accepts the first Prompt it:
 
 For a no-Tool turn, model inference and completion never wait for Runtime. Provisioning may continue so later turns reuse the warm Runtime.
 
-For a cold Tool turn, the Harness creates or resolves a `ToolExecution`; Java keeps it in `waiting_runtime`, dispatches it when the original binding is ready and attested, returns the result to the Harness, and the same model loop continues.
+For a cold Tool turn, the Harness prepares or resolves a `ToolExecution`, commits its stable Broker identity before any side effect, and starts it after the private checkpoint succeeds. Java keeps it in `waiting_runtime`, dispatches it when the original binding is ready and attested, returns the result to the Harness, and the same model loop continues.
 
 ## 10. Idempotency and uncertain results
 
@@ -234,7 +236,7 @@ sessionId + turnId + toolCallId + requestDigest
 
 - The same key and request returns the original `executionCallId`.
 - The same key with different content is a conflict.
-- Java records `accepted` before dispatch.
+- Java records `PREPARED` and returns the durable ID before dispatch; only the explicit start command may claim dispatch.
 - Runtime deduplicates by `executionCallId` and retains a receipt while the binding is alive.
 - A lost response is recovered by querying the original Runtime and execution ID.
 - Java never changes Runtime and replays an execution whose start is uncertain.

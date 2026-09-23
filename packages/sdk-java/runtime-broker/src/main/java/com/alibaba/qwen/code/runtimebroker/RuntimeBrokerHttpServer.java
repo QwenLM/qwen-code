@@ -72,6 +72,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
+                    && "/executions:prepare".equals(relative)) {
+                prepareExecution(exchange);
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod())
                     && "/executions".equals(relative)) {
                 createExecution(exchange);
                 return;
@@ -150,6 +155,15 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private void createExecution(HttpExchange exchange) throws IOException {
+        executionRequest(exchange, true);
+    }
+
+    private void prepareExecution(HttpExchange exchange) throws IOException {
+        executionRequest(exchange, false);
+    }
+
+    private void executionRequest(HttpExchange exchange, boolean start)
+            throws IOException {
         Map<String, Object> body = requestBody(exchange,
                 "execution request");
         requireProtocol(body);
@@ -160,21 +174,45 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 "harnessSessionId", "execution request");
         String runtimeSessionId = JsonCodec.requiredString(body,
                 "runtimeSessionId", "execution request");
-        Map<String, Object> snapshot = service.createExecution(idempotencyKey,
-                harnessSessionId, runtimeSessionId,
-                JsonCodec.requiredString(body, "turnId", "execution request"),
-                JsonCodec.requiredString(body, "toolCallId",
-                        "execution request"),
-                JsonCodec.requiredString(body, "requestDigest",
-                        "execution request"),
-                JsonCodec.requiredObject(body, "reference",
-                        "execution request"));
+        String turnId = JsonCodec.requiredString(body, "turnId",
+                "execution request");
+        String toolCallId = JsonCodec.requiredString(body, "toolCallId",
+                "execution request");
+        String requestDigest = JsonCodec.requiredString(body,
+                "requestDigest", "execution request");
+        Map<String, Object> reference = JsonCodec.requiredObject(body,
+                "reference", "execution request");
+        Map<String, Object> snapshot = start
+                ? service.createExecution(idempotencyKey, harnessSessionId,
+                        runtimeSessionId, turnId, toolCallId, requestDigest,
+                        reference)
+                : service.prepareExecution(idempotencyKey, harnessSessionId,
+                        runtimeSessionId, turnId, toolCallId, requestDigest,
+                        reference);
         sendJson(exchange, 200, executionEnvelope(harnessSessionId,
                 runtimeSessionId, snapshot));
     }
 
     private void execution(HttpExchange exchange, String suffix)
             throws IOException {
+        if ("POST".equals(exchange.getRequestMethod())
+                && suffix.endsWith(":start")) {
+            String executionCallId = pathId(suffix.substring(0,
+                    suffix.length() - ":start".length()));
+            Map<String, Object> body = requestBody(exchange,
+                    "start request");
+            requireProtocol(body);
+            JsonCodec.requiredString(body, "requestId", "start request");
+            String harnessSessionId = JsonCodec.requiredString(body,
+                    "harnessSessionId", "start request");
+            String runtimeSessionId = JsonCodec.requiredString(body,
+                    "runtimeSessionId", "start request");
+            Map<String, Object> snapshot = service.startExecution(
+                    harnessSessionId, runtimeSessionId, executionCallId);
+            sendJson(exchange, 200, executionEnvelope(harnessSessionId,
+                    runtimeSessionId, snapshot));
+            return;
+        }
         if ("POST".equals(exchange.getRequestMethod())
                 && suffix.endsWith(":cancel")) {
             String executionCallId = pathId(suffix.substring(0,

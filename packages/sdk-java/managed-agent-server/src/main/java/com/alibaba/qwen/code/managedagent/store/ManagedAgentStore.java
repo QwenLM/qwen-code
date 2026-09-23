@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -678,6 +679,37 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
+    public boolean bindRecoveredHarness(String tenantId, String sessionId,
+            String turnId, String owner, String expectedHarnessBootId,
+            String harnessBootId) {
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
+        long now = clock.millis();
+        if (!owner.equals(turn.dispatchOwner())
+                || turn.dispatchLeaseUntil() == null
+                || turn.dispatchLeaseUntil() < now
+                || !ACTIVE_TURN_STATES.contains(turn.status())
+                || !turn.submissionAttempted()
+                || turn.harnessEventEpoch() == null) {
+            return false;
+        }
+        if (harnessBootId.equals(session.harnessBootId())) {
+            return true;
+        }
+        if (!Objects.equals(expectedHarnessBootId,
+                session.harnessBootId())) {
+            return false;
+        }
+        int updated = jdbc.update("UPDATE managed_agent_session SET"
+                        + " harness_boot_id = ?, updated_at = ?, version ="
+                        + " version + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ? AND harness_boot_id = ?",
+                harnessBootId, now, tenantId, sessionId,
+                expectedHarnessBootId);
+        return updated == 1;
+    }
+
+    @Transactional
     public void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner) {
         long now = clock.millis();
@@ -711,14 +743,68 @@ public class ManagedAgentStore implements AgentStateStore {
         if (updated != 1) {
             throw new IllegalStateException("Turn dispatch lease was lost");
         }
-        jdbc.update("UPDATE managed_agent_session SET harness_event_epoch ="
+        int sessionUpdated = jdbc.update("UPDATE managed_agent_session SET harness_event_epoch ="
                         + " ?, harness_last_event_id = ?, updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ?",
                 eventEpoch, lastEventId, now, tenantId, sessionId);
+        if (sessionUpdated != 1) {
+            throw new IllegalStateException("Session disappeared");
+        }
         if (!hasEventType(tenantId, sessionId, turnId, "turn.started")) {
             appendEvent(tenantId, sessionId, turnId, "turn.started",
                     Map.of("turnId", turnId), false, null, now);
+        }
+    }
+
+    @Transactional
+    public void recordRecoveryAdmission(String tenantId, String sessionId,
+            String turnId, String owner, String expectedEventEpoch,
+            String eventEpoch, long lastEventId) {
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
+        long now = clock.millis();
+        if (!owner.equals(turn.dispatchOwner())
+                || turn.dispatchLeaseUntil() == null
+                || turn.dispatchLeaseUntil() < now
+                || !ACTIVE_TURN_STATES.contains(turn.status())) {
+            throw new IllegalStateException("Turn dispatch lease was lost");
+        }
+        if (eventEpoch.equals(turn.harnessEventEpoch())
+                && turn.harnessLastEventId() != null
+                && turn.harnessLastEventId() >= lastEventId) {
+            return;
+        }
+        if (!turn.submissionAttempted()
+                || !Objects.equals(expectedEventEpoch,
+                        turn.harnessEventEpoch())
+                || !Objects.equals(expectedEventEpoch,
+                        session.harnessEventEpoch())) {
+            throw new IllegalStateException(
+                    "Hosted Harness recovery epoch changed");
+        }
+        int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
+                        + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
+                        + " 'RUNNING' END, harness_event_epoch = ?,"
+                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND"
+                        + " dispatch_owner = ? AND dispatch_lease_until"
+                        + " >= ? AND harness_event_epoch = ?",
+                eventEpoch, lastEventId, now, tenantId, sessionId, turnId,
+                owner, now, expectedEventEpoch);
+        if (updated != 1) {
+            throw new IllegalStateException("Turn dispatch lease was lost");
+        }
+        int sessionUpdated = jdbc.update("UPDATE managed_agent_session SET harness_event_epoch ="
+                        + " ?, harness_last_event_id = ?, updated_at = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND harness_event_epoch = ?",
+                eventEpoch, lastEventId, now, tenantId, sessionId,
+                expectedEventEpoch);
+        if (sessionUpdated != 1) {
+            throw new IllegalStateException(
+                    "Hosted Harness recovery epoch changed");
         }
     }
 

@@ -90,11 +90,19 @@ public interface AgentStateStore {
     boolean bindHarness(String tenantId, String sessionId, String turnId,
             String owner, String harnessBootId);
 
+    boolean bindRecoveredHarness(String tenantId, String sessionId,
+            String turnId, String owner, String expectedHarnessBootId,
+            String harnessBootId);
+
     void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
+
+    void recordRecoveryAdmission(String tenantId, String sessionId,
+            String turnId, String owner, String expectedEventEpoch,
+            String eventEpoch, long lastEventId);
 
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,

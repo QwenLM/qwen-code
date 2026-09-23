@@ -39,9 +39,6 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('keeps the real-model server E2E compatible with the Hosted Harness profile', () => {
-    expect(managedAgentServerE2E).not.toContain(
-      'QWEN_MANAGED_AGENT_WORKSPACE_ID',
-    );
     expect(embeddedRuntimeBroker).toContain(
       'resolveWorkspaceId(broker, workspaceCwd)',
     );
@@ -62,6 +59,51 @@ describe('SDK Java self-hosted workflow guards', () => {
         `sourceSettings['${section}']`,
       );
     }
+  });
+
+  it('keeps durable Session failover deterministic and isolated from real-model mode', () => {
+    expect(managedAgentServerE2E).toContain(
+      "} else if (argument === '--session-failover') {",
+    );
+    expect(managedAgentServerE2E).toContain(
+      '...(durableFailover\n          ? {',
+    );
+    expect(managedAgentServerE2E).toContain(
+      'QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:',
+    );
+    expect(managedAgentServerE2E).toContain(
+      "crashChild(harness.child, 'Hosted Harness A')",
+    );
+    expect(managedAgentServerE2E).toContain(
+      "crashChild(spring.child, 'Spring Managed Agent Server A')",
+    );
+    expect(managedAgentServerE2E).toContain(
+      'rmSync(harnessHome, { recursive: true, force: true })',
+    );
+    expect(managedAgentServerE2E).toContain('restoredFirstTurnContext: true');
+    expect(managedAgentServerE2E).toContain(
+      'oldHarnessDiskDeleted: !existsSync(harnessHome)',
+    );
+  });
+
+  it('crashes at the durable tool-intent boundary and recovers the original execution', () => {
+    expect(managedAgentServerE2E).toContain(
+      "} else if (argument === '--inflight-failover') {",
+    );
+    expect(managedAgentServerE2E).toContain(
+      "target.pathname.endsWith(':start')",
+    );
+    expect(managedAgentServerE2E).toContain("execution[1] !== 'PREPARED'");
+    expect(managedAgentServerE2E).toContain(
+      'recoveredExecution[0] !== originalExecutionCallId',
+    );
+    expect(managedAgentServerE2E).toContain(
+      'initialModelRequests.length !== 1',
+    );
+    expect(managedAgentServerE2E).toContain(
+      'sideEffectBytes !== inflightSideEffectContent',
+    );
+    expect(managedAgentServerE2E).toContain('physicalToolExecutions: 1');
   });
 
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
@@ -101,16 +143,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('runs Runtime Broker tests from the sibling module on self-hosted Java 21', () => {
-    const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
+  it('runs SDK and Runtime Broker tests from the sibling module on self-hosted runners', () => {
+    const block = step(job('test'), 'Run Java module tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain(
       'mvn --batch-mode --no-transfer-progress clean test\n' +
-        '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
-        '            cd ../runtime-broker\n' +
-        '            mvn --batch-mode --no-transfer-progress clean test\n' +
-        '          fi',
+        '          mvn --batch-mode --no-transfer-progress -f ../runtime-broker/pom.xml clean test',
     );
   });
 
@@ -125,7 +164,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         block.match(
           /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
         ),
-      ).toHaveLength(name === 'test' ? 6 : 2);
+      ).toHaveLength(name === 'test' ? 7 : 2);
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },

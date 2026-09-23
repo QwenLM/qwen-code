@@ -73,7 +73,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 key, ignored -> loadExisting
                         ? load(tenantId, sessionId)
                         : loadOrCreate(tenantId, sessionId));
-        return new Attachment(attached.getHarnessBootId());
+        return new Attachment(attached.getHarnessBootId(),
+                attached.getRuntimeRecovery(),
+                attached.getHarnessLastEventId(),
+                attached.getHarnessEventEpoch());
     }
 
     @Override
@@ -86,6 +89,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .payloadDigest(payloadDigest);
         input.forEach(builder::addContent);
         PromptReceipt receipt = client().submitTurn(builder.build());
+        return new Admission(receipt.getLastEventId(),
+                receipt.getEventEpoch());
+    }
+
+    @Override
+    public Admission continueManagedRuntime(String tenantId,
+            String sessionId, String promptId, String checkpointId,
+            String activationId) {
+        PromptReceipt receipt = client().continueManagedRuntime(
+                attachment(tenantId, sessionId), promptId, checkpointId,
+                activationId);
         return new Admission(receipt.getLastEventId(),
                 receipt.getEventEpoch());
     }

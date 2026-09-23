@@ -192,6 +192,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String harnessSessionId, String runtimeSessionId, String turnId,
             String toolCallId, String requestDigest,
             Map<String, Object> reference) {
+        Map<String, Object> prepared = prepareExecution(idempotencyKey,
+                harnessSessionId, runtimeSessionId, turnId, toolCallId,
+                requestDigest, reference);
+        return startExecution(harnessSessionId, runtimeSessionId,
+                (String) prepared.get("executionCallId"));
+    }
+
+    public Map<String, Object> prepareExecution(String idempotencyKey,
+            String harnessSessionId, String runtimeSessionId, String turnId,
+            String toolCallId, String requestDigest,
+            Map<String, Object> reference) {
         ensureOpen();
         SessionBinding session = requireSession(harnessSessionId,
                 runtimeSessionId);
@@ -211,10 +222,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw conflict("runtime_broker_execution_conflict",
                     "Execution idempotency key changed content.");
         }
-        ExecutionRecord execution = executionsById.computeIfAbsent(
-                persisted.getExecutionCallId(), ignored ->
-                        new ExecutionRecord(persisted, session));
-        execution.assertSession(session);
+        return executionSnapshot(persisted);
+    }
+
+    public Map<String, Object> startExecution(String harnessSessionId,
+            String runtimeSessionId, String executionCallId) {
+        ensureOpen();
+        ExecutionRecord execution = requireExecution(harnessSessionId,
+                runtimeSessionId, executionCallId);
         execution.start(transport);
         return execution.snapshot();
     }
@@ -236,6 +251,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ExecutionRecord execution = requireExecution(harnessSessionId,
                 runtimeSessionId, executionCallId);
         return execution.cancel(transport);
+    }
+
+    private ExecutionRecord restoreExecution(ToolExecutionRecord persisted,
+            SessionBinding session) {
+        ExecutionRecord execution = executionsById.computeIfAbsent(
+                persisted.getExecutionCallId(), ignored ->
+                        new ExecutionRecord(persisted, session));
+        execution.assertSession(session);
+        if (persisted.getState() != ToolExecutionRecord.State.PREPARED) {
+            execution.start(transport);
+        }
+        return execution;
     }
 
     public Map<String, Object> resolveUnknownExecution(
@@ -486,7 +513,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         try {
             session = requireSession(harnessId, runtimeId);
         } catch (RuntimeBrokerException error) {
-            if (!record.isSettled() && makesOutcomeUnknown(error)) {
+            if (!record.isSettled()
+                    && record.getState()
+                            != ToolExecutionRecord.State.PREPARED
+                    && makesOutcomeUnknown(error)) {
                 ToolExecutionRecord unknown = markExecutionUnknown(
                         executionId);
                 if (unknown != null && unknown.getState()
@@ -496,11 +526,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             throw error;
         }
-        ExecutionRecord execution = executionsById.computeIfAbsent(
-                executionId, ignored -> new ExecutionRecord(record, session));
-        execution.assertSession(session);
-        execution.start(transport);
-        return execution;
+        return restoreExecution(record, session);
     }
 
     private ToolExecutionRecord markExecutionUnknown(

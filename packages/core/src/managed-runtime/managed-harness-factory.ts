@@ -95,6 +95,7 @@ export interface ManagedDurableWaitDecision {
 
 export interface ManagedAwaitRuntimeCommit {
   readonly functionCallId: string;
+  readonly toolName: string;
   readonly executionCallId: string;
   readonly invocationBindingId: string;
   readonly capabilityVersion: string;
@@ -111,6 +112,7 @@ export interface ManagedAwaitRuntimeCommit {
 
 export interface ManagedAwaitRuntimeRequest {
   readonly functionCallId: string;
+  readonly toolName: string;
   readonly executionCallId: string;
   readonly invocationBindingId?: string;
   readonly modelMessageId?: string;
@@ -494,6 +496,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
             ...priorItems.filter((item) => item.state === 'settled'),
             {
               functionCallId: request.functionCallId,
+              toolName: request.toolName,
               executionCallId: request.executionCallId,
               modelMessageId: request.modelMessageId,
               partIndex: request.partIndex,

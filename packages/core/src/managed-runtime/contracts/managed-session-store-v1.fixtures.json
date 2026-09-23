@@ -119,6 +119,10 @@
       "status": 409,
       "code": "managed_session_idempotency_conflict"
     },
+    "recoveryConflict": {
+      "status": 409,
+      "code": "managed_session_recovery_conflict"
+    },
     "resourceMissing": {
       "status": 409,
       "code": "managed_session_resource_missing"

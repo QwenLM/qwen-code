@@ -3,9 +3,11 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RecoveryStateReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
@@ -64,6 +66,16 @@ public class ManagedSessionStoreController {
                     String writerToken,
             @Valid @RequestBody SealWriterRequest request) {
         return store.sealWriter(tenant.tenantId(), sessionId,
+                writerToken, request);
+    }
+
+    @PostMapping("/recovery:block")
+    public RecoveryStateReceipt blockRecovery(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
+                    String writerToken,
+            @Valid @RequestBody BlockRecoveryRequest request) {
+        return store.blockRecovery(tenant.tenantId(), sessionId,
                 writerToken, request);
     }
 

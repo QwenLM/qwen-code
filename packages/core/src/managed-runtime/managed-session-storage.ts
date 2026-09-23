@@ -85,6 +85,13 @@ export interface ManagedSessionJournalReader {
 export interface ManagedSessionJournalHandle
   extends ManagedSessionJournalReader {
   appendTransaction(records: readonly unknown[]): Promise<void>;
+  blockRecovery?(request: {
+    readonly status:
+      | 'BLOCKED_RESOURCE'
+      | 'BLOCKED_WORKSPACE'
+      | 'BLOCKED_EXECUTION';
+    readonly detailCode: string;
+  }): Promise<void>;
   seal(): Promise<void>;
   /** Abandons an unsuccessful open without publishing a handoff boundary. */
   abort(): Promise<void>;

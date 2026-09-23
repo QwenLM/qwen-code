@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
+import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
@@ -197,26 +198,88 @@ public class HarnessCoordinator {
         Attachment attachment = harness.createOrLoad(
                 session.tenantId(), session.sessionId(),
                 session.harnessBootId() != null);
-        if (!store.bindHarness(session.tenantId(), session.sessionId(),
-                claimed.turnId(), owner, attachment.bootId())) {
-            return fail(claimed, "hosted_harness_generation_mismatch",
-                    "Hosted Harness generation changed.");
+        HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
+        if (runtimeRecovery != null
+                && runtimeRecovery.hasUnknownOutcome()) {
+            return fail(claimed, "managed_runtime_recovery_blocked",
+                    "A prior tool execution has an unknown outcome; the"
+                            + " Session was blocked without replaying it.");
         }
-        requireLease(leaseLost);
-        TurnRecord current = store.findTurn(claimed.tenantId(),
-                claimed.sessionId(), claimed.turnId()).orElseThrow();
-        if (current.harnessEventEpoch() == null) {
-            store.markSubmissionAttempted(current.tenantId(),
-                    current.sessionId(), current.turnId(), owner);
-            Admission admission = harness.submit(session.tenantId(),
-                    session.sessionId(), current.promptId(), current.input(),
-                    current.payloadDigest());
+        TurnRecord current;
+        if (runtimeRecovery != null) {
+            if (!runtimeRecovery.isContinuationReady()) {
+                return fail(claimed, "managed_runtime_recovery_incomplete",
+                        "A prior tool execution is not ready for safe"
+                                + " continuation.");
+            }
+            if ("CANCELLING".equals(claimed.status())) {
+                return fail(claimed,
+                        "managed_runtime_recovery_cancel_pending",
+                        "The recovered Turn was cancelled before model"
+                                + " continuation.");
+            }
+            if (attachment.eventEpoch() == null
+                    || attachment.lastEventId() == null) {
+                return fail(claimed,
+                        "managed_runtime_recovery_watermark_missing",
+                        "Hosted Harness recovery did not return an event"
+                                + " watermark.");
+            }
+            if (!store.bindRecoveredHarness(session.tenantId(),
+                    session.sessionId(), claimed.turnId(), owner,
+                    session.harnessBootId(), attachment.bootId())) {
+                return fail(claimed,
+                        "hosted_harness_recovery_generation_mismatch",
+                        "Hosted Harness recovery generation changed.");
+            }
             requireLease(leaseLost);
-            store.recordAdmission(current.tenantId(), current.sessionId(),
-                    current.turnId(), owner, admission.eventEpoch(),
+            current = store.findTurn(claimed.tenantId(),
+                    claimed.sessionId(), claimed.turnId()).orElseThrow();
+            String previousEventEpoch = current.harnessEventEpoch();
+            store.recordRecoveryAdmission(current.tenantId(),
+                    current.sessionId(), current.turnId(), owner,
+                    previousEventEpoch, attachment.eventEpoch(),
+                    attachment.lastEventId());
+            requireLease(leaseLost);
+            Admission admission = harness.continueManagedRuntime(
+                    session.tenantId(), session.sessionId(),
+                    current.promptId(), runtimeRecovery.getCheckpointId(),
+                    runtimeRecovery.getActivationId());
+            requireLease(leaseLost);
+            if (!attachment.eventEpoch().equals(admission.eventEpoch())
+                    || admission.lastEventId()
+                            < attachment.lastEventId()) {
+                throw new IllegalStateException(
+                        "Hosted Harness recovery watermark changed");
+            }
+            store.recordRecoveryAdmission(current.tenantId(),
+                    current.sessionId(), current.turnId(), owner,
+                    attachment.eventEpoch(), admission.eventEpoch(),
                     admission.lastEventId());
             current = store.findTurn(current.tenantId(), current.sessionId(),
                     current.turnId()).orElseThrow();
+        } else {
+            if (!store.bindHarness(session.tenantId(), session.sessionId(),
+                    claimed.turnId(), owner, attachment.bootId())) {
+                return fail(claimed, "hosted_harness_generation_mismatch",
+                        "Hosted Harness generation changed.");
+            }
+            requireLease(leaseLost);
+            current = store.findTurn(claimed.tenantId(),
+                    claimed.sessionId(), claimed.turnId()).orElseThrow();
+            if (current.harnessEventEpoch() == null) {
+                store.markSubmissionAttempted(current.tenantId(),
+                        current.sessionId(), current.turnId(), owner);
+                Admission admission = harness.submit(session.tenantId(),
+                        session.sessionId(), current.promptId(),
+                        current.input(), current.payloadDigest());
+                requireLease(leaseLost);
+                store.recordAdmission(current.tenantId(),
+                        current.sessionId(), current.turnId(), owner,
+                        admission.eventEpoch(), admission.lastEventId());
+                current = store.findTurn(current.tenantId(),
+                        current.sessionId(), current.turnId()).orElseThrow();
+            }
         }
         if ("CANCELLING".equals(current.status())) {
             harness.cancel(session.tenantId(), session.sessionId());

@@ -5315,6 +5315,64 @@ describe('Session', () => {
       expect(promptSpy).not.toHaveBeenCalled();
     });
 
+    it('continues a recovered Runtime receipt without a synthesized tool failure', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'read it' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+          ],
+        },
+      ]);
+      const readManagedRuntimeOutcomes = vi.fn().mockResolvedValue({
+        outcomes: [
+          {
+            functionCallId: 'call-1',
+            executionCallId: 'execution-1',
+            part: {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'original Runtime receipt' },
+              },
+            },
+          },
+        ],
+        preserveCallIds: ['call-1'],
+      });
+      Object.assign(mockConfig, { readManagedRuntimeOutcomes });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(session.continueLastTurn()).resolves.toEqual({
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [],
+          _meta: { 'qwen.daemon.continueLastTurn': true },
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(readManagedRuntimeOutcomes).toHaveBeenCalled();
+      expect(
+        firstSentMessage().find(
+          (part) => part.functionResponse?.id === 'call-1',
+        )?.functionResponse,
+      ).toEqual({
+        id: 'call-1',
+        name: 'read_file',
+        response: { output: 'original Runtime receipt' },
+      });
+      expect(
+        mockChat.stripOrphanedUserEntriesFromHistory,
+      ).not.toHaveBeenCalled();
+    });
+
     it('rejects when the gemini client is not initialized', async () => {
       vi.mocked(mockLlmClient.isInitialized).mockReturnValue(false);
       const promptSpy = vi
@@ -38865,6 +38923,13 @@ describe('Session', () => {
             events.push('authorize');
             authorized = true;
           }),
+          prepareExecution: vi.fn(async () => {
+            events.push('reserve');
+            return {
+              executionCallId: 'broker-execution-id',
+              invocationBindingId: 'runtime-session-id',
+            };
+          }),
           cancelAndDrain: vi.fn(async () => {
             events.push('drain');
           }),
@@ -38939,6 +39004,9 @@ describe('Session', () => {
 
       it('prepares before permission, runs preflight before guard and authorizes execution', async () => {
         const remote = managedTool({ path: '/normalized/remote.txt' });
+        mockConfig.commitManagedAwaitRuntime = vi.fn(async () => {
+          remote.events.push('commit');
+        });
         mockToolRegistry.getTool.mockReturnValue(remote.tool);
         mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(
           vi.fn(async () => {
@@ -38957,6 +39025,8 @@ describe('Session', () => {
           'preflight',
           'guard',
           'authorize',
+          'reserve',
+          'commit',
           'execute',
           'drain',
         ]);
@@ -38966,13 +39036,14 @@ describe('Session', () => {
         expect(remote.tool.build).toHaveBeenCalledTimes(1);
         expect(mockConfig.commitManagedAwaitRuntime).toHaveBeenCalledWith({
           functionCallId: 'managed-call',
-          executionCallId: 'runtime-tool-use-id',
-          invocationBindingId: 'runtime-tool-use-id',
+          executionCallId: 'broker-execution-id',
+          invocationBindingId: 'runtime-session-id',
           modelMessageId: 'managed-prompt',
+          toolName: 'remote_tool',
         });
         expect(mockConfig.resolveManagedAwaitRuntime).toHaveBeenCalledWith({
           functionCallId: 'managed-call',
-          executionCallId: 'runtime-tool-use-id',
+          executionCallId: 'broker-execution-id',
           outcome: 'completed',
           body: { executionStatus: 'success' },
           functionResponse: expect.objectContaining({
@@ -39003,6 +39074,7 @@ describe('Session', () => {
           'permission',
           'preflight',
           'authorize',
+          'reserve',
           'execute',
         ]);
         expect(remote.managed.cancelAndDrain).not.toHaveBeenCalled();

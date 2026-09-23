@@ -298,6 +298,53 @@ describe('RuntimeBackedTool', () => {
     expect(real.executeSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('reserves a durable execution identity before starting the Runtime', async () => {
+    const order: string[] = [];
+    client.prepareExecution = vi.fn(async () => {
+      order.push('reserve');
+      return {
+        executionCallId: 'execution-1',
+        invocationBindingId: 'runtime-1',
+      };
+    });
+    client.startExecution = vi.fn(async (reference, executionCallId) => {
+      expect(executionCallId).toBe('execution-1');
+      order.push('start');
+      return runtime.execute(reference);
+    });
+    const invocation = await authorized();
+
+    await expect(invocation.managed.prepareExecution()).resolves.toEqual({
+      executionCallId: 'execution-1',
+      invocationBindingId: 'runtime-1',
+    });
+    await invocation.managed.prepareExecution();
+    expect(order).toEqual(['reserve']);
+
+    await expect(invocation.execute(controller.signal)).resolves.toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(order).toEqual(['reserve', 'start']);
+    expect(client.prepareExecution).toHaveBeenCalledTimes(1);
+    expect(client.startExecution).toHaveBeenCalledTimes(1);
+    expect(client.execute).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when only half of the reservation contract is present', async () => {
+    client.prepareExecution = vi.fn(async () => ({
+      executionCallId: 'execution-1',
+      invocationBindingId: 'runtime-1',
+    }));
+    const invocation = await authorized();
+
+    await expect(invocation.managed.prepareExecution()).rejects.toThrow(
+      'reservation contract is incomplete',
+    );
+    expect(client.prepareExecution).not.toHaveBeenCalled();
+    expect(client.execute).not.toHaveBeenCalled();
+    await invocation.managed.cancelAndDrain();
+  });
+
   it('keeps cancellation pending until the real invocation settles, including successful late writes', async () => {
     const done = deferred<ToolResult>();
     real.executeSpy.mockImplementation(async () => done.promise);

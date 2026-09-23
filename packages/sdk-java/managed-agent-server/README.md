@@ -151,9 +151,22 @@ has an explicit ID, startup rejects a mismatch.
 This activates the durable create and cold-load paths for newly created Hosted
 Sessions. The load path rebuilds the Harness state from the scoped Store and
 does not require a Pod-local transcript. The Store boundary has an
-independent-JVM crash/takeover proof against real MySQL. Do not advertise
-automatic cross-Pod recovery yet: real Hosted Harness owner failover and
-admitted in-flight Turn reconciliation are still pending. Resources larger than 64 KiB fail with
+independent-JVM crash/takeover proof against real MySQL. A deterministic
+multi-process check also kills the real Java and Hosted Harness owners, deletes
+their local homes, and proves that replacement owners complete a second Turn
+with the first Turn's restored context. A separate recovery slice supports one
+known pending tool execution: the replacement Harness starts or polls the
+original Broker identity, commits its settled receipt as `results_ready`, and
+Java replaces the Harness boot and public event epoch under the Turn dispatch
+lease, durably records the replacement attachment watermark before invoking
+checkpoint-bound continuation with the original public prompt identity, and
+advances the cursor after the response. Unit, contract, and H2 coordinator/store
+tests verify that this path does not resubmit the Prompt or replay the tool. Do
+not advertise general automatic cross-Pod recovery yet: multi-tool recovery,
+recovered cancellation, event/checkpoint reconstruction after a
+mid-continuation Harness crash, the full multi-process in-flight failure matrix,
+OSS-backed resources, and scheduler recovery are still pending. Resources
+larger than 64 KiB fail with
 `managed_session_oss_disabled` until the immutable OSS path is implemented.
 Production deployments must add mTLS or equivalent service authentication;
 the tenant and writer headers are scope and fencing inputs, not a substitute
@@ -273,6 +286,31 @@ mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
 mvn -f packages/sdk-java/managed-agent-server/pom.xml clean package
 npm run test:e2e:managed-agent-server -- --model moonshot/kimi-k3
 ```
+
+For the deterministic durable-owner failover check, use the same built
+artifacts and run:
+
+```bash
+npm run test:e2e:managed-session-failover
+```
+
+This mode uses a local fake model, completes one Turn, kills the Spring and
+Hosted Harness process trees, deletes their old local homes, starts replacement
+owners against the same MySQL store, and verifies that the second Turn sees the
+first Turn's prompt and answer.
+
+To exercise an admitted in-flight Turn at the tool-intent boundary, run:
+
+```bash
+npm run test:e2e:managed-inflight-failover
+```
+
+This mode holds the first Broker `:start` request after the Harness has durably
+committed its `await_runtime` checkpoint, kills the original Spring and Hosted
+Harness process trees, deletes their homes, and starts replacement owners. It
+requires the replacement Harness to use the original `executionCallId`, execute
+the physical tool exactly once, continue the original Prompt without replay,
+and commit one public terminal event.
 
 The default zero-delay run is the stable real-model integration gate. To also
 observe resident model output while the Tool Runtime is unavailable, add a

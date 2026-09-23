@@ -40,9 +40,12 @@ describe('managed tool Session binding', () => {
   const bindings = new Map<string, ManagedToolFileHistoryBinding>();
   const getClient =
     vi.fn<NonNullable<ManagedRuntimeProvider['getToolV2Client']>>();
+  const inspectExecution =
+    vi.fn<NonNullable<ManagedRuntimeProvider['inspectExecution']>>();
   const release = vi.fn<ManagedRuntimeProvider['release']>();
   const provider = {
     getToolV2Client: getClient,
+    inspectExecution,
     release,
   } as unknown as ManagedRuntimeProvider;
 
@@ -59,6 +62,14 @@ describe('managed tool Session binding', () => {
       confirmation: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue(undefined),
       preflight: vi.fn().mockResolvedValue({ shouldProceed: true }),
+      prepareExecution: vi.fn().mockResolvedValue({
+        executionCallId: 'execution-1',
+        invocationBindingId: sessionId,
+      }),
+      startExecution: vi.fn().mockResolvedValue({
+        executionStatus: 'success',
+        result: { llmContent: 'ok', returnDisplay: 'ok' },
+      }),
       execute: vi.fn().mockResolvedValue({
         executionStatus: 'success',
         result: { llmContent: 'ok', returnDisplay: 'ok' },
@@ -103,6 +114,7 @@ describe('managed tool Session binding', () => {
     getClient
       .mockReset()
       .mockImplementation(async ({ sessionId }) => clientFor(sessionId));
+    inspectExecution.mockReset();
     release.mockReset().mockResolvedValue(true);
   });
   afterEach(async () => {
@@ -259,6 +271,74 @@ describe('managed tool Session binding', () => {
       { terminal: true },
     );
     await second.close();
+  });
+
+  it('preserves two-phase execution through the Session wrapper', async () => {
+    const { session } = create();
+    const remote = await session.getClient();
+    const raw = clients.get(session.sessionId)!;
+    const ref: ManagedToolInvocationReference = {
+      sessionId: session.sessionId,
+      promptId: 'prompt',
+      callId: 'call',
+      invocationId: 'invocation',
+      capabilityDigest: 'capability',
+      policyRevision: 'policy',
+      argsDigest: 'args',
+    };
+
+    const reservation = await remote.prepareExecution!(ref);
+    expect(reservation).toEqual({
+      executionCallId: 'execution-1',
+      invocationBindingId: session.sessionId,
+    });
+    expect(raw.startExecution).not.toHaveBeenCalled();
+
+    await remote.startExecution!(ref, reservation.executionCallId);
+    expect(raw.prepareExecution).toHaveBeenCalledExactlyOnceWith(ref);
+    expect(raw.startExecution).toHaveBeenCalledExactlyOnceWith(
+      ref,
+      reservation.executionCallId,
+    );
+    await session.close();
+  });
+
+  it('inspects a durable execution from the root Session without acquiring a Runtime', async () => {
+    const { session, config } = create();
+    inspectExecution.mockResolvedValue({
+      outcome: 'known',
+      status: {
+        state: 'prepared',
+        cancelRequested: false,
+        lastSeq: 0,
+        firstAvailableSeq: 0,
+        progressGap: false,
+        progress: [],
+      },
+    });
+
+    await expect(
+      session.inspectExecution!({
+        runtimeSessionId: 'runtime-session',
+        executionCallId: 'execution-call',
+        afterSeq: 7,
+      }),
+    ).resolves.toMatchObject({
+      outcome: 'known',
+      status: { state: 'prepared' },
+    });
+    expect(inspectExecution).toHaveBeenCalledExactlyOnceWith({
+      harnessSessionId: config.getSessionId(),
+      runtimeSessionId: 'runtime-session',
+      executionCallId: 'execution-call',
+      afterSeq: 7,
+    });
+    expect(getClient).not.toHaveBeenCalled();
+
+    const child = session.createChild!(config);
+    expect(child.inspectExecution).toBeUndefined();
+    await child.close();
+    await session.close();
   });
 
   it('binds parent history before the first child tool and persists later child changes in the parent writer', async () => {

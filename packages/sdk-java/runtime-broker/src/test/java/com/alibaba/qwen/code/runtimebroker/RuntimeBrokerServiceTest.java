@@ -178,6 +178,38 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void preparedExecutionDoesNotDispatchUntilExplicitStart()
+            throws Exception {
+        FakeTransport transport = new FakeTransport();
+        RuntimeBrokerService service = readyService(transport);
+        service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                .toCompletableFuture().get(1, TimeUnit.SECONDS);
+
+        Map<String, Object> prepared = service.prepareExecution("key-1",
+                HARNESS_SESSION, RUNTIME_SESSION, "turn-1", "tool-1",
+                "args-1", reference("args-1"));
+        String executionCallId = (String) prepared.get("executionCallId");
+
+        assertEquals("prepared", status(prepared).get("state"));
+        assertEquals("prepared", status(service.getExecution(
+                HARNESS_SESSION, RUNTIME_SESSION, executionCallId, null))
+                        .get("state"));
+        assertEquals(0, transport.executions.get());
+
+        service.startExecution(HARNESS_SESSION, RUNTIME_SESSION,
+                executionCallId);
+        service.startExecution(HARNESS_SESSION, RUNTIME_SESSION,
+                executionCallId);
+        waitForCount(transport.executions, 1);
+        assertEquals(1, transport.executions.get());
+
+        transport.execution.complete(executionResult("success"));
+        assertEquals("success", result(waitForSettled(service,
+                executionCallId)).get("executionStatus"));
+        service.close();
+    }
+
+    @Test
     void executionLedgerDispatchesOnePhysicalExecutionPerKey()
             throws Exception {
         FakeTransport transport = new FakeTransport();

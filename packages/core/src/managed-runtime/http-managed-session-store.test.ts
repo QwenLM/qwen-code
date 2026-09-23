@@ -265,6 +265,84 @@ describe('HTTP Managed Session store', () => {
     expect(String(error)).not.toContain(TOKEN_A);
   });
 
+  it('persists a fenced recovery block through the active writer', async () => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const handle = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+
+    await handle.blockRecovery?.({
+      status: 'BLOCKED_EXECUTION',
+      detailCode: 'runtime_execution_outcome_unknown',
+    });
+
+    expect(server.recoveryBlocks).toEqual([
+      {
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        recoveryStatus: 'BLOCKED_EXECUTION',
+        recoveryDetailCode: 'runtime_execution_outcome_unknown',
+      },
+    ]);
+    await stores.close();
+  });
+
+  it('seals without committing an activation boundary after recovery is blocked', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-blocked-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{"model":"test"}', 'utf8'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: {
+        definitionRef,
+        rootSnapshotRef,
+        createdBy: 'test',
+      },
+    });
+    await session.authority.blockRecovery({
+      status: 'BLOCKED_EXECUTION',
+      detailCode: 'runtime_execution_outcome_unknown',
+    });
+    const committedBeforeClose = server.commits.length;
+
+    await session.close();
+
+    expect(server.commits).toHaveLength(committedBeforeClose);
+    expect(server.sealCount).toBe(1);
+  });
+
   it('rejects resources that require the unimplemented OSS path', async () => {
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
@@ -285,7 +363,9 @@ describe('HTTP Managed Session store', () => {
 
 class FakeManagedSessionStore {
   readonly commits: Array<Record<string, unknown>> = [];
+  readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   transactionReads = 0;
+  sealCount = 0;
   readonly fetch = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(requestUrl(input));
     const headers = new Headers(init?.headers);
@@ -295,6 +375,11 @@ class FakeManagedSessionStore {
       url.pathname.indexOf('/internal/managed-session-store/v1/sessions/') +
         `/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}`
           .length,
+    );
+    expect(headers.get('Accept')).toBe(
+      suffix.startsWith('/resources/')
+        ? 'application/octet-stream, application/json'
+        : 'application/json',
     );
     if (suffix === '/writers:acquire') {
       this.writerGeneration++;
@@ -307,6 +392,7 @@ class FakeManagedSessionStore {
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:seal') {
+      this.sealCount++;
       this.state = 'SEALED';
       return jsonResponse({
         writerGeneration: this.writerGeneration,
@@ -326,7 +412,22 @@ class FakeManagedSessionStore {
           : { lastCommitDigest: this.lastCommitDigest }),
         activationEpoch: this.activationEpoch,
         compactedThroughRevision: 0,
-        recoveryStatus: 'READY',
+        recoveryStatus: this.recoveryStatus,
+        ...(this.recoveryDetailCode === null
+          ? {}
+          : { recoveryDetailCode: this.recoveryDetailCode }),
+      });
+    }
+    if (suffix === '/recovery:block') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      this.recoveryBlocks.push(body);
+      this.recoveryStatus = String(body['recoveryStatus']);
+      this.recoveryDetailCode = String(body['recoveryDetailCode']);
+      return jsonResponse({
+        writerGeneration: this.writerGeneration,
+        recoveryStatus: this.recoveryStatus,
+        recoveryDetailCode: this.recoveryDetailCode,
+        replayed: false,
       });
     }
     if (suffix === '/transactions') {
@@ -442,6 +543,8 @@ class FakeManagedSessionStore {
   private committedSequence = 0;
   private lastCommitDigest: string | null = null;
   private activationEpoch = 0;
+  private recoveryStatus = 'READY';
+  private recoveryDetailCode: string | null = null;
   private readonly transactions: Array<Record<string, unknown>> = [];
   private readonly resources = new Map<
     string,

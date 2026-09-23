@@ -166,6 +166,7 @@ export interface HarnessAttemptGroup {
 
 export interface HarnessToolItem {
   readonly functionCallId: string;
+  readonly toolName: string;
   readonly executionCallId: string;
   readonly modelMessageId: string;
   readonly partIndex: number;
@@ -637,6 +638,7 @@ function parseToolItem(
     record,
     [
       'functionCallId',
+      'toolName',
       'executionCallId',
       'modelMessageId',
       'partIndex',
@@ -671,6 +673,10 @@ function parseToolItem(
     functionCallId: assertManagedSessionStableId(
       record['functionCallId'],
       `${label}.functionCallId`,
+    ),
+    toolName: assertManagedSessionStableId(
+      record['toolName'],
+      `${label}.toolName`,
     ),
     executionCallId: assertManagedSessionStableId(
       record['executionCallId'],

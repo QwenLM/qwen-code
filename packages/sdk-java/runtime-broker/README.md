@@ -22,6 +22,8 @@ The module provides:
 - Runtime Session acquisition and release;
 - in-memory and JDBC execution ledgers with at-most-once dispatch per
   idempotency key;
+- a two-phase Tool boundary that reserves a durable execution identity before
+  the Harness checkpoint and starts physical execution only after that commit;
 - encrypted durable Runtime seeds, versioned resource handles, and an
   owner-generation fence for cross-JVM recovery;
 - a static provisioner for externally managed Runtime endpoints;

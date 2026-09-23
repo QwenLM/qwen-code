@@ -36,6 +36,7 @@ import {
   managedRuntimeDispatchGate,
   resetManagedRuntimeDispatchGatesForTest,
 } from '../managed-runtime/managed-runtime-dispatch-gate.js';
+import type { ManagedToolSessionFactory } from '../tools/managed-tool-session.js';
 import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
@@ -60,7 +61,10 @@ interface Fixture {
   transcriptPath: string;
 }
 
-type Activate = (options: { managedSessionLog: boolean }) => Promise<Fixture>;
+type Activate = (options: {
+  managedSessionLog: boolean;
+  managedToolSessionFactory?: ManagedToolSessionFactory;
+}) => Promise<Fixture>;
 
 async function withWorkspace(run: (activate: Activate) => Promise<void>) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-managed-log-'));
@@ -79,9 +83,11 @@ async function withWorkspace(run: (activate: Activate) => Promise<void>) {
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        managedToolSessionFactory: () => {
-          throw new Error('must not create tools');
-        },
+        managedToolSessionFactory:
+          options.managedToolSessionFactory ??
+          (() => {
+            throw new Error('must not create tools');
+          }),
         ...(options.managedSessionLog
           ? { managedSessionLogEnabled: true }
           : {}),
@@ -914,6 +920,7 @@ describe('managed session log activation', () => {
 
       await fixture.config.commitManagedAwaitRuntime({
         functionCallId: 'fc-rt-1',
+        toolName: 'remote_tool',
         executionCallId: 'ex-rt-1',
         invocationBindingId: 'bind-rt-1',
         modelMessageId: 'msg-rt-1',
@@ -980,6 +987,225 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('inspects admitted Runtime work and blocks an unknown outcome after a cold reopen', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      const recorder = first.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run a remote tool');
+      await recorder.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-recover-1',
+        toolName: 'remote_tool',
+        executionCallId: 'ex-recover-1',
+        invocationBindingId: 'runtime-session-1',
+        modelMessageId: 'msg-recover-1',
+      });
+      await first.config.closeSessionWriter();
+
+      const inspectExecution = vi.fn().mockResolvedValue({
+        outcome: 'known' as const,
+        status: {
+          state: 'executing' as const,
+          cancelRequested: false,
+          lastSeq: 2,
+          firstAvailableSeq: 1,
+          progressGap: false,
+          progress: [],
+        },
+      });
+      const second = await activate({
+        managedSessionLog: true,
+        managedToolSessionFactory: () => ({
+          sessionId: 'recovery-inspector',
+          shellConfiguration: {
+            shell: 'bash',
+            executable: 'bash',
+            argsPrefix: ['-c'],
+          },
+          platform: 'darwin',
+          getClient: async () => {
+            throw new Error('recovery inspection must not acquire a Runtime');
+          },
+          inspectExecution,
+          close: async () => {},
+        }),
+      });
+
+      await expect(
+        second.config.readPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'await_runtime',
+        activationId: expect.any(String),
+        checkpointId: expect.any(String),
+        executions: [
+          {
+            functionCallId: 'fc-recover-1',
+            toolName: 'remote_tool',
+            executionCallId: 'ex-recover-1',
+            runtimeSessionId: 'runtime-session-1',
+            progressCursor: null,
+          },
+        ],
+      });
+      await expect(
+        second.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'await_runtime',
+        executions: [
+          {
+            functionCallId: 'fc-recover-1',
+            executionCallId: 'ex-recover-1',
+            runtimeSessionId: 'runtime-session-1',
+            outcome: 'known',
+            status: { state: 'executing', lastSeq: 2 },
+          },
+        ],
+      });
+      expect(inspectExecution).toHaveBeenCalledExactlyOnceWith({
+        runtimeSessionId: 'runtime-session-1',
+        executionCallId: 'ex-recover-1',
+      });
+      const managedSession = (
+        second.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession!;
+      const blockRecovery = vi
+        .spyOn(managedSession.authority, 'blockRecovery')
+        .mockResolvedValue();
+      inspectExecution.mockResolvedValueOnce({ outcome: 'unknown' as const });
+      await expect(
+        second.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'await_runtime',
+        executions: [{ outcome: 'unknown' }],
+      });
+      expect(blockRecovery).toHaveBeenCalledExactlyOnceWith({
+        status: 'BLOCKED_EXECUTION',
+        detailCode: 'runtime_execution_outcome_unknown',
+      });
+      await second.config.closeSessionWriter();
+    });
+  });
+
+  it('settles the original Runtime execution and restores its receipt after a cold reopen', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      const recorder = first.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run a remote tool');
+      await recorder.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-recover-settled',
+        toolName: 'remote_tool',
+        executionCallId: 'ex-recover-settled',
+        invocationBindingId: 'runtime-session-settled',
+        modelMessageId: 'msg-recover-settled',
+      });
+      await first.config.closeSessionWriter();
+
+      const result = {
+        executionStatus: 'success' as const,
+        result: {
+          llmContent: 'recovered output',
+          returnDisplay: 'recovered output',
+        },
+      };
+      const reconcileExecution = vi.fn().mockResolvedValue({
+        outcome: 'known' as const,
+        status: {
+          state: 'settled' as const,
+          cancelRequested: false,
+          lastSeq: 3,
+          firstAvailableSeq: 1,
+          progressGap: false,
+          progress: [],
+          result,
+        },
+      });
+      const second = await activate({
+        managedSessionLog: true,
+        managedToolSessionFactory: () => ({
+          sessionId: 'recovery-reconciler',
+          shellConfiguration: {
+            shell: 'bash',
+            executable: 'bash',
+            argsPrefix: ['-c'],
+          },
+          platform: 'darwin',
+          getClient: async () => {
+            throw new Error('recovery must not acquire a new Runtime');
+          },
+          reconcileExecution,
+          close: async () => {},
+        }),
+      });
+
+      await expect(
+        second.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'results_ready',
+        executions: [
+          {
+            executionCallId: 'ex-recover-settled',
+            outcome: 'known',
+            status: { state: 'settled' },
+          },
+        ],
+      });
+      expect(reconcileExecution).toHaveBeenCalledExactlyOnceWith({
+        runtimeSessionId: 'runtime-session-settled',
+        executionCallId: 'ex-recover-settled',
+      });
+      const managedSession = (
+        second.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession!;
+      await expect(
+        managedSession.authority.harnessRunAuthorization(),
+      ).resolves.toMatchObject({
+        status: 'runnable',
+        checkpoint: { continuation: { phase: 'results_ready' } },
+      });
+      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
+        {
+          outcomes: [
+            {
+              functionCallId: 'fc-recover-settled',
+              executionCallId: 'ex-recover-settled',
+              part: {
+                functionResponse: {
+                  id: 'fc-recover-settled',
+                  name: 'remote_tool',
+                  response: { output: 'recovered output' },
+                },
+              },
+            },
+          ],
+          preserveCallIds: ['fc-recover-settled'],
+        },
+      );
+      await second.config.closeSessionWriter();
+
+      const third = await activate({ managedSessionLog: true });
+      await expect(
+        third.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'results_ready',
+        checkpointId: expect.any(String),
+        executions: [
+          {
+            functionCallId: 'fc-recover-settled',
+            executionCallId: 'ex-recover-settled',
+            runtimeSessionId: 'runtime-session-settled',
+            outcome: 'known',
+            status: { state: 'settled' },
+          },
+        ],
+      });
+      expect(reconcileExecution).toHaveBeenCalledOnce();
+      await third.config.closeSessionWriter();
+    });
+  });
+
   it('sends the original Runtime receipt on the next model request instead of a synthesized failure', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });
@@ -989,6 +1215,7 @@ describe('managed session log activation', () => {
       await fixture.config.ensureManagedHarnessRunnable();
       await fixture.config.commitManagedAwaitRuntime({
         functionCallId: 'fc-rt-1',
+        toolName: 'remote_tool',
         executionCallId: 'ex-rt-1',
         invocationBindingId: 'bind-rt-1',
         modelMessageId: 'msg-rt-1',
@@ -1100,6 +1327,7 @@ describe('managed session log activation', () => {
       await fixture.config.ensureManagedHarnessRunnable();
       await fixture.config.commitManagedAwaitRuntime({
         functionCallId: 'fc-rt-1',
+        toolName: 'remote_tool',
         executionCallId: 'ex-rt-1',
         invocationBindingId: 'bind-rt-1',
         modelMessageId: 'msg-rt-1',

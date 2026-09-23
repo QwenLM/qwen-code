@@ -14,7 +14,10 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 import type { PreToolUseHookResult } from '../core/toolHookTriggers.js';
-import type { ManagedToolExecutionResult } from './managed-tool-runtime.js';
+import type {
+  ManagedToolExecutionReservation,
+  ManagedToolExecutionResult,
+} from './managed-tool-runtime.js';
 
 import type { ManagedToolContentModification } from './managed-tool-protocol.js';
 
@@ -31,6 +34,7 @@ export interface ManagedToolInvocationLifecycle {
     payload?: ToolConfirmationPayload,
   ): Promise<void>;
   authorize(): void;
+  prepareExecution(): Promise<ManagedToolExecutionReservation>;
   cancelAndDrain(): Promise<void>;
   readonly result: ManagedToolExecutionResult | undefined;
   readonly toolUseId: string;

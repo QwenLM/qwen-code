@@ -1240,6 +1240,10 @@ describe('CoreToolScheduler', () => {
           authorized = true;
           order.push('authorize');
         }),
+        prepareExecution: vi.fn(async () => ({
+          executionCallId: 'remote-tool-use',
+          invocationBindingId: 'remote-tool-use',
+        })),
         cancelAndDrain: vi.fn(async () => {
           cancelled = true;
           order.push('drain');

@@ -105,6 +105,7 @@ import {
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
+  PromptIdConflictError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   SessionShellClientRequiredError,
@@ -779,6 +780,19 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  continuationAdmissions: Map<
+    string,
+    {
+      recoveryKey: string | null;
+      result: {
+        accepted: true;
+        interruption: 'interrupted_prompt' | 'interrupted_turn';
+        promptId: string;
+        lastEventId: number;
+        eventEpoch: string;
+      };
+    }
+  >;
   /** Recent formal terminals bridge-published before transcript visibility. */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
   /**
@@ -6359,6 +6373,7 @@ export function createSessionControlPlane(
       pendingAgentNotificationCount: 0,
       ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
       pendingPromptList: [],
+      continuationAdmissions: new Map(),
       terminalTurnStatuses: new Map(),
       enrichedTerminalPromptIds: new Set(),
       rewindGeneration: 0,
@@ -12454,6 +12469,20 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
+      const promptId = context?.promptId;
+      const managedRuntimeContinuation = context?.managedRuntimeContinuation;
+      const recoveryKey = managedRuntimeContinuation
+        ? `${managedRuntimeContinuation.checkpointId}\u0000${managedRuntimeContinuation.activationId}`
+        : null;
+      if (promptId !== undefined) {
+        const existing = entry.continuationAdmissions.get(promptId);
+        if (existing !== undefined) {
+          if (existing.recoveryKey !== recoveryKey) {
+            throw new PromptIdConflictError(sessionId, promptId);
+          }
+          return existing.result;
+        }
+      }
       const cancelGeneration = entry.cancelGeneration;
 
       // Accept/reject pre-check: the agent classifies the last turn (and rejects
@@ -12461,7 +12490,13 @@ export function createSessionControlPlane(
       const decision = await requestSessionStatus<{
         accepted: boolean;
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+      }>(
+        sessionId,
+        managedRuntimeContinuation
+          ? SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeContinue
+          : SERVE_CONTROL_EXT_METHODS.sessionContinue,
+        managedRuntimeContinuation ?? {},
+      );
 
       if (!decision.accepted) {
         return decision;
@@ -12493,8 +12528,6 @@ export function createSessionControlPlane(
       // envelope (DAEMON-001): without it a client that seeds its SSE resume
       // position from this response cannot detect a daemon restart.
       const eventEpoch = liveEntry.events.epoch;
-      const promptId = context?.promptId;
-
       // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
       // pre-aborted, so an admission failure propagates out of here and the
       // caller gets an error instead of a misleading accepted:true whose
@@ -12524,12 +12557,27 @@ export function createSessionControlPlane(
         );
       });
 
-      return {
+      const result = {
         ...decision,
         ...(promptId !== undefined ? { promptId } : {}),
         lastEventId,
         eventEpoch,
       };
+      if (promptId !== undefined) {
+        entry.continuationAdmissions.set(promptId, {
+          recoveryKey,
+          result: {
+            accepted: true,
+            interruption: decision.interruption as
+              | 'interrupted_prompt'
+              | 'interrupted_turn',
+            promptId,
+            lastEventId,
+            eventEpoch,
+          },
+        });
+      }
+      return result;
     },
 
     async getSessionStatsStatus(sessionId) {

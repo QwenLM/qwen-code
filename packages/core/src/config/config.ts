@@ -254,6 +254,7 @@ import {
 import {
   createManagedBuiltinTool,
   type ManagedChildExecutionScope,
+  type ManagedToolExecutionInspection,
   type ManagedToolSession,
   type ManagedToolSessionFactory,
 } from '../tools/managed-tool-session.js';
@@ -363,6 +364,11 @@ import type {
   ManagedSessionJournalStore,
   ManagedSessionResourceStore,
 } from '../managed-runtime/managed-session-storage.js';
+import {
+  convertToFunctionErrorResponse,
+  convertToFunctionResponse,
+} from '../core/coreToolScheduler.js';
+import type { ManagedToolExecutionResult } from '../tools/managed-tool-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
 import {
@@ -2624,6 +2630,88 @@ export function deriveConfig(
   }
   Object.defineProperty(derived, DERIVED_CONFIG, { value: true });
   return derived;
+}
+
+export interface ManagedPendingRuntimeExecution {
+  readonly functionCallId: string;
+  readonly toolName: string;
+  readonly executionCallId: string;
+  readonly runtimeSessionId: string;
+  readonly progressCursor: string | null;
+}
+
+export interface ManagedPendingRuntimeWait {
+  readonly phase: 'await_runtime';
+  readonly checkpointId: string;
+  readonly activationId: string;
+  readonly executions: readonly ManagedPendingRuntimeExecution[];
+}
+
+export type ManagedInspectedRuntimeExecution = ManagedPendingRuntimeExecution &
+  ManagedToolExecutionInspection;
+
+export interface ManagedRuntimeWaitInspection {
+  readonly phase: 'await_runtime' | 'results_ready';
+  readonly checkpointId: string;
+  readonly activationId: string;
+  readonly executions: readonly ManagedInspectedRuntimeExecution[];
+}
+
+function recoveredRuntimeOutcome(
+  execution: ManagedPendingRuntimeExecution,
+  result: ManagedToolExecutionResult,
+): {
+  outcome: 'completed' | 'failed' | 'cancelled';
+  functionResponse: ManagedRuntimeOutcome['part']['functionResponse'];
+} {
+  const failed = result.executionStatus !== 'success';
+  const fallback =
+    result.error?.message ??
+    (result.executionStatus === 'cancelled'
+      ? 'Managed tool execution was cancelled.'
+      : result.executionStatus === 'not_started'
+        ? 'Managed tool execution did not start.'
+        : 'Managed tool execution failed.');
+  if (!failed && result.result === undefined) {
+    throw new ManagedSessionRecordError(
+      `settled Runtime execution ${execution.executionCallId} has no result.`,
+    );
+  }
+  const parts = failed
+    ? convertToFunctionErrorResponse(
+        execution.toolName,
+        execution.functionCallId,
+        result.result?.llmContent ?? fallback,
+        fallback,
+      )
+    : convertToFunctionResponse(
+        execution.toolName,
+        execution.functionCallId,
+        result.result!.llmContent,
+      );
+  const functionResponse = parts.find(
+    (part) => part.functionResponse !== undefined,
+  )?.functionResponse;
+  if (functionResponse === undefined) {
+    throw new ManagedSessionRecordError(
+      `settled Runtime execution ${execution.executionCallId} has no model response.`,
+    );
+  }
+  return {
+    outcome:
+      result.executionStatus === 'success'
+        ? 'completed'
+        : result.executionStatus === 'error'
+          ? 'failed'
+          : 'cancelled',
+    functionResponse: {
+      id: execution.functionCallId,
+      name: execution.toolName,
+      ...(functionResponse.response === undefined
+        ? {}
+        : { response: functionResponse.response }),
+    },
+  };
 }
 
 export class Config {
@@ -4984,6 +5072,7 @@ export class Config {
       let releaseFailureAlreadyReported = false;
       if (
         !(failure instanceof SessionWriterError) &&
+        !(failure instanceof ManagedSessionRecordError) &&
         failure &&
         typeof failure === 'object' &&
         typeof (failure as NodeJS.ErrnoException).code === 'string'
@@ -6034,6 +6123,7 @@ export class Config {
     );
     await handle.commitAwaitRuntime({
       functionCallId: request.functionCallId,
+      toolName: request.toolName,
       executionCallId: request.executionCallId,
       invocationBindingId:
         request.invocationBindingId ?? request.executionCallId,
@@ -6081,6 +6171,197 @@ export class Config {
       ),
     );
     await handle.resolveAwaitRuntime(resultRef);
+  }
+
+  /**
+   * Reads the durable identities for Runtime work admitted before a Harness
+   * disconnect. It never starts or replays an execution.
+   */
+  async readPendingManagedRuntimeWait(): Promise<ManagedPendingRuntimeWait | null> {
+    const session = this.managedSession;
+    if (
+      session === undefined ||
+      session.authority.latestCheckpoint?.boundary !==
+        HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return null;
+    }
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (
+      authorization.status !== 'runnable' ||
+      authorization.checkpoint.continuation.phase !== 'await_runtime'
+    ) {
+      return null;
+    }
+    const checkpoint = authorization.checkpoint;
+    const bindings = new Map(
+      (checkpoint.runtime?.bindings ?? [])
+        .filter((binding) => binding.state === 'dispatch')
+        .map((binding) => [binding.executionCallId, binding]),
+    );
+    const executions = (checkpoint.tools?.items ?? [])
+      .filter((item) => item.state === 'in_progress')
+      .map((item): ManagedPendingRuntimeExecution => {
+        const binding = bindings.get(item.executionCallId);
+        if (binding === undefined) {
+          throw new ManagedSessionRecordError(
+            `in-progress Runtime execution ${item.executionCallId} has no dispatch binding.`,
+          );
+        }
+        return {
+          functionCallId: item.functionCallId,
+          toolName: item.toolName,
+          executionCallId: item.executionCallId,
+          runtimeSessionId: binding.invocationBindingId,
+          progressCursor: binding.progressCursor,
+        };
+      });
+    if (executions.length === 0) {
+      throw new ManagedSessionRecordError(
+        'await_runtime checkpoint has no in-progress Runtime execution.',
+      );
+    }
+    return {
+      phase: 'await_runtime',
+      checkpointId: checkpoint.identity.checkpointId,
+      activationId: checkpoint.identity.activationId,
+      executions,
+    };
+  }
+
+  private async readResultsReadyManagedRuntimeWait(): Promise<ManagedRuntimeWaitInspection | null> {
+    const session = this.managedSession;
+    if (session === undefined) return null;
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (authorization.status !== 'runnable') return null;
+    const checkpoint = authorization.checkpoint;
+    const tools = checkpoint.tools;
+    if (checkpoint.continuation.phase !== 'results_ready' || tools === null) {
+      return null;
+    }
+    const items = tools.items.filter(
+      (item) => item.state === 'settled' && !item.consumed,
+    );
+    if (items.length === 0) return null;
+    const outcomes = await this.readManagedRuntimeOutcomes();
+    const outcomeCallIds = new Set(
+      outcomes.outcomes.map((outcome) => outcome.functionCallId),
+    );
+    const bindings = new Map(
+      (checkpoint.runtime?.bindings ?? [])
+        .filter((binding) => binding.state === 'settled')
+        .map((binding) => [binding.executionCallId, binding]),
+    );
+    const executions = items.map((item): ManagedInspectedRuntimeExecution => {
+      const binding = bindings.get(item.executionCallId);
+      if (binding === undefined) {
+        throw new ManagedSessionRecordError(
+          `settled Runtime execution ${item.executionCallId} has no settled binding.`,
+        );
+      }
+      if (!outcomeCallIds.has(item.functionCallId)) {
+        throw new ManagedSessionRecordError(
+          `settled Runtime execution ${item.executionCallId} has no readable model receipt.`,
+        );
+      }
+      return {
+        functionCallId: item.functionCallId,
+        toolName: item.toolName,
+        executionCallId: item.executionCallId,
+        runtimeSessionId: binding.invocationBindingId,
+        progressCursor: binding.progressCursor,
+        outcome: 'known',
+        status: {
+          state: 'settled',
+          cancelRequested: false,
+          lastSeq: 0,
+          firstAvailableSeq: 1,
+          progressGap: false,
+          progress: [],
+        },
+      };
+    });
+    return {
+      phase: 'results_ready',
+      checkpointId: checkpoint.identity.checkpointId,
+      activationId: checkpoint.identity.activationId,
+      executions,
+    };
+  }
+
+  /**
+   * Reconciles pending Runtime work by its durable Broker identity when the
+   * provider supports it, otherwise inspects without dispatch. An unknown
+   * result is returned to the coordinator and must never trigger tool replay.
+   */
+  async inspectPendingManagedRuntimeWait(): Promise<ManagedRuntimeWaitInspection | null> {
+    const pending = await this.readPendingManagedRuntimeWait();
+    if (pending === null) return this.readResultsReadyManagedRuntimeWait();
+    const managedToolSession = this.getManagedToolSession();
+    const inspectExecution =
+      managedToolSession?.reconcileExecution ??
+      managedToolSession?.inspectExecution;
+    if (inspectExecution === undefined) {
+      throw new Error(
+        'Managed tool Runtime recovery inspection is unavailable.',
+      );
+    }
+    const executions = await Promise.all(
+      pending.executions.map(async (execution) => ({
+        ...execution,
+        ...(await inspectExecution({
+          runtimeSessionId: execution.runtimeSessionId,
+          executionCallId: execution.executionCallId,
+        })),
+      })),
+    );
+    if (executions.some((execution) => execution.outcome === 'unknown')) {
+      await this.managedSession!.authority.blockRecovery({
+        status: 'BLOCKED_EXECUTION',
+        detailCode: 'runtime_execution_outcome_unknown',
+      });
+      return { ...pending, executions };
+    }
+    if (
+      executions.every(
+        (execution) =>
+          execution.outcome === 'known' && execution.status.state === 'settled',
+      )
+    ) {
+      if (executions.length !== 1) {
+        throw new ManagedSessionRecordError(
+          'Runtime recovery currently requires exactly one pending execution.',
+        );
+      }
+      const execution = executions[0];
+      if (
+        execution.outcome !== 'known' ||
+        execution.status.result === undefined
+      ) {
+        throw new ManagedSessionRecordError(
+          `settled Runtime execution ${execution.executionCallId} has no receipt.`,
+        );
+      }
+      const recovered = recoveredRuntimeOutcome(
+        execution,
+        execution.status.result,
+      );
+      await this.resolveManagedAwaitRuntime({
+        functionCallId: execution.functionCallId,
+        executionCallId: execution.executionCallId,
+        outcome: recovered.outcome,
+        body: execution.status.result,
+        functionResponse: recovered.functionResponse,
+      });
+      const ready = await this.readResultsReadyManagedRuntimeWait();
+      if (ready === null) {
+        throw new ManagedSessionRecordError(
+          'settled Runtime execution did not produce a results_ready checkpoint.',
+        );
+      }
+      return ready;
+    }
+    return { ...pending, executions };
   }
 
   shouldRetainManagedRuntimeInvocation(executionCallId: string): boolean {

@@ -1007,6 +1007,16 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ).sessionIdContext,
 }));
 
+vi.mock(
+  '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/tools/managed-tool-runtime.js')
+    >()),
+    createBuiltinManagedToolRuntime: mockCreateBuiltinManagedToolRuntime,
+  }),
+);
+
 const { mockHistoryReplay } = vi.hoisted(() => ({
   mockHistoryReplay: vi.fn(),
 }));
@@ -28823,6 +28833,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         dispose: ReturnType<typeof vi.fn>;
         shouldHintAskUserQuestionRestore?: ReturnType<typeof vi.fn>;
         shouldHintManagedApprovalRestore?: ReturnType<typeof vi.fn>;
+        readManagedRuntimeRecoveryHint?: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -29091,6 +29102,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     primeTurnStateImpl?: (...args: unknown[]) => unknown;
     hintAskUserQuestionRestore?: boolean;
     hintManagedApprovalRestore?: boolean;
+    managedRuntimeRecoveryHint?: unknown;
   }) {
     const innerConfig = makeRestoreInnerConfig({
       resumedConversation: opts.resumedConversation,
@@ -29211,6 +29223,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         shouldHintManagedApprovalRestore: vi
           .fn()
           .mockResolvedValue(opts.hintManagedApprovalRestore === true),
+        readManagedRuntimeRecoveryHint: vi
+          .fn()
+          .mockResolvedValue(opts.managedRuntimeRecoveryHint ?? null),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi
@@ -29622,6 +29637,55 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             'qwen.daemon.restoreManagedApproval'
           ],
         ).toBe(true);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s returns the durable Runtime recovery inspection without replaying it',
+    async (action) => {
+      const recovery = {
+        checkpointId: 'checkpoint-1',
+        activationId: 'activation-1',
+        executions: [
+          {
+            functionCallId: 'function-call-1',
+            toolName: 'read_file',
+            executionCallId: 'execution-call-1',
+            runtimeSessionId: 'runtime-session-1',
+            progressCursor: null,
+            outcome: 'unknown',
+          },
+        ],
+      };
+      bindRestoreMocks({
+        sessionExists: true,
+        managedRuntimeRecoveryHint: recovery,
+      });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        const response =
+          action === 'load'
+            ? await agent.loadSession(params)
+            : await agent.unstable_resumeSession(params);
+
+        expect(
+          lastSessionMock?.readManagedRuntimeRecoveryHint,
+        ).toHaveBeenCalledOnce();
+        expect(
+          (response as { _meta?: Record<string, unknown> })._meta?.[
+            'qwen.daemon.managedRuntimeRecovery'
+          ],
+        ).toEqual(recovery);
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

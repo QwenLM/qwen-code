@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.daemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -280,7 +281,8 @@ class HostedHarnessClientTest {
         server.createContext("/session/" + SESSION_ID + "/load",
                 exchange -> {
                     loadBody.set(readBody(exchange));
-                    sendSessionJson(exchange, 200, sessionJson());
+                    sendSessionJson(exchange, 200,
+                            sessionJsonWithRuntimeRecovery());
                 });
         server.createContext("/session/" + SESSION_ID + "/status",
                 exchange -> sendSessionJson(exchange, 200,
@@ -325,7 +327,17 @@ class HostedHarnessClientTest {
                                     .workspaceId("workspace-a")
                                     .writerId(BOOT_ID)
                                     .leaseDuration(Duration.ofSeconds(45))
-                                    .build()));
+                                            .build()));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+            assertNotNull(recovery);
+            assertEquals("await_runtime", recovery.getPhase());
+            assertEquals("checkpoint-1", recovery.getCheckpointId());
+            assertEquals("activation-1", recovery.getActivationId());
+            assertTrue(recovery.hasUnknownOutcome());
+            assertEquals("execution-1", recovery.getExecutions().get(0)
+                    .getExecutionCallId());
+            assertEquals("read_file", recovery.getExecutions().get(0)
+                    .getToolName());
             assertFalse(client.getStatus(session).hasActivePrompt());
             HarnessTranscriptPage transcript = client.getTranscript(
                     GetHarnessTranscript.builder()
@@ -350,6 +362,66 @@ class HostedHarnessClientTest {
                 "\"baseUrl\":\"https://store.example\""));
         assertTrue(loadBody.get().contains("\"writerId\":\"" + BOOT_ID
                 + "\""));
+    }
+
+    @Test
+    void parsesAResultsReadyRuntimeRecovery() {
+        AtomicReference<String> continuationBody = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithResultsReadyRuntimeRecovery()));
+        server.createContext("/session/" + SESSION_ID
+                        + "/managed-runtime/continue",
+                exchange -> {
+                    continuationBody.set(readBody(exchange));
+                    sendSessionJson(exchange, 200,
+                            "{\"accepted\":true,"
+                                    + "\"interruption\":\"interrupted_turn\","
+                                    + "\"promptId\":\"" + PROMPT_ID
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\"" + EVENT_EPOCH
+                                    + "\"}");
+                });
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+
+            assertNotNull(recovery);
+            assertEquals("results_ready", recovery.getPhase());
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isContinuationReady());
+            assertEquals("settled", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
+            assertEquals(0L, session.getHarnessLastEventId());
+            assertEquals(EVENT_EPOCH, session.getHarnessEventEpoch());
+            PromptReceipt receipt = client.continueManagedRuntime(session,
+                    PROMPT_ID, recovery.getCheckpointId(),
+                    recovery.getActivationId());
+            assertEquals(PROMPT_ID, receipt.getPromptId());
+            assertEquals(EVENT_EPOCH, receipt.getEventEpoch());
+            assertTrue(continuationBody.get().contains(
+                    "\"checkpointId\":\"checkpoint-2\""));
+        }
+    }
+
+    @Test
+    void rejectsRuntimeRecoveryWithoutAnEventWatermark() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithResultsReadyRuntimeRecovery()
+                                .replace(",\"lastEventId\":0,\"eventEpoch\":\""
+                                        + EVENT_EPOCH + "\"", "")));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(
+                            new LoadHarnessSession(SESSION_ID)));
+            assertTrue(failure.getCause()
+                    instanceof DaemonProtocolException);
+        }
     }
 
     @Test
@@ -548,6 +620,41 @@ class HostedHarnessClientTest {
                 + "\",\"workspaceCwd\":\"/control\","
                 + "\"attached\":true,\"clientId\":\""
                 + CLIENT_ID + "\"}";
+    }
+
+    private static String sessionJsonWithRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_runtime\","
+                + "\"checkpointId\":\"checkpoint-1\","
+                + "\"activationId\":\"activation-1\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"read_file\","
+                + "\"executionCallId\":\"execution-1\","
+                + "\"runtimeSessionId\":\"runtime-1\","
+                + "\"progressCursor\":null,\"outcome\":\"unknown\"}]}}}";
+    }
+
+    private static String sessionJsonWithResultsReadyRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"results_ready\","
+                + "\"checkpointId\":\"checkpoint-2\","
+                + "\"activationId\":\"activation-2\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"read_file\","
+                + "\"executionCallId\":\"execution-1\","
+                + "\"runtimeSessionId\":\"runtime-1\","
+                + "\"progressCursor\":null,\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"settled\"}}]}}}";
     }
 
     private static String terminalEvent(long id, String promptId) {

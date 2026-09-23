@@ -10,7 +10,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -191,6 +194,39 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_found"));
+    }
+
+    @Test
+    void blocksUnknownRuntimeRecoveryWithoutSubmittingTheTurn()
+            throws Exception {
+        String tenant = "tenant-runtime-recovery";
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.hasUnknownOutcome()).thenReturn(true);
+        harness.returnRuntimeRecovery(recovery);
+        int submissions = harness.submitCount();
+
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "runtime-recovery-create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\","
+                                + "\"input\":[{\"type\":\"text\","
+                                + "\"text\":\"do not replay\"}]}"))
+                .andExpect(status().isAccepted()).andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString()).get("id")
+                .asText();
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                mvc.perform(get("/v1/agents/sessions/{id}/events",
+                                sessionId)
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .accept(MediaType.APPLICATION_JSON))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.data[?(@.type =="
+                                + " 'turn.failed')].data.code")
+                                .value("managed_runtime_recovery_blocked")));
+        assertThat(harness.submitCount()).isEqualTo(submissions);
     }
 
     @Test
@@ -777,6 +813,70 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void recoversAdmittedHarnessGenerationAndEventEpochUnderDispatchLease() {
+        String tenant = "tenant-harness-recovery-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "recovery-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "recovery-turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(Map.of(
+                        "type", "text", "text", "recover")),
+                "sha256:" + "3".repeat(64));
+        String owner = "recovery-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-old")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch-old", 7);
+
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-new")).isFalse();
+        assertThat(store.bindRecoveredHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-wrong", "boot-new"))
+                .isFalse();
+        assertThat(store.bindRecoveredHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-old", "boot-new"))
+                .isTrue();
+        assertThat(store.bindRecoveredHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-old", "boot-new"))
+                .isTrue();
+
+        store.recordRecoveryAdmission(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch-old", "epoch-new", 0);
+        store.recordRecoveryAdmission(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch-old", "epoch-new", 0);
+        store.recordRecoveryAdmission(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch-new", "epoch-new", 3);
+
+        assertThat(store.requireSession(tenant, session.sessionId()))
+                .satisfies(record -> {
+                    assertThat(record.harnessBootId()).isEqualTo("boot-new");
+                    assertThat(record.harnessEventEpoch())
+                            .isEqualTo("epoch-new");
+                    assertThat(record.harnessLastEventId()).isEqualTo(3);
+                });
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    assertThat(record.submissionAttempted()).isTrue();
+                    assertThat(record.harnessEventEpoch())
+                            .isEqualTo("epoch-new");
+                    assertThat(record.harnessLastEventId()).isEqualTo(3);
+                    assertThat(record.status()).isEqualTo("RUNNING");
+                });
+        assertThatThrownBy(() -> store.recordRecoveryAdmission(tenant,
+                session.sessionId(), turn.turnId(), owner, "epoch-old",
+                "epoch-other", 0)).isInstanceOfSatisfying(
+                        IllegalStateException.class, error ->
+                                assertThat(error.getMessage()).contains(
+                                        "recovery epoch changed"));
+    }
+
+    @Test
     void doesNotPublishRolledBackEvents() throws Exception {
         String tenant = "tenant-rollback-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
@@ -903,6 +1003,7 @@ class ManagedAgentServerIntegrationTest {
         private final Set<String> uncertainRetries =
                 ConcurrentHashMap.newKeySet();
         private volatile boolean available = true;
+        private volatile HarnessRuntimeRecovery runtimeRecovery;
 
         @Override
         public boolean isAvailable() {
@@ -913,8 +1014,10 @@ class ManagedAgentServerIntegrationTest {
         public Attachment createOrLoad(String tenantId, String sessionId,
                 boolean created) {
             sessions.add(sessionId);
+            HarnessRuntimeRecovery recovery = runtimeRecovery;
+            runtimeRecovery = null;
             return new Attachment(
-                    "11111111-1111-4111-8111-111111111111");
+                    "11111111-1111-4111-8111-111111111111", recovery);
         }
 
         @Override
@@ -1052,6 +1155,10 @@ class ManagedAgentServerIntegrationTest {
 
         void setAvailable(boolean value) {
             available = value;
+        }
+
+        void returnRuntimeRecovery(HarnessRuntimeRecovery recovery) {
+            runtimeRecovery = recovery;
         }
 
         int cancelCount() {

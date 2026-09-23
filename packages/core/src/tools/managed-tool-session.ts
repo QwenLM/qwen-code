@@ -22,7 +22,10 @@ import {
   projectShellToolClassifierInput,
   projectWriteFileToolClassifierInput,
 } from './builtin-tool-definitions.js';
-import type { ManagedToolV2Client } from './managed-tool-runtime.js';
+import type {
+  ManagedToolInvocationStatus,
+  ManagedToolV2Client,
+} from './managed-tool-runtime.js';
 import { RuntimeBackedTool } from './runtime-backed-tool.js';
 import { ToolNames } from './tool-names.js';
 import {
@@ -30,11 +33,27 @@ import {
   type ToolCallConfirmationDetails,
 } from './tools.js';
 
+export interface ManagedToolExecutionIdentity {
+  readonly runtimeSessionId: string;
+  readonly executionCallId: string;
+  readonly afterSeq?: number;
+}
+
+export type ManagedToolExecutionInspection =
+  | { readonly outcome: 'known'; readonly status: ManagedToolInvocationStatus }
+  | { readonly outcome: 'unknown' };
+
 export interface ManagedToolSession {
   readonly sessionId: string;
   readonly shellConfiguration: ShellConfiguration;
   readonly platform: NodeJS.Platform;
   getClient(): Promise<ManagedToolV2Client>;
+  inspectExecution?(
+    identity: ManagedToolExecutionIdentity,
+  ): Promise<ManagedToolExecutionInspection>;
+  reconcileExecution?(
+    identity: ManagedToolExecutionIdentity,
+  ): Promise<ManagedToolExecutionInspection>;
   createChild?(config: Config): ManagedToolSession;
   beginFileHistoryTurn?(promptId: string): Promise<void>;
   flushFileHistory?(): Promise<void>;

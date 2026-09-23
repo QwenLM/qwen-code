@@ -195,14 +195,16 @@ ACCEPTED -> WAITING_RUNTIME -> DISPATCHED -> STARTED
 ```text
 POST /internal/runtime-broker/v1/tool-sessions:acquire
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}/control
-POST /internal/runtime-broker/v1/executions
+POST /internal/runtime-broker/v1/executions:prepare
+POST /internal/runtime-broker/v1/executions/{executionCallId}:start
+POST /internal/runtime-broker/v1/executions # 兼容 create-and-start
 GET  /internal/runtime-broker/v1/executions/{executionCallId}
 GET  /internal/runtime-broker/v1/executions/{executionCallId}/events
 POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release
 ```
 
-P2 客户端先轮询 `GET /executions/{executionCallId}`。`/events` 路由及其序号语义在此冻结，并在 P3/P4 接入产品事件存储时实现。
+Harness 使用 `executions:prepare` 预留 durable 身份但不派发，把该身份提交到私有 `await_runtime` checkpoint，提交成功后才调用 `:start`。GET 永远不会启动 `PREPARED` 记录，取消则可以在没有物理副作用时直接结算；原 `/executions` create-and-start 路由继续兼容。P2 客户端轮询 `GET /executions/{executionCallId}`。`/events` 路由及其序号语义在此冻结，并在 P3/P4 接入产品事件存储时实现。
 
 qwen 客户端为现有 Managed Tool v2 操作生成有类型的判别联合：manifest、file-history bind/checkpoint/snapshot、begin-turn、prepare、confirmation、confirm 和 preflight。Java 校验封闭的操作名集合；P2 中字段级 payload 校验仍由 Managed Runtime 完成。它不是任意 URL 或 HTTP 方法代理。
 
@@ -221,7 +223,7 @@ Java 接受首轮 Prompt 时：
 
 无 Tool Turn 中，模型推理和完成都不等待 Runtime。Provisioning 可以继续，以便后续 Turn 复用已经预热的 Runtime。
 
-冷启动 Tool Turn 中，Harness 创建或解析 `ToolExecution`；Java 将其保持在 `waiting_runtime`，原 binding ready 且完成能力校验后再派发，结果返回 Harness，由同一个模型循环继续执行。
+冷启动 Tool Turn 中，Harness prepare 或解析 `ToolExecution`，在任何副作用前提交稳定 Broker 身份，并在私有 checkpoint 成功后启动。Java 将其保持在 `waiting_runtime`，原 binding ready 且完成能力校验后再派发，结果返回 Harness，由同一个模型循环继续执行。
 
 ## 10. 幂等与结果不确定
 
@@ -233,7 +235,7 @@ sessionId + turnId + toolCallId + requestDigest
 
 - 相同 key 和相同请求返回原 `executionCallId`。
 - 相同 key 但请求内容不同返回冲突。
-- Java 在派发前记录 `accepted`。
+- Java 在派发前记录 `PREPARED` 并返回 durable ID；只有显式 start 命令可以取得 dispatch claim。
 - Runtime 按 `executionCallId` 去重，并在 binding 存活期间保留回执。
 - 响应丢失后查询原 Runtime 和原 execution ID。
 - 执行是否开始不确定时，Java 不得更换 Runtime 后重放。

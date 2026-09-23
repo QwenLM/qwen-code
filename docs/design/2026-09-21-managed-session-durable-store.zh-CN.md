@@ -2,7 +2,7 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
-状态：当前 feature 分支工作树已实现 D0、D1a 和 D1b，包括 TypeScript/Java 共享 golden contract，以及基于真实 MySQL 的独立 JVM 崩溃/接管证明。面向新建 Hosted Session 和 inline 资源的 D2a 路由、Hosted 冷加载链路，以及第一阶段公共 Session 生命周期也已实现。OSS 资源、物理删除/保留策略、真实 Hosted Harness 进程恢复、已准入在途 Turn 对账及其余 D3 生产门禁仍待完成。日期：2026-09-23。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
+状态：当前 feature 分支工作树已实现 D0、D1a 和 D1b，包括 TypeScript/Java 共享 golden contract，以及基于真实 MySQL 的独立 JVM 崩溃/接管证明。面向新建 Hosted Session 和 inline 资源的 D2a 路由、Hosted 冷加载链路、第一阶段公共 Session 生命周期，以及 settled Session 与单 execution 在途 Turn 的确定性 owner failover 证明也已实现。settled 证明会强杀真实 Java 与 Hosted Harness 进程、删除旧 Harness 磁盘、启动替代 owner，并在第二轮恢复第一轮上下文后成功完成 Turn。在途证明则在 durable `PREPARED` Broker 身份和私有 `await_runtime` checkpoint 已提交、但物理执行尚未开始时强杀两个 owner。替代 Harness 不分配新 Runtime，而是重建同一个 execution 与 Runtime Session 身份，只启动一次物理执行，把 `SETTLED` 回执持久化为 `results_ready`，并在替代 Harness generation 与 Java event epoch 下完成 checkpoint-bound continuation。删除旧 Harness 磁盘后，该证明观察到一条 Broker 记录、一次物理副作用、一次初始模型请求、一次 continuation 模型请求、一个公共终态事件，且没有重放原 Prompt。Java 会在调用 continuation 前先持久安装替代 event epoch 与 attachment cursor，再在响应后推进 cursor。`UNKNOWN` 观测会由当前 fenced writer 持久写成 `BLOCKED_EXECUTION`，Java 会终止已准入的公共 Turn，而不会重新提交。该边界已有 TypeScript 单元/契约测试、Java H2 coordinator/store 测试和 `npm run test:e2e:managed-inflight-failover` 覆盖；其余崩溃矩阵尚未完成。OSS 资源、物理删除/保留策略、多工具恢复、恢复态取消、continuation 准入后的 Harness 再次崩溃与事件重建、Workspace 对账、Kubernetes 调度恢复及其余 D3 生产门禁仍待完成。日期：2026-09-23。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
 
 ## 1. 决策
 
@@ -27,7 +27,7 @@ Standalone 仍使用本地后端。D0 已通过契约隔离存储，D1a 实现�
 - Flyway V4 和 Spring 内部 API 已能保存私有 Managed journal head、事务精确字节、资源目录及 revision 到资源的引用；数据库时间 lease、单调 writer generation、head CAS、command 幂等、精确字节校验和事务化 `MYSQL_INLINE` 均已实现。
 - 私有 Hosted Harness 创建请求现在可以为一个调用方指定的 Session ID 选择 HTTP journal/resource adapter。普通 daemon 路由会拒绝该 capability，ACP 子进程也只接受经过认证的私有 managed parent 下发的配置。
 - 当前 D2 活跃路径会持久化精确 journal 事务和不超过 64 KiB 的资源，并且不创建本地权威 transcript。私有 Hosted `loadSession` 会重新获取远端 writer，在内存中校验和投影 durable journal 及其引用资源，并在没有本地 transcript 的情况下重建既有恢复结构。
-- Store `writerId` 与当前 Hosted Harness boot ID 绑定。只有 Java 持有 active Turn dispatch lease 且该 Turn 尚未尝试准入时，才允许替换已记录的 Harness generation；已经准入的在途 Turn 不会被重新解释成新 event epoch。
+- Store `writerId` 与当前 Hosted Harness boot ID 绑定。普通 bind 路径只有在 Java 持有 active Turn dispatch lease 且该 Turn 尚未尝试准入时，才允许替换已记录的 Harness generation。已经准入的在途 Turn 只能走更窄的恢复路径；该路径还必须证明 checkpoint/activation 身份、替代 attachment 水位、原 boot/event epoch 和单个已知 execution 结果，不能把原 Turn 重新解释为一次新准入。
 - 现有 JSONL 包含 `session_execution_engine`、`managed_session_header_v1`、`managed_session_event_v1` 和 `managed_session_commit_v1`。同目录的 `<sessionId>.ledger.jsonl` 是 prompt 终态账本，不是私有 Managed journal。
 
 仍使用本地后端的 Session，在 Runtime 或 Hosted Harness 使用临时文件系统时，Pod 回收后依然会丢失 transcript 及其引用资源。新的 Hosted 创建/加载路径已经去掉 journal 和 inline 资源对该本地持久盘的依赖。只上传 JSONL 仍然不够，因为 checkpoint、消息和工具正文位于独立资源中。
@@ -122,6 +122,7 @@ interface ManagedSessionJournalHandle {
   readonly sessionKey: ManagedSessionKey;
   read(options?: { maxBytes?: number }): Promise<ManagedSessionJournalScan>;
   appendTransaction(records: readonly unknown[]): Promise<void>;
+  blockRecovery?(request: RecoveryBlockRequest): Promise<void>;
   seal(): Promise<void>;
   abort(): Promise<void>;
 }
@@ -132,7 +133,7 @@ interface ManagedSessionResourceStore {
 }
 ```
 
-以上是已实现的 Core 接缝。`appendTransaction` 每次接收一笔完整的语义事务。本地 adapter 保留历史上的逐行 sync 与可恢复 torn-tail 行为。D1a Java endpoint 接收完整远端事务并执行物理提交语义。D1b HTTP handle 对整批记录只序列化一次，在内部获取或续租 scoped writer grant，从已校验的 header、event 和 marker 派生外层 CAS 与幂等元数据，并仅在 Java 确认精确字节已提交后返回；配套 HTTP resource adapter 会将 inline 暂存字节保留到该次提交，并在恢复时校验响应元数据、精确事务字节、摘要链和下载资源。
+以上是已实现的 Core 接缝。`appendTransaction` 每次接收一笔完整的语义事务；可选的 `blockRecovery` 能力由 durable HTTP handle 实现，所选 Store 无法持久记录恢复阻塞时调用方会 fail-closed。本地 adapter 保留历史上的逐行 sync 与可恢复 torn-tail 行为。D1a Java endpoint 接收完整远端事务并执行物理提交语义。D1b HTTP handle 对整批记录只序列化一次，在内部获取或续租 scoped writer grant，从已校验的 header、event 和 marker 派生外层 CAS 与幂等元数据，并仅在 Java 确认精确字节已提交后返回；配套 HTTP resource adapter 会将 inline 暂存字节保留到该次提交，并在恢复时校验响应元数据、精确事务字节、摘要链和下载资源。
 
 `ManagedSessionAuthority` 负责记录校验、事件 sequence、command content digest、checkpoint 规则和领域语义；Store 实现负责物理原子性、writer fencing、精确字节持久化、分页和资源校验。
 
@@ -211,6 +212,7 @@ interface ManagedSessionResourceStore {
 ```text
 POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire
 POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew
+POST /internal/managed-session-store/v1/sessions/{sessionId}/recovery:block
 POST /internal/managed-session-store/v1/sessions/{sessionId}/transactions:commit
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/restore
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/transactions
@@ -219,6 +221,8 @@ POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal
 ```
 
 调用方在 acquire writer 时通过 `X-Qwen-Managed-Writer-Token` 提交新生成的 opaque Base64URL writer secret。Java 授予并返回数据库 generation 和过期时间，且只保存 secret hash。journal commit 与 renew 会绑定 tenant、workspace、Session、writer 身份、generation 及未过期的数据库时间 lease；读取 restore head、transaction page 和 resource 也要求当前未过期 secret，确保被接管的旧 Harness 无法继续读取私有上下文。seal 保持幂等；只有在尚未被更高 generation 取代时，它才可关闭已过期 grant。相同 writer 与 secret 重试会续租同一未过期 generation；显式 seal 或 lease 过期后才允许更高 generation。生产部署除 scoped bearer 外还需 mTLS 或等价服务身份；`tenantId` 只是 scope，不是鉴权凭据。
+
+`recovery:block` 是从 `READY` 到三个阻塞恢复状态之一的单向 fenced 转移。它要求当前 writer 身份、generation、secret 及未过期的数据库时间 lease。同一 status/detail 重试保持幂等；不同阻塞原因不能覆盖第一个原因，该路由也不能解除阻塞。
 
 私有 Store 前缀下的所有响应均携带 `Cache-Control: no-store`；数据库查询后还会对 tenant、workspace、Session 和 resource ID 的原始值做精确比较，避免不区分大小写的 MySQL collation 扩大 scope。
 
@@ -248,6 +252,10 @@ OSS Object 上传后数据库提交失败，会留下未引用的不可变孤儿
 4. Runtime Broker 对每个未结算 `executionCallId` 对账。结果未知则进入 `BLOCKED_EXECUTION`，不能因为旧 Pod 消失就重新执行。
 5. 核验 Workspace 身份与快照/挂载。缺少 Workspace 时进入 `BLOCKED_WORKSPACE`；能读 transcript 不等于能继续执行。
 6. 只有 `READY` 的恢复才能安装新 activation 并允许模型/工具推进。资源缺失或损坏进入 `BLOCKED_RESOURCE`；安全场景仍可提供只读历史。
+
+已实现的 tool-intent 边界为第 4 步建立了可对账身份：Harness 先让 Broker 幂等创建 `PREPARED` execution 记录，把工具名、返回的 Broker `executionCallId` 与 Runtime Session binding 提交到 `await_runtime`，只有提交成功后才调用显式 start 路由。读取 `PREPARED` execution 不会触发派发，取消会在没有副作用的情况下结算；原 create-and-start 路由继续保持兼容。冷加载后，Core 会重建待处理 execution，provider 可直接用持久化的 Harness、Runtime Session 与 execution 身份查询 Broker，而不依赖旧进程的内存 entry。恢复流程会启动原 `PREPARED` 身份，轮询 `EXECUTING` 或 `CANCEL_REQUESTED` 直到结算，把不可变结果引用提交进 `results_ready` checkpoint，并暴露绑定 checkpoint/activation 的私有 continuation 路由。Java 持有 Turn dispatch lease 时，会绑定替代 Harness boot，先以 attachment 水位持久替换公共 event epoch，再使用原公共 `promptId` 调用 continuation 路由，在响应后推进持久 cursor，并在不调用普通 Prompt submission 的情况下流式转发新 epoch。Broker 的结构化 `UNKNOWN` 会原样保留而不会被转成重试，当前 fenced Harness writer 会写入 `BLOCKED_EXECUTION`，Java coordinator 会在 Harness submit 前终止公共 Turn。进入阻塞状态后，Harness 会跳过 Store 必须拒绝的 activation-release 语义事务，但仍立即 seal writer，不让所有权一直残留到 lease 到期。
+
+这条已实现恢复链路刻意只支持一个 durable pending execution。多工具恢复需要一种批量 checkpoint，把每个工具调用映射到各自不可变结果；把同一个结果引用分配给多个工具是错误的。公共 Turn 已经处于 `CANCELLING` 时仍然 fail-closed，因为恢复态取消还必须同时消费或结算私有 `results_ready` checkpoint。Java 的替代 event epoch 现在采用 write-ahead 顺序：continuation 调用前崩溃可以安全重试，调用准入后崩溃也不会让旧 epoch 继续留在长期状态中。但 continuation admission 本身仍是 Harness bridge 进程内内存，因此模型 continuation 已推进后 Harness 再崩溃，仍需要长期事件/checkpoint 重建与确定性的进程级证明。这些更大的窗口继续作为 D3 门禁。
 
 首个远端实现可以分页读取完整已提交 journal。压缩属于后续按测量触发的优化：后台任务把连续前缀打包成不可变压缩 OSS Object，校验后在 MySQL 原子发布 manifest 和水位，经过宽限期后再删除覆盖的 SQL blob。恢复合并已验证 pack 与 SQL 热尾；OSS Object listing 永远不是顺序或完整性的权威。
 
@@ -293,26 +301,27 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 
 - D1a 已实现：Flyway V4 四张私有表；Spring 内部 API；基于数据库时间的 lease/generation fencing；head CAS 与 checkpoint 指针原子推进；幂等回执；精确 record bytes 存储与校验；分页恢复读取；以及 OSS fail-closed 的事务化 `MYSQL_INLINE` 资源。
 - D1b 已实现：配套 TypeScript HTTP journal/resource adapter、scoped writer 获取/续租/seal、精确事务重建与校验、结构化 Java 错误、inline 资源暂存，以及不使用本地 transcript 的关闭/重开测试。共享 fixture 现在跨两种语言固定 header、限额、UTF-8/JSONL 精确字节、SHA-256 摘要、请求元数据和 Java 错误分类。
-- 独立进程证明会让多个子 JVM 连接一个临时真实 MySQL schema：writer A 提交后在返回 ACK 前直接退出；数据库时间 lease 过期后，writer B 取得 generation 2 并恢复已提交事务和 inline 资源。A 对同一 command 的重试会得到原回执，而其新写入会被 fencing。至此 D1 Store 边界退出条件已满足；这仍不等价于 D3 的“杀死真实 Hosted Harness 与 Java owner 后完成下一轮 Turn”。
+- 独立进程证明会让多个子 JVM 连接一个临时真实 MySQL schema：writer A 提交后在返回 ACK 前直接退出；数据库时间 lease 过期后，writer B 取得 generation 2 并恢复已提交事务和 inline 资源。A 对同一 command 的重试会得到原回执，而其新写入会被 fencing。至此 D1 Store 边界退出条件已满足。下述 D2 settled Session 证明进一步强杀真实 Hosted Harness 与 Java owner，并完成下一轮 Turn。
 - D2a 已为新建私有 Hosted Harness Session 选择该 backend。Java 下发 tenant、workspace、writer 身份、endpoint 和 lease 时长，Harness 自己生成 writer secret；普通 daemon 路由和不可信 ACP parent 都会拒绝该描述。
 
 退出条件：两个共享 MySQL 的 Java 实例能拒绝旧 writer，并在提交响应丢失后返回同一回执。
 
 ### D2：OSS 资源与 Hosted 路由
 
-- 状态：新 Session 路由和 Hosted 冷加载已支持 inline 资源，Store 边界独立 JVM 证明已完成；OSS 与完整 Hosted Harness/Runtime 故障注入证明仍待完成。
+- 状态：新 Session 路由、Hosted 冷加载，以及 settled Session 的真实 Hosted owner failover 已支持 inline 资源；工具边界会在副作用启动前持久化 Broker execution 身份。一个已准入在途 Turn 包含一个已知 execution 时，现在可以安装替代 Harness generation 与 write-ahead 公共 event epoch、消费原结果，并且不重放 Prompt 或工具就继续。确定性多进程 E2E 已证明 durable `PREPARED`/`await_runtime` 之后、物理执行开始之前的崩溃接管。OSS、多工具/取消恢复、continuation 准入后的 Harness 再次崩溃与事件重建，以及其余在途故障矩阵仍待完成。
 - 为超过 64 KiB 的资源实现 `OSS_OBJECT` 路径：allocate/upload/finalize/read、scoped signed URL、摘要校验、加密和孤儿盘点。
 - 仅新建 Hosted Managed Session 选择远端后端；既有本地 Session 继续本地运行，不迁移、不双写。
 - Hosted `loadSession` 会下发与 create 相同作用域的 Store 描述。ACP 子进程重新获取 durable writer，校验 journal 与 resource 闭包，投影 reader-facing records，并且不读取本地 transcript 就构建 runtime restore state。
-- 当前测试已证明 TypeScript/Java 共享 Store 契约、route/ACP 接线、不使用本地 transcript 的内存 close/reopen 流程，以及基于真实 MySQL 的 Store 边界进程崩溃接管；尚未完成“杀掉一个真实 Harness 进程和 Java owner、保留共享 MySQL Store、再由另一进程完成新 Turn”的故障实验。
-- 已准入在途 Turn 的自动恢复仍受门禁约束：在 event epoch 与 Runtime 副作用对账能够证明原操作结果前，Java 会拒绝 submission attempted 之后的 Harness generation 切换。空闲或尚未准入的恢复不会放宽该 fence。
+- 确定性多进程测试会启动 MySQL、Spring/Java、Hosted Harness、带本地进程 Runtime Provider 的内嵌 Broker 与假模型。第一轮结算后，它强杀 Java 和 Harness 进程树、删除两者旧本地 home、等待数据库 writer lease 过期，再启动替代 owner。替代 Harness 取得更高 writer generation，在同一公共 Session 上完成第二轮；第二次模型请求同时包含第一轮 prompt 与 answer。测试还核验 journal revision、committed sequence、公共终态数量与 Harness boot ID 均推进，且未读取已删除的 Harness 磁盘。
+- 在途变体会在 Harness 已提交精确 `executionCallId` 和 `await_runtime` checkpoint 后阻塞 Broker start，强杀原 Java 与 Harness 进程树、删除旧 Harness 磁盘，再放行替代 owner。它断言原 execution 以 dispatch generation 1 到达 `SETTLED`，物理副作用恰好一次，模型收到一次初始请求和一次回执 continuation，公共 Turn 只产生一个终态事件。该测试有意小于完整故障矩阵：尚未覆盖 continuation 准入后的再次崩溃，也未覆盖多个或已取消 execution 的恢复。
+- 已准入在途 Turn 只有在已实现的单 execution `results_ready` 决策下才允许自动恢复。Java 在更换任一 owner 前，必须持有 active dispatch lease，并匹配预期的旧 Harness boot/event epoch、替代 attachment 水位与 checkpoint/activation 身份。`UNKNOWN`、多个待处理 execution、恢复态取消及无法重建长期事件的 continuation 仍然 fail-closed。空闲或尚未准入的恢复不会放宽这些 fence。
 
-退出条件：删除原 Harness Pod 及其文件系统后，另一个 Harness 能恢复同一 Session 和 checkpoint，历史无缺失。
+退出条件：删除原 owner 文件系统后，由另一个 Harness 无历史缺失地恢复同一 settled Session，这一 inline 资源子条件现已验证。只有同一资源闭包覆盖 OSS 资源与 checkpoint 后，D2 才算完整完成。
 
 ### D3：恢复门禁与生产证据
 
-- 将 journal writer generation 与 Harness activation、Runtime dispatch fencing 关联。
-- continuation 前完成未结算工具 execution 与 Workspace 恢复对账。
+- Runtime dispatch fence、恢复查询和单个已知 execution continuation 已实现：`executions:prepare` 只预留 durable Broker 身份而不派发，Harness 提交该身份后，再由 `executions/{executionCallId}:start` 执行幂等派发；冷启动 Harness 会启动或轮询该精确 execution 而不重放。settled 回执把私有 checkpoint 推进到 `results_ready`；随后 Java 在 Turn dispatch lease 下，把预期 writer activation 绑定到替代 Harness boot，并在请求 checkpoint-bound continuation 前持久安装 attachment event 水位。
+- Core 与 Broker 能够保留并查询稳定身份；`UNKNOWN` 分支会先持久写入 `BLOCKED_EXECUTION`，再由 Java 终止公共 Turn。真实进程证明现已覆盖 `PREPARED`/`await_runtime` 到 `SETTLED`/`results_ready` 的接管边界。剩余恢复工作包括多工具结果映射、恢复态取消、continuation 中途 Harness 崩溃后的长期事件/checkpoint 重建、Workspace 恢复，以及其他边界的确定性进程级故障注入。
 - 增加保留/tombstone 流程、指标、告警、备份恢复演练和故障注入。
 
 退出条件：下列故障矩阵在实际 MySQL 和 OSS 产品上通过。只有这时 hosted 模式才能承诺跨 Pod 自动恢复。
@@ -330,6 +339,7 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 | Harness Pod 与本地盘删除                 | 新 Harness 恢复 journal、checkpoint 和全部引用资源                                   |
 | 资源缺失或摘要不符                       | `BLOCKED_RESOURCE`；不从空状态或未经证明的旧状态继续                                 |
 | 工具结果未知                             | `BLOCKED_EXECUTION`；不自动重复调用工具                                              |
+| owner 在提交 `await_runtime` 后崩溃      | 替代 owner 只启动一次同一 Broker execution，消费其回执并只产生一个公共终态事件       |
 | Workspace 快照/挂载缺失                  | 历史仍可读，执行状态为 `BLOCKED_WORKSPACE`                                           |
 | 伪造 tenant 或 Session scope             | 返回 Object URL 或私有字节前拒绝请求                                                 |
 | MySQL 或 OSS 不可用                      | 有界背压和明确失败，不发出虚假 durable ACK                                           |

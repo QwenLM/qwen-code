@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
+import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import java.util.List;
 import java.util.Map;
 
@@ -11,6 +12,13 @@ public interface HarnessConnector extends AutoCloseable {
 
     Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
+
+    default Admission continueManagedRuntime(String tenantId,
+            String sessionId, String promptId, String checkpointId,
+            String activationId) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime continuation is unavailable");
+    }
 
     SourceStream stream(String tenantId, String sessionId, long lastEventId,
             String eventEpoch);
@@ -25,7 +33,16 @@ public interface HarnessConnector extends AutoCloseable {
     default void close() {
     }
 
-    record Attachment(String bootId) {
+    record Attachment(String bootId, HarnessRuntimeRecovery runtimeRecovery,
+            Long lastEventId, String eventEpoch) {
+        public Attachment(String bootId) {
+            this(bootId, null, null, null);
+        }
+
+        public Attachment(String bootId,
+                HarnessRuntimeRecovery runtimeRecovery) {
+            this(bootId, runtimeRecovery, null, null);
+        }
     }
 
     record Admission(long lastEventId, String eventEpoch) {

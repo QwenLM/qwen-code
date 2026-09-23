@@ -339,6 +339,64 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_oss_disabled"));
 
+        ObjectNode recoveryBlock = objectMapper.createObjectNode()
+                .put("workspaceId", WORKSPACE)
+                .put("writerId", WRITER_B)
+                .put("writerGeneration", 2)
+                .put("recoveryStatus", "BLOCKED_EXECUTION")
+                .put("recoveryDetailCode",
+                        "runtime_execution_outcome_unknown");
+        mvc.perform(post(BASE + "/recovery:block")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(recoveryBlock.toString()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("managed_session_writer_conflict"));
+        postWithToken("/recovery:block", TOKEN_B, recoveryBlock)
+                .getResponse();
+        mvc.perform(post(BASE + "/recovery:block")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_B)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(recoveryBlock.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.recoveryStatus")
+                        .value("BLOCKED_EXECUTION"))
+                .andExpect(jsonPath("$.recoveryDetailCode")
+                        .value("runtime_execution_outcome_unknown"))
+                .andExpect(jsonPath("$.replayed").value(true));
+        ObjectNode conflictingBlock = recoveryBlock.deepCopy()
+                .put("recoveryStatus", "BLOCKED_WORKSPACE")
+                .put("recoveryDetailCode", "workspace_snapshot_missing");
+        mvc.perform(post(BASE + "/recovery:block")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_B)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(conflictingBlock.toString()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("managed_session_recovery_conflict"));
+        mvc.perform(get(BASE + "/restore")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_B)
+                        .param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.recoveryStatus")
+                        .value("BLOCKED_EXECUTION"))
+                .andExpect(jsonPath("$.recoveryDetailCode")
+                        .value("runtime_execution_outcome_unknown"));
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                        + " recovery_status = 'READY',"
+                        + " recovery_detail_code = NULL WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                TENANT, SESSION);
+
         jdbc.update("UPDATE qwen_managed_session_journal_head"
                         + " SET recovery_status = 'UNKNOWN'"
                         + " WHERE tenant_id = ? AND session_id = ?",

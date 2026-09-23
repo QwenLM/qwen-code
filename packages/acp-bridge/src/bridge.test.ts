@@ -16741,6 +16741,54 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('deduplicates a managed Runtime continuation by prompt and checkpoint identity', async () => {
+      const prompt = deferred<PromptResponse>();
+      const extMethod = vi.fn((method: string, params: unknown) => {
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeContinue
+        ) {
+          expect(params).toMatchObject({
+            checkpointId: 'checkpoint-2',
+            activationId: 'activation-2',
+          });
+          return { accepted: true, interruption: 'interrupted_turn' };
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      });
+      const handle = makeChannel({
+        promptImpl: () => prompt.promise,
+        extMethodImpl: extMethod,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const context = {
+        promptId: 'managed-cont-1',
+        managedRuntimeContinuation: {
+          checkpointId: 'checkpoint-2',
+          activationId: 'activation-2',
+        },
+      };
+
+      const first = await bridge.continueSession(session.sessionId, context);
+      const retry = await bridge.continueSession(session.sessionId, context);
+
+      expect(retry).toEqual(first);
+      expect(extMethod).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      await expect(
+        bridge.continueSession(session.sessionId, {
+          ...context,
+          managedRuntimeContinuation: {
+            checkpointId: 'checkpoint-other',
+            activationId: 'activation-2',
+          },
+        }),
+      ).rejects.toBeInstanceOf(PromptIdConflictError);
+
+      prompt.resolve({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
     it('admits only one continuation when concurrent pre-checks both accept', async () => {
       const preChecks = deferred<Record<string, unknown>>();
       const prompt = deferred<PromptResponse>();

@@ -18,6 +18,8 @@ import {
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   ManagedRuntimeProviderError,
+  type ManagedRuntimeExecutionIdentity,
+  type ManagedRuntimeExecutionInspection,
   type ManagedRuntimeHandle,
   type ManagedRuntimeProvider,
   type ManagedRuntimeReleaseOptions,
@@ -71,14 +73,19 @@ interface BrokerEntry {
 
 interface BrokerExecution {
   readonly referenceDigest: string;
-  readonly accepted: Promise<{
+  readonly reserved: Promise<{
     executionCallId: string;
     status: ManagedToolInvocationStatus;
   }>;
+  started?: Promise<ManagedToolExecutionResult>;
 }
 
 class BrokerResponseError extends Error {
-  constructor(readonly status: number) {
+  constructor(
+    readonly status: number,
+    readonly code?: string,
+    readonly retryable?: boolean,
+  ) {
     super(`Managed Runtime Broker returned HTTP ${status}.`);
     this.name = 'BrokerResponseError';
   }
@@ -301,38 +308,56 @@ export class ManagedRuntimeBrokerClient {
     reference: ManagedToolInvocationReference,
     signal: AbortSignal,
   ): Promise<{ executionCallId: string; status: ManagedToolInvocationStatus }> {
-    const body = {
-      protocolVersion: MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
-      requestId: randomUUID(),
-      idempotencyKey: executionIdempotencyKey(harnessSessionId, reference),
-      harnessSessionId,
+    return this.submitExecution(
+      'executions',
       runtimeSessionId,
-      turnId: reference.promptId,
-      toolCallId: reference.callId,
-      requestDigest: reference.argsDigest,
+      harnessSessionId,
       reference,
-    };
-    let response: unknown;
-    try {
-      response = await this.requestJson('POST', 'executions', body, signal);
-    } catch (error) {
-      if (
-        signal.aborted ||
-        (error instanceof BrokerResponseError && error.status < 500)
-      ) {
-        throw error;
-      }
-      response = await this.requestJson('POST', 'executions', body, signal);
-    }
+      signal,
+    );
+  }
+
+  async prepareExecution(
+    runtimeSessionId: string,
+    harnessSessionId: string,
+    reference: ManagedToolInvocationReference,
+    signal: AbortSignal,
+  ): Promise<{ executionCallId: string; status: ManagedToolInvocationStatus }> {
+    return this.submitExecution(
+      'executions:prepare',
+      runtimeSessionId,
+      harnessSessionId,
+      reference,
+      signal,
+    );
+  }
+
+  async startExecution(
+    runtimeSessionId: string,
+    harnessSessionId: string,
+    executionCallId: string,
+    signal: AbortSignal,
+  ): Promise<ManagedToolInvocationStatus> {
+    const response = await this.requestJson(
+      'POST',
+      `executions/${encodeURIComponent(executionCallId)}:start`,
+      {
+        protocolVersion: MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
+        requestId: randomUUID(),
+        harnessSessionId,
+        runtimeSessionId,
+      },
+      signal,
+    );
     const envelope = this.parseEnvelope(
       response,
       harnessSessionId,
       runtimeSessionId,
     ) as BrokerExecutionResponse;
-    return {
-      executionCallId: boundedId(envelope.executionCallId, 'executionCallId'),
-      status: parseInvocationStatus(envelope.status),
-    };
+    if (envelope.executionCallId !== executionCallId) {
+      throw new Error('Managed Runtime Broker execution identity changed.');
+    }
+    return parseInvocationStatus(envelope.status);
   }
 
   async getExecution(
@@ -416,6 +441,47 @@ export class ManagedRuntimeBrokerClient {
     return envelope.released === true;
   }
 
+  private async submitExecution(
+    path: 'executions' | 'executions:prepare',
+    runtimeSessionId: string,
+    harnessSessionId: string,
+    reference: ManagedToolInvocationReference,
+    signal: AbortSignal,
+  ): Promise<{ executionCallId: string; status: ManagedToolInvocationStatus }> {
+    const body = {
+      protocolVersion: MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      idempotencyKey: executionIdempotencyKey(harnessSessionId, reference),
+      harnessSessionId,
+      runtimeSessionId,
+      turnId: reference.promptId,
+      toolCallId: reference.callId,
+      requestDigest: reference.argsDigest,
+      reference,
+    };
+    let response: unknown;
+    try {
+      response = await this.requestJson('POST', path, body, signal);
+    } catch (error) {
+      if (
+        signal.aborted ||
+        (error instanceof BrokerResponseError && error.status < 500)
+      ) {
+        throw error;
+      }
+      response = await this.requestJson('POST', path, body, signal);
+    }
+    const envelope = this.parseEnvelope(
+      response,
+      harnessSessionId,
+      runtimeSessionId,
+    ) as BrokerExecutionResponse;
+    return {
+      executionCallId: boundedId(envelope.executionCallId, 'executionCallId'),
+      status: parseInvocationStatus(envelope.status),
+    };
+  }
+
   private parseEnvelope(
     value: unknown,
     harnessSessionId: string,
@@ -454,8 +520,29 @@ export class ManagedRuntimeBrokerClient {
       },
     );
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new BrokerResponseError(response.status);
+      let code: string | undefined;
+      let retryable: boolean | undefined;
+      try {
+        const text = await readBoundedResponseText(
+          response,
+          MAX_BROKER_RESPONSE_BYTES,
+        );
+        const body = record(JSON.parse(text) as unknown);
+        if (
+          typeof body['code'] === 'string' &&
+          body['code'].length > 0 &&
+          body['code'].length <= 512 &&
+          !body['code'].includes('\0')
+        ) {
+          code = body['code'];
+        }
+        if (typeof body['retryable'] === 'boolean') {
+          retryable = body['retryable'];
+        }
+      } catch {
+        await response.body?.cancel().catch(() => undefined);
+      }
+      throw new BrokerResponseError(response.status, code, retryable);
     }
     const contentLength = Number(response.headers.get('content-length'));
     if (
@@ -567,6 +654,79 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
     return entry.client;
   }
 
+  async inspectExecution(
+    identity: ManagedRuntimeExecutionIdentity,
+  ): Promise<ManagedRuntimeExecutionInspection> {
+    this.lifetime.signal.throwIfAborted();
+    try {
+      const status = await this.client.getExecution(
+        identity.runtimeSessionId,
+        identity.harnessSessionId,
+        identity.executionCallId,
+        identity.afterSeq,
+        AbortSignal.any([
+          this.lifetime.signal,
+          AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+        ]),
+      );
+      return { outcome: 'known', status };
+    } catch (error) {
+      if (
+        error instanceof BrokerResponseError &&
+        error.code === 'runtime_broker_execution_unknown'
+      ) {
+        return { outcome: 'unknown' };
+      }
+      throw error;
+    }
+  }
+
+  async reconcileExecution(
+    identity: ManagedRuntimeExecutionIdentity,
+  ): Promise<ManagedRuntimeExecutionInspection> {
+    this.lifetime.signal.throwIfAborted();
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+    ]);
+    try {
+      let status = await this.client.getExecution(
+        identity.runtimeSessionId,
+        identity.harnessSessionId,
+        identity.executionCallId,
+        identity.afterSeq,
+        signal,
+      );
+      if (status.state === 'prepared') {
+        status = await this.client.startExecution(
+          identity.runtimeSessionId,
+          identity.harnessSessionId,
+          identity.executionCallId,
+          signal,
+        );
+      }
+      while (status.state !== 'settled') {
+        await delay(EXECUTION_POLL_DELAY_MS, undefined, { signal });
+        status = await this.client.getExecution(
+          identity.runtimeSessionId,
+          identity.harnessSessionId,
+          identity.executionCallId,
+          undefined,
+          signal,
+        );
+      }
+      return { outcome: 'known', status };
+    } catch (error) {
+      if (
+        error instanceof BrokerResponseError &&
+        error.code === 'runtime_broker_execution_unknown'
+      ) {
+        return { outcome: 'unknown' };
+      }
+      throw error;
+    }
+  }
+
   async cancel(
     _sessionId: string,
     _executionId: string,
@@ -661,7 +821,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       if (!execution) {
         execution = {
           referenceDigest,
-          accepted: this.client.createExecution(
+          reserved: this.client.prepareExecution(
             entry.request.sessionId,
             entry.harnessSessionId,
             reference,
@@ -680,20 +840,56 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       afterSeq?: number,
     ) => {
       const execution = ensureExecution(reference);
-      const accepted = await execution.accepted;
-      if (accepted.status.state === 'settled' && afterSeq === undefined) {
-        return accepted.status;
+      const reserved = await execution.reserved;
+      if (reserved.status.state === 'settled' && afterSeq === undefined) {
+        return reserved.status;
       }
       return this.client.getExecution(
         entry.request.sessionId,
         entry.harnessSessionId,
-        accepted.executionCallId,
+        reserved.executionCallId,
         afterSeq,
         AbortSignal.any([
           this.lifetime.signal,
           AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
         ]),
       );
+    };
+    const startExecution = async (
+      reference: ManagedToolInvocationReference,
+      executionCallId?: string,
+    ): Promise<ManagedToolExecutionResult> => {
+      const execution = ensureExecution(reference);
+      const reserved = await execution.reserved;
+      if (
+        executionCallId !== undefined &&
+        reserved.executionCallId !== executionCallId
+      ) {
+        throw new ManagedRuntimeProviderError(
+          'managed_runtime_identity_conflict',
+          'Managed Runtime Broker execution identity changed.',
+          false,
+        );
+      }
+      execution.started ??= (async () => {
+        let status = await this.client.startExecution(
+          entry.request.sessionId,
+          entry.harnessSessionId,
+          reserved.executionCallId,
+          AbortSignal.any([
+            this.lifetime.signal,
+            AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+          ]),
+        );
+        while (status.state !== 'settled') {
+          await delay(EXECUTION_POLL_DELAY_MS, undefined, {
+            signal: this.lifetime.signal,
+          });
+          status = await readExecution(reference);
+        }
+        return parseExecutionResult(status.result);
+      })();
+      return execution.started;
     };
     return {
       fileHistory: {
@@ -725,23 +921,23 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         });
       },
       preflight: (reference) => control({ kind: 'preflight', reference }),
-      execute: async (reference) => {
-        let status = await readExecution(reference);
-        while (status.state !== 'settled') {
-          await delay(EXECUTION_POLL_DELAY_MS, undefined, {
-            signal: this.lifetime.signal,
-          });
-          status = await readExecution(reference);
-        }
-        return parseExecutionResult(status.result);
+      prepareExecution: async (reference) => {
+        const reserved = await ensureExecution(reference).reserved;
+        return {
+          executionCallId: reserved.executionCallId,
+          invocationBindingId: entry.request.sessionId,
+        };
       },
+      startExecution: (reference, executionCallId) =>
+        startExecution(reference, executionCallId),
+      execute: (reference) => startExecution(reference),
       status: (reference, afterSeq) => readExecution(reference, afterSeq),
       cancel: async (reference) => {
-        const accepted = await ensureExecution(reference).accepted;
+        const reserved = await ensureExecution(reference).reserved;
         return this.client.cancelExecution(
           entry.request.sessionId,
           entry.harnessSessionId,
-          accepted.executionCallId,
+          reserved.executionCallId,
           AbortSignal.any([
             this.lifetime.signal,
             AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),

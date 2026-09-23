@@ -982,7 +982,7 @@
           <a href="#acceptance">验收标准</a>
         </nav>
         <div class="sidebar-note">
-          方案版本 v1.9 · 2026-09-22<br />
+          方案版本 v1.11 · 2026-09-23<br />
           核心决策：一个 Session 一个固定执行引擎；Managed Harness
           从第一轮起负责完整模型循环；公开事件先可靠提交，再向客户端推送。
         </div>
@@ -1035,14 +1035,16 @@
             </div>
           </div>
           <p class="lead">
-            v1.9 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线、
+            v1.11 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线、
             v1.5 的统一 Session 身份和 v1.6 的事件可靠投影边界，并补充 Java
             管控面、Hosted Harness、Runtime Broker 与 Tool Runtime
             的职责及通信架构图；v1.8 记录 daemon workspace 配额边界和 Managed
             Session 长期存储 D0 接缝，v1.9 补充 D1a Java/MySQL 私有 Store
-            的实现边界。Java 在创建前生成全局唯一 RFC UUID， 公共 API、qwen
-            Session Authority、Managed Harness、JSONL 和 Runtime Broker scope
-            使用完全相同的
+            的实现边界，v1.10 记录真实 Java/Hosted Harness owner 的 settled
+            Session 故障接管证明，v1.11 增加工具执行的 durable identity
+            预留、私有 checkpoint 提交与显式启动顺序。Java 在创建前生成全局唯一
+            RFC UUID， 公共 API、qwen Session Authority、Managed Harness、JSONL
+            和 Runtime Broker scope 使用完全相同的
             <code>sessionId</code>。不得再生成或持久化第二套 Harness Session
             ID。 首版仍采用单 Java + qwen Sidecar、预发布静态
             AgentBundle、Session 独占 Runtime， 复用现有产品 REST/SSE
@@ -2361,31 +2363,39 @@ GET  /events</pre
                 Plane 的内部接口。
               </p>
               <pre>
-POST /internal/agent-runtime/v1/prepare
-POST /internal/agent-runtime/v1/manifest
-POST /internal/agent-runtime/v1/execute
-POST /internal/agent-runtime/v1/cancel
-POST /internal/agent-runtime/v1/release
-GET  /internal/agent-runtime/v1/executions/{executionCallId}
-POST /internal/agent-runtime/v1/control
-POST /internal/agent-runtime/v1/executions/{executionCallId}/ack
-GET  /internal/agent-runtime/v1/resources/{resourceId}</pre
+POST /internal/runtime-broker/v1/tool-sessions:acquire
+POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}/control
+POST /internal/runtime-broker/v1/executions:prepare
+POST /internal/runtime-broker/v1/executions/{executionCallId}:start
+GET  /internal/runtime-broker/v1/executions/{executionCallId}
+POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
+POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release</pre
               >
             </article>
           </div>
 
           <div class="callout">
-            v1.4 补齐工具阶段、原命令查询与资源读取。execute 返回 accepted 后，
-            Harness 可有界轮询原 ID，连接中断不能重新派发。 control 按
-            activation / tool / history / receipt 分型：包含 stageGate /
-            enableGate / renewGate / revokeGate / queryGate、 prepareInvocation
-            / getConfirmation / confirmInvocation / preflightInvocation /
-            cancelInvocation / queryInvocation、bindHistory / beginTurn /
-            checkpoint / readHistory 及 queryReceipt。
-            每种操作单独校验，复用原门禁与 tool v2；status/cancel 不能创建
-            execution。 qwen 持久接收结果与必要 bytes 后的 CommitReceipt
-            经可信入口核验才记 delivered， release 还需核对轮末
-            history/checkpoint、资源引用和物理退出。 完整方法映射见
+            v1.11 把工具 intent 与物理副作用拆成两步：
+            <code>executions:prepare</code> 幂等创建
+            <code>PREPARED</code> ledger 并返回真实
+            <code>executionCallId</code>，不触发 Runtime；Harness 将该 ID 与
+            Runtime Session binding 提交到私有
+            <code>await_runtime</code> checkpoint 后，才调用显式
+            <code>:start</code>。GET 不会启动 PREPARED
+            execution，取消可在无副作用时直接结算；旧 create-and-start
+            服务方法继续兼容。Harness 可有界轮询原 ID，连接中断不能生成新 ID
+            重新派发。冷加载后的替代 Harness 已能从 checkpoint
+            重建工具名、Runtime Session binding 与 executionCallId，并直接查询
+            Broker，不创建新的 Runtime entry；结构化 UNKNOWN
+            会按未知结果保留，不能转成重放。 control 按 activation / tool /
+            history / receipt 分型：包含 stageGate / enableGate / renewGate /
+            revokeGate / queryGate、 prepareInvocation / getConfirmation /
+            confirmInvocation / preflightInvocation / cancelInvocation /
+            queryInvocation、bindHistory / beginTurn / checkpoint / readHistory
+            及 queryReceipt。 每种操作单独校验，复用原门禁与 tool
+            v2；status/cancel 不能创建 execution。 qwen 持久接收结果与必要 bytes
+            后的 CommitReceipt 经可信入口核验才记 delivered， release
+            还需核对轮末 history/checkpoint、资源引用和物理退出。 完整方法映射见
             <a
               href="managed-agent-first-runtime.md#3-broker-到-runtime-的最小协议"
               >运行契约</a
@@ -3392,7 +3402,9 @@ reconnect / history → SessionReplayService
                     恢复。
                   </td>
                   <td>
-                    Broker/Runtime 子阶段已完成参考实现和本地验证；真实 Pod
+                    Broker/Runtime 子阶段已完成参考实现和本地验证；工具 intent
+                    已使用 Broker durable execution identity，并在私有
+                    checkpoint 提交后才显式启动。真实 Pod
                     故障矩阵待集群验收。不能证明的工具副作用进入
                     <code>UNKNOWN</code> 或 <code>recovery_blocked</code>。
                   </td>
@@ -3440,16 +3452,40 @@ reconnect / history → SessionReplayService
             跨 Java/TypeScript 固定 header、限额、精确 JSONL
             字节、摘要、请求元数据和错误分类； 多个独立子 JVM 连接真实 MySQL
             的测试已证明“提交后 ACK 前崩溃”、租约接管、 幂等回放、旧 writer
-            fencing 和资源恢复。当前未过期 writer secret
+            fencing 和资源恢复。确定性多进程测试还会在第一轮结算后强杀真实 Java
+            与 Hosted Harness、删除旧本地 home，并由替代 owner 在相同 MySQL
+            Store 上完成第二轮；第二次模型请求已验证包含第一轮 prompt 与
+            answer，writer generation、journal revision、committed sequence 和
+            Harness boot ID 均推进。当前未过期 writer secret
             同时保护恢复、分页和资源读取。私有路由默认关闭，仅在受信服务网络显式设置
             <code>qwen.managed-agent.session-store.enabled=true</code> 后开放。
+            工具边界还会先通过 Runtime Broker 预留持久
+            <code>executionCallId</code>，把该身份与 Runtime Session binding
+            写入 <code>await_runtime</code> checkpoint，再显式启动工具；读取
+            PREPARED 记录不会产生副作用。冷加载后的 Core 现在还能读取该
+            checkpoint 中的工具名、Runtime Session 与 execution
+            身份，并在不分配新 Runtime 的前提下查询原 Broker 状态；UNKNOWN
+            不会触发工具重放；当前 fenced writer 会先把私有 Session 持久置为
+            <code>BLOCKED_EXECUTION</code>，Java 再以明确恢复错误终止公共
+            Turn，不重新 submit 原 Prompt。进入阻塞状态后，Harness 不再提交
+            Store 必须拒绝的 activation-release 事务，但仍会立即 seal writer，
+            不让所有权残留到 lease 到期。
           </div>
           <div class="callout warning">
             <strong>尚未完成：</strong>大于 64 KiB 的 OSS 不可变资源、物理删除与
-            保留回收尚未实现；还没有杀死真实 Hosted Harness 与 Java owner 后，
-            在另一实例完成下一轮 Turn 的端到端证明。已准入在途 Turn、Runtime
-            副作用和 Workspace 状态的对账仍由 D3 门禁保护，不能据此宣称生产级 跨
-            Pod 自动恢复。详细方案见
+            保留回收尚未实现。现有 owner failover 已证明 settled
+            Session；对于一个 已准入 Turn 中的一个已知
+            execution，恢复协调器现在还能启动或轮询原 Broker ID，把 SETTLED
+            结果提交为 results_ready，在 Turn dispatch lease 下安装替代 Harness
+            generation 与公共 event epoch，并通过绑定 checkpoint/activation 的
+            continuation 继续，且不重放原 Prompt 或工具。 UNKNOWN →
+            BLOCKED_EXECUTION 的 fenced 持久化及公共 Turn 阻断也已实现。 Java
+            现在会在调用 continuation 前先持久安装 attachment event epoch 与
+            cursor，再在响应后推进 cursor，因此不会再留下“已准入但数据库仍是旧
+            epoch”的窗口。但多工具结果映射、恢复态取消、continuation 中途
+            Harness 崩溃后的长期事件/checkpoint 重建、Workspace 状态及
+            Kubernetes 调度恢复仍由 D3 门禁保护，不能据此宣称生产级跨 Pod
+            自动恢复。详细方案见
             <a
               href="https://github.com/doudouOUC/qwen-code/blob/feature/managed-agents-p0-p8/docs/design/2026-09-21-managed-session-durable-store.zh-CN.md"
               >《Managed Session 长期权威存储》</a
@@ -3460,9 +3496,25 @@ reconnect / history → SessionReplayService
             兼容模式证明 64 KiB inline 资源及 writer/commit/read HTTP
             契约，并以共享 golden fixture 约束 Java/TypeScript 协议。真实 MySQL
             测试覆盖 schema 升级、精确字节、幂等回执，并由多个独立 JVM 证明
-            generation 接管、旧 writer 拒绝和崩溃后的资源恢复；它尚不是杀死真实
-            Hosted Harness、Java owner 与 Runtime 后完成新 Turn 的端到端证据。
-            P0/P1 事件、Item 与 Snapshot 切片已有 H2 和真实 MySQL 模块级验证，
+            generation 接管、旧 writer 拒绝和崩溃后的资源恢复。新增确定性
+            端到端测试已杀死真实 Hosted Harness 与 Java owner、删除旧本地盘并在
+            替代进程完成第二轮。新增单测已证明 Broker prepare/GET 不派发、显式
+            start 只派发一次，以及 Harness checkpoint 使用 Broker ID 并先于
+            start；新增冷加载测试还证明替代 Harness 能以持久身份查询原
+            execution，且查询不会获取新 Runtime；UNKNOWN 分支的 fenced
+            BLOCKED_EXECUTION 写入与“不 submit、不重放”公共终态已有模块级测试。
+            新增 TypeScript 单元/契约测试和 Java H2 coordinator/store 测试已覆盖
+            单 execution 的 results_ready continuation、Harness boot 与 event
+            epoch 接管，并证明不重新 submit 原 Prompt。确定性真实进程 E2E 还会在
+            durable PREPARED/await_runtime 已提交、物理执行尚未开始时强杀 原
+            Java 与 Harness，删除旧 Harness 磁盘，并由替代 owner 完成同一
+            execution；连续验证观察到一条 Broker 记录、一次物理副作用、一次初始
+            模型请求、一次回执 continuation 和一个公共终态。新增 Java
+            顺序测试还证明替代 event epoch 会在 continuation
+            调用前持久提交，并在响应后推进 cursor。尚未覆盖多工具、恢复态取消、
+            continuation 中途 Harness 崩溃后的事件/checkpoint
+            重建、其余多进程在途故障矩阵或真实 Kubernetes 调度恢复。P0/P1
+            事件、Item 与 Snapshot 切片已有 H2 和真实 MySQL 模块级验证，
             尚不代表跨节点通知已经完成。P3 Runtime 恢复切片已增加真实 MySQL
             下两个独立 JVM 的单物理资源/单次执行证明，并覆盖 local-process
             接管、UID 条件删除、身份冲突、私有 attestation、有界退避、in-flight
@@ -3472,8 +3524,8 @@ reconnect / history → SessionReplayService
             集群验收还必须证明部署配置提供的不可变
             <code>clusterUid</code> 在所有 Java 副本上一致，并在使用持久 handle
             前拒绝其他集群的值；当前 adapter 不从 Kubernetes API 自动发现该
-            identity。真实 Kubernetes 集群、真实 Hosted Harness 端到端、容量与
-            TTFT 仍是发布前验证项。
+            identity。真实 Kubernetes 集群、continuation 准入后的再次崩溃、
+            多工具/取消恢复、容量与 TTFT 仍是发布前验证项。
           </div>
         </section>
 
@@ -3625,7 +3677,7 @@ reconnect / history → SessionReplayService
           <div class="section-head">
             <div>
               <div class="section-index">17 / CURRENT GAP</div>
-              <h2>现有基础与主要缺口（v1.9 代码快照）</h2>
+              <h2>现有基础与主要缺口（v1.11 代码快照）</h2>
             </div>
           </div>
           <div class="grid-2">
@@ -3668,7 +3720,17 @@ reconnect / history → SessionReplayService
                   私有 Managed Session Store 的 Flyway V4、Spring 内部 API、
                   writer fencing、精确事务字节、幂等 CAS、64 KiB inline 资源、
                   TypeScript adapter、共享 golden contract 与独立 JVM/MySQL
-                  接管证明。
+                  接管证明，以及 settled Session 的真实 Java/Hosted Harness
+                  owner 故障接管证明。
+                </li>
+                <li>
+                  Tool intent 的两阶段执行边界：Broker 先预留 durable execution
+                  identity，Harness checkpoint 提交后再显式启动。
+                </li>
+                <li>
+                  单个已知 execution 的跨 owner 恢复：替代 Harness
+                  对账原执行、提交 results_ready，Java 在 continuation
+                  前持久安装替代 event 水位并用原 promptId 续跑。
                 </li>
               </ul>
             </article>
@@ -3689,8 +3751,12 @@ reconnect / history → SessionReplayService
                 <li>Artifact Store 和 RuntimeTemplate。</li>
                 <li>
                   Harness 私有 journal 的 D0、D1a、D1b 和 D2a inline Hosted
-                  路由已完成；OSS 资源闭包、物理保留/删除和 D3
-                  恢复门禁尚待实现。
+                  路由及 settled owner failover 已完成；工具 intent
+                  身份、提交顺序 和单个已知 execution 的 results_ready 跨 owner
+                  continuation 已完成。 OSS
+                  资源闭包、物理保留/删除、多工具与恢复态取消、continuation 中途
+                  Harness 崩溃后的事件/checkpoint 重建和 D3
+                  其余生产证明尚待实现。
                 </li>
                 <li>
                   真实 Kubernetes、真实 Harness/Runtime 的故障、网络、容量与
@@ -3718,7 +3784,7 @@ reconnect / history → SessionReplayService
         </section>
 
         <footer class="footer">
-          Managed Agent 双链路技术方案 · v1.9 · 2026-09-22 · 单文件展示<br />
+          Managed Agent 双链路技术方案 · v1.11 · 2026-09-23 · 单文件展示<br />
           核心原则：一个 Session 一个固定执行引擎；一个模型循环
           owner；工具副作用结果不确定时不自动重放。
         </footer>

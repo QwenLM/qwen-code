@@ -1291,6 +1291,19 @@ interface SessionEntry {
       eventEpoch: string;
     }
   >;
+  continuationAdmissions: Map<
+    string,
+    {
+      recoveryKey: string | null;
+      result: {
+        accepted: true;
+        interruption: 'interrupted_prompt' | 'interrupted_turn';
+        promptId: string;
+        lastEventId: number;
+        eventEpoch: string;
+      };
+    }
+  >;
   /** Recent formal terminals bridge-published before transcript visibility. */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
   /**
@@ -7587,6 +7600,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
       pendingPromptList: [],
       promptAdmissions: new Map(),
+      continuationAdmissions: new Map(),
       terminalTurnStatuses: new Map(),
       enrichedTerminalPromptIds: new Set(),
       rewindGeneration: 0,
@@ -13687,6 +13701,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       assertSessionAcceptsModelWork(entry);
       resolveTrustedClientId(entry, context?.clientId);
+      const promptId = context?.promptId;
+      const managedRuntimeContinuation = context?.managedRuntimeContinuation;
+      const recoveryKey = managedRuntimeContinuation
+        ? `${managedRuntimeContinuation.checkpointId}\u0000${managedRuntimeContinuation.activationId}`
+        : null;
+      if (promptId !== undefined) {
+        const existing = entry.continuationAdmissions.get(promptId);
+        if (existing !== undefined) {
+          if (existing.recoveryKey !== recoveryKey) {
+            throw new PromptIdConflictError(sessionId, promptId);
+          }
+          return existing.result;
+        }
+      }
       const cancelGeneration = entry.cancelGeneration;
 
       // Accept/reject pre-check: the agent classifies the last turn (and rejects
@@ -13694,7 +13722,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const decision = await requestSessionStatus<{
         accepted: boolean;
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+      }>(
+        sessionId,
+        managedRuntimeContinuation
+          ? SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeContinue
+          : SERVE_CONTROL_EXT_METHODS.sessionContinue,
+        managedRuntimeContinuation ?? {},
+      );
 
       if (!decision.accepted) {
         return decision;
@@ -13726,8 +13760,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // envelope (DAEMON-001): without it a client that seeds its SSE resume
       // position from this response cannot detect a daemon restart.
       const eventEpoch = liveEntry.events.epoch;
-      const promptId = context?.promptId;
-
       // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
       // pre-aborted, so an admission failure propagates out of here and the
       // caller gets an error instead of a misleading accepted:true whose
@@ -13757,12 +13789,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
       });
 
-      return {
+      const result = {
         ...decision,
         ...(promptId !== undefined ? { promptId } : {}),
         lastEventId,
         eventEpoch,
       };
+      if (promptId !== undefined) {
+        entry.continuationAdmissions.set(promptId, {
+          recoveryKey,
+          result: {
+            accepted: true,
+            interruption: decision.interruption as
+              | 'interrupted_prompt'
+              | 'interrupted_turn',
+            promptId,
+            lastEventId,
+            eventEpoch,
+          },
+        });
+      }
+      return result;
     },
 
     async getSessionStatsStatus(sessionId) {

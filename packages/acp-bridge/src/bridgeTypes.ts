@@ -1247,6 +1247,15 @@ export interface BridgeClientRequestContext {
    */
   continue?: boolean;
   /**
+   * Internal recovery identity accepted only by the Hosted Harness private
+   * continuation route. The ACP child verifies it against the current durable
+   * `results_ready` checkpoint before the bridge admits a model continuation.
+   */
+  managedRuntimeContinuation?: {
+    checkpointId: string;
+    activationId: string;
+  };
+  /**
    * Internal: set ONLY after load/resume when the child hinted that a trailing
    * ask_user_question should be re-hung. HTTP routes never populate this from
    * request input.
@@ -1267,6 +1276,8 @@ export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
 export const DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY =
   'qwen.daemon.restoreManagedApproval';
+export const DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY =
+  'qwen.daemon.managedRuntimeRecovery';
 /**
  * Response `_meta` key on `session/request_permission` cancellations telling
  * the child WHY the bridge resolved a cancel (`timeout` / `agent_cancelled`

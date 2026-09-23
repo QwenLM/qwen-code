@@ -2,10 +2,12 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RecoveryStateReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
@@ -209,6 +211,47 @@ public class ManagedSessionStore {
                         + " WHERE tenant_id = ? AND session_id = ?",
                 now, tenantId, sessionId);
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
+    }
+
+    @Transactional
+    public RecoveryStateReceipt blockRecovery(String tenantId,
+            String sessionId, String writerToken,
+            BlockRecoveryRequest request) {
+        validateScope(tenantId, request.workspaceId(), sessionId);
+        validateStableId(request.writerId(), "writerId");
+        validateCounter(request.writerGeneration(), "writerGeneration", 1);
+        if (!RECOVERY_STATES.contains(request.recoveryStatus())
+                || "READY".equals(request.recoveryStatus())) {
+            throw invalid("recoveryStatus must be a blocked state.");
+        }
+        validateText(request.recoveryDetailCode(), "recoveryDetailCode",
+                MAX_TEXT_BYTES);
+        HeadRow head = requireHeadForUpdate(tenantId, sessionId);
+        requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        Timestamp now = databaseNow();
+        requireWriter(head, request.writerId(), request.writerGeneration(),
+                writerToken, now, true);
+        if (request.recoveryStatus().equals(head.recoveryStatus())
+                && request.recoveryDetailCode()
+                        .equals(head.recoveryDetailCode())) {
+            return new RecoveryStateReceipt(head.writerGeneration(),
+                    head.recoveryStatus(), head.recoveryDetailCode(), true);
+        }
+        if (!"READY".equals(head.recoveryStatus())) {
+            throw conflict(
+                    ManagedSessionStoreModels.ERROR_RECOVERY_CONFLICT,
+                    "The Managed Session already has a different recovery"
+                            + " block.");
+        }
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                        + " recovery_status = ?, recovery_detail_code = ?,"
+                        + " updated_at = ? WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                request.recoveryStatus(), request.recoveryDetailCode(), now,
+                tenantId, sessionId);
+        return new RecoveryStateReceipt(head.writerGeneration(),
+                request.recoveryStatus(), request.recoveryDetailCode(),
+                false);
     }
 
     @Transactional
@@ -772,7 +815,7 @@ public class ManagedSessionStore {
     }
 
     private Timestamp databaseNow() {
-        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP",
+        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",
                 Timestamp.class);
         if (now == null) {
             throw new IllegalStateException("Database time is unavailable");

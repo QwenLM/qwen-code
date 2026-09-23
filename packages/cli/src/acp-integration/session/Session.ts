@@ -4199,6 +4199,10 @@ export class Session implements SessionContext {
     );
   }
 
+  async readManagedRuntimeRecoveryHint() {
+    return (await this.config.inspectPendingManagedRuntimeWait?.()) ?? null;
+  }
+
   async assertCanStartTurn(): Promise<void> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -5702,6 +5706,18 @@ export class Session implements SessionContext {
     ) {
       return { accepted: false, interruption: 'none' };
     }
+    const managedRuntimeOutcomes =
+      await this.config.readManagedRuntimeOutcomes?.();
+    if (
+      managedRuntimeOutcomes &&
+      managedRuntimeOutcomes.outcomes.length > 0 &&
+      recovery.kind !== 'degraded_history'
+    ) {
+      return {
+        accepted: !this.closing && !this.#hasActiveTurn(),
+        interruption: 'interrupted_turn',
+      };
+    }
     return {
       accepted: recovery.canContinue,
       interruption:
@@ -5710,6 +5726,24 @@ export class Session implements SessionContext {
           ? recovery.kind
           : 'none',
     };
+  }
+
+  async continueManagedRuntime(
+    checkpointId: string,
+    activationId: string,
+  ): Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }> {
+    const recovery = await this.readManagedRuntimeRecoveryHint();
+    if (
+      recovery?.phase !== 'results_ready' ||
+      recovery.checkpointId !== checkpointId ||
+      recovery.activationId !== activationId
+    ) {
+      return { accepted: false, interruption: 'none' };
+    }
+    return this.continueLastTurn();
   }
 
   /**
@@ -6144,8 +6178,23 @@ export class Session implements SessionContext {
                 goalTurn.permit,
               );
             } else if (isContinue) {
-              const recoveryPlan = this.#getRecoveryPlan(true);
-              if (!recoveryPlan?.continuation) {
+              const runtimeOutcomes =
+                await this.config.readManagedRuntimeOutcomes?.();
+              const continuesManagedRuntime =
+                runtimeOutcomes !== undefined &&
+                runtimeOutcomes.outcomes.length > 0;
+              const recoveryPlan = continuesManagedRuntime
+                ? undefined
+                : this.#getRecoveryPlan(true);
+              if (continuesManagedRuntime) {
+                // Resume with the original durable functionResponses. This
+                // keeps the tool_result adjacent to its functionCall and gives
+                // the model send a real, non-empty message without inventing a
+                // synthetic user prompt or generic interruption failure.
+                continuationParts = runtimeOutcomes.outcomes.map((outcome) =>
+                  structuredClone(outcome.part),
+                );
+              } else if (!recoveryPlan?.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -6163,8 +6212,9 @@ export class Session implements SessionContext {
                   ),
                 );
                 return { stopReason: 'end_turn' };
-              }
-              if (recoveryPlan.continuation.mode === 'retry_user_parts') {
+              } else if (
+                recoveryPlan.continuation.mode === 'retry_user_parts'
+              ) {
                 strippedOrphanEntries =
                   this.config
                     .getLlmClient()!
@@ -13172,6 +13222,9 @@ export class Session implements SessionContext {
     let managedPostHookConsumed = false;
     let managedFailureHookConsumed = false;
     let managedRuntimeWaitCommitted = false;
+    let managedExecutionIdentity:
+      | { executionCallId: string; invocationBindingId: string }
+      | undefined;
     let managedModelFunctionResponse: Part['functionResponse'];
     const drainManagedInvocation = async () => {
       if (managedInvocation) {
@@ -13179,7 +13232,8 @@ export class Session implements SessionContext {
           managedRuntimeWaitCommitted &&
           !abortSignal.aborted &&
           this.config.shouldRetainManagedRuntimeInvocation?.(
-            managedInvocation.toolUseId,
+            managedExecutionIdentity?.executionCallId ??
+              managedInvocation.toolUseId,
           ) === true
         ) {
           // Detach at await_runtime hands the original invocation to the
@@ -14956,10 +15010,14 @@ export class Session implements SessionContext {
             if (staleTodoPlanApproval) return staleTodoPlanApproval;
             invocation.managed?.authorize();
             if (invocation.managed && this.config.commitManagedAwaitRuntime) {
+              managedExecutionIdentity =
+                await invocation.managed.prepareExecution();
               await this.config.commitManagedAwaitRuntime({
                 functionCallId: callId,
-                executionCallId: invocation.managed.toolUseId,
-                invocationBindingId: invocation.managed.toolUseId,
+                toolName: modelFacingToolName,
+                executionCallId: managedExecutionIdentity.executionCallId,
+                invocationBindingId:
+                  managedExecutionIdentity.invocationBindingId,
                 modelMessageId: promptId,
               });
               managedRuntimeWaitCommitted = true;
@@ -15860,7 +15918,8 @@ export class Session implements SessionContext {
         if (
           abortSignal.aborted ||
           this.config.shouldRetainManagedRuntimeInvocation?.(
-            managedInvocation.toolUseId,
+            managedExecutionIdentity?.executionCallId ??
+              managedInvocation.toolUseId,
           ) !== true
         ) {
           const outcome =
@@ -15882,7 +15941,9 @@ export class Session implements SessionContext {
               : undefined;
           await this.config.resolveManagedAwaitRuntime?.({
             functionCallId: callId,
-            executionCallId: managedInvocation.toolUseId,
+            executionCallId:
+              managedExecutionIdentity?.executionCallId ??
+              managedInvocation.toolUseId,
             outcome,
             body: managedInvocation.result ?? null,
             functionResponse: persistableFunctionResponse,

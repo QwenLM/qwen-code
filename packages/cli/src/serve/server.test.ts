@@ -125,6 +125,7 @@ import {
   BridgeTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
+import { DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   appendPromptLedgerRecord,
   readPromptLedgerRecords,
@@ -13526,7 +13527,37 @@ describe('createServeApp', () => {
       const digest = `sha256:${'b'.repeat(64)}`;
       const bootId = '22222222-2222-4222-8222-222222222222';
       const sessionId = '550e8400-e29b-41d4-a716-446655440012';
-      const bridge = fakeBridge();
+      const recovery = {
+        phase: 'results_ready',
+        checkpointId: 'checkpoint-1',
+        activationId: 'activation-1',
+        executions: [
+          {
+            functionCallId: 'call-1',
+            toolName: 'shell',
+            executionCallId: 'execution-1',
+            runtimeSessionId: 'runtime-1',
+            outcome: 'known',
+            status: { state: 'settled' },
+          },
+        ],
+      };
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-load',
+          state: {
+            _meta: {
+              [DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY]: recovery,
+            },
+          },
+          hasActivePrompt: false,
+          lastEventId: 4,
+          eventEpoch: 'recovery-epoch',
+        }),
+      });
       const app = createServeApp(
         {
           ...baseOpts,
@@ -13563,6 +13594,9 @@ describe('createServeApp', () => {
         });
 
       expect(res.status).toBe(200);
+      expect(res.body._meta).toEqual({
+        [DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY]: recovery,
+      });
       expect(bridge.loadCalls).toHaveLength(1);
       expect(bridge.loadCalls[0]).toMatchObject({
         sessionId,
@@ -13574,6 +13608,69 @@ describe('createServeApp', () => {
           leaseDurationMs: 60_000,
         },
       });
+    });
+
+    it('admits a checkpoint-bound Managed Runtime continuation only through Hosted Harness', async () => {
+      const digest = `sha256:${'d'.repeat(64)}`;
+      const bootId = '44444444-4444-4444-8444-444444444444';
+      const sessionId = '550e8400-e29b-41d4-a716-446655440013';
+      const promptId = '550e8400-e29b-41d4-a716-446655440014';
+      const bridge = fakeBridge({
+        continueSessionImpl: async () => ({
+          accepted: true,
+          interruption: 'interrupted_turn',
+          promptId,
+          lastEventId: 0,
+          eventEpoch: 'recovery-epoch',
+        }),
+      });
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          profile: 'hosted-harness',
+          workspace: WS_BOUND,
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: digest,
+        },
+        undefined,
+        {
+          bridge,
+          hostedHarnessContract: createHostedHarnessContract(digest, bootId),
+        },
+      );
+
+      const res = await request(app)
+        .post(`/session/${sessionId}/managed-runtime/continue`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send({
+          promptId,
+          checkpointId: 'checkpoint-2',
+          activationId: 'activation-2',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        accepted: true,
+        interruption: 'interrupted_turn',
+        promptId,
+        lastEventId: 0,
+        eventEpoch: 'recovery-epoch',
+      });
+      expect(bridge.continueSessionContexts).toEqual([
+        {
+          promptId,
+          managedRuntimeContinuation: {
+            checkpointId: 'checkpoint-2',
+            activationId: 'activation-2',
+          },
+        },
+      ]);
     });
 
     it('returns a typed safe-retry error when channel initialization times out', async () => {

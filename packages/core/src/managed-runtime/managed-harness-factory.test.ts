@@ -661,6 +661,7 @@ describe('managed harness factory', () => {
     await handle.commitAwaitRuntime({
       ...first,
       functionCallId: 'fc-2',
+      toolName: 'write_file',
       executionCallId: 'ex-2',
       invocationBindingId: 'bind-2',
       modelMessageId: 'msg-2',
@@ -791,6 +792,7 @@ async function runtimeCommit(
 ): Promise<ManagedAwaitRuntimeCommit> {
   return {
     functionCallId: 'fc-1',
+    toolName: 'read_file',
     executionCallId: 'ex-1',
     invocationBindingId: 'bind-1',
     capabilityVersion: 'cap-1',

@@ -82,9 +82,17 @@ class RuntimeBrokerHttpServerTest {
             execution.put("requestDigest", "args-1");
             execution.put("reference", reference());
             Map<String, Object> created = send(client, request(
-                    server.getBaseUri(), "executions", execution, TOKEN));
+                    server.getBaseUri(), "executions:prepare", execution,
+                    TOKEN));
             String executionCallId = (String) created.get("executionCallId");
-            assertEquals("executing", object(created, "status").get("state"));
+            assertEquals("prepared", object(created, "status").get("state"));
+            assertEquals(0, transport.executions.get());
+
+            Map<String, Object> started = send(client, request(
+                    server.getBaseUri(), "executions/"
+                            + encode(executionCallId) + ":start", envelope(),
+                    TOKEN));
+            assertEquals("executing", object(started, "status").get("state"));
             assertEquals(1, transport.executions.get());
 
             transport.execution.complete(executionResult("success"));

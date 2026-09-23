@@ -95,6 +95,9 @@ class ManagedSessionStoreContractFixtureTest {
         expected.put("idempotencyConflict", new ExpectedError(
                 HttpStatus.CONFLICT.value(),
                 ManagedSessionStoreModels.ERROR_IDEMPOTENCY_CONFLICT));
+        expected.put("recoveryConflict", new ExpectedError(
+                HttpStatus.CONFLICT.value(),
+                ManagedSessionStoreModels.ERROR_RECOVERY_CONFLICT));
         expected.put("resourceMissing", new ExpectedError(
                 HttpStatus.CONFLICT.value(),
                 ManagedSessionStoreModels.ERROR_RESOURCE_MISSING));

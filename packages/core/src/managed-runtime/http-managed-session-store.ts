@@ -139,6 +139,16 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     return this.client.appendTransaction(records);
   }
 
+  blockRecovery(request: {
+    readonly status:
+      | 'BLOCKED_RESOURCE'
+      | 'BLOCKED_WORKSPACE'
+      | 'BLOCKED_EXECUTION';
+    readonly detailCode: string;
+  }): Promise<void> {
+    return this.client.blockRecovery(request);
+  }
+
   seal(): Promise<void> {
     return this.client.seal();
   }
@@ -518,6 +528,8 @@ class ManagedSessionStoreHttpClient {
     const response = await this.request(
       `/resources/${encodeURIComponent(ref.resourceId)}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
       'GET',
+      undefined,
+      'application/octet-stream, application/json',
     );
     const bytes = Buffer.from(await response.arrayBuffer());
     if (
@@ -533,6 +545,38 @@ class ManagedSessionStoreHttpClient {
       );
     }
     return bytes;
+  }
+
+  async blockRecovery(request: {
+    readonly status:
+      | 'BLOCKED_RESOURCE'
+      | 'BLOCKED_WORKSPACE'
+      | 'BLOCKED_EXECUTION';
+    readonly detailCode: string;
+  }): Promise<void> {
+    await this.ensureWriter();
+    const grant = this.requireGrant();
+    const receipt = asRecord(
+      await this.json('/recovery:block', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: grant.writerGeneration,
+        recoveryStatus: request.status,
+        recoveryDetailCode: request.detailCode,
+      }),
+      'recovery state receipt',
+    );
+    if (
+      safeCounter(receipt['writerGeneration'], 'writerGeneration') !==
+        grant.writerGeneration ||
+      string(receipt['recoveryStatus'], 'recoveryStatus') !== request.status ||
+      string(receipt['recoveryDetailCode'], 'recoveryDetailCode') !==
+        request.detailCode
+    ) {
+      throw corrupt(
+        'recovery state receipt does not match the active writer request.',
+      );
+    }
   }
 
   async seal(): Promise<void> {
@@ -656,6 +700,7 @@ class ManagedSessionStoreHttpClient {
     path: string,
     method: 'GET' | 'POST',
     body?: Readonly<Record<string, unknown>>,
+    accept = 'application/json',
   ): Promise<Response> {
     let response: Response;
     try {
@@ -663,7 +708,7 @@ class ManagedSessionStoreHttpClient {
         method,
         redirect: 'error',
         headers: {
-          Accept: 'application/json',
+          Accept: accept,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:

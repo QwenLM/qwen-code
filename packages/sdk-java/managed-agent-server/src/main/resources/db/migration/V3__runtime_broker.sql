@@ -85,6 +85,7 @@ CREATE INDEX idx_runtime_session_binding
     );
 
 CREATE TABLE qwen_tool_execution (
+    execution_call_id_hash CHAR(64) NOT NULL,
     execution_call_id VARCHAR(512) PRIMARY KEY,
     idempotency_key_hash CHAR(64) NOT NULL,
     idempotency_key VARCHAR(512) NOT NULL,
@@ -107,6 +108,8 @@ CREATE TABLE qwen_tool_execution (
     dispatch_generation BIGINT NOT NULL,
     record_version BIGINT NOT NULL,
     settled_at DATETIME(6),
+    CONSTRAINT uq_tool_execution_call_hash
+        UNIQUE (execution_call_id_hash),
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash)
 );

@@ -102,7 +102,7 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(bodies[0]).not.toHaveProperty('workspaceCwd');
   });
 
-  it('retries a durable execution identity after response loss', async () => {
+  it('reserves a durable execution identity before starting it', async () => {
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
     let droppedExecutionResponse = false;
     const settled = {
@@ -121,6 +121,10 @@ describe('BrokerManagedRuntimeProvider', () => {
       ...settled,
       state: 'executing',
       result: undefined,
+    };
+    const preparedStatus = {
+      ...executing,
+      state: 'prepared',
     };
     const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
@@ -143,11 +147,16 @@ describe('BrokerManagedRuntimeProvider', () => {
           }),
         );
       }
-      if (url.endsWith('/executions')) {
+      if (url.endsWith('/executions:prepare')) {
         if (!droppedExecutionResponse) {
           droppedExecutionResponse = true;
           throw new TypeError('response connection closed');
         }
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start')) {
         return json(
           envelope({ executionCallId: 'execution-1', status: executing }),
         );
@@ -175,7 +184,17 @@ describe('BrokerManagedRuntimeProvider', () => {
     await expect(client.manifest()).resolves.toMatchObject({
       policyRevision: 'policy-1',
     });
-    await expect(client.execute(reference())).resolves.toMatchObject({
+    const reservation = await client.prepareExecution!(reference());
+    expect(reservation).toEqual({
+      executionCallId: 'execution-1',
+      invocationBindingId: runtimeSessionId,
+    });
+    expect(
+      calls.some((call) => call.url.endsWith('/executions/execution-1:start')),
+    ).toBe(false);
+    await expect(
+      client.startExecution!(reference(), reservation.executionCallId),
+    ).resolves.toMatchObject({
       executionStatus: 'success',
     });
     await expect(client.execute(reference())).resolves.toMatchObject({
@@ -190,7 +209,9 @@ describe('BrokerManagedRuntimeProvider', () => {
       harnessSessionId,
       operation: { kind: 'manifest' },
     });
-    const executions = calls.filter((call) => call.url.endsWith('/executions'));
+    const executions = calls.filter((call) =>
+      call.url.endsWith('/executions:prepare'),
+    );
     expect(executions).toHaveLength(2);
     expect(executions[0].body).toMatchObject({
       harnessSessionId,
@@ -201,6 +222,11 @@ describe('BrokerManagedRuntimeProvider', () => {
       idempotencyKey: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(executions[1].body).toEqual(executions[0].body);
+    expect(
+      calls.filter((call) =>
+        call.url.endsWith('/executions/execution-1:start'),
+      ),
+    ).toHaveLength(1);
     const status = calls.find((call) =>
       call.url.includes('/executions/execution-1?'),
     );
@@ -230,5 +256,141 @@ describe('BrokerManagedRuntimeProvider', () => {
     await expect(
       provider.getToolV2Client(request(), { harnessSessionId }),
     ).rejects.toThrow('response identity changed');
+  });
+
+  it('inspects a durable execution without recreating a process-local Runtime entry', async () => {
+    let unknown = false;
+    const status = {
+      state: 'executing',
+      cancelRequested: false,
+      lastSeq: 4,
+      firstAvailableSeq: 5,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      expect(init?.method).toBe('GET');
+      const url = String(input);
+      expect(url).toContain('/executions/execution-recovery?');
+      expect(url).toContain(`harnessSessionId=${harnessSessionId}`);
+      expect(url).toContain(`runtimeSessionId=${runtimeSessionId}`);
+      expect(url).toContain('afterSeq=3');
+      if (unknown) {
+        return new Response(
+          JSON.stringify({
+            error: 'Tool execution outcome is unknown.',
+            code: 'runtime_broker_execution_unknown',
+            retryable: true,
+          }),
+          {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      }
+      return json(envelope({ executionCallId: 'execution-recovery', status }));
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const identity = {
+      harnessSessionId,
+      runtimeSessionId,
+      executionCallId: 'execution-recovery',
+      afterSeq: 3,
+    };
+
+    await expect(provider.inspectExecution(identity)).resolves.toEqual({
+      outcome: 'known',
+      status,
+    });
+    unknown = true;
+    await expect(provider.inspectExecution(identity)).resolves.toEqual({
+      outcome: 'unknown',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles the original execution to settlement without acquiring a new Runtime', async () => {
+    const result = {
+      executionStatus: 'success' as const,
+      result: {
+        llmContent: 'recovered output',
+        returnDisplay: 'recovered output',
+      },
+    };
+    const prepared = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const executing = { ...prepared, state: 'executing' as const };
+    const settled = {
+      ...executing,
+      state: 'settled' as const,
+      result,
+    };
+    let reads = 0;
+    const calls: Array<{ method: string; url: string }> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      calls.push({ method, url });
+      if (url.includes('/executions/execution-recovery?')) {
+        reads++;
+        return json(
+          envelope({
+            executionCallId: 'execution-recovery',
+            status: reads === 1 ? prepared : settled,
+          }),
+        );
+      }
+      if (url.endsWith('/executions/execution-recovery:start')) {
+        return json(
+          envelope({
+            executionCallId: 'execution-recovery',
+            status: executing,
+          }),
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${method} ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+
+    await expect(
+      provider.reconcileExecution({
+        harnessSessionId,
+        runtimeSessionId,
+        executionCallId: 'execution-recovery',
+        afterSeq: 0,
+      }),
+    ).resolves.toEqual({ outcome: 'known', status: settled });
+
+    expect(calls).toEqual([
+      expect.objectContaining({
+        method: 'GET',
+        url: expect.stringContaining('/executions/execution-recovery?'),
+      }),
+      expect.objectContaining({
+        method: 'POST',
+        url: expect.stringContaining('/executions/execution-recovery:start'),
+      }),
+      expect.objectContaining({
+        method: 'GET',
+        url: expect.stringContaining('/executions/execution-recovery?'),
+      }),
+    ]);
+    expect(
+      calls.some((call) => call.url.includes('tool-sessions:acquire')),
+    ).toBe(false);
   });
 });

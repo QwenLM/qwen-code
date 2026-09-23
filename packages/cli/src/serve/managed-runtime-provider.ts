@@ -10,6 +10,7 @@ import type {
   BridgeManagedRuntimeToolManifest,
   ManagedToolV2Client,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ManagedToolInvocationStatus } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
 import {
   MANAGED_LEASE_ID_HEADER,
   MANAGED_LEASE_EPOCH_HEADER,
@@ -61,11 +62,31 @@ export interface ManagedRuntimeToolClientContext {
   readonly harnessSessionId: string;
 }
 
+export interface ManagedRuntimeExecutionIdentity {
+  readonly harnessSessionId: string;
+  readonly runtimeSessionId: string;
+  readonly executionCallId: string;
+  readonly afterSeq?: number;
+}
+
+export type ManagedRuntimeExecutionInspection =
+  | {
+      readonly outcome: 'known';
+      readonly status: ManagedToolInvocationStatus;
+    }
+  | { readonly outcome: 'unknown' };
+
 export interface ManagedRuntimeProvider {
   getToolV2Client?(
     request: ManagedRuntimePrepareRequest,
     context?: ManagedRuntimeToolClientContext,
   ): Promise<ManagedToolV2Client>;
+  inspectExecution?(
+    identity: ManagedRuntimeExecutionIdentity,
+  ): Promise<ManagedRuntimeExecutionInspection>;
+  reconcileExecution?(
+    identity: ManagedRuntimeExecutionIdentity,
+  ): Promise<ManagedRuntimeExecutionInspection>;
   prepare(request: ManagedRuntimePrepareRequest): ManagedRuntimeHandle;
   cancel(
     sessionId: string,

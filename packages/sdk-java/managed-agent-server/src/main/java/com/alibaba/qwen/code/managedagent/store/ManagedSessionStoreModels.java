@@ -40,6 +40,8 @@ public final class ManagedSessionStoreModels {
             "managed_session_journal_corrupt";
     public static final String ERROR_HEAD_CORRUPT =
             "managed_session_head_corrupt";
+    public static final String ERROR_RECOVERY_CONFLICT =
+            "managed_session_recovery_conflict";
     private static final String DIGEST_PATTERN = "^[0-9a-f]{64}$";
 
     private ManagedSessionStoreModels() {
@@ -74,6 +76,21 @@ public final class ManagedSessionStoreModels {
     }
 
     public record SealReceipt(long writerGeneration, String state,
+            boolean replayed) {
+    }
+
+    public record BlockRecoveryRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank @Pattern(regexp =
+                    "BLOCKED_RESOURCE|BLOCKED_WORKSPACE|BLOCKED_EXECUTION")
+                    String recoveryStatus,
+            @NotBlank @Size(max = 4096) String recoveryDetailCode) {
+    }
+
+    public record RecoveryStateReceipt(long writerGeneration,
+            String recoveryStatus, String recoveryDetailCode,
             boolean replayed) {
     }
 

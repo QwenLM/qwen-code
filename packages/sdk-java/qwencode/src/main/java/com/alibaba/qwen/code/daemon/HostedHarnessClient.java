@@ -35,6 +35,8 @@ public final class HostedHarnessClient implements AutoCloseable {
     static final String PROTOCOL_HEADER = "X-Qwen-Harness-Protocol-Version";
     static final String CLIENT_ID_HEADER = "X-Qwen-Client-Id";
     static final String EVENT_EPOCH_HEADER = "X-Qwen-Event-Epoch";
+    static final String MANAGED_RUNTIME_RECOVERY_META_KEY =
+            "qwen.daemon.managedRuntimeRecovery";
 
     private static final int PROTOCOL_VERSION = 1;
     private static final Pattern UUID_PATTERN = Pattern.compile(
@@ -47,6 +49,12 @@ public final class HostedHarnessClient implements AutoCloseable {
             "^[A-Za-z0-9._:-]{1,128}$");
     private static final Pattern EVENT_EPOCH_PATTERN = Pattern.compile(
             "^[A-Za-z0-9_-]{1,64}$");
+    private static final Set<String> RUNTIME_RECOVERY_OUTCOMES =
+            Set.of("known", "unknown");
+    private static final Set<String> RUNTIME_RECOVERY_PHASES =
+            Set.of("await_runtime", "results_ready");
+    private static final Set<String> RUNTIME_EXECUTION_STATES =
+            Set.of("prepared", "executing", "cancel_requested", "settled");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
 
     private final String baseUrl;
@@ -245,6 +253,51 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw e;
         } catch (DaemonProtocolException e) {
             throw new PromptAdmissionUnknownException(e);
+        }
+    }
+
+    public PromptReceipt continueManagedRuntime(HarnessSessionRef session,
+            String promptId, String checkpointId, String activationId) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String stablePromptId = requireUuid(promptId, "promptId");
+        String checkpoint = requireBoundedRecoveryText(checkpointId,
+                "checkpointId");
+        String activation = requireBoundedRecoveryText(activationId,
+                "activationId");
+        String operation = "POST /session/:id/managed-runtime/continue";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/managed-runtime/continue",
+                Map.of("promptId", stablePromptId,
+                        "checkpointId", checkpoint,
+                        "activationId", activation),
+                ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 200, operation);
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(),
+                    "managed Runtime continuation response");
+            if (!JsonSupport.requiredBoolean(json, "accepted",
+                    "managed Runtime continuation")) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not admit the Runtime continuation");
+            }
+            String responsePromptId = parseWireUuid(
+                    JsonSupport.requiredString(json, "promptId",
+                            "managed Runtime continuation"),
+                    "managed Runtime continuation.promptId");
+            if (!stablePromptId.equals(responsePromptId)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness returned a different continuation promptId");
+            }
+            return new PromptReceipt(responsePromptId,
+                    JsonSupport.requiredNonNegativeLong(json, "lastEventId",
+                            "managed Runtime continuation"),
+                    requireEventEpoch(JsonSupport.requiredString(json,
+                            "eventEpoch", "managed Runtime continuation"),
+                            false));
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
         }
     }
 
@@ -658,9 +711,126 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new DaemonProtocolException(
                     context + ".clientId is invalid");
         }
+        HarnessRuntimeRecovery runtimeRecovery = parseRuntimeRecovery(json,
+                context);
+        Long lastEventId = json.containsKey("lastEventId")
+                ? JsonSupport.requiredNonNegativeLong(json, "lastEventId",
+                        context)
+                : null;
+        String eventEpoch = requireEventEpoch(
+                JsonSupport.optionalString(json, "eventEpoch"), true);
+        if ((lastEventId == null) != (eventEpoch == null)) {
+            throw new DaemonProtocolException(context
+                    + " must carry lastEventId and eventEpoch together");
+        }
+        if (runtimeRecovery != null && eventEpoch == null) {
+            throw new DaemonProtocolException(context
+                    + " must carry an event watermark for Runtime recovery");
+        }
         return new HarnessSessionRef(sessionId, clientId,
                 capabilities.getBootId(), JsonSupport.requiredString(json,
-                        "workspaceCwd", context));
+                        "workspaceCwd", context), runtimeRecovery,
+                lastEventId, eventEpoch);
+    }
+
+    private HarnessRuntimeRecovery parseRuntimeRecovery(
+            Map<String, Object> session, String context) {
+        Map<String, Object> metadata = JsonSupport.optionalObject(session,
+                "_meta");
+        if (metadata == null) {
+            return null;
+        }
+        Map<String, Object> recovery = JsonSupport.optionalObject(metadata,
+                MANAGED_RUNTIME_RECOVERY_META_KEY);
+        if (recovery == null) {
+            return null;
+        }
+        String phase = boundedRecoveryText(recovery, "phase", context);
+        if (!RUNTIME_RECOVERY_PHASES.contains(phase)) {
+            throw new DaemonProtocolException(context
+                    + "._meta managed Runtime recovery phase is invalid");
+        }
+        String checkpointId = boundedRecoveryText(recovery,
+                "checkpointId", context);
+        String activationId = boundedRecoveryText(recovery,
+                "activationId", context);
+        List<Object> rawExecutions = JsonSupport.optionalList(recovery,
+                "executions");
+        if (rawExecutions == null || rawExecutions.isEmpty()
+                || rawExecutions.size() > 1024) {
+            throw new DaemonProtocolException(context
+                    + "._meta managed Runtime recovery executions"
+                    + " must contain 1-1024 items");
+        }
+        List<HarnessRuntimeExecutionRecovery> executions = new ArrayList<>();
+        for (Object raw : rawExecutions) {
+            Map<String, Object> execution = JsonSupport.extensionObject(raw);
+            if (execution == null) {
+                throw new DaemonProtocolException(context
+                        + "._meta managed Runtime recovery execution"
+                        + " must be an object");
+            }
+            String outcome = boundedRecoveryText(execution, "outcome",
+                    context);
+            if (!RUNTIME_RECOVERY_OUTCOMES.contains(outcome)) {
+                throw new DaemonProtocolException(context
+                        + "._meta managed Runtime recovery outcome is invalid");
+            }
+            Map<String, Object> status = JsonSupport.optionalObject(execution,
+                    "status");
+            if ("known".equals(outcome)) {
+                if (status == null
+                        || !RUNTIME_EXECUTION_STATES.contains(
+                                JsonSupport.requiredString(status, "state",
+                                        context))) {
+                    throw new DaemonProtocolException(context
+                            + "._meta managed Runtime recovery status is invalid");
+                }
+            } else if (status != null) {
+                throw new DaemonProtocolException(context
+                        + "._meta unknown Runtime recovery cannot carry status");
+            }
+            String progressCursor = JsonSupport.optionalString(execution,
+                    "progressCursor");
+            if (progressCursor != null
+                    && !isBoundedRecoveryText(progressCursor)) {
+                throw new DaemonProtocolException(context
+                        + "._meta managed Runtime progress cursor is invalid");
+            }
+            executions.add(new HarnessRuntimeExecutionRecovery(
+                    boundedRecoveryText(execution, "functionCallId", context),
+                    boundedRecoveryText(execution, "toolName", context),
+                    boundedRecoveryText(execution, "executionCallId", context),
+                    boundedRecoveryText(execution, "runtimeSessionId", context),
+                    progressCursor, outcome, status));
+        }
+        return new HarnessRuntimeRecovery(phase, checkpointId, activationId,
+                executions);
+    }
+
+    private static String boundedRecoveryText(Map<String, Object> value,
+            String field, String context) {
+        String result = JsonSupport.requiredString(value, field, context);
+        if (!isBoundedRecoveryText(result)) {
+            throw new DaemonProtocolException(context + "._meta managed Runtime "
+                    + field + " is invalid");
+        }
+        return result;
+    }
+
+    private static String requireBoundedRecoveryText(String value,
+            String field) {
+        String result = requireNonBlank(value, field);
+        if (!isBoundedRecoveryText(result)) {
+            throw new IllegalArgumentException(
+                    field + " must not exceed 512 UTF-8 bytes");
+        }
+        return result;
+    }
+
+    private static boolean isBoundedRecoveryText(String value) {
+        return value.indexOf('\0') < 0
+                && value.getBytes(StandardCharsets.UTF_8).length <= 512;
     }
 
     private HttpSupport.Response sendRead(String path,

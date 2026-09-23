@@ -477,6 +477,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -5180,6 +5181,22 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async withManagedRuntimeRecoveryHint<
+    T extends { _meta?: Record<string, unknown> | null },
+  >(session: Session | undefined, response: T): Promise<T> {
+    const recovery = await session?.readManagedRuntimeRecoveryHint?.();
+    if (recovery === undefined || recovery === null) return response;
+    return {
+      ...response,
+      _meta: {
+        ...(response._meta && typeof response._meta === 'object'
+          ? response._meta
+          : {}),
+        [DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY]: recovery,
+      },
+    };
+  }
+
   private async withRestoreHints<
     T extends { _meta?: Record<string, unknown> | null },
   >(
@@ -5192,7 +5209,11 @@ class QwenAgent implements Agent {
       response,
       suppressRestoreAskUserQuestion,
     );
-    return this.withManagedApprovalRestoreHint(session, withSessionMeta);
+    const withApproval = await this.withManagedApprovalRestoreHint(
+      session,
+      withSessionMeta,
+    );
+    return this.withManagedRuntimeRecoveryHint(session, withApproval);
   }
 
   private async retryPendingConfigCleanup(
@@ -14194,6 +14215,31 @@ class QwenAgent implements Agent {
         const result = await session.continueLastTurn();
         debugLogger.info(
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
+        );
+        return result;
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeContinue: {
+        const sessionId = params['sessionId'];
+        const checkpointId = params['checkpointId'];
+        const activationId = params['activationId'];
+        if (
+          typeof sessionId !== 'string' ||
+          sessionId.length === 0 ||
+          typeof checkpointId !== 'string' ||
+          checkpointId.length === 0 ||
+          typeof activationId !== 'string' ||
+          activationId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid managed Runtime continuation identity',
+          );
+        }
+        const result = await this.sessionOrThrow(
+          sessionId,
+        ).continueManagedRuntime(checkpointId, activationId);
+        debugLogger.info(
+          `sessionManagedRuntimeContinue sessionId=${sessionId} accepted=${result.accepted}`,
         );
         return result;
       }

@@ -164,6 +164,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
+import { ManagedSessionNotFoundError } from '../managed-runtime/managed-session-authority.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
@@ -6317,6 +6318,69 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([activationError, releaseError]);
       expect(release).toHaveBeenCalledOnce();
       acquire.mockRestore();
+    });
+
+    it('preserves a managed restore error with a protocol code during writer cleanup', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
+      const runtimeBaseDir = path.join(root, 'runtime');
+      const projectDir = path.join(root, 'project');
+      const sessionId = '550e8400-e29b-41d4-a716-446655440289';
+      await mkdir(projectDir, { recursive: true });
+      const failure = new ManagedSessionNotFoundError(sessionId);
+
+      try {
+        await Storage.runWithResolvedRuntimeBaseDir(
+          runtimeBaseDir,
+          async () => {
+            const config = new Config({
+              ...baseParams,
+              sessionId,
+              cwd: projectDir,
+              targetDir: projectDir,
+              chatRecording: true,
+              experimentalZedIntegration: true,
+              sessionWriterLeaseEnabled: true,
+              managedToolSessionFactory: () => {
+                throw new Error('must not create tools');
+              },
+              sessionRestoreProjectionSource: async () => {
+                throw failure;
+              },
+            });
+            let released = false;
+            const release = vi.fn().mockImplementation(async () => {
+              released = true;
+            });
+            const acquire = vi
+              .spyOn(SessionWriterLease, 'acquire')
+              .mockResolvedValue({
+                transcriptExistedAtAcquire: false,
+                assertOwnedAndUnchanged: vi.fn(),
+                release,
+                get isReleased() {
+                  return released;
+                },
+                isReleaseDurabilityPending: false,
+              } as unknown as SessionWriterLease);
+            vi.spyOn(
+              config.getSessionService(),
+              'getSessionLocation',
+            ).mockResolvedValue(undefined);
+
+            try {
+              await expect(
+                config.initialize({ sessionExecutionEngine: 'managed' }),
+              ).rejects.toBe(failure);
+              expect(release).toHaveBeenCalledOnce();
+              expect(config.hasSessionWriteOwnership()).toBe(false);
+            } finally {
+              acquire.mockRestore();
+            }
+          },
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
 
     it('does not report the same acquisition release failure twice', async () => {

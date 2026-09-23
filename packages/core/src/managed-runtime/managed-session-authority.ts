@@ -303,6 +303,7 @@ export class LocalManagedSessionAuthority {
   ) {}
 
   private writeFailure: Error | undefined;
+  private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly eventIds = new Set<string>();
   private readonly checkpointSequences = new Map<string, number>();
@@ -335,6 +336,24 @@ export class LocalManagedSessionAuthority {
   /** The activation the log currently records, if any. */
   get currentActivation(): ManagedSessionActivationState | undefined {
     return this.activation;
+  }
+
+  blockRecovery(request: {
+    readonly status:
+      | 'BLOCKED_RESOURCE'
+      | 'BLOCKED_WORKSPACE'
+      | 'BLOCKED_EXECUTION';
+    readonly detailCode: string;
+  }): Promise<void> {
+    return this.runSerial(async () => {
+      if (this.journal.blockRecovery === undefined) {
+        throw new ManagedSessionRecordError(
+          'the Managed Session journal cannot persist a recovery block.',
+        );
+      }
+      await this.journal.blockRecovery(request);
+      this.recoveryBlocked = true;
+    });
   }
 
   static async open(
@@ -1433,6 +1452,7 @@ export class LocalManagedSessionAuthority {
    * that is already gone is not an error: there is nothing left to fence.
    */
   async releaseActivation(): Promise<void> {
+    if (this.recoveryBlocked) return;
     const current = this.activation;
     if (
       current === undefined ||

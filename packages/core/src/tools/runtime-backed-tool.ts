@@ -19,6 +19,7 @@ import {
   type ManagedToolCallIdentity,
 } from './managed-tool-protocol.js';
 import type {
+  ManagedToolExecutionReservation,
   ManagedToolV2Client,
   ManagedToolExecutionResult,
   ManagedToolInvocationStatus,
@@ -112,6 +113,7 @@ class RuntimeBackedInvocation
   private context?: { callId: string; promptId: string };
   private signal?: AbortSignal;
   private authorized = false;
+  private executionReservation?: Promise<ManagedToolExecutionReservation>;
   private cancelled = false;
   private cancellation?: Promise<void>;
   private execution?: Promise<ToolResult>;
@@ -346,6 +348,51 @@ class RuntimeBackedInvocation
     this.authorized = true;
   }
 
+  prepareExecution(): Promise<ManagedToolExecutionReservation> {
+    this.ready();
+    this.checkAdmission();
+    if (!this.authorized) {
+      return Promise.reject(
+        new Error(
+          'Managed tool invocation has not been authorized by its scheduler.',
+        ),
+      );
+    }
+    const prepareExecution = this.client!.prepareExecution;
+    if (
+      (prepareExecution === undefined) !==
+      (this.client!.startExecution === undefined)
+    ) {
+      return Promise.reject(
+        new Error('Managed tool execution reservation contract is incomplete.'),
+      );
+    }
+    this.executionReservation ??= (
+      prepareExecution
+        ? prepareExecution(this.reference!)
+        : Promise.resolve({
+            executionCallId: this.toolUseId,
+            invocationBindingId: this.toolUseId,
+          })
+    ).then((reservation) => {
+      if (
+        ![reservation.executionCallId, reservation.invocationBindingId].every(
+          (value) =>
+            typeof value === 'string' &&
+            value.length > 0 &&
+            value.length <= 512 &&
+            !value.includes('\0'),
+        )
+      ) {
+        throw new Error('Managed tool execution reservation is invalid.');
+      }
+      return structuredClone(reservation);
+    });
+    return this.executionReservation.then((reservation) =>
+      structuredClone(reservation),
+    );
+  }
+
   execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
@@ -363,10 +410,17 @@ class RuntimeBackedInvocation
     };
     signal.addEventListener('abort', onAbort, { once: true });
     this.execution = (async () => {
+      const reservation = await this.prepareExecution();
       let rpcEnded = false;
       let rpcError: unknown;
       // Send execute exactly once. A lost response is recovered with status.
-      void this.client!.execute(this.reference!).then(
+      const remoteExecution = this.client!.startExecution
+        ? this.client!.startExecution(
+            this.reference!,
+            reservation.executionCallId,
+          )
+        : this.client!.execute(this.reference!);
+      void remoteExecution.then(
         (result) => {
           this.acceptResult(result);
           rpcEnded = true;

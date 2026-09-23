@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -220,6 +221,50 @@ class ManagedAgentMySqlIT {
 
     @Test
     @Order(2)
+    void shortWriterLeaseKeepsSubsecondDatabasePrecision()
+            throws InterruptedException {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        String tenant = "mysql-lease-precision";
+        String session = "mysql-lease-precision-session";
+        jdbc.update("DELETE FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant,
+                session);
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        boolean precisionWindowReached = false;
+        while (System.nanoTime() < deadline) {
+            Integer micros = jdbc.queryForObject(
+                    "SELECT MICROSECOND(CURRENT_TIMESTAMP(6))",
+                    Integer.class);
+            if (micros != null && micros >= 600_000 && micros <= 700_000) {
+                precisionWindowReached = true;
+                break;
+            }
+            Thread.sleep(5);
+        }
+        assertThat(precisionWindowReached).isTrue();
+
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        ManagedSessionStore store = new ManagedSessionStore(jdbc);
+        WriterGrant grant = inTransaction(transactions,
+                () -> store.acquireWriter(tenant, session,
+                        "cccccccccccccccccccccccccccccccc",
+                        new AcquireWriterRequest("mysql-lease-workspace",
+                                "mysql-lease-writer", 1_000L)));
+        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",
+                Timestamp.class);
+
+        assertThat(now).isNotNull();
+        assertThat(grant.leaseUntil() - now.getTime())
+                .isBetween(700L, 1_000L);
+    }
+
+    @Test
+    @Order(3)
     void independentProcessesRecoverACommittedSessionAfterOwnerLoss()
             throws Exception {
         DriverManagerDataSource dataSource = dataSource();

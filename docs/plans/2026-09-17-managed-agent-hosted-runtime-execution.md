@@ -94,7 +94,9 @@ TTFT 的关键路径只有 `Java admission -> Harness -> Model`。Runtime provis
 ```text
 POST /tool-sessions:acquire
 POST /tool-sessions/{runtimeSessionId}/control
-POST /executions
+POST /executions:prepare
+POST /executions/{executionCallId}:start
+POST /executions # 兼容 create-and-start
 GET  /executions/{executionCallId}
 GET  /executions/{executionCallId}/events
 POST /executions/{executionCallId}:cancel
@@ -107,7 +109,7 @@ P2 的 qwen client 先通过 `GET /executions/{executionCallId}` 轮询状态；
 
 - Bearer 只用于服务到服务认证；tenant/workspace 不从请求体采信。
 - `control.kind` 使用封闭枚举，不提供任意 URL 或方法透传。
-- 每条命令有稳定 `requestId`；执行另外使用稳定 `idempotencyKey`。
+- 每条命令有稳定 `requestId`；执行另外使用稳定 `idempotencyKey`。Harness 必须先 prepare 并提交返回的 `executionCallId`，再显式 start；GET 不能隐式启动 PREPARED execution。
 - Broker 响应不包含 Runtime endpoint、token、Pod 名、lease 或调度信息。
 - 请求失败必须返回稳定错误码和 `retryable`，Harness 不自行切换 Runtime。
 

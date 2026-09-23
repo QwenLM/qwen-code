@@ -60,7 +60,21 @@ export type ManagedToolV2Client = {
     | 'cancel']: (
     ...args: Parameters<ManagedToolRuntime[K]>
   ) => Promise<Awaited<ReturnType<ManagedToolRuntime[K]>>>;
-} & { fileHistory?: ManagedToolFileHistoryClient };
+} & {
+  fileHistory?: ManagedToolFileHistoryClient;
+  prepareExecution?: (
+    reference: ManagedToolInvocationReference,
+  ) => Promise<ManagedToolExecutionReservation>;
+  startExecution?: (
+    reference: ManagedToolInvocationReference,
+    executionCallId: string,
+  ) => Promise<ManagedToolExecutionResult>;
+};
+
+export interface ManagedToolExecutionReservation {
+  executionCallId: string;
+  invocationBindingId: string;
+}
 
 export interface ManagedToolExecutionResult {
   executionStatus: 'not_started' | 'success' | 'error' | 'cancelled';
