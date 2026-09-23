@@ -562,6 +562,21 @@ export function createChannelManagementService(
       }
       assertWorkspaceConfig(persisted.channels[name]!);
       if (!workspaceCommittedNames().includes(name)) {
+        // A channel listed as `error` with nothing running — a restore that
+        // failed, or a replacement rolled back after its reload failed — has
+        // no worker to restart. Clients offer "retry" for that state, and
+        // retrying it means starting it.
+        if (
+          diagnostics.has(name) ||
+          opts.restoreFailures?.get(opts.workspaceCwd, name)
+        ) {
+          await opts.manager.setChannelEnabled(
+            { name, workspaceCwd: opts.workspaceCwd },
+            true,
+          );
+          forgetDiagnostics(name);
+          return resultFor(name, persisted);
+        }
         throw new ChannelManagementError(
           'channel_worker_not_enabled',
           `Channel "${name}" is not running.`,

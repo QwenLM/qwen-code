@@ -16132,6 +16132,84 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('retries a failed late restore from the channel list', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-retry-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    // The restore's worker fails; the one the retry starts connects.
+    let attempts = 0;
+    daemon.factory.mockImplementation(
+      (opts: CreateChannelWorkerSupervisorOptions) => {
+        attempts += 1;
+        const channels =
+          opts.selection.mode === 'names' ? [...opts.selection.names] : [];
+        const failing = attempts === 1;
+        const worker = makeWorker({
+          enabled: true,
+          state: failing ? 'failed' : 'running',
+          channels: failing ? [] : channels,
+          requestedChannels: channels,
+          ...(failing
+            ? {}
+            : {
+                adapters: channels.map((name) => ({
+                  name,
+                  state: 'connected' as const,
+                })),
+              }),
+        });
+        if (failing) {
+          worker.start.mockRejectedValue(new Error('feishu refused'));
+        } else {
+          worker.start.mockImplementation(async () => {
+            opts.onReady?.(worker.snapshot());
+          });
+        }
+        return worker;
+      },
+    );
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      const { id } = (await added.json()) as { id: string };
+      const channelsUrl = `${handle.url}/workspaces/${encodeURIComponent(id)}/channels`;
+      const feishuRuntime = async () =>
+        (
+          (await (
+            await fetch(channelsUrl, { headers: daemon.headers })
+          ).json()) as {
+            instances: Record<string, { runtime: Record<string, unknown> }>;
+          }
+        ).instances['feishu']?.runtime;
+      await vi.waitFor(
+        async () =>
+          expect(await feishuRuntime()).toEqual({
+            state: 'error',
+            lastError: 'feishu refused',
+          }),
+        { timeout: 10_000 },
+      );
+
+      // Web Shell offers "Retry" for `error`, which calls restart.
+      const retried = await fetch(`${channelsUrl}/feishu/restart`, {
+        method: 'POST',
+        headers: daemon.headers,
+      });
+      expect(retried.status).toBe(200);
+      expect(await feishuRuntime()).toEqual({ state: 'connected' });
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('reports only the names a failed late restore left down, until a PUT', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-failure-put-')),
