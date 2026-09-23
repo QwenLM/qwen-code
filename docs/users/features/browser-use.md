@@ -5,14 +5,17 @@ existing tabs and signed-in sessions.
 
 ## Use
 
-Use macOS or Linux with Chrome 125 or later. **Install and enable the Qwen
-Chrome extension in the Chrome profile you want to use.** The extension is
-required and is not installed by the Qwen Code package. There is no Chrome Web
-Store listing yet. Build it from the `packages/chrome-extension` directory of
-the Qwen Code repository by following its
-[README](https://github.com/QwenLM/qwen-code/tree/main/packages/chrome-extension#readme),
-then open `chrome://extensions`, enable Developer mode, choose **Load
-unpacked**, and pick the built `dist/extension` directory.
+Use macOS or Linux with Chrome 125 or later. **Install the
+[Qwen Code extension from the Chrome Web Store](https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph)
+in the Chrome profile you want to use.** The extension is required and is not
+installed by the Qwen Code package. Chrome keeps it up to date once installed.
+
+If the Chrome Web Store says the extension is not available in your region,
+build it from source instead: follow the
+[README](https://github.com/QwenLM/qwen-code/tree/main/packages/chrome-extension#readme)
+of the `packages/chrome-extension` directory in the Qwen Code repository, then
+open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and
+pick the built `dist/extension` directory.
 
 Describe your browser task directly, for example:
 
