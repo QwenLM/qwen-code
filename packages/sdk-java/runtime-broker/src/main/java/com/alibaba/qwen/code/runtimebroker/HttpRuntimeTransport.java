@@ -1,17 +1,20 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Attestation half of the preview Managed Runtime HTTP adapter.
@@ -30,20 +33,30 @@ public final class HttpRuntimeTransport {
             "capabilityDigest", "isolationClass");
 
     private final HttpClient client;
+    private final Duration requestTimeout;
 
     public HttpRuntimeTransport() {
         this(HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(Duration.ofSeconds(5))
-                .build());
+                .build(), REQUEST_TIMEOUT);
     }
 
     public HttpRuntimeTransport(HttpClient client) {
+        this(client, REQUEST_TIMEOUT);
+    }
+
+    HttpRuntimeTransport(HttpClient client, Duration requestTimeout) {
         if (client == null) {
             throw new IllegalArgumentException("client is required");
         }
+        if (requestTimeout == null || requestTimeout.isNegative()
+                || requestTimeout.isZero()) {
+            throw new IllegalArgumentException("requestTimeout is required");
+        }
         this.client = client;
+        this.requestTimeout = requestTimeout;
     }
 
     public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
@@ -68,24 +81,45 @@ public final class HttpRuntimeTransport {
         body.put("isolationClass", scope.getIsolationClass());
         CompletableFuture<RuntimeAttestation> result =
                 new CompletableFuture<>();
-        client.sendAsync(request(lease, body),
-                HttpResponse.BodyHandlers.ofInputStream())
-                .whenComplete((response, error) -> {
+        CompletableFuture<HttpResponse<BoundedBody>> exchange = client
+                .sendAsync(request(lease, body),
+                        info -> new BoundedBodySubscriber(BODY_LIMIT_BYTES));
+        exchange.whenComplete((response, error) -> {
+            if (error != null) {
+                result.completeExceptionally(unavailable(unwrap(error)));
+                return;
+            }
+            try {
+                result.complete(parse(response, response.body(), lease,
+                        request, seed));
+            } catch (RuntimeException exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result.orTimeout(requestTimeout.toMillis(),
+                TimeUnit.MILLISECONDS).whenComplete((value, error) -> {
                     if (error != null) {
-                        result.completeExceptionally(unavailable(error));
-                        return;
+                        exchange.cancel(true);
                     }
-                    try (InputStream stream = response.body()) {
-                        byte[] bytes = readAtMost(stream);
-                        result.complete(parse(response, bytes, lease, request,
-                                seed));
-                    } catch (IOException exception) {
-                        result.completeExceptionally(unavailable(exception));
-                    } catch (RuntimeException exception) {
-                        result.completeExceptionally(exception);
+                }).handle((value, error) -> {
+                    if (error == null) {
+                        return value;
                     }
+                    Throwable cause = unwrap(error);
+                    if (cause instanceof RuntimeBrokerException failure) {
+                        throw failure;
+                    }
+                    throw unavailable(cause);
                 });
-        return result;
+    }
+
+    private static Throwable unwrap(Throwable error) {
+        Throwable cause = error;
+        while (cause instanceof CompletionException
+                && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
     }
 
     static String classificationFor(int status) {
@@ -110,7 +144,7 @@ public final class HttpRuntimeTransport {
     private HttpRequest request(RuntimeLease lease, Map<String, Object> body) {
         URI target = lease.getEndpoint().resolve(PATH);
         return HttpRequest.newBuilder(target)
-                .timeout(REQUEST_TIMEOUT)
+                .timeout(requestTimeout)
                 .header("Authorization", "Bearer " + lease.getToken())
                 .header("Cache-Control", "no-store")
                 .header("Content-Type", "application/json")
@@ -122,31 +156,17 @@ public final class HttpRuntimeTransport {
                 .build();
     }
 
-    private static byte[] readAtMost(InputStream stream) throws IOException {
-        byte[] buffer = new byte[BODY_LIMIT_BYTES + 1];
-        int offset = 0;
-        while (offset < buffer.length) {
-            int read = stream.read(buffer, offset, buffer.length - offset);
-            if (read < 0) {
-                break;
-            }
-            offset += read;
-        }
-        byte[] payload = new byte[offset];
-        System.arraycopy(buffer, 0, payload, 0, offset);
-        return payload;
-    }
-
-    private static RuntimeAttestation parse(HttpResponse<?> response,
-            byte[] bytes, RuntimeLease lease, RuntimeProvisionRequest request,
-            RuntimeProvisionSeed seed) {
+    private static RuntimeAttestation parse(HttpResponse<BoundedBody> response,
+            BoundedBody body, RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         int status = response.statusCode();
-        if (bytes.length > BODY_LIMIT_BYTES) {
+        if (body.overflow()) {
             if (status >= 500) {
                 throw failure(status);
             }
             throw tooLarge();
         }
+        byte[] bytes = body.bytes();
         if (status != 200) {
             throw failure(status);
         }
@@ -318,5 +338,100 @@ public final class HttpRuntimeTransport {
     private static RuntimeBrokerException error(int status, String code,
             String message, boolean retryable) {
         return new RuntimeBrokerException(status, code, message, retryable);
+    }
+
+    private static final class BoundedBody {
+        private final byte[] bytes;
+        private final boolean overflow;
+
+        private BoundedBody(byte[] bytes, boolean overflow) {
+            this.bytes = bytes;
+            this.overflow = overflow;
+        }
+
+        private byte[] bytes() {
+            return bytes;
+        }
+
+        private boolean overflow() {
+            return overflow;
+        }
+    }
+
+    /**
+     * Stops reading once the cap is crossed and completes the body future, so
+     * the request timeout still covers the exchange.
+     */
+    private static final class BoundedBodySubscriber
+            implements HttpResponse.BodySubscriber<BoundedBody> {
+        private final int limit;
+        private final byte[] bytes;
+        private int size;
+        private final CompletableFuture<BoundedBody> body =
+                new CompletableFuture<>();
+        private Flow.Subscription subscription;
+
+        private BoundedBodySubscriber(int limit) {
+            this.limit = limit;
+            this.bytes = new byte[limit];
+        }
+
+        @Override
+        public CompletionStage<BoundedBody> getBody() {
+            return body;
+        }
+
+        @Override
+        public void onSubscribe(Flow.Subscription newSubscription) {
+            if (subscription != null) {
+                newSubscription.cancel();
+                return;
+            }
+            subscription = newSubscription;
+            newSubscription.request(Long.MAX_VALUE);
+        }
+
+        @Override
+        public void onNext(List<ByteBuffer> buffers) {
+            if (body.isDone()) {
+                return;
+            }
+            for (ByteBuffer buffer : buffers) {
+                int remaining = limit - size;
+                if (buffer.remaining() > remaining) {
+                    copy(buffer, remaining);
+                    subscription.cancel();
+                    body.complete(new BoundedBody(copyOf(size), true));
+                    return;
+                }
+                copy(buffer, buffer.remaining());
+            }
+        }
+
+        @Override
+        public void onError(Throwable throwable) {
+            body.completeExceptionally(throwable);
+        }
+
+        @Override
+        public void onComplete() {
+            body.complete(new BoundedBody(copyOf(size), false));
+        }
+
+        private void copy(ByteBuffer buffer, int count) {
+            if (count <= 0) {
+                return;
+            }
+            byte[] chunk = new byte[count];
+            buffer.get(chunk);
+            System.arraycopy(chunk, 0, bytes, size, count);
+            size += count;
+        }
+
+        private byte[] copyOf(int length) {
+            byte[] payload = new byte[length];
+            System.arraycopy(bytes, 0, payload, 0, length);
+            return payload;
+        }
     }
 }

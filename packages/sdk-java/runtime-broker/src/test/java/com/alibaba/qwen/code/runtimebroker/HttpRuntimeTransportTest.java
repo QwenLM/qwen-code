@@ -13,7 +13,9 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -173,6 +175,69 @@ class HttpRuntimeTransportTest {
         assertEquals(503, failure.getStatusCode());
         assertEquals("managed_runtime_unavailable", failure.getCode());
         assertTrue(failure.isRetryable());
+    }
+
+    @Test
+    void failsWhenTheResponseBodyStallsPastTheRequestTimeout()
+            throws Exception {
+        HttpServer stalled = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        stalled.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            exchange.getResponseHeaders().set("Content-Type",
+                    "application/json");
+            exchange.sendResponseHeaders(200, 64);
+            try {
+                Thread.sleep(2_000);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            exchange.getResponseBody().write(new byte[64]);
+            exchange.close();
+        });
+        stalled.start();
+        HttpRuntimeTransport impatient = new HttpRuntimeTransport(
+                HttpClient.newHttpClient(), Duration.ofMillis(300));
+        JsonNode identity = suite.required("identity");
+        RuntimeScope scope = new RuntimeScope(
+                identity.required("tenantId").textValue(),
+                identity.required("workspaceId").textValue(),
+                identity.required("workspaceGeneration").textValue(),
+                identity.required("workspaceCwd").textValue(),
+                identity.required("capabilityDigest").textValue(),
+                identity.required("isolationClass").textValue());
+        RuntimeLease lease = new RuntimeLease(
+                identity.required("runtimeInstanceId").textValue(),
+                URI.create("http://127.0.0.1:" + stalled.getAddress().getPort()
+                        + "/"),
+                identity.required("token").textValue(),
+                identity.required("leaseId").textValue(),
+                identity.required("epoch").longValue());
+        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
+                identity.required("provisionRequestId").textValue(),
+                identity.required("runtimeInstanceId").textValue(),
+                identity.required("runtimeIncarnation").textValue(),
+                identity.required("leaseId").textValue(),
+                identity.required("epoch").longValue(),
+                identity.required("token").textValue());
+        long started = System.nanoTime();
+        try {
+            ExecutionException thrown = assertThrows(ExecutionException.class,
+                    () -> impatient.attest(lease,
+                            new RuntimeProvisionRequest(scope, "session-1"),
+                            seed).toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+            Throwable cause = thrown.getCause();
+            assertTrue(cause instanceof RuntimeBrokerException);
+            RuntimeBrokerException failure = (RuntimeBrokerException) cause;
+            assertEquals(503, failure.getStatusCode());
+            assertTrue(failure.isRetryable());
+            assertTrue(System.nanoTime() - started < 1_500_000_000L);
+        } finally {
+            stalled.stop(0);
+        }
     }
 
     @Test
