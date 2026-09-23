@@ -45,6 +45,7 @@ import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { isAlreadyTruncated } from '../tools/truncation.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
@@ -13397,7 +13398,12 @@ describe('CoreToolScheduler telemetry spans', () => {
         terminalWidth: 90,
         terminalHeight: 30,
       }),
-      storage: { getProjectTempDir: () => '/tmp' },
+      storage: {
+        getProjectTempDir: () => '/tmp',
+        getToolResultsDir: () => '/tmp/tool-results',
+      },
+      getToolResultBytesWritten: () => 0,
+      trackToolResultBytes: vi.fn(),
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -14107,14 +14113,13 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     // The producer's tail is what the gate used to eat.
-    expect(message).toContain('exit 7');
-    expect(message).toContain(HOOK_CONTEXT);
+    expect(message).toBe(`${FAILURE_BODY}\n\n${HOOK_CONTEXT}`);
   });
 
   it('keeps it without a hook too, so the case above is the hook path', async () => {
     const message = await runBudgetedFailure({ outputBudgetApplied: true });
 
-    expect(message).toContain('exit 7');
+    expect(message).toBe(FAILURE_BODY);
   });
 
   it('still bounds an error body the producer never sized', async () => {
@@ -14123,8 +14128,12 @@ describe('CoreToolScheduler telemetry spans', () => {
     // separately.
     const message = await runBudgetedFailure({ hookContext: HOOK_CONTEXT });
 
-    expect(message).not.toContain('exit 7');
-    expect(message).toContain(HOOK_CONTEXT);
+    const suffix = `\n\n${HOOK_CONTEXT}`;
+    expect(message.endsWith(suffix)).toBe(true);
+    const body = message.slice(0, -suffix.length);
+    expect(isAlreadyTruncated(body)).toBe(true);
+    expect(body).not.toContain('exit 7');
+    expect(body).not.toContain(HOOK_CONTEXT);
   });
 
   it('caps oversized failure-hook context without touching the body', async () => {
