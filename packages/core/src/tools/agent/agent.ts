@@ -1533,6 +1533,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     }
   }
 
+  /**
+   * Resolve a sub-agent's model selector (omitted / "inherit" / "fast" /
+   * modelId / authType:modelId) against the current config. Shared by the
+   * background and foreground reservation paths so the resolution and its
+   * `buildModelIdContext` wiring live in exactly one place.
+   */
+  private resolveSubagentModel(modelSelector?: string) {
+    return resolveModelId(modelSelector, buildModelIdContext(this.config));
+  }
+
+  /**
+   * Human-readable "how many are ahead" phrase for a slot-wait display, shared
+   * by the background and foreground wait messages so the two paths cannot
+   * drift on the queue-count wording.
+   */
+  private formatSlotQueueText(count: number): string {
+    return count === 0
+      ? 'no agents ahead'
+      : count === 1
+        ? '1 already queued'
+        : `${count} already queued`;
+  }
+
   private registerOwnedMonitorNotifications(
     agentId: string,
     enqueue: (input: AgentExternalInput) => boolean,
@@ -3022,12 +3045,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Resolve the concrete model the sub-agent (or fork) will run with so the
           // registry can apply a per-model cap. `subagentConfig.model` is a
           // selector (omitted/"inherit"/"fast"/modelId/authType:modelId);
-          // resolveModelId maps it to the actual model ID, falling back to the
-          // parent's current model when the sub-agent inherits (forks always
+          // resolveSubagentModel maps it to the actual model ID, falling back to
+          // the parent's current model when the sub-agent inherits (forks always
           // inherit, since FORK_AGENT has no model selector).
-          const resolvedSubagentModel = resolveModelId(
+          const resolvedSubagentModel = this.resolveSubagentModel(
             subagentConfig.model,
-            buildModelIdContext(this.config),
           );
           subagentModelId = resolvedSubagentModel?.modelId;
           subagentModelId ??= this.config.getModel();
@@ -3051,13 +3073,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           backgroundOwnerId,
         );
         if (!backgroundSlotReservation) {
-          const queuedCount = registry.getQueuedCount();
-          const queueText =
-            queuedCount === 0
-              ? 'no agents ahead'
-              : queuedCount === 1
-                ? '1 already queued'
-                : `${queuedCount} already queued`;
+          const queueText = this.formatSlotQueueText(registry.getQueuedCount());
           this.updateDisplay(
             {
               status: 'running',
@@ -3101,12 +3117,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // on a slot its own parent holds. Interactive forks are excluded:
         // their detached body returns a placeholder with no release site on
         // this path, so capping them would leak the slot.
-        const resolvedSubagentModel = resolveModelId(
-          subagentConfig.model,
-          buildModelIdContext(this.config),
-        );
         subagentModelId =
-          resolvedSubagentModel?.modelId ?? this.config.getModel();
+          this.resolveSubagentModel(subagentConfig.model)?.modelId ??
+          this.config.getModel();
         const fgRegistry = this.config.getBackgroundTaskRegistry();
         const perModelCap = fgRegistry.resolvePerModelCap(subagentModelId);
         if (perModelCap !== undefined) {
@@ -3115,22 +3128,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             backgroundOwnerId,
           );
           if (!backgroundSlotReservation) {
-            const queuedCount = fgRegistry.getForegroundQueuedCount();
-            const queueText =
-              queuedCount === 0
-                ? 'no agents ahead'
-                : queuedCount === 1
-                  ? '1 already queued'
-                  : `${queuedCount} already queued`;
+            const claimed =
+              fgRegistry.getClaimedModelSlotCount(subagentModelId);
+            const aheadText = this.formatSlotQueueText(
+              fgRegistry.getForegroundQueuedCount(),
+            );
             debugLogger.debug(
               `[AgentTool] Foreground launch queued behind per-model cap ` +
                 `on ${subagentModelId} (cap=${perModelCap}, ` +
-                `queued=${queuedCount}).`,
+                `claimed=${claimed}, ${aheadText}).`,
             );
             this.updateDisplay(
               {
                 status: 'running' as const,
-                terminateReason: `Waiting for a model slot (${queueText}).`,
+                terminateReason: `Waiting for a model slot (${claimed}/${perModelCap} in use, ${aheadText}).`,
               },
               updateOutput,
             );

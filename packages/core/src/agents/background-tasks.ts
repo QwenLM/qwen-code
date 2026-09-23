@@ -294,7 +294,9 @@ export interface AgentTask extends TaskBase {
    * Concrete model ID this agent runs with (resolved from the subagent's
    * model selector at launch time). Used to enforce per-model concurrency
    * caps (`agents.maxParallelAgentsByModel`); undefined when the model
-   * could not be resolved, in which case only the global cap applies.
+   * could not be resolved, in which case a background entry is bounded only
+   * by the global cap (foreground per-model claims are keyed by their own
+   * resolved model and excluded from the global budget).
    */
   model?: string;
   /**
@@ -472,10 +474,12 @@ export interface BackgroundTaskRegistryOptions {
   maxConcurrentBackgroundAgents?: number;
   /**
    * Per-model concurrency caps keyed by concrete model ID. Each value is the
-   * maximum number of background sub-agents that may run concurrently on that
-   * model. A model not present here is bounded only by the global
-   * `maxConcurrentBackgroundAgents` cap. Useful when a model has a lower
-   * concurrency capacity than the rest of the fleet.
+   * maximum number of top-level sub-agents (background and foreground
+   * alike) that may run concurrently on that model. A model not present here
+   * falls back to the global `maxConcurrentBackgroundAgents` cap for
+   * background launches and is uncapped for foreground launches — list a
+   * model here to bound its foreground fan-out. Useful when a model has a
+   * lower concurrency capacity than the rest of the fleet.
    */
   maxConcurrentBackgroundAgentsByModel?:
     | ReadonlyMap<string, number>
@@ -552,8 +556,9 @@ export class BackgroundTaskRegistry {
   >();
   private readonly maxConcurrentBackgroundAgents: number;
   // Per-model concurrency caps keyed by concrete model ID. Empty when no
-  // `agents.maxParallelAgentsByModel` is configured, in which case only the
-  // global cap is enforced.
+  // `agents.maxParallelAgentsByModel` is configured, in which case
+  // background launches fall back to the global cap and foreground launches
+  // are uncapped.
   private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
@@ -730,17 +735,14 @@ export class BackgroundTaskRegistry {
    * failure.
    */
   async waitForForegroundModelSlot(
-    signal?: AbortSignal,
-    model?: string,
+    signal: AbortSignal | undefined,
+    model: string,
     ownerId?: string | null,
   ): Promise<BackgroundSlotReservation> {
     if (signal?.aborted) {
       throw new Error(FOREGROUND_MODEL_SLOT_WAIT_CANCELLED);
     }
-    const reservation = this.tryReserveForegroundModelSlot(
-      model ?? '',
-      ownerId,
-    );
+    const reservation = this.tryReserveForegroundModelSlot(model, ownerId);
     if (reservation) {
       return reservation;
     }
@@ -774,10 +776,20 @@ export class BackgroundTaskRegistry {
     return this.foregroundWaitQueue.length;
   }
 
+  /**
+   * Number of slots currently claimed on `model` — running background agents
+   * plus outstanding foreground and background claims. Lets a caller render
+   * occupancy (`claimed/cap`) rather than only queue depth when a launch is
+   * blocked behind a running agent, which is the common case the queue-depth
+   * text alone cannot describe.
+   */
+  getClaimedModelSlotCount(model: string): number {
+    return this.getClaimedBackgroundSlotCount(model);
+  }
+
   releaseBackgroundSlot(reservation: BackgroundSlotReservation): void {
     if (this.reservedBackgroundSlots.delete(reservation.id)) {
-      this.drainWaitQueue();
-      this.drainForegroundWaitQueue();
+      this.drainQueues();
     }
   }
 
@@ -836,7 +848,7 @@ export class BackgroundTaskRegistry {
       wasRunningBackground &&
       (!entry.isBackgrounded || entry.status !== 'running')
     ) {
-      this.drainWaitQueue();
+      this.drainQueues();
     }
 
     // Foreground entries are paired with a synchronous tool-call result on
@@ -973,7 +985,7 @@ export class BackgroundTaskRegistry {
     }
     this.emitNotification(entry);
     this.emitStatusChange(entry);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   /**
@@ -1006,7 +1018,7 @@ export class BackgroundTaskRegistry {
     this.deleteAgent(agentId);
     this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // See complete() for the cancelled → terminal path rationale.
@@ -1027,7 +1039,7 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // Cancellation aborts the signal and marks the entry as cancelled, but
@@ -1074,7 +1086,7 @@ export class BackgroundTaskRegistry {
     }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
     this.emitStatusChange(entry);
-    this.drainWaitQueue();
+    this.drainQueues();
 
     // Foreground entries don't emit XML notifications and unregister
     // themselves in the tool-call's finally path, so the grace timer
@@ -1085,7 +1097,7 @@ export class BackgroundTaskRegistry {
       // Session reset paths intentionally suppress the old task's terminal
       // notification so it cannot leak into a new conversation.
       entry.notified = true;
-      this.drainWaitQueue();
+      this.drainQueues();
       return;
     }
 
@@ -1112,7 +1124,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // Emit the terminal cancelled notification once the agent's natural
@@ -1139,7 +1151,7 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // Emit the terminal cancelled notification for entries that were cancelled
@@ -1159,7 +1171,7 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   /**
@@ -1488,6 +1500,22 @@ export class BackgroundTaskRegistry {
         'Invalid background agent slot reservation; it may have been invalidated by session reset.',
       );
     }
+  }
+
+  /**
+   * Re-scan both wait queues after capacity frees. Foreground waiters are
+   * admitted first: a parked foreground launch blocks the user's
+   * synchronous turn, whereas a background waiter's caller already expects
+   * its result later as a task-notification, so the blocking call must not
+   * be starved by continuing background traffic on the same model. The
+   * background drain still runs afterward because queued background launches
+   * on other models depend on it, and a foreground-first drain cannot trip
+   * `drainWaitQueue`'s global-budget break (foreground claims are excluded
+   * from that count).
+   */
+  private drainQueues(): void {
+    this.drainForegroundWaitQueue();
+    this.drainWaitQueue();
   }
 
   private drainWaitQueue(): void {

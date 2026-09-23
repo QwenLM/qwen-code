@@ -3651,7 +3651,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as Record<string, number> | undefined,
         description:
-          'Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { "qwen3-max": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing "Waiting for a model slot") until a slot frees, so a skill or a single message issuing several Agent calls cannot oversubscribe a low-capacity model. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit. Applies to top-level launches only — nested sub-agents and teammate fan-out are not capped by this setting.',
+          'Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { "qwen3-max": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing "Waiting for a model slot") until a slot frees. Takes precedence over the global maxParallelAgents for the matched model. Applies to top-level launches only — nested sub-agents, teammate fan-out, interactive forks, and external-executor subagents are not capped by this setting. Models not listed here fall back to the global maxParallelAgents for background launches and are uncapped for foreground launches — list a model here to bound its foreground fan-out.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.SHALLOW_MERGE,
         jsonSchemaOverride: {

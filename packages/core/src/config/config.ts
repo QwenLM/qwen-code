@@ -909,10 +909,13 @@ export interface AgentsCollabSettings {
    */
   maxParallelAgents?: number;
   /**
-   * Per-model maximum number of background sub-agents running concurrently,
-   * keyed by concrete model ID. Overrides the global `maxParallelAgents` for
-   * the matched model; models not listed here fall back to the global limit.
-   * Useful when a model has a lower concurrency capacity than the rest.
+   * Per-model maximum number of top-level sub-agents running concurrently,
+   * keyed by concrete model ID. Bounds background and foreground launches
+   * alike. Overrides the global `maxParallelAgents` for the matched model;
+   * models not listed here fall back to the global limit for background
+   * launches and are uncapped for foreground launches — list a model here to
+   * bound its foreground fan-out. Useful when a model has a lower
+   * concurrency capacity than the rest.
    */
   maxParallelAgentsByModel?: Record<string, number>;
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */

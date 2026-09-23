@@ -60,6 +60,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import * as transcript from '../../agents/agent-transcript.js';
+import { FOREGROUND_MODEL_SLOT_WAIT_CANCELLED } from '../../agents/background-tasks.js';
 import {
   ExecutionCleanupError,
   type ExecutionEnvironment,
@@ -174,6 +175,7 @@ describe('AgentTool', () => {
         .fn()
         .mockResolvedValue({ id: Symbol('background-slot') }),
       getForegroundQueuedCount: vi.fn().mockReturnValue(0),
+      getClaimedModelSlotCount: vi.fn().mockReturnValue(0),
       releaseBackgroundSlot: vi.fn(),
       getQueuedCount: vi.fn().mockReturnValue(0),
       register: vi.fn(),
@@ -7046,6 +7048,7 @@ describe('AgentTool', () => {
       tryReserveForegroundModelSlot: ReturnType<typeof vi.fn>;
       waitForForegroundModelSlot: ReturnType<typeof vi.fn>;
       getForegroundQueuedCount: ReturnType<typeof vi.fn>;
+      getClaimedModelSlotCount: ReturnType<typeof vi.fn>;
       releaseBackgroundSlot: ReturnType<typeof vi.fn>;
       getQueuedCount: ReturnType<typeof vi.fn>;
       get: ReturnType<typeof vi.fn>;
@@ -7112,6 +7115,7 @@ describe('AgentTool', () => {
           .fn()
           .mockResolvedValue({ id: Symbol('background-slot') }),
         getForegroundQueuedCount: vi.fn().mockReturnValue(0),
+        getClaimedModelSlotCount: vi.fn().mockReturnValue(0),
         releaseBackgroundSlot: vi.fn(),
         getQueuedCount: vi.fn().mockReturnValue(0),
         get: vi.fn().mockReturnValue(restartedEntry),
@@ -8548,6 +8552,7 @@ describe('AgentTool', () => {
       mockRegistry.resolvePerModelCap.mockReturnValue(1);
       mockRegistry.tryReserveForegroundModelSlot.mockReturnValue(undefined);
       mockRegistry.getForegroundQueuedCount.mockReturnValue(2);
+      mockRegistry.getClaimedModelSlotCount.mockReturnValue(1);
       const reservation = { id: Symbol('fg-model-slot') };
       let releaseSlot: ((r: unknown) => void) | undefined;
       mockRegistry.waitForForegroundModelSlot.mockReturnValue(
@@ -8576,11 +8581,14 @@ describe('AgentTool', () => {
         'parent-model',
         null,
       );
+      // The display reports occupancy (claimed/cap), not just queue depth, so
+      // a launch blocked behind a running agent is distinguishable from one
+      // blocked behind queued launches.
       expect(
         updates.some(
           (u) =>
             (u as AgentResultDisplay).terminateReason ===
-            'Waiting for a model slot (2 already queued).',
+            'Waiting for a model slot (1/1 in use, 2 already queued).',
         ),
       ).toBe(true);
 
@@ -8597,6 +8605,138 @@ describe('AgentTool', () => {
       expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledWith(
         reservation,
       );
+    });
+
+    it('does not reserve a foreground per-model slot for a nested launch', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      // A cap IS configured, so the only reason to skip the reservation is
+      // the isTopLevelSession() gate (the deadlock guard).
+      mockRegistry.resolvePerModelCap.mockReturnValue(1);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      // Running inside an agent frame makes isTopLevelSession() false.
+      await runWithAgentContext('sub-1', () => invocation.execute());
+
+      expect(mockRegistry.tryReserveForegroundModelSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.waitForForegroundModelSlot).not.toHaveBeenCalled();
+    });
+
+    it('does not reserve a foreground per-model slot for an interactive fork', async () => {
+      // A cap IS configured, so the only reason to skip the reservation is
+      // the !isFork gate (the leak guard for the detached fork body).
+      mockRegistry.resolvePerModelCap.mockReturnValue(1);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Fork work',
+        prompt: 'Fork the session',
+        subagent_type: 'fork',
+      });
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockRegistry.tryReserveForegroundModelSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.waitForForegroundModelSlot).not.toHaveBeenCalled();
+    });
+
+    it('does not reserve a foreground per-model slot for an external-executor subagent', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        name: 'peer',
+        background: undefined,
+        executor: { kind: 'acp', command: 'peer' },
+      });
+      // A cap IS configured, so the only reason to skip the reservation is
+      // the executor === undefined gate.
+      mockRegistry.resolvePerModelCap.mockReturnValue(1);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Peer work',
+        prompt: 'Delegate to peer',
+        subagent_type: 'peer',
+        run_in_background: false,
+      });
+      await invocation.execute();
+
+      expect(mockRegistry.tryReserveForegroundModelSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.waitForForegroundModelSlot).not.toHaveBeenCalled();
+    });
+
+    it('reports a clean cancellation when the user aborts a queued foreground launch', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      mockRegistry.resolvePerModelCap.mockReturnValue(1);
+      mockRegistry.tryReserveForegroundModelSlot.mockReturnValue(undefined);
+      mockRegistry.waitForForegroundModelSlot.mockRejectedValue(
+        new Error(FOREGROUND_MODEL_SLOT_WAIT_CANCELLED),
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(
+        FOREGROUND_MODEL_SLOT_WAIT_CANCELLED,
+      );
+      expect((result.returnDisplay as AgentResultDisplay).status).toBe(
+        'cancelled',
+      );
+      // The sub-agent never started — the launch was cancelled while queued.
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a genuine registry fault during a foreground wait as a failure, not a cancellation', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      mockRegistry.resolvePerModelCap.mockReturnValue(1);
+      mockRegistry.tryReserveForegroundModelSlot.mockReturnValue(undefined);
+      mockRegistry.waitForForegroundModelSlot.mockRejectedValue(
+        new Error('registry exploded'),
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const result = await invocation.execute();
+
+      expect((result.returnDisplay as AgentResultDisplay).status).toBe(
+        'failed',
+      );
+      expect(partToString(result.llmContent)).toContain('registry exploded');
+      expect(mockAgent.execute).not.toHaveBeenCalled();
     });
 
     it('routes owned monitor notifications and cleanup for foreground agents', async () => {
