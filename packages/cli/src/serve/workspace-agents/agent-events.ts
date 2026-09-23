@@ -108,8 +108,14 @@ function queueChange(hub: Hub, threadId: string): void {
  * that died goes offline precisely by writing nothing.
  */
 async function checkHosts(hub: Hub, workspaceCwd: string): Promise<void> {
+  let hosts: Awaited<ReturnType<typeof readAgentHosts>>;
+  try {
+    hosts = await readAgentHosts(workspaceCwd);
+  } catch {
+    // A busy store lock is not "every runtime left"; the next check decides.
+    return;
+  }
   const now = Date.now();
-  const hosts = await readAgentHosts(workspaceCwd).catch(() => []);
   const key = JSON.stringify(
     hosts.map(({ lastSeenAt, ...host }) => ({
       ...host,
