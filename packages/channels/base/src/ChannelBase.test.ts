@@ -1288,7 +1288,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
-    it('keeps group traffic on senderPolicy when groupSenderPolicy is unset', async () => {
+    it('keeps group traffic on senderPolicy when groups set no senders', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['admin'],
@@ -1300,12 +1300,12 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('admits any group member with groupSenderPolicy=open', async () => {
+    it('admits any group member with senders=open', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['admin'],
         groupPolicy: 'open',
-        groupSenderPolicy: 'open',
+        groups: { '*': { senders: 'open' } },
       });
       await ch.handleInbound(
         envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
@@ -1317,13 +1317,12 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('gates group members with allowedGroupUsers', async () => {
+    it('gates group members with a per-group allowedUsers list', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['admin'],
         groupPolicy: 'open',
-        groupSenderPolicy: 'allowlist',
-        allowedGroupUsers: ['member1'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['member1'] } },
       });
       await ch.handleInbound(
         envelope({ isGroup: true, isMentioned: true, senderId: 'member1' }),
@@ -1341,13 +1340,96 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('lets one group override the senders default from groups["*"]', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+        groupPolicy: 'open',
+        groups: {
+          '*': { senders: 'open' },
+          ops: { senders: 'allowlist', allowedUsers: ['oncall'] },
+        },
+      });
+      const inGroup = (chatId: string, senderId: string) =>
+        envelope({ chatId, isGroup: true, isMentioned: true, senderId });
+
+      await ch.handleInbound(inGroup('lobby', 'stranger'));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      await ch.handleInbound(inGroup('ops', 'stranger'));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      await ch.handleInbound(inGroup('ops', 'oncall'));
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('resolves senders and allowedUsers field by field', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+        groupPolicy: 'open',
+        groups: {
+          '*': { allowedUsers: ['member1'] },
+          ops: { senders: 'allowlist' },
+        },
+      });
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'ops',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'member1',
+        }),
+      );
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('lets explicit senders narrow an approved pairing group', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-senders-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const store = new PairingStore('test-chan', '/tmp');
+        store.approve(
+          pairingCodeOf(
+            store.createGroupRequest('chat1', 'Team', 'alice', 'Alice'),
+          ),
+        );
+        const approvedGroup = (senderId: string) =>
+          envelope({ isGroup: true, isMentioned: true, senderId });
+
+        const byDefault = createChannel({
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+          groupPolicy: 'pairing',
+        });
+        await byDefault.handleInbound(approvedGroup('stranger'));
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+        const narrowed = createChannel({
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+          groupPolicy: 'pairing',
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        });
+        await narrowed.handleInbound(approvedGroup('stranger'));
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        await narrowed.handleInbound(approvedGroup('alice'));
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
     it('logs the axis in the preflight rejection reason for group sender gates', async () => {
       const ch = createChannel({
         senderPolicy: 'allowlist',
         allowedUsers: ['stranger'],
         groupPolicy: 'open',
-        groupSenderPolicy: 'allowlist',
-        allowedGroupUsers: ['member1'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['member1'] } },
       });
       const writeSpy = vi
         .spyOn(process.stderr, 'write')
@@ -3299,7 +3381,7 @@ describe('ChannelBase', () => {
       const ch = createChannel({
         senderPolicy: 'pairing',
         groupPolicy: 'open',
-        groupSenderPolicy: 'open',
+        groups: { '*': { senders: 'open' } },
         sessionScope: 'chat_thread',
       });
       const sessionId = await startSession(ch, {
@@ -3370,7 +3452,7 @@ describe('ChannelBase', () => {
           const ch = createChannel({
             senderPolicy: 'pairing',
             groupPolicy: 'open',
-            groupSenderPolicy: 'open',
+            groups: { '*': { senders: 'open' } },
             sessionScope: 'chat_thread',
           });
           const sessionId = await startSession(ch, {
@@ -3394,7 +3476,7 @@ describe('ChannelBase', () => {
         const ch = createChannel({
           senderPolicy: 'open',
           groupPolicy: 'open',
-          groupSenderPolicy: 'open',
+          groups: { '*': { senders: 'open' } },
           sessionScope: 'chat_thread',
         });
         const sessionId = await startSession(ch, {
@@ -3406,13 +3488,12 @@ describe('ChannelBase', () => {
         expect(await approveAs(ch, 'stranger', 'req-1')).toBe(true);
       });
 
-      it('lets allowedGroupUsers operate under an allowlist group axis', async () => {
+      it('lets the group allowedUsers operate under senders=allowlist', async () => {
         const ch = createChannel({
           senderPolicy: 'allowlist',
           allowedUsers: [],
           groupPolicy: 'open',
-          groupSenderPolicy: 'allowlist',
-          allowedGroupUsers: ['bob'],
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['bob'] } },
           sessionScope: 'chat_thread',
         });
         const sessionId = await startSession(ch, { ...group, senderId: 'bob' });
@@ -10999,7 +11080,7 @@ describe('ChannelBase', () => {
         {
           senderPolicy: 'pairing',
           groupPolicy: 'open',
-          groupSenderPolicy: 'open',
+          groups: { '*': { senders: 'open' } },
           sessionScope: 'chat_thread',
         },
         {
@@ -23156,8 +23237,7 @@ describe('ChannelBase', () => {
           senderPolicy: 'allowlist',
           allowedUsers: ['owner'],
           groupPolicy: 'open',
-          groupSenderPolicy: 'allowlist',
-          allowedGroupUsers: ['alice'],
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
         },
         {
           loopController: {
