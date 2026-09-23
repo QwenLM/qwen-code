@@ -1288,6 +1288,84 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
+    it('keeps group traffic on senderPolicy when groupSenderPolicy is unset', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['admin'],
+        groupPolicy: 'open',
+      });
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('admits any group member with groupSenderPolicy=open', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['admin'],
+        groupPolicy: 'open',
+        groupSenderPolicy: 'open',
+      });
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
+      );
+      expect(bridge.prompt).toHaveBeenCalled();
+
+      bridge.prompt.mockClear();
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('gates group members with allowedGroupUsers', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['admin'],
+        groupPolicy: 'open',
+        groupSenderPolicy: 'allowlist',
+        allowedGroupUsers: ['member1'],
+      });
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'member1' }),
+      );
+      expect(bridge.prompt).toHaveBeenCalled();
+
+      bridge.prompt.mockClear();
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      bridge.prompt.mockClear();
+      await ch.handleInbound(envelope({ senderId: 'member1' }));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('logs the axis in the preflight rejection reason for group sender gates', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['stranger'],
+        groupPolicy: 'open',
+        groupSenderPolicy: 'allowlist',
+        allowedGroupUsers: ['member1'],
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
+      );
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=group_sender_denied',
+      );
+    });
+
     it('observes a user after inbound gates pass', async () => {
       const observe = vi.fn();
       const ch = createChannel({}, { observedContacts: { observe } });
@@ -3215,6 +3293,50 @@ describe('ChannelBase', () => {
       expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       });
+    });
+
+    it('does not let an unvouched group-axis member act on the shared session', async () => {
+      const ch = createChannel({
+        senderPolicy: 'pairing',
+        groupPolicy: 'open',
+        groupSenderPolicy: 'open',
+        sessionScope: 'chat_thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'stranger',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain('Only authorized members');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'stranger',
+          text: '/clear confirm',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(bridge.discardSession).not.toHaveBeenCalled();
     });
 
     it('uses ACP option kinds for approval and denial', async () => {
@@ -22808,6 +22930,52 @@ describe('ChannelBase', () => {
 
       expect(disable).toHaveBeenCalledWith('job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('keeps a stored group job whose creator passes the decoupled group axis', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {
+          senderPolicy: 'allowlist',
+          allowedUsers: ['owner'],
+          groupPolicy: 'open',
+          groupSenderPolicy: 'allowlist',
+          allowedGroupUsers: ['alice'],
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(disable).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalled();
     });
 
     it('disables a stored DM job when dmPolicy=disabled', async () => {

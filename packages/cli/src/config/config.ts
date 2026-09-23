@@ -1743,19 +1743,7 @@ export async function loadCliConfig(
     (executionSandboxSettings
       ? createExecutionSandboxPolicy(executionSandboxSettings, cwd)
       : undefined);
-  const shellExecutionSandbox = requestedShellExecutionSandbox
-    ? {
-        ...requestedShellExecutionSandbox,
-        maskedPaths: [
-          ...(requestedShellExecutionSandbox.maskedPaths ?? []),
-          path.join(
-            requestedShellExecutionSandbox.workspace,
-            '.qwen',
-            'review-leases',
-          ),
-        ],
-      }
-    : undefined;
+  const shellExecutionSandbox = requestedShellExecutionSandbox;
 
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
