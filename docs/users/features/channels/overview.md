@@ -318,7 +318,7 @@ Each group's entry is read first, then `"*"`, field by field: a group that sets 
 
 On the `github` and `gitlab` channels all inbound traffic is group traffic, so `senders: "open"` there is equivalent to `senderPolicy: "open"` — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
-The Web Shell channel editor does not show `senders`, the per-group `allowedUsers`, or `operators` yet. Set them in `settings.json`; saving the channel from the editor keeps them, because unrendered keys are carried through unchanged.
+In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. Per-group overrides and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
 ### Group History Backfill
 
