@@ -104,9 +104,10 @@ Example:
 
 #### Transport Fields
 
-| Option    | Type   | Description                                                             |
-| --------- | ------ | ----------------------------------------------------------------------- |
-| `command` | string | Required only for `stdio`. Resolved through `PATH` or an absolute path. |
+| Option    | Type             | Description                                                             |
+| --------- | ---------------- | ----------------------------------------------------------------------- |
+| `command` | string           | Required only for `stdio`. Resolved through `PATH` or an absolute path. |
+| `socket`  | string or object | Required for `tcp` and `socket`. Accepts `host`/`port` or `path`.       |
 
 #### Optional Fields
 
@@ -132,11 +133,14 @@ entries both within one source and across sources. When several entries resolve
 to the same name, the last entry in a source wins, and project configuration
 replaces extension configuration. To use one command for several file types,
 prefer one entry with an `extensionToLanguage` map instead of repeating the
-command under several language keys.
+command under several language keys. The map must list every file extension the
+server handles; unmapped files are opened as `plaintext`.
 
 Qwen Code watches the project-root `.lsp.json` for semantic changes and
 reconciles added, removed, and changed servers. Invalid JSON leaves the current
-LSP runtime unchanged and reports the configuration error.
+LSP runtime unchanged and logs the configuration error (visible with
+`--debug`). Configurations using `tcp` or `socket` without `socket` connection
+details are ignored with a debug-log warning.
 
 ### TCP/Socket Transport
 
@@ -370,6 +374,9 @@ When folder trust is enabled, use `/trust` to mark a workspace as trusted.
 5. **Check logs**: Start Qwen Code with `--debug`, then search for LSP-related entries in the debug log (see Debugging section below)
 6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 
+In an untrusted workspace, `/lsp` prints `No LSP servers configured...` when
+all configured servers require trust.
+
 ### Slow Performance
 
 1. **Large projects**: Consider excluding `node_modules` and other large directories
@@ -378,7 +385,7 @@ When folder trust is enabled, use `/trust` to mark a workspace as trusted.
 ### No Results
 
 1. **Server not ready**: The server may still be indexing. For C/C++ projects with clangd, ensure `--background-index` is in the args and a `compile_commands.json` (or `compile_flags.txt`) exists in the project root or a parent directory. Use `--compile-commands-dir=<path>` if it is in a build subdirectory
-2. **Stale file contents**: Qwen Code sends `textDocument/didOpen` on first access but does not currently send `didChange` or `didSave`. Saving an already opened file does not guarantee that the server receives the new contents; restart the session to reopen it
+2. **Changed file contents**: Saved on-disk changes are sent before the next location or document query using `textDocument/didChange` when the server supports it. Unsaved editor buffers are not covered
 3. **Wrong language**: Check if the correct server is running for your language
 4. **Check the process**: Run `ps aux | grep <server-name>` to verify the server is actually running
 
@@ -427,10 +434,10 @@ For per-server details, run `/lsp`:
 | Server | Command | Languages | Status |
 |--------|---------|-----------|--------|
 | clangd | `clangd` | cpp | READY |
-| pyright-langserver | `pyright-langserver` | python | FAILED - startup failed |
+| pyright-langserver | `pyright-langserver` | python | FAILED - LSP connection closed |
 ```
 
-Common error messages to look for:
+Common debug-log messages to look for:
 
 ```text
 command path is unsafe        -> relative path escapes workspace, use absolute path or add to PATH
