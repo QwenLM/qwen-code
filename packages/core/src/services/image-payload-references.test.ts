@@ -345,7 +345,7 @@ describe('buildReattachParts', () => {
     ];
     const replaced = replaceImagePayloadsInPlace(contents, store);
     const parts = buildReattachParts(replaced, 2);
-    expect(parts).toHaveLength(3);
+    expect(parts).toHaveLength(5); // marker + (label, image) per image
     expect(parts[0]?.text).toContain('Images read earlier in this session');
     const data = parts
       .filter((p) => p.inlineData)
@@ -444,6 +444,45 @@ describe('buildReattachParts', () => {
     expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
   });
 
+  it('labels each replayed image so an older one is not read as current (#12544)', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [
+      toolImageTurn('a'),
+      toolImageTurn('b'),
+      { role: 'user', parts: [{ text: 'what changed?' }] },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 2, contents, store);
+
+    expect(
+      parts.slice(1).map((part) => part.inlineData?.data ?? part.text),
+    ).toEqual([
+      expect.stringMatching(
+        /^Image #[a-f0-9]{12}: read earlier, NOT part of the current message$/,
+      ),
+      'a',
+      expect.stringMatching(
+        /^Image #[a-f0-9]{12}: read earlier, NOT part of the current message$/,
+      ),
+      'b',
+    ]);
+    expect(parts[1]?.text).toContain(store.put(parts[2]!).id);
+  });
+
+  it('labels a replayed marker from the current user turn as current', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [toolImageTurn('current')];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 0, contents, store);
+
+    expect(parts.at(-2)?.text).toMatch(
+      /^Image #[a-f0-9]{12}: attachment of the current message$/,
+    );
+    expect(parts.at(-1)?.inlineData?.data).toBe('current');
+  });
+
   it('does not reattach an image already inline in a tool response', () => {
     const store = new InMemoryImagePayloadStore();
     const markerContents = [toolImageTurn('same')];
@@ -462,14 +501,14 @@ describe('trailingReattachPartCount', () => {
     const store = new InMemoryImagePayloadStore();
     const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
     const reattachParts = buildReattachParts(replaced, 1);
-    expect(reattachParts).toHaveLength(2); // marker text + one image
+    expect(reattachParts).toHaveLength(3); // marker, label, image
 
     const contents: Content[] = [
       { role: 'user', parts: [{ text: 'stable prefix' }] },
       { role: 'user', parts: [...reattachParts] },
     ];
 
-    expect(trailingReattachPartCount(contents)).toBe(2);
+    expect(trailingReattachPartCount(contents)).toBe(3);
   });
 
   it('counts only the reattach suffix when other parts precede it', () => {
@@ -484,7 +523,7 @@ describe('trailingReattachPartCount', () => {
       },
     ];
 
-    expect(trailingReattachPartCount(contents)).toBe(2);
+    expect(trailingReattachPartCount(contents)).toBe(3);
   });
 
   it('returns 0 when the last content carries no reattach marker', () => {

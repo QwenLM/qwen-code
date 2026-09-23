@@ -133,7 +133,9 @@ export function buildReattachParts(
       text: reattachContextText(recent.map((img) => img.id)),
       partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
-    ...recent.map(storedImageToPart),
+    ...recent.flatMap((image) =>
+      labeledReattachParts(image, lastReferencedIds.has(image.id)),
+    ),
   ];
 }
 
@@ -153,8 +155,9 @@ export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
 /**
  * Number of trailing parts of the last content that belong to the reattach
  * region, or 0 when the request ends without one. Each reattach part (one
- * text marker + N inline images) converts to exactly one OpenAI content
- * block, so this equals the trailing reattach block count on the wire.
+ * text marker, then a text label and an inline image per replayed image)
+ * converts to exactly one OpenAI content block, so this equals the
+ * trailing reattach block count on the wire.
  */
 export function trailingReattachPartCount(contents: ContentListUnion): number {
   const last = Array.isArray(contents) ? contents.at(-1) : undefined;
@@ -238,7 +241,9 @@ export function prepareImagePayloadsForRequest(
     {
       text: reattachContextText([...reattachById.keys()]),
     },
-    ...[...reattachById.values()].map(storedImageToPart),
+    ...[...reattachById.values()].flatMap((image) =>
+      labeledReattachParts(image, referencedIds.has(image.id)),
+    ),
   ];
 
   const last = transformed.at(-1);
@@ -371,8 +376,22 @@ function imageReferenceText(stored: StoredImagePayload): string {
 function reattachContextText(ids: readonly string[]): string {
   return (
     'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
-    ids.map((id) => `Image #${id}`).join(', ')
+    ids.map((id) => `Image #${id}`).join(', ') +
+    '. Each image below is labeled with whether it belongs to the current message.'
   );
+}
+
+// A lone id list above N unlabeled images cannot be mapped back to them, so
+// a one-image turn followed by several replays reads as "the old images are
+// the new ones" (#12544). Label every replayed image on its own.
+function labeledReattachParts(
+  stored: StoredImagePayload,
+  fromCurrentMessage: boolean,
+): Part[] {
+  const label = fromCurrentMessage
+    ? `Image #${stored.id}: attachment of the current message`
+    : `Image #${stored.id}: read earlier, NOT part of the current message`;
+  return [{ text: label }, storedImageToPart(stored)];
 }
 
 function safeImageMimeType(mimeType: string): string {
