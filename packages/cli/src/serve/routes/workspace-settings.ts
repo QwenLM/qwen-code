@@ -915,7 +915,10 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             if (sendGenerationClosedError(res, err)) return 'unchanged_failure';
             throw err;
           }
-          if (key === 'experimental.sessionWorkflow') {
+          if (
+            key === 'experimental.sessionWorkflow' &&
+            !runtime.routeFileSystemFactory?.sshWorkspace
+          ) {
             if (
               !(await updateLiveSessionWorkflow(
                 (enabled) =>

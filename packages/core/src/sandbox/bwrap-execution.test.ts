@@ -13,6 +13,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -45,13 +46,19 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-describe('bwrap execution adapter', () => {
+// The suite fakes Linux (platform is mocked below) but still assumes POSIX
+// temp semantics — Node ignores TMPDIR on Windows and there is no '/tmp'
+// fallback — and its fs mock matches POSIX separators, so it cannot run
+// under win32.
+describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   let root: string;
   let workspace: string;
   let installation: string;
   let state: string;
   let bwrap: string;
   let originalTmpdir: string | undefined;
+  let capturedPayloadEnv: Record<string, string>;
+  let capturedPayloadEnvMode: number;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -67,6 +74,8 @@ describe('bwrap execution adapter', () => {
     writeFileSync(bwrap, 'stub');
     originalTmpdir = process.env['TMPDIR'];
     delete process.env['TMPDIR'];
+    capturedPayloadEnv = {};
+    capturedPayloadEnvMode = 0;
   });
 
   afterEach(() => {
@@ -100,6 +109,11 @@ describe('bwrap execution adapter', () => {
       .spyOn(ShellExecutionService, 'executeLaunch')
       .mockImplementation(async (launch) => {
         const statusPath = launch.args[2];
+        const payloadEnvPath = launch.args[3];
+        capturedPayloadEnv = JSON.parse(
+          readFileSync(payloadEnvPath, 'utf8'),
+        ) as Record<string, string>;
+        capturedPayloadEnvMode = statSync(payloadEnvPath).mode & 0o777;
         if (receipt) writeFileSync(statusPath, JSON.stringify(receipt));
         return {
           pid: 123,
@@ -116,10 +130,11 @@ describe('bwrap execution adapter', () => {
         };
       });
 
-  it('builds a literal launch, filters internal secrets, and cleans confirmed resources', async () => {
+  it('builds a literal launch, transports the payload env privately, and prepares writable masks', async () => {
+    const maskedPath = path.join(workspace, '.qwen', 'review-leases');
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await executeBwrap(
-      policy(),
+      { ...policy(), maskedPaths: [maskedPath] },
       payload(),
       () => {},
       new AbortController().signal,
@@ -129,28 +144,101 @@ describe('bwrap execution adapter', () => {
     });
     const relayLaunch = launch.mock.calls[0][0];
     const argv = relayLaunch.args;
+    const admittedWorkspace = realpathSync(workspace);
+    const admittedMaskedPath = path.join(
+      admittedWorkspace,
+      '.qwen',
+      'review-leases',
+    );
     expect(argv).toContain('--unshare-pid');
     expect(argv).toContain('--unshare-net');
-    expect(argv).toContain('--clearenv');
-    expect(argv).toContain('GH_TOKEN');
-    expect(argv).toContain('visible-user-value');
+    expect(argv).not.toContain('--clearenv');
+    expect(argv).not.toContain('--setenv');
+    expect(argv).not.toContain('GH_TOKEN');
+    expect(argv).not.toContain('visible-user-value');
     expect(argv).not.toContain('QWEN_SERVER_TOKEN');
     expect(argv).not.toContain('internal-secret');
-    const term = argv.indexOf('TERM');
-    expect(argv.slice(term - 1, term + 2)).toEqual([
-      '--setenv',
-      'TERM',
-      'xterm-256color',
-    ]);
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    expect(capturedPayloadEnv).toMatchObject({
+      GH_TOKEN: 'visible-user-value',
+      TERM: 'xterm-256color',
+    });
+    expect(capturedPayloadEnv).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(capturedPayloadEnvMode).toBe(0o600);
+    const workspaceBind = argv.findIndex(
+      (value, index) =>
+        value === '--bind' &&
+        argv[index + 1] === admittedWorkspace &&
+        argv[index + 2] === admittedWorkspace,
+    );
+    const mask = argv.indexOf('--tmpfs');
+    expect(workspaceBind).toBeGreaterThan(-1);
+    expect(argv.slice(mask, mask + 2)).toEqual(['--tmpfs', admittedMaskedPath]);
+    expect(mask).toBeGreaterThan(workspaceBind);
+    expect(existsSync(maskedPath)).toBe(true);
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.isAbsolute(scratch)).toBe(true);
     expect(existsSync(scratch)).toBe(false);
     expect(readdirSync(state)).toEqual([]);
   });
 
+  it('inherits redirected stdin through the relay launch', async () => {
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    const handle = await executeBwrap(
+      policy(),
+      { ...payload(), inheritStdin: true },
+      () => {},
+      new AbortController().signal,
+    );
+    await handle.result;
+    expect(launch.mock.calls[0][0].inheritStdin).toBe(true);
+  });
+
+  it('rejects conflicting stdin modes before creating control state', async () => {
+    const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');
+    await expect(
+      executeBwrap(
+        policy(),
+        { ...payload(), stdin: 'input', inheritStdin: true },
+        () => {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('both piped and inherited');
+    expect(launch).not.toHaveBeenCalled();
+    expect(readdirSync(state)).toEqual([]);
+  });
+
+  it('skips absent masks without mutating a read-only workspace', async () => {
+    const maskedPath = path.join(workspace, '.qwen', 'review-leases');
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    const handle = await executeBwrap(
+      {
+        ...policy(),
+        filesystem: 'read-only',
+        maskedPaths: [maskedPath],
+      },
+      payload(),
+      () => {},
+      new AbortController().signal,
+    );
+    await handle.result;
+    expect(launch.mock.calls[0][0].args).not.toContain('--tmpfs');
+    expect(existsSync(maskedPath)).toBe(false);
+  });
+
+  it('rejects mask paths outside the workspace', async () => {
+    await expect(
+      executeBwrap(
+        { ...policy(), maskedPaths: [state] },
+        payload(),
+        () => {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('inside the workspace');
+  });
+
   it('uses an absolute scratch root for a relative TMPDIR without leaking it', async () => {
     process.env['TMPDIR'] = 'relative-tmp';
-    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await executeBwrap(
       policy(),
       payload(),
@@ -158,8 +246,7 @@ describe('bwrap execution adapter', () => {
       new AbortController().signal,
     );
     await handle.result;
-    const argv = launch.mock.calls[0][0].args;
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.dirname(scratch)).toBe(realpathSync('/tmp'));
     expect(existsSync(scratch)).toBe(false);
     expect(existsSync(path.join(process.cwd(), 'relative-tmp'))).toBe(false);
@@ -177,7 +264,7 @@ describe('bwrap execution adapter', () => {
 
   it('allows a temporary root that contains disjoint sandbox roots', async () => {
     process.env['TMPDIR'] = root;
-    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await executeBwrap(
       policy(),
       payload(),
@@ -185,8 +272,7 @@ describe('bwrap execution adapter', () => {
       new AbortController().signal,
     );
     await handle.result;
-    const argv = launch.mock.calls[0][0].args;
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.dirname(scratch)).toBe(realpathSync(root));
     expect(existsSync(scratch)).toBe(false);
   });
@@ -204,7 +290,7 @@ describe('bwrap execution adapter', () => {
     });
     const argv = launch.mock.calls[0][0].args;
     const statusPath = argv[2];
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(readFileSync(statusPath, 'utf8')).toContain('unconfirmed');
     expect(existsSync(scratch)).toBe(true);
     rmSync(path.dirname(statusPath), { recursive: true, force: true });

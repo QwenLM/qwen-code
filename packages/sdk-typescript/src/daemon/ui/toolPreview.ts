@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isShellResultDisplay,
+  mapShellResultText,
+} from '@qwen-code/qwen-code-core/shellResult';
 import type {
   DaemonToolPreview,
   DaemonToolResultPreview,
@@ -124,6 +128,25 @@ export function createDaemonToolResultPreview(
   content?: unknown,
   opts: { toolName?: string; toolKind?: string } = {},
 ): DaemonToolResultPreview | undefined {
+  if (isShellResultDisplay(output)) {
+    const count = 2 + output.notices.length + (output.error === null ? 0 : 1);
+    const limit = Math.floor(
+      (MAX_TOOL_RESULT_PREVIEW_LENGTH -
+        output.directory.length -
+        output.outputFiles.join('').length) /
+        count,
+    );
+    return {
+      kind: 'shell_result',
+      result: mapShellResultText(output, (value) => {
+        if (value.length <= limit) return value;
+        const last = value.charCodeAt(limit - 1);
+        const end = last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit;
+        return detachString(value.slice(0, end));
+      }),
+    };
+  }
+
   if (
     isRecord(output) &&
     output['type'] === 'ask_user_question_answers' &&

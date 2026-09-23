@@ -66,6 +66,13 @@ const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
       { value: 'open', label: 'Open' },
     ],
   },
+  {
+    key: 'operators',
+    label: 'Session Operators',
+    kind: 'string-list',
+    description:
+      'User IDs who may approve tool use and run /cancel, /clear or /loop in shared sessions; empty derives them from allowed users and the sender policy',
+  },
 ];
 
 const SESSION_SCOPE_OPTIONS: ReadonlyArray<{

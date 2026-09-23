@@ -7551,7 +7551,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
 
       expect(harness.workspaceFileActions.readFileBytes).toHaveBeenCalledWith(
         'docs/notes.txt',
-        { offset: 0, maxBytes: 100 * 1024 },
+        { offset: 0, maxBytes: 256 * 1024 },
       );
       expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -13367,7 +13367,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('cleans up a payload-bearing resubmission whose confirmation never landed once it settles', async () => {
+  it('rebinds a payload-bearing resubmission whose confirmation never landed from a later snapshot', async () => {
     let resolveFirst: ((value: { promptId: string }) => void) | undefined;
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
       (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
@@ -13384,6 +13384,30 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       )
       .mockImplementation(() => new Promise(() => {}));
     const image = { data: 'aGVsbG8=', media_type: 'image/png' } as const;
+    const queuedEntry = (
+      promptId: string,
+      text: string,
+      content?: Array<{ type: string; data: string; mimeType: string }>,
+    ) => ({
+      promptId,
+      text,
+      ...(content ? { content } : {}),
+      queuedAt: Date.now(),
+      state: 'queued' as const,
+      originatorClientId: CLIENT_ID,
+    });
+    // The unrelated prompt is listed first: while the orphan row below is
+    // still an unbound attachment submission it counts as an in-flight
+    // attachment submission and suppresses every other possibly-ours prompt
+    // from materializing, so only a pass that rebinds the orphan first can
+    // surface it.
+    const snapshot = [
+      queuedEntry('prompt-2', 'later question'),
+      queuedEntry('prompt-1', 'describe this', [
+        { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+      ]),
+    ];
+    let releaseSnapshot: ((value: unknown) => void) | undefined;
     const harness = createHarness();
     try {
       await harness.render({
@@ -13391,25 +13415,68 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         sessionHasActivePrompt: true,
       });
       await act(async () => {
-        sdkMock.actions.getPendingPrompts.mockRejectedValueOnce(
-          new Error('pending snapshot unavailable'),
-        );
+        sdkMock.actions.getPendingPrompts
+          // The body's own confirmation refresh is the one that fails.
+          .mockRejectedValueOnce(new Error('pending snapshot unavailable'))
+          // The later successful refresh: held open so the temporary orphan
+          // state can be observed before it is reconciled.
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                releaseSnapshot = resolve;
+              }),
+          )
+          .mockResolvedValue({ pendingPrompts: snapshot });
         harness.result().enqueuePrompt('describe this', [image]);
         for (let i = 0; i < 6; i++) await Promise.resolve();
       });
       expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
-      // The admission lands but the confirmation snapshot fails: the row
-      // stays submitting (no snapshot, no verdict), still unbound.
+      // The admission lands but the confirmation snapshot fails, so the row
+      // is temporarily local: still submitting, still unbound.
       await act(async () => {
         resolveFirst?.({ promptId: 'prompt-1' });
         for (let i = 0; i < 8; i++) await Promise.resolve();
       });
-      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
       expect(harness.result().queuedPrompts).toEqual([
         expect.objectContaining({ serverState: 'submitting' }),
       ]);
-      // The started event echoes the stashed payload — a text+image row has
-      // no binding route, so nothing later will ever bind this row.
+      const orphanRowId = harness.result().queuedPrompts[0]?.id;
+      expect(orphanRowId).toEqual(expect.any(Number));
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // A later successful snapshot carries the id the daemon returned for
+      // this very row, so the row binds instead of staying a phantom.
+      await act(async () => {
+        releaseSnapshot?.({ pendingPrompts: snapshot });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      const rebound = harness
+        .result()
+        .queuedPrompts.find((row) => row.id === orphanRowId);
+      expect(rebound).toEqual(
+        expect.objectContaining({
+          id: orphanRowId,
+          text: 'describe this',
+          serverPromptId: 'prompt-1',
+          serverState: 'queued',
+        }),
+      );
+      // A sync-performed binding is not a submit-body binding.
+      expect(rebound?.boundAtSeq).toBeUndefined();
+      // No resubmission and no echo: the daemon already holds the message.
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // The orphan no longer suppresses it: prompt-2 materializes once, and
+      // the rebound row is the only other row.
+      const serverRows = harness.result().queuedPrompts;
+      expect(serverRows).toHaveLength(2);
+      expect(
+        serverRows.filter((row) => row.serverPromptId === 'prompt-2'),
+      ).toHaveLength(1);
+      expect(
+        serverRows.filter((row) => row.serverPromptId === 'prompt-1'),
+      ).toHaveLength(1);
+      // The start/echo race: the started event echoes the message and marks
+      // prompt-1 displayed through the ordinary path.
       await act(async () => {
         sdkMock.publishPendingEvents([
           {
@@ -13423,7 +13490,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
             },
           },
         ]);
-        for (let i = 0; i < 6; i++) await Promise.resolve();
+        for (let i = 0; i < 8; i++) await Promise.resolve();
       });
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
@@ -13432,20 +13499,22 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         { promptId: 'prompt-1' },
         undefined,
       );
-      // At settle the message is echoed and the prompt can never bind, so
-      // the still-unbound row must not survive as a phantom.
-      await act(async () => {
-        sdkMock.publishPendingEvents([
-          {
-            type: 'turn_complete',
-            promptId: 'prompt-1',
-            data: { sessionId: 'session-a', promptId: 'prompt-1' },
-          },
-        ]);
-        for (let i = 0; i < 6; i++) await Promise.resolve();
-      });
+      // A stale snapshot that still lists prompt-1 as queued must not
+      // resurrect it: the started event's own refresh reads this same
+      // snapshot, and the displayed marker stays authoritative.
+      expect(
+        harness
+          .result()
+          .queuedPrompts.some((row) => row.serverPromptId === 'prompt-1'),
+      ).toBe(false);
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'later question',
+          serverPromptId: 'prompt-2',
+        }),
+      ]);
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
-      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
     } finally {
       await harness.dispose();
     }
