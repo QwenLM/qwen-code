@@ -3081,6 +3081,52 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('keeps a document thread on the direct-message axis when groups set senders', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({
+        senderPolicy: 'open',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['someone-else'] },
+        },
+      }),
+    );
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-1',
+        documentMentionCard('doc-1'),
+      ),
+    );
+    const access = channel as unknown as {
+      gate: unknown;
+      senderGateFor(target: { isGroup: boolean; chatId: string }): unknown;
+      isAuthorizedForSharedSession(envelope: Envelope): boolean;
+    };
+    const author = (chatId: string): Envelope => ({
+      channelName: 'test-dws',
+      senderId: 'open-alice',
+      senderName: 'Alice',
+      chatId,
+      text: 'follow-up',
+      isGroup: true,
+      isMentioned: true,
+      isReplyToBot: false,
+    });
+
+    expect(access.senderGateFor({ isGroup: true, chatId: 'doc-1' })).toBe(
+      access.gate,
+    );
+    expect(access.isAuthorizedForSharedSession(author('doc-1'))).toBe(true);
+    // An ordinary group with the same config still follows `groups`.
+    expect(access.senderGateFor({ isGroup: true, chatId: 'group-1' })).not.toBe(
+      access.gate,
+    );
+    expect(access.isAuthorizedForSharedSession(author('group-1'))).toBe(false);
+  });
+
   it('extracts a document request when CJK text precedes the mention', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

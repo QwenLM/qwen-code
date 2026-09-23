@@ -16738,6 +16738,760 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  function makeLateRegistrationDaemon() {
+    const primary = path.join(tmpDir!, 'primary');
+    const secondary = path.join(tmpDir!, 'secondary');
+    fs.mkdirSync(primary, { recursive: true });
+    writeWorkspaceSettings(secondary, {
+      channels: { feishu: { type: 'feishu' } },
+      serve: { channels: ['feishu'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeById: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const { factory } = makePerWorkspaceWorkerFactory();
+    return {
+      primary,
+      secondary,
+      factory,
+      store,
+      headers: {
+        Authorization: 'Bearer secret',
+        'Content-Type': 'application/json',
+      },
+      start: (
+        overrides: Partial<Parameters<typeof runQwenServe>[0]> = {},
+        depsOverrides: Partial<RunQwenServeDeps> = {},
+      ) =>
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: primary,
+            token: 'secret',
+            serveWebShell: false,
+            ...overrides,
+          },
+          {
+            preheatBridge: false,
+            daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+            channelWorkerSupervisorFactory: factory,
+            channelServicePidfile: makePidfileDeps(),
+            workspaceRegistrationStore: store,
+            ...depsOverrides,
+          },
+        ),
+    };
+  }
+
+  it("restores a workspace's own serve.channels when it registers after boot", async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-register-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      // Registration answers before the worker is up, so wait for the restore
+      // this hook runs afterwards rather than asserting on the response.
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not hold a later registration behind another workspace channel startup', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-bystander-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const bystander = path.join(tmpDir, 'bystander');
+    // Configures no channels at all.
+    fs.mkdirSync(bystander, { recursive: true });
+    // The first workspace's worker never becomes ready, so its startup holds
+    // the channel-control lane for as long as the startup budget allows.
+    let releaseStart: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    daemon.factory.mockImplementation(() => {
+      const worker = makeWorker({
+        enabled: true,
+        state: 'starting',
+        channels: [],
+        requestedChannels: ['feishu'],
+      });
+      worker.start.mockImplementation(() => blocked);
+      return worker;
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const first = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(first.status).toBe(201);
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalled());
+
+      // A workspace with no channels has nothing to wait for. Registering it
+      // must not queue behind the first workspace's stuck startup.
+      const started = Date.now();
+      const second = await Promise.race([
+        fetch(`${handle.url}/workspaces`, {
+          method: 'POST',
+          headers: daemon.headers,
+          body: JSON.stringify({ cwd: bystander }),
+        }).then((response) => response.status),
+        new Promise<'held'>((resolve) =>
+          setTimeout(() => resolve('held'), 3_000),
+        ),
+      ]);
+      expect(second).toBe(201);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      releaseStart?.();
+      await handle.close();
+    }
+  });
+
+  it('answers a workspace registration without waiting for its channel worker', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-latency-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    // A worker that never becomes ready. Awaiting it would hold the daemon's
+    // runtime-topology gate until the 30s startup budget expires, so this test
+    // fails by timing out if registration ever waits for channel startup.
+    let releaseStart: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    daemon.factory.mockImplementation(() => {
+      const worker = makeWorker({
+        enabled: true,
+        state: 'starting',
+        channels: [],
+        requestedChannels: ['feishu'],
+      });
+      worker.start.mockImplementation(() => blocked);
+      return worker;
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalled());
+    } finally {
+      releaseStart?.();
+      await handle.close();
+    }
+  });
+
+  it('leaves a late workspace alone under an explicit --channel selection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-explicit-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+    });
+    const handle = await daemon.start({
+      channelSelection: { mode: 'names', names: ['telegram'] },
+    });
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        daemon.factory.mock.calls.map(([call]) => call.workspace),
+      ).not.toContain(canonicalizeWorkspace(daemon.secondary));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("restores a workspace's channels once per daemon, not on every return", async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-once-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      const workspaceId = ((await added.json()) as { id: string }).id;
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalledTimes(1));
+
+      // An operator stops the channel, then the workspace leaves and comes
+      // back. Restoring again here would undo the stop, so the daemon does not.
+      const stopped = await fetch(
+        `${handle.url}/workspaces/${workspaceId}/channels/feishu/stop`,
+        { method: 'POST', headers: daemon.headers },
+      );
+      expect(stopped.status).toBe(200);
+      const removed = await fetch(`${handle.url}/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(removed.status).toBe(200);
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(readded.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(daemon.factory).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves a late workspace alone once channel hosting has been stopped', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-stopped-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalledTimes(1));
+
+      // `qwen channel stop` maps to this. Registering a workspace afterwards
+      // is not an instruction to turn hosting back on.
+      const stopped = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(stopped.status).toBe(200);
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(daemon.factory).toHaveBeenCalledTimes(1);
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: daemon.headers,
+      });
+      expect(await control.json()).toMatchObject({
+        enabled: false,
+        selection: null,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves a committed all selection alone when a workspace registers later', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-all-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['all'] },
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({ selection: { mode: 'all' } }),
+        ),
+      );
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // One flat selection cannot say "everything the primary has, plus
+      // these": `all` is left as it is rather than rewritten into names.
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: daemon.headers,
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'all' },
+      });
+      expect(
+        daemon.factory.mock.calls.map(([call]) => call.workspace),
+      ).not.toContain(canonicalizeWorkspace(daemon.secondary));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('still restores a late workspace after channels were only listed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-listed-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      // Listing channels creates the channel manager, and a manager that has
+      // never hosted anything reports the same state as one an operator
+      // stopped. A read must not switch the restore off.
+      const listed = await fetch(`${handle.url}/workspace/channels`, {
+        headers: daemon.headers,
+      });
+      expect(listed.status).toBe(200);
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('still restores a late workspace after an earlier late restore failed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-after-fail-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const broken = path.join(tmpDir, 'broken');
+    // Asks for a channel no workspace defines, so its restore cannot commit.
+    writeWorkspaceSettings(broken, { serve: { channels: ['ghost'] } });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const first = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: broken }),
+      });
+      expect(first.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      // Nobody stopped hosting; one workspace's failed restore must not read
+      // as if someone had.
+      const second = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(second.status).toBe(201);
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+      // The failure names the workspace that lost its list, so it is not
+      // left to adjacency in the log to guess whose restore failed.
+      await vi.waitFor(() => {
+        const failure = fs
+          .readFileSync(
+            path.join(tmpDir!, 'debug', 'daemon', 'daemon.log'),
+            'utf8',
+          )
+          .split('\n')
+          .find((line) => line.includes('were not restored'));
+        expect(failure).toContain(
+          `workspaceCwd=${canonicalizeWorkspace(broken)}`,
+        );
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps both workspaces registered back to back on a channel-less daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-pair-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const tertiary = path.join(tmpDir, 'tertiary');
+    writeWorkspaceSettings(tertiary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    // Creating the channel manager on a TLS daemon waits for this probe, which
+    // holds open the window the race lives in: the first restore has started
+    // but no manager exists yet, so nothing orders the second restore behind
+    // it, and each commit replaces the whole selection.
+    let releaseManager: (() => void) | undefined;
+    const managerGate = new Promise<void>((resolve) => {
+      releaseManager = resolve;
+    });
+    const workerTlsTrustVerifier = vi.fn(async () => {
+      await managerGate;
+      return undefined;
+    });
+    const handle = await daemon.start(
+      { tlsCert: certPath, tlsKey: keyPath },
+      { workerTlsTrustVerifier },
+    );
+    const request = (
+      method: string,
+      route: string,
+      body?: unknown,
+    ): Promise<{ status: number; json: unknown }> =>
+      new Promise((resolve, reject) => {
+        const req = https.request(
+          `${handle.url}${route}`,
+          { method, headers: daemon.headers, rejectUnauthorized: false },
+          (res) => {
+            let text = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => (text += chunk));
+            res.on('end', () =>
+              resolve({
+                status: res.statusCode ?? 0,
+                json: text ? JSON.parse(text) : undefined,
+              }),
+            );
+          },
+        );
+        req.on('error', reject);
+        if (body !== undefined) req.write(JSON.stringify(body));
+        req.end();
+      });
+
+    try {
+      await handle.runtimeReady;
+      const first = await request('POST', '/workspaces', {
+        cwd: daemon.secondary,
+      });
+      expect(first.status).toBe(201);
+      await vi.waitFor(() => expect(workerTlsTrustVerifier).toHaveBeenCalled());
+      const second = await request('POST', '/workspaces', { cwd: tertiary });
+      expect(second.status).toBe(201);
+      releaseManager?.();
+
+      await vi.waitFor(async () => {
+        const control = await request('GET', '/workspace/channel');
+        const state = control.json as {
+          transition: string;
+          selection: { mode: string; names?: string[] } | null;
+        };
+        expect(state.transition).toBe('idle');
+        expect(state.selection).toEqual({
+          mode: 'names',
+          names: ['feishu', 'telegram'],
+        });
+      });
+    } finally {
+      releaseManager?.();
+      await handle.close();
+    }
+  });
+
+  it('does not move a hosted channel to a workspace that registers later', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-claim-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const hosting = path.join(tmpDir, 'hosting');
+    const claimant = path.join(tmpDir, 'claimant');
+    fs.mkdirSync(primary, { recursive: true });
+    // Both workspaces ask for the same channel, which is what the per-workspace
+    // startup toggle produces for a channel defined once in user scope.
+    writeWorkspaceSettings(hosting, { serve: { channels: ['shared'] } });
+    writeWorkspaceSettings(claimant, { serve: { channels: ['shared'] } });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      () =>
+        ({
+          merged: { channels: { shared: { type: 'feishu' } } },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+    } as unknown as WorkspaceRegistrationStore;
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, hosting],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        workspaceRegistrationStore: store,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(hosting),
+          selection: { mode: 'names', names: ['shared'] },
+        }),
+      );
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      const hostingCallsBefore = factory.mock.calls.filter(
+        ([call]) => call.workspace === canonicalizeWorkspace(hosting),
+      ).length;
+      const totalCallsBefore = factory.mock.calls.length;
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The newcomer asks for a name the daemon already hosts, so it has
+      // nothing of its own to bring up and the running worker stays put.
+      expect(factory.mock.calls.map(([call]) => call.workspace)).not.toContain(
+        canonicalizeWorkspace(claimant),
+      );
+      // "Stays put" means the same worker, not a fresh one under the same
+      // owner: re-committing a name the daemon already hosts would tear the
+      // incumbent down and take every session on it with it.
+      expect(
+        factory.mock.calls.filter(
+          ([call]) => call.workspace === canonicalizeWorkspace(hosting),
+        ),
+      ).toHaveLength(hostingCallsBefore);
+      expect(factory.mock.calls).toHaveLength(totalCallsBefore);
+      // The committed selection is what a reconcile acts on, so re-committing
+      // a name the daemon already hosts is the step that would tear the
+      // incumbent down. It must not even be proposed.
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'names', names: ['shared'] },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('counts a registration whose names were all hosted as its one restore', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-hosted-once-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const hosting = path.join(tmpDir, 'hosting');
+    const claimant = path.join(tmpDir, 'claimant');
+    fs.mkdirSync(primary, { recursive: true });
+    // Two checkouts of one repository: both list the same channels, and the
+    // one registered at boot hosts them.
+    writeWorkspaceSettings(hosting, {
+      serve: { channels: ['shared', 'other'] },
+    });
+    writeWorkspaceSettings(claimant, {
+      serve: { channels: ['shared', 'other'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      () =>
+        ({
+          merged: {
+            channels: {
+              shared: { type: 'feishu' },
+              other: { type: 'feishu' },
+            },
+          },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeById: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    };
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, hosting],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        workspaceRegistrationStore: store,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      expect(added.status).toBe(201);
+      const workspaceId = ((await added.json()) as { id: string }).id;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // The operator stops one channel; the other keeps hosting enabled.
+      const narrowed = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['other'] },
+        }),
+      });
+      expect(narrowed.status).toBe(200);
+      const callsAfterStop = factory.mock.calls.length;
+
+      // The claimant leaves and comes back. It already had its restore — it
+      // found nothing to bring up — so coming back must not bring up the
+      // channel the operator stopped in between.
+      const removed = await fetch(`${handle.url}/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+        headers,
+      });
+      expect(removed.status).toBe(200);
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      expect(readded.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers,
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'names', names: ['other'] },
+      });
+      expect(factory.mock.calls).toHaveLength(callsAfterStop);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('keeps explicit channel selection ahead of workspace startup channels', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-explicit-')),

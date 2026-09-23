@@ -22,6 +22,20 @@ class JdbcRuntimeBrokerMySqlIT {
     }
 
     @Test
+    void databaseClockIgnoresSessionTimeZone() throws Exception {
+        DataSource dataSource = dataSource();
+        for (String offset : new String[] {"+00:00", "+08:00", "-04:00"}) {
+            try (Connection connection = dataSource.getConnection();
+                    PreparedStatement timeZone = connection.prepareStatement(
+                            "SET time_zone = '" + offset + "'")) {
+                timeZone.execute();
+                JdbcRepositorySupportTest.assertStorageSafeClock(
+                        JdbcRepositorySupport.databaseNow(connection));
+            }
+        }
+    }
+
+    @Test
     void independentBrokerProcessesFenceProvisioningAndDispatch()
             throws Exception {
         DataSource dataSource = dataSource();

@@ -366,12 +366,11 @@ export function createTranscriptUsageUpdate(
 export interface TranscriptTimingMeta {
   readonly kind: 'request' | 'tool';
   /**
-   * Epoch ms, and `kind === 'request'` only. A request is logged when its
-   * stream ends, so its start time is a real subtraction from a real end time.
-   * Tool calls are logged in one loop after their whole batch settles, so the
-   * recorded timestamp is the batch's end for every tool in it and no honest
-   * per-tool start can be derived; a tool frame carries only `durationMs`
-   * until the recorded event itself carries a start time.
+   * Epoch ms. A request is logged when its stream ends, so its start time is
+   * a real subtraction from a real end time. A tool call carries one only when
+   * its record does (`started_at_ms`): tool calls can be logged in one loop
+   * after their whole batch settles, so the record's timestamp is the batch's
+   * end and subtracting a tool's own duration from it would misplace it.
    */
   readonly startedAt?: number;
   readonly durationMs: number;
@@ -494,9 +493,13 @@ function parseTelemetryTiming(
     // `ToolCallEvent` turns a missing duration into 0 as well. A zero on
     // anything but a success is therefore a stand-in, not a measurement.
     if (durationMs === 0 && toolStatus !== 'success') return undefined;
+    // Only the recorded start: never derived from `event.timestamp`, which for
+    // a scheduled batch is when the whole batch settled.
+    const startedAt = finiteNumber(uiEvent['started_at_ms']);
     return {
       kind: 'tool',
       ...shared,
+      ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
       callId,
       ...(toolName !== undefined ? { toolName } : {}),
       ...(toolStatus !== undefined ? { toolStatus } : {}),
@@ -508,8 +511,8 @@ function parseTelemetryTiming(
   // A request is logged the moment its stream ends, so its `event.timestamp`
   // really is this span's end and the start time follows from the duration.
   // Tool calls are logged in a batch loop after the whole batch settles, so
-  // the same subtraction would place a fast tool just before the batch ended
-  // rather than when it actually ran — see `startedAt` on the type.
+  // the same subtraction would misplace a tool; theirs is read from the
+  // record above — see `startedAt` on the type.
   const endMs = toTranscriptEpochMs(
     typeof uiEvent['event.timestamp'] === 'string'
       ? uiEvent['event.timestamp']

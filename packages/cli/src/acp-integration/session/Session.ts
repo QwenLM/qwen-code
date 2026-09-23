@@ -13318,6 +13318,7 @@ export class Session implements SessionContext {
           function_name: toolName,
           function_args: args,
           duration_ms: durationMs,
+          started_at_ms: startTime,
           status,
           execution_status: executionStatus,
           success: false,
@@ -15698,9 +15699,16 @@ export class Session implements SessionContext {
                 'event.name': 'tool_call',
                 'event.timestamp': new Date().toISOString(),
                 call_id: callId,
+                ...(codeModeContext
+                  ? {
+                      parent_call_id: codeModeContext.parentCallId,
+                      source: codeModeContext.source,
+                    }
+                  : {}),
                 function_name: toolName,
                 function_args: args,
                 duration_ms: durationMs,
+                started_at_ms: startTime,
                 status,
                 execution_status: executionStatus,
                 success: succeeded,

@@ -6,192 +6,96 @@ Status: Implemented and verified at the repository boundary
 
 ## Problem
 
-The Runtime Broker state foundation defines optimistic repository contracts for
-Runtime bindings and logical Runtime Sessions, but its only implementations are
-process-local. A Java process restart loses placement generations, Session
-bindings, operation ownership, and the evidence needed to decide whether a
-request may be retried. Multiple Java instances also cannot coordinate through
-those implementations.
-
-Managed tool execution adds another durable boundary. A caller must be able to
-look up the original `executionCallId` after a lost response and must not create
-a second physical execution for the same idempotency key.
-
-## Current state
-
-Before this change, the full Managed Agent branch provided immutable Runtime
-scope, binding, lease, Session, and Tool execution records plus compare-and-set
-repository interfaces, but no MySQL persistence. Its Hosted Harness, Java
-Managed Agent server, and Runtime Broker still select the in-memory
-implementations; this repository slice adds the durable implementations without
-changing that production wiring yet.
+The managed runtime broker foundation defines Runtime Binding, Runtime Session, and Tool Execution state, but its Tool Execution implementation is process-local. A restart loses execution identity, dispatch ownership, cancellation intent, `UNKNOWN` recovery state, and settled results. Multiple broker processes also cannot coordinate an at-most-once dispatch boundary through a shared source of truth.
 
 ## Goals
 
-- Add durable JDBC implementations for Runtime bindings and Runtime Sessions.
-- Add a durable JDBC implementation for the existing Tool execution ledger.
-- Preserve the existing atomic create, generation, compare-and-set, ownership
-  lease, tenant isolation, and terminal-state semantics across JVMs.
-- Provide an explicit, idempotent schema initializer for the four private
-  state tables, including a stable binding-allocation slot.
-- Verify the repositories with two independent repository instances against an
-  in-memory JDBC database and a real MySQL database.
+- Persist runtime bindings, runtime sessions, and tool executions through JDBC.
+- Preserve atomic binding creation, binding generation fencing, compare-and-set updates, operation leases, tenant and workspace isolation for Binding and Session state, and terminal session semantics.
+- Preserve idempotent Tool Execution creation, dispatch owner and generation fencing, database-clock leases, cancellation intent, `UNKNOWN` reconciliation, and settled results.
+- Initialize the private broker schema idempotently.
+- Verify the same repository contract against H2 and a real MySQL instance.
 
 ## Non-goals
 
-- Migrating old data; these tables are new and have no production predecessor.
-- Changing the existing Runtime process lifecycle or health checks.
-- Wiring the JDBC repositories into the Spring Managed Agent server or changing
-  the Hosted Harness, Runtime transport, or public Agent APIs in this change.
-- Cross-node SSE notification, Item/Snapshot materialization, or an Outbox.
-- Sharing one Runtime between Sessions.
+- Starting, stopping, or otherwise managing runtime processes.
+- Integrating the repositories into the Harness, Spring wiring, transport layer, or public API.
+- Dispatching a Tool call or resolving an `UNKNOWN` execution automatically.
+- Delivering events through SSE, an outbox, MQ, or Redis.
+- Sharing one managed runtime across unrelated workspaces.
 
-## Design
+## Dependency boundary
 
-### Dependency boundary
+The JDBC repositories use `javax.sql.DataSource` for database access and fastjson2 (2.0.60) as the JSON codec for the `reference_json`/`result_json` columns. Opaque Tool payloads disable fastjson2 reference detection so `$ref` and `@type` members remain data, and finite `BigDecimal` values are written without exponent notation so the reader cannot narrow or overflow them as doubles. They do not choose a connection pool, require Spring, manage database migrations through a framework, or bundle a production database driver. The test profile supplies H2 for the default repository contract and MySQL Connector/J for the optional MySQL integration test.
 
-The module accepts a standard `javax.sql.DataSource`. It does not depend on
-Spring, a connection pool, Flyway, or a concrete JDBC driver. The embedding
-service owns the DataSource and schema lifecycle. Tests provide H2 in MySQL mode
-and the MySQL Connector/J driver.
+## Schema
 
-JSON fields in the private Tool execution ledger use Fastjson2. They are opaque
-Broker payloads and are not public Agent Event or Item resources. Reference
-detection is disabled while reading so `$ref` and `@type` remain ordinary data,
-and finite decimal values are written without exponent notation so persistence
-does not narrow or overflow them through a floating-point conversion.
+The broker owns four private tables:
 
-### Tables
+- `qwen_runtime_binding_slot` serializes creation for one hashed runtime scope.
+- `qwen_runtime_binding` stores the current runtime binding, generation, endpoint, operation lease, lifecycle state, and optimistic version.
+- `qwen_runtime_session` stores runtime sessions and their terminal state under a binding generation.
+- `qwen_tool_execution` stores one durable Tool Execution per globally unique idempotency key, including immutable request identity, dispatch fencing, cancellation intent, `UNKNOWN` state, and the settled result. Execution-call and idempotency identifiers use deterministic hashes for case-sensitive lookup under any database collation, while each lookup verifies the complete identifier.
 
-| Table                       | Identity                                                                        | Concurrency constraints                                                                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `qwen_runtime_binding_slot` | immutable request hash                                                          | one locked allocation row per request; globally unique non-null Session isolation key; current active binding and last allocated generation |
-| `qwen_runtime_binding`      | `binding_id`; immutable request hash plus generation                            | unique monotonically increasing generation; version and operation generation fencing                                                        |
-| `qwen_runtime_session`      | globally unique public `runtime_session_id`                                     | atomic create; version compare-and-set; immutable scope, binding generation, and Session identity                                           |
-| `qwen_tool_execution`       | hashed plus full `execution_call_id`; unique hashed plus full `idempotency_key` | atomic idempotent create; version compare-and-set; dispatch owner, expiry, and generation fencing                                           |
+Scope identity is represented by a deterministic hash and is always checked together with the full tenant-scoped identity. Endpoint tokens remain encrypted or opaque values supplied by the caller; the repository does not log or transform them.
 
-Request and scope hashes are SHA-256 indexes over length-prefixed immutable
-fields. The original fields remain in each row and are reconstructed and
-compared after reads, so a hash collision fails closed instead of merging two
-identities.
+## Transaction and concurrency semantics
 
-The stable `qwen_runtime_binding_slot` row is locked before allocation or a
-terminal transition. It stores the last allocated generation and the current
-active binding identifier. Historical terminal bindings remain in
-`qwen_runtime_binding`, while the locked slot prevents two active generations
-without relying on an unlocked aggregate query.
+Binding creation locks the scope slot, re-reads the binding inside the transaction, and inserts exactly one active record for that scope. Binding updates use the stored version and generation as fences. Operation leases use the database clock so competing JVMs do not depend on synchronized local clocks. The JDBC adapter converts the database clock to Unix epoch time in the query, preventing the connection's session time zone from shifting lease instants, and normalizes it to whole seconds so lease values round-trip consistently through MySQL-compatible drivers that discard fractional seconds.
 
-### Transaction semantics
+Session creation relies on the database uniqueness constraint and re-reads the winning record after a concurrent insert. Session compare-and-set updates lock the current row, validate the expected version and binding generation, and reject any attempt to reactivate a terminal session. SQL failures roll back the transaction and propagate to the caller; there is no silent fallback to process-local state.
 
-- Runtime binding `findOrCreate` inserts the stable slot if needed, locks it
-  with `SELECT ... FOR UPDATE`, returns its active binding when present, or
-  atomically increments the stored generation and assigns a new binding.
-- Runtime Session and Tool execution `findOrCreate` use database uniqueness;
-  a unique-key race is resolved by rereading and validating the winning row.
-- Mutable operations lock the row with `SELECT ... FOR UPDATE`, validate the
-  current version and immutable identity, and update the version in the same
-  transaction.
-- Operation and dispatch claims read the database clock and persist UTC
-  microsecond timestamps. An expired claim can be taken over only by
-  incrementing its fencing generation, so JVM clock drift cannot elect an
-  owner.
-- Terminal Runtime bindings and Sessions cannot be reactivated. Settled Tool
-  executions cannot be redispatched.
-- SQL failures roll back and surface as repository failures; the adapter never
-  silently falls back to process memory.
+Tool Execution creation uses a unique SHA-256 key for bounded database indexing while retaining and verifying the full idempotency key. Mutations lock the execution row. Compare-and-set and `UNKNOWN` reconciliation validate the supplied immutable identity and version; cancellation validates the expected version; dispatch claim and renewal validate the applicable owner, generation, and lease fences. Lease decisions use the database clock. An expired `DISPATCHING` claim can be reissued because physical execution has not started; an expired `EXECUTING` or `CANCEL_REQUESTED` claim becomes `UNKNOWN` and cannot be dispatched again until an explicit reconciliation result settles it.
 
-### Tool execution identity
+## Schema lifecycle
 
-The Tool execution record binds the stable idempotency key to the Runtime
-binding generation, Harness Session, Runtime Session, Turn, Tool call, request
-digest, and immutable invocation reference. A duplicate idempotency key returns
-the original record so the caller can compare the request and reject changed
-content. Lost or ambiguous dispatches remain queryable by the original
-`executionCallId`. Both execution and idempotency identifiers use SHA-256 keys
-for bounded, case-sensitive indexing under any database collation, while every
-lookup verifies the complete identifier and fails closed on a collision.
-
-### Schema lifecycle
-
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` creates only the four new
-tables and indexes and is safe to call repeatedly. It does not alter existing
-tables or import process-local state. Production deployments may execute the
-same bundled SQL through their normal schema-management system instead of the
-initializer.
-
-## Security and tenancy
-
-Tenant, workspace, workspace generation, canonical working directory,
-capability digest, and isolation class remain part of the persisted scope. The
-public Session UUID is globally unique and is the Runtime Session primary key;
-an attempt to reuse it with another Harness or scope is rejected.
-Session-isolated bindings use that same UUID as their unique isolation key;
-workspace-isolated bindings keep the key null. The JDBC adapter does not
-authenticate those values; the Java control plane must derive them from its
-trusted admission context.
-
-Tool execution methods intentionally do not accept a separate tenant or
-workspace argument. The embedding service must derive globally unique
-execution and idempotency identifiers from authenticated tenant, workspace,
-and Session context; an untrusted identifier alone is never authorization.
-
-Runtime endpoint tokens are private control-plane credentials. The schema
-stores them because restart recovery requires the original lease, but the
-embedding service must use encrypted storage or database-level encryption and
-must not expose rows through public APIs or logs.
+Schema initialization executes idempotent `CREATE TABLE IF NOT EXISTS` statements for the four broker-owned tables. This is sufficient for the current private module boundary. A later server integration must define how migrations are versioned and deployed before these repositories become production wiring.
 
 ## Recovery boundary
 
-Persisting Broker state does not prove that a local Runtime process can be
-adopted after a Java restart. A persisted `READY` binding may point to a process
-that the previous Java instance stopped. Production integration must health
-check and reconcile that lease before reuse, and local-process recovery still
-needs a durable provision seed, process adoption or reprovisioning, and a
-Session rebind policy for dead bindings. Until then, this implementation proves
-shared state, fencing, and execution idempotency only.
+A durable binding or session row proves only that broker state survived. It does not prove that the referenced runtime process is live. Likewise, an `UNKNOWN` Tool Execution records uncertainty rather than proving whether the side effect happened. Process reconciliation, transport health checks, and authoritative execution reconciliation remain responsibilities of the later runtime integration.
+
+## Security and tenancy
+
+Binding and Session lookups and mutations are constrained by the complete Runtime Scope or an identity created from it. Tool Execution methods accept opaque execution, idempotency, and Runtime Session identifiers without a separate tenant or workspace argument. The embedding service must derive globally unique identifiers from authenticated tenant, workspace, and session context before calling this repository and must never accept an untrusted identifier as sufficient authorization. Within this precondition, the unique keys prevent cross-scope aliasing; the Tool Execution repository does not independently enforce tenant or workspace scope. The Binding and Session repositories never search for a compatible binding in another tenant or workspace, and no repository falls back to a primary runtime when state is missing or ambiguous.
 
 ## Validation
 
-- Run the existing Runtime Broker lifecycle suite and strengthened in-memory
-  repository tests.
-- Run JDBC contract tests with two repository objects sharing one H2 database
-  in MySQL mode.
-- Run the same durable create, CAS, lease takeover, tenant isolation, Session
-  accounting, execution idempotency, and restart-read scenarios against a real
-  MySQL database.
-- Run Maven tests, Checkstyle, and package verification on JDK 21 with the
-  module's Java 11 release target.
+The repository contract covers:
+
+- concurrent creation of one binding per scope;
+- reconstruction through a new repository instance;
+- stale version and stale generation rejection;
+- operation lease ownership and takeover after expiry;
+- tenant and workspace isolation for Binding and Session state;
+- concurrent session creation;
+- terminal sessions that cannot be reactivated;
+- concurrent idempotent Tool Execution creation across repository instances;
+- dispatch claim, renewal, cancellation, expired-owner fencing, and `UNKNOWN` reconciliation;
+- settled result reconstruction through a new repository instance; and
+- repeatable schema initialization.
+
+The default test suite runs the contract on H2 in MySQL compatibility mode. CI also runs the `mysql-integration` Maven profile against MariaDB through MySQL Connector/J so session-time-zone handling and persisted lease round trips are exercised on a real MySQL-compatible protocol. The same profile can be run locally against a caller-supplied MySQL database.
 
 ## Acceptance criteria
 
-- Two JVM-equivalent repository instances converge on one active binding and
-  one Tool execution for the same keys.
-- A newly constructed repository instance can read and mutate records created
-  by a prior instance.
-- Stale versions, stale operation generations, and stale dispatch generations
-  cannot mutate current state.
-- Tenant and workspace identity cannot be replaced by identifier collisions.
-- A terminal binding or Session cannot be reactivated, and a settled execution
-  cannot be redispatched.
-- Schema initialization is repeatable and does not modify unrelated tables.
-- Default tests and a real-MySQL integration profile pass without adding a
-  Spring dependency.
+- Multiple repository instances coordinate through the database and observe one active binding for a scope.
+- Binding and session state survives repository reconstruction.
+- Stale owners cannot mutate a newer binding generation or version.
+- Expired operation leases can be taken over while live leases remain fenced.
+- Binding and Session state remains isolated by tenant and workspace.
+- Tool Execution identifiers are globally unique and namespace-bound to authenticated tenant, workspace, and session context by the embedding service.
+- Terminal sessions cannot return to a non-terminal state.
+- Concurrent callers observe one Tool Execution for an idempotency key.
+- A live dispatch lease rejects another owner, while an expired executing claim becomes `UNKNOWN` instead of being replayed.
+- Cancellation intent and settled Tool results survive repository reconstruction.
+- Schema initialization is safe to repeat.
+- The H2 contract and the CI real-MySQL-compatible contract pass without process-local fallback.
 
-Verified on 2026-09-20 with JDK 21.0.8 and the Java 11 release target: the
-in-memory suite and H2 JDBC contract passed; the same JDBC contract passed
-through the `mysql-integration` profile against a disposable local MySQL
-database; Checkstyle reported zero violations. The contract uses independently
-constructed Repository objects and 32-way concurrent binding and execution
-creation.
+## Follow-up work
+
+Server wiring, process reconciliation, authoritative `UNKNOWN` resolution, schema migration deployment, and multi-process end-to-end validation remain follow-up work.
 
 ## Follow-up integration
 
-After this change, the Managed Agent server can inject these repositories into
-`RuntimeBrokerService` from its Spring DataSource. The next integration slice
-must remove the production InMemory wiring, run two Java processes against one
-MySQL database, reconcile stale Runtime leases after restart, recover the
-original execution, and then add the delayed-Runtime TTFT scenario. That
-integration must depend on this durable source of truth rather than add another
-state store. The scheduler-neutral endpoint, resource-handle, and recovery
-contract for that slice is specified in
-[Managed Runtime Endpoint Persistence and Recovery](2026-09-21-managed-runtime-endpoint-recovery.md).
+After this change, the Managed Agent server can inject these repositories into `RuntimeBrokerService` from its Spring DataSource. The next integration slice must remove the production InMemory wiring, run two Java processes against one MySQL database, reconcile stale Runtime leases after restart, recover the original execution, and then add the delayed-Runtime TTFT scenario. That integration must depend on this durable source of truth rather than add another state store. The scheduler-neutral endpoint, resource-handle, and recovery contract for that slice is specified in [Managed Runtime Endpoint Persistence and Recovery](2026-09-21-managed-runtime-endpoint-recovery.md).

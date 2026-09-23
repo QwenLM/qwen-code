@@ -5270,10 +5270,9 @@ describe('loadCliConfig with includeDirectories', () => {
       ...policy,
       maskedPaths: expect.any(Array),
     });
-    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual([
-      policy.maskedPaths[0],
-      path.join(policy.workspace, '.qwen', 'review-leases'),
-    ]);
+    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual(
+      policy.maskedPaths,
+    );
     expect(config.getCoreTools()).toEqual(
       expect.arrayContaining([
         ToolNames.SHELL,

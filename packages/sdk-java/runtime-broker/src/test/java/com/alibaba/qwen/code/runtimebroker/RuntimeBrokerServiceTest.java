@@ -313,6 +313,38 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void dispatcherThatLosesItsClaimDoesNotExecute() throws Exception {
+        MutableClock clock = new MutableClock(Instant.parse(
+                "2026-09-18T00:00:00Z"));
+        TakeoverExecutionRepository executions =
+                new TakeoverExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        RuntimeBrokerService service = durableService("broker-a",
+                request -> CompletableFuture.completedFuture(LEASE),
+                transport, new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(), executions);
+        try {
+            service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                    .toCompletableFuture().get(1, TimeUnit.SECONDS);
+            Map<String, Object> created = service.createExecution("key-1",
+                    HARNESS_SESSION, RUNTIME_SESSION, "turn-1", "tool-1",
+                    "args-1", reference("args-1"));
+
+            executions.awaitTakeover();
+
+            assertEquals(0, transport.executions.get());
+            ToolExecutionRecord current = executions.findByExecutionCallId(
+                    (String) created.get("executionCallId"));
+            assertEquals(ToolExecutionRecord.State.EXECUTING,
+                    current.getState());
+            assertEquals("broker-b", current.getDispatchOwner());
+            assertEquals(2, current.getDispatchGeneration());
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
     void provisioningOwnerRenewsItsOperationLease() throws Exception {
         InMemoryRuntimeBindingRepository bindings =
                 new InMemoryRuntimeBindingRepository();
@@ -1633,6 +1665,104 @@ class RuntimeBrokerServiceTest {
                 RuntimeSession session) {
             return releases.incrementAndGet() == 1 ? interrupted
                     : CompletableFuture.completedFuture(true);
+        }
+    }
+
+    private static final class TakeoverExecutionRepository
+            implements ToolExecutionRepository {
+        private final MutableClock clock;
+        private final InMemoryToolExecutionRepository delegate;
+        private final CompletableFuture<Void> takeoverCompleted =
+                new CompletableFuture<>();
+        private boolean takeoverPending = true;
+
+        TakeoverExecutionRepository(MutableClock clock) {
+            this.clock = clock;
+            delegate = new InMemoryToolExecutionRepository(clock);
+        }
+
+        void awaitTakeover() throws Exception {
+            takeoverCompleted.get(5, TimeUnit.SECONDS);
+        }
+
+        @Override
+        public ToolExecutionRecord findOrCreate(
+                ToolExecutionRecord candidate) {
+            return delegate.findOrCreate(candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord findByExecutionCallId(
+                String executionCallId) {
+            return delegate.findByExecutionCallId(executionCallId);
+        }
+
+        @Override
+        public ToolExecutionRecord findByIdempotencyKey(
+                String idempotencyKey) {
+            return delegate.findByIdempotencyKey(idempotencyKey);
+        }
+
+        @Override
+        public ToolExecutionRecord compareAndSet(
+                ToolExecutionRecord expected, ToolExecutionRecord replacement,
+                String owner, long dispatchGeneration) {
+            if (takeoverPending && "broker-a".equals(owner)
+                    && replacement.getState()
+                            == ToolExecutionRecord.State.EXECUTING) {
+                takeoverPending = false;
+                clock.advance(Duration.ofSeconds(2));
+                ToolExecutionRecord claimed = delegate.claimDispatch(
+                        expected.getExecutionCallId(), "broker-b",
+                        Duration.ofMinutes(1));
+                delegate.compareAndSet(claimed, claimed.withState(
+                        ToolExecutionRecord.State.EXECUTING, false),
+                        "broker-b", claimed.getDispatchGeneration());
+                takeoverCompleted.complete(null);
+            }
+            return delegate.compareAndSet(expected, replacement, owner,
+                    dispatchGeneration);
+        }
+
+        @Override
+        public ToolExecutionRecord claimDispatch(String executionCallId,
+                String owner, Duration leaseDuration) {
+            return delegate.claimDispatch(executionCallId, owner,
+                    leaseDuration);
+        }
+
+        @Override
+        public ToolExecutionRecord renewDispatch(String executionCallId,
+                String owner, long dispatchGeneration,
+                Duration leaseDuration) {
+            return delegate.renewDispatch(executionCallId, owner,
+                    dispatchGeneration, leaseDuration);
+        }
+
+        @Override
+        public ToolExecutionRecord requestCancel(String executionCallId,
+                long expectedVersion) {
+            return delegate.requestCancel(executionCallId, expectedVersion);
+        }
+
+        @Override
+        public ToolExecutionRecord resolveUnknown(
+                ToolExecutionRecord expected,
+                Map<String, Object> resolutionResult,
+                Instant resolutionTime) {
+            return delegate.resolveUnknown(expected, resolutionResult,
+                    resolutionTime);
+        }
+
+        @Override
+        public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
+            return delegate.hasActiveByRuntimeSession(runtimeSessionId);
+        }
+
+        @Override
+        public boolean hasActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            return delegate.hasActiveByBinding(bindingId, runtimeGeneration);
         }
     }
 
