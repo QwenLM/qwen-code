@@ -90,6 +90,12 @@ vi.mock('./MessageItem', async () => {
             message.role === 'tool_group'
               ? message.thoughts?.map((thought) => thought.content).join('|')
               : undefined,
+          'data-thought-streaming':
+            message.role === 'tool_group'
+              ? message.thoughts
+                  ?.map((thought) => String(Boolean(thought.isStreaming)))
+                  .join('|')
+              : undefined,
         },
         sendFailed
           ? React.createElement(
@@ -5672,12 +5678,13 @@ describe('MessageList — turn collapse (DOM)', () => {
     );
 
     // A full re-merge would rebuild the aggregated group's tools array on
-    // every tick; the streamed-tail patch reuses it.
-    expect(
-      container
-        .querySelector('[data-thought-content]')
-        ?.getAttribute('data-thought-content'),
-    ).toBe('plan delta two');
+    // every tick; the streamed-tail patch reuses it. The idle renders settle
+    // the stale streaming flag on the merged summary row's thought.
+    const summaryRow = container.querySelector('[data-thought-content]');
+    expect(summaryRow?.getAttribute('data-thought-content')).toBe(
+      'plan delta two',
+    );
+    expect(summaryRow?.getAttribute('data-thought-streaming')).toBe('false');
     const afterTicks = messageItemTestState.toolArrays.slice(renderedBefore);
     expect(afterTicks.length).toBeGreaterThan(0);
     expect(afterTicks.every((tools) => tools === stableTools)).toBe(true);
