@@ -7,6 +7,7 @@
 import type { Content, Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import {
+  IMAGE_MARKER_METADATA,
   InMemoryImagePayloadStore,
   buildReattachParts,
   countAllInlineImages,
@@ -29,6 +30,16 @@ function toolImageTurn(data: string): Content {
       },
     ],
   };
+}
+
+// The eviction marker a tool-nested image was replaced with.
+function nestedMarkerText(content: Content): string {
+  const nested = content.parts?.[0]?.functionResponse?.parts as
+    | Part[]
+    | undefined;
+  const text = nested?.[0]?.text;
+  if (!text) throw new Error('expected an evicted tool-nested image');
+  return text;
 }
 
 function imageParts(contents: Content[]): Part[] {
@@ -332,6 +343,28 @@ describe('replaceImagePayloadsInPlace', () => {
       2,
     );
   });
+
+  it('stamps marker provenance on top-level parts only', () => {
+    const store = new InMemoryImagePayloadStore();
+    const topLevel: Part = {
+      inlineData: { mimeType: 'image/png', data: 'top-level' },
+    };
+    const contents: Content[] = [
+      { role: 'user', parts: [topLevel] },
+      toolImageTurn('nested'),
+    ];
+
+    replaceImagePayloadsInPlace(contents, store);
+
+    const id = store.put({
+      inlineData: { mimeType: 'image/png', data: 'top-level' },
+    }).id;
+    expect(topLevel.partMetadata?.[IMAGE_MARKER_METADATA]).toBe(id);
+    // `stripPartFields` does not recurse into `functionResponse.parts`, so a
+    // stamp on a tool-nested marker would reach providers that reject it.
+    const nested = contents[1]!.parts![0]!.functionResponse!.parts as Part[];
+    expect(nested[0]!.partMetadata).toBeUndefined();
+  });
 });
 
 describe('buildReattachParts', () => {
@@ -475,16 +508,16 @@ describe('buildReattachParts', () => {
 
     const parts = buildReattachParts([], 3, contents, store);
 
-    // Staleness is scoped to earlier turns, and the unlabeled inline images
-    // of the current turn are named as its attachments (#12544).
+    // Every stale class carries the caveat, and the note no longer claims
+    // the images above it are user-sent attachments (#12544).
     expect(parts[0]?.text).toContain(
-      'Each image below is labeled with whether it belongs to the current user turn;',
+      'Each image below is labeled with its origin:',
     );
     expect(parts[0]?.text).toContain(
-      'images from an earlier user turn may be OUTDATED',
+      'are frozen snapshots that may be OUTDATED, do not treat them as current UI state.',
     );
     expect(parts[0]?.text).toContain(
-      'Images that appear before this note in the current user turn are attachments of that turn.',
+      'Images shown above this note are not the ones replayed below.',
     );
     const earlier = (label: string | undefined) =>
       label?.endsWith(
@@ -543,7 +576,7 @@ describe('buildReattachParts', () => {
     ]);
   });
 
-  it('labels a replayed marker from the current user turn as current', () => {
+  it('labels an in-turn tool snapshot as captured earlier, not as current (#12544)', () => {
     const store = new InMemoryImagePayloadStore();
     const contents = [toolImageTurn('current')];
     replaceImagePayloadsInPlace(contents, store);
@@ -553,10 +586,197 @@ describe('buildReattachParts', () => {
       store,
     );
 
+    // A snapshot a tool took during this turn is a frozen frame as well, so
+    // the unqualified current label is reserved for prompt attachments.
     expect(images).toEqual([
       {
         data: 'current',
+        label: expect.stringMatching(
+          /^Image #[a-f0-9]{12}: captured earlier in the current user turn; may predate later changes$/,
+        ),
+      },
+    ]);
+  });
+
+  it('keeps the unqualified current label for the prompt attachment only', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'fix the layout' },
+          { inlineData: { mimeType: 'image/png', data: 'prompt-shot' } },
+        ],
+      },
+      toolImageTurn('old'),
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-edit', name: 'edit' } }],
+      },
+      toolImageTurn('new'),
+    ];
+    // The tool result of the running call stays inline, as on a live request.
+    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
+
+    const images = labeledImages(
+      buildReattachParts([], 3, contents, store),
+      store,
+    );
+
+    expect(images).toEqual([
+      {
+        data: 'prompt-shot',
         label: expect.stringMatching(/: part of the current user turn$/),
+      },
+      {
+        data: 'old',
+        label: expect.stringMatching(
+          /^Image #[a-f0-9]{12}: captured earlier in the current user turn; may predate later changes$/,
+        ),
+      },
+    ]);
+  });
+
+  it('does not let a marker echoed by tool output vouch for a stale image', () => {
+    const store = new InMemoryImagePayloadStore();
+    const turn1 = toolImageTurn('stale');
+    replaceImagePayloadsInPlace([turn1], store);
+    const marker = nestedMarkerText(turn1);
+    const contents: Content[] = [
+      turn1,
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
+      },
+      // A tool result whose text quotes the marker verbatim: a transcript
+      // read back, a fetched page, or model prose folded into the turn.
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-read',
+              name: 'read_file',
+              response: { output: marker },
+            },
+          },
+          { text: marker },
+        ],
+      },
+    ];
+
+    const images = labeledImages(
+      buildReattachParts([], 2, contents, store),
+      store,
+    );
+
+    expect(images).toEqual([
+      {
+        data: 'stale',
+        label: expect.stringMatching(
+          /: from an earlier user turn, NOT part of the current one$/,
+        ),
+      },
+    ]);
+  });
+
+  it('does not let a prompt quoting an earlier marker relabel it as current', () => {
+    const store = new InMemoryImagePayloadStore();
+    const turn1 = toolImageTurn('stale');
+    replaceImagePayloadsInPlace([turn1], store);
+    const marker = nestedMarkerText(turn1);
+    const contents: Content[] = [
+      turn1,
+      { role: 'model', parts: [{ text: 'ok' }] },
+      { role: 'user', parts: [{ text: `compare ${marker} with this` }] },
+    ];
+
+    const images = labeledImages(
+      buildReattachParts([], 2, contents, store),
+      store,
+    );
+
+    expect(images).toEqual([
+      {
+        data: 'stale',
+        label: expect.stringMatching(
+          /: from an earlier user turn, NOT part of the current one$/,
+        ),
+      },
+    ]);
+  });
+
+  it('does not label an image kept by a post-compaction summary as current', () => {
+    const store = new InMemoryImagePayloadStore();
+    const turn1 = toolImageTurn('restored');
+    replaceImagePayloadsInPlace([turn1], store);
+    const marker = nestedMarkerText(turn1);
+    // Post-compaction history is a plain-text user content whose image
+    // restoration block retains the marker text of earlier turns.
+    const contents: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: `Context summary. Preserved from before context was compacted: ${marker}`,
+          },
+        ],
+      },
+    ];
+
+    const images = labeledImages(
+      buildReattachParts([], 1, contents, store),
+      store,
+    );
+
+    expect(images).toEqual([
+      {
+        data: 'restored',
+        label: expect.stringMatching(
+          /^Image #[a-f0-9]{12}: captured earlier in the current user turn; may predate later changes$/,
+        ),
+      },
+    ]);
+  });
+
+  it('labels an earlier snapshot as earlier when the prompt merged with a tool result', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      { role: 'user', parts: [{ text: 'turn 1 question' }] },
+      toolImageTurn('old'),
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-shot', name: 'screenshot' } }],
+      },
+      // `appendCuratedContent` fuses the new prompt onto the tool result when
+      // the model group between them is dropped as invalid or degraded.
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-shot',
+              name: 'screenshot',
+              response: { output: 'shot' },
+            },
+          },
+          { text: 'what changed?' },
+        ],
+      },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const images = labeledImages(
+      buildReattachParts([], 2, contents, store),
+      store,
+    );
+
+    expect(images).toEqual([
+      {
+        data: 'old',
+        label: expect.stringMatching(
+          /: from an earlier user turn, NOT part of the current one$/,
+        ),
       },
     ]);
   });
