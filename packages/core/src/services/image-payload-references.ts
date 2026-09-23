@@ -239,13 +239,16 @@ export function prepareImagePayloadsForRequest(
   if (reattachById.size === 0) {
     return transformed;
   }
+  const currentTurnIds = collectReferencedImageIds(
+    currentTurnContents(transformed),
+  );
 
   const reattachParts: Part[] = [
     {
       text: reattachContextText([...reattachById.keys()]),
     },
     ...[...reattachById.values()].flatMap((image) =>
-      labeledReattachParts(image, referencedIds.has(image.id)),
+      labeledReattachParts(image, currentTurnIds.has(image.id)),
     ),
   ];
 
@@ -378,9 +381,11 @@ function imageReferenceText(stored: StoredImagePayload): string {
 
 function reattachContextText(ids: readonly string[]): string {
   return (
-    'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
+    'Images read earlier in this session, replayed for reference: ' +
     ids.map((id) => `Image #${id}`).join(', ') +
-    '. Each image below is labeled with whether it belongs to the current user turn.'
+    '. Each image below is labeled with whether it belongs to the current user turn;' +
+    ' images from an earlier user turn may be OUTDATED, do not treat them as current UI state.' +
+    ' Images that appear before this note in the current user turn are attachments of that turn.'
   );
 }
 

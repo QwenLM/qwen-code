@@ -475,8 +475,16 @@ describe('buildReattachParts', () => {
 
     const parts = buildReattachParts([], 3, contents, store);
 
+    // Staleness is scoped to earlier turns, and the unlabeled inline images
+    // of the current turn are named as its attachments (#12544).
     expect(parts[0]?.text).toContain(
-      'Each image below is labeled with whether it belongs to the current user turn.',
+      'Each image below is labeled with whether it belongs to the current user turn;',
+    );
+    expect(parts[0]?.text).toContain(
+      'images from an earlier user turn may be OUTDATED',
+    );
+    expect(parts[0]?.text).toContain(
+      'Images that appear before this note in the current user turn are attachments of that turn.',
     );
     const earlier = (label: string | undefined) =>
       label?.endsWith(
