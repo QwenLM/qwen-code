@@ -627,6 +627,7 @@ class FakeBridge {
         taskId: string;
         action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2];
         context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3];
+        input: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[4];
       }
     | undefined;
   async controlSessionWorkflowTask(
@@ -634,8 +635,9 @@ class FakeBridge {
     taskId: string,
     action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2],
     context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3],
+    input: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[4],
   ) {
-    this.lastWorkflowAction = { sessionId, taskId, action, context };
+    this.lastWorkflowAction = { sessionId, taskId, action, context, input };
     return { changed: true, status: 'running' as const };
   }
   lastSavedWorkflowRead: { sessionId: string; name: string } | undefined;
@@ -1861,6 +1863,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       retryable: true,
     });
   });
+
+  it.each(['full', 'summary'] as const)(
+    'accepts the daemon eventDetailMode extension over ACP: %s',
+    async (eventDetailMode) => {
+      const send = vi.spyOn(bridge, 'sendPrompt');
+      const connId = await initialize();
+      await newSession(connId);
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'hello' }],
+          eventDetailMode,
+        },
+      });
+      expect(ack.status).toBe(202);
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledWith(
+          'sess-1',
+          expect.objectContaining({ eventDetailMode }),
+          expect.any(AbortSignal),
+          expect.anything(),
+        ),
+      );
+    },
+  );
 
   it.each([
     { meta: undefined, context: {} },
@@ -8841,6 +8871,48 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         taskId: 'workflow-1',
         action: 'retry',
         context: { clientId: 'client-1', fromLoopback: true },
+        // A control action carries no start input, whatever the caller sends.
+        input: undefined,
+      });
+    });
+
+    it('_qwen/session/tasks/workflow_action forwards the start input of a run-script call', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/tasks/workflow_action',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'definition-7',
+          action: 'run-script',
+          script: 'return 1',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { changed: true, status: 'running' },
+      });
+      expect(bridge.lastWorkflowAction).toMatchObject({
+        sessionId: 'sess-1',
+        taskId: 'definition-7',
+        action: 'run-script',
+        input: {
+          script: 'return 1',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
       });
     });
 
@@ -11493,6 +11565,7 @@ describe('ACP WebSocket transport security', () => {
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
       localControlToken?: string;
+      webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
     } = {},
@@ -11502,9 +11575,11 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
-      const credentials = opts.localControlToken
-        ? new CredentialStore(opts.token)
-        : undefined;
+      const credentials =
+        opts.localControlToken || opts.webShellToken
+          ? new CredentialStore(opts.token)
+          : undefined;
+      if (opts.webShellToken) credentials!.addWebShellToken(opts.webShellToken);
       if (opts.localControlToken) {
         credentials!.addPairingToken('test-pairing', opts.localControlToken);
       }
@@ -11730,6 +11805,96 @@ describe('ACP WebSocket transport security', () => {
   );
 
   // ── CSWSH origin check ─────────────────────────────────────────────
+  it.each([
+    ['http://qwen.test:4170', 'device-token', 101],
+    ['http://qwen.test:4170', 'wrong', 401],
+    ['http://evil.test', 'device-token', 403],
+    ['https://qwen.test:4170', 'device-token', 403],
+  ])(
+    'checks non-loopback primary device access from %s with %s',
+    async (origin, token, code) => {
+      await startServer({
+        hostname: '0.0.0.0',
+        token: 'runtime-token',
+        webShellToken: 'device-token',
+      });
+      const result = await wsConnectRaw('127.0.0.1', origin, {
+        Host: 'qwen.test:4170',
+        Authorization: `Bearer ${token}`,
+      });
+      expect(result.code).toBe(code);
+    },
+  );
+
+  it.each([
+    ['[fd00::1]:4170', 'http://[fd00::1]:4170', 101],
+    ['[fd00::1]:4170', 'http://fd00::1:4170', 403],
+    ['[fd00::1]:4170', 'http://[fd00::2]:4170', 403],
+    // RFC 7230 §5.4: a browser omits the scheme-default port from Origin;
+    // only the URL-parse normalization matches `Host: qwen.test:80` to it.
+    ['qwen.test:80', 'http://qwen.test', 101],
+    ['qwen.test:4170', 'http://qwen.test', 403],
+  ])(
+    'checks non-loopback primary device access with Host %s and origin %s',
+    async (host, origin, code) => {
+      await startServer({
+        hostname: '0.0.0.0',
+        token: 'runtime-token',
+        webShellToken: 'device-token',
+      });
+      const result = await wsConnectRaw('127.0.0.1', origin, {
+        Host: host,
+        Authorization: 'Bearer device-token',
+      });
+      expect(result.code).toBe(code);
+    },
+  );
+
+  it('applies the loopback Host allowlist on a short-spelled loopback bind', async () => {
+    // `127.1` is the inet_aton short form Node binds as 127.0.0.1: the
+    // listener is loopback, so a rebound Host/Origin pair must fail the
+    // loopback allowlist even with a valid device credential — the bind must
+    // not classify as an authenticated remote one.
+    await startServer({
+      hostname: '127.1',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+    });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+      Authorization: 'Bearer device-token',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`, {
+      Authorization: 'Bearer device-token',
+    });
+    expect(legit.code).toBe(101);
+  });
+
+  it('applies the loopback Host allowlist on a token-less non-loopback bind', async () => {
+    // A token-less daemon never classifies as an authenticated remote bind:
+    // the upgrade carries no credential at all, so the rebound Host/Origin
+    // pair must fail the loopback Host allowlist rather than pass an
+    // "Origin agrees with Host" check.
+    await startServer({ hostname: '0.0.0.0' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
+  it('applies the loopback Host allowlist on a token-less specific non-loopback bind', async () => {
+    await startServer({ hostname: '192.168.1.100' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
   it('rejects WS upgrade with cross-origin Origin header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');

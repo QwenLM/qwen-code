@@ -70,6 +70,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                               |
 | `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                             |
 | `dmPolicy`          | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
+| `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset derives it. See [Shared-Session Operators](#shared-session-operators)                                                                      |
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
 | `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
@@ -81,6 +82,20 @@ Controls who can interact with the bot:
 - **`allowlist`** (default) — Only users listed in `allowedUsers` can send messages. Others are silently ignored.
 - **`pairing`** — Unknown senders receive a pairing code. The bot operator approves them via CLI, and they're added to a persistent allowlist. Users in `allowedUsers` skip pairing entirely. See [DM Pairing](#dm-pairing) below.
 - **`open`** — Anyone can send messages. Use with caution.
+
+### Shared-Session Operators
+
+In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+
+The operators are, in order:
+
+1. `operators`, when set. It is authoritative even when empty: `"operators": []` means nobody may operate a shared session.
+2. Otherwise `allowedUsers`, when it is not empty.
+3. Otherwise anyone who may speak in the conversation — with one exception. A group with `senders: "open"` admits members nobody vouched for by name, so there the direct-message axis decides instead: everyone under `senderPolicy: "open"`, paired users under `"pairing"`. In a group with `senders: "allowlist"` the members of that group's `allowedUsers` are operators. An approved group under `groupPolicy: "pairing"` admits all of its members by default, and all of them may operate its sessions.
+
+For example, `senderPolicy: "pairing"` with `groups: { "*": { "senders": "open" } }` lets every group member start a turn, while only the users you approved through pairing may answer its permission prompts. Set `operators` when you want a different list.
+
+A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
 ### Session Scope
 
@@ -183,11 +198,13 @@ The legacy slash aliases `/remember-channel`, `/channel-memory`, and
 commands.
 
 Channel memory follows the channel access gates. Any message accepted by
-`senderPolicy`, `dmPolicy`, `groupPolicy`, group settings, pairing, and mention
-requirements can read, write, update, or clear memory for that chat or thread.
-Accepted members of the same group share that group's target store. Use
-`allowlist` or `pairing` policies when group memory should be limited to trusted
-senders.
+`senderPolicy`, `dmPolicy`, `groupPolicy`, group settings (including `senders`),
+pairing, and mention requirements can read, write, update, or clear memory for
+that chat or thread. Accepted members of the same group share that group's
+target store. Use `allowlist` or `pairing` on `senderPolicy`, or a group's
+`senders: "allowlist"` with its `allowedUsers`, when group memory should be
+limited to trusted senders — under `senders: "open"` every member of an
+admitted group shares that group's memory store.
 
 Existing legacy `CHANNEL.md` memory is migrated automatically to structured
 `CHANNEL.json` storage on the first mutation. Structured memory persists across
@@ -303,6 +320,33 @@ Configure per-group with the `groups` setting:
 - **Group chat ID** — Override settings for a specific group. Overrides `"*"` defaults.
 - **`requireMention`** (default: `true`) — When `true`, the bot only responds to messages that @mention it or reply to one of its messages. When `false`, the bot responds to all messages (useful for dedicated task groups).
 
+### Group Senders
+
+By default a group follows `senderPolicy`, so a group that `groupPolicy` admits still drops messages from users outside the direct-message allowlist. Set `senders` in `groups` to decide who may speak in groups on their own:
+
+```json
+{
+  "senderPolicy": "pairing",
+  "groupPolicy": "open",
+  "groups": {
+    "*": { "senders": "open" },
+    "-100123456": { "senders": "allowlist", "allowedUsers": ["alice", "bob"] }
+  }
+}
+```
+
+- **`inherit`** — follow `senderPolicy`, like a direct message. This is the default, except in an approved group under `groupPolicy: "pairing"`, which defaults to `open` because the approval admits all of its members.
+- **`open`** — any member of the group may use the bot, while `senderPolicy` keeps governing direct messages. This is the usual choice for a team bot that answers in groups but only for a few people in private chat.
+- **`allowlist`** — only the group's `allowedUsers` may speak. This list is separate from the channel-level `allowedUsers`.
+
+Each group's entry is read first, then `"*"`, field by field: a group that sets only `senders: "allowlist"` uses the `allowedUsers` from `"*"`. Under `groupPolicy: "allowlist"` a group ID key also admits the group, so a per-group entry there both admits the group and sets its senders.
+
+`pairing` is deliberately not a `senders` value: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
+
+On the `github` and `gitlab` channels all inbound traffic is group traffic, so `senders: "open"` there is equivalent to `senderPolicy: "open"` — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
+
+In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. Per-group overrides and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
+
 ### Group History Backfill
 
 By default, Qwen ignores unmentioned group messages and does not store them as session turns. To let the next `@mention` include recent group context, set `groupHistoryLimit` to a positive number.
@@ -330,7 +374,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 - Omitted or `0` disables backfill.
 - Group-level `groupHistoryLimit` overrides the channel-level value.
-- Only messages from authorized senders, or members of an approved paired group, are persisted.
+- Only messages from senders the group's `senders` setting admits are persisted (`senderPolicy` when it inherits; every member of an approved paired group by default) — so `senders: "open"` also widens whose messages `groupHistoryLimit` records.
 - Messages rejected by `groupPolicy` or group allowlist are not persisted.
 - Pending group history is stored as local JSONL under `~/.qwen/channels/<channel-name>-group-history.jsonl` or `$QWEN_HOME/channels/<channel-name>-group-history.jsonl`.
 - Cached messages are injected as untrusted context on the next real trigger and are not written as standalone session turns.
@@ -341,7 +385,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 1. groupPolicy — is this group disabled, listed, paired, or open? (no → ignore/pairing flow)
 2. dmPolicy — is this DM allowed?                      (disabled → ignore)
 3. requireMention — was the bot mentioned/replied to? (no → ignore)
-4. senderPolicy — is this sender approved?             (skipped for a paired group; otherwise no → user pairing flow)
+4. senders — may this sender speak here?              (the group's `senders`, else senderPolicy; a senderPolicy no → user pairing flow)
 5. Route to session
 ```
 
@@ -441,6 +485,18 @@ You can also set dispatch mode per group, overriding the channel default:
 Channels use their normal response delivery path. The shared delivery layer sends completed responses, and adapters may provide native progressive display, such as updating an interactive card in place. Platform message-length limits may still split long responses.
 
 The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings are no longer supported and can be removed from channel configuration. They do not affect delivery. Channel settings management rejects newly added or changed values for these fields. An unchanged stored value is retained, or removed, when the edit keeps the channel's `type`; changing a channel's `type` requires removing these fields first.
+
+### Turn output mode
+
+`outputMode` is a shared channel setting with adapter opt-in. Currently only **DingTalk** supports it and defaults to `per_turn` when the setting is omitted. Other adapters retain their existing behavior and receive no output-mode default: the channel editor does not offer this field, and configuration parsing or management saves reject an explicit value on unsupported adapters.
+
+- `per_task` waits for the main task and its associated background tasks and notifications, then delivers one final result containing the last non-empty assistant reply for that task.
+- `per_response` delivers each complete assistant response, not each token chunk.
+- `per_turn` delivers the last non-empty assistant reply within each turn. The main turn finishes immediately when its prompt ends; later background notification turns deliver separate results.
+
+In the default `per_turn` mode, a later background callback cannot reopen or replace the completed main result. A main result followed by eleven independent callback turns can therefore produce twelve result messages or cards. Choose `per_task` when the final result should wait for the associated background work. These modes select assistant output; they do not generate an extra summary or concatenate every intermediate reply.
+
+The selected policy applies whether interactive cards are enabled or replies use ordinary messages. The shared layer owns output selection and task/turn coordination; native rendering, media and fallback delivery remain adapter-specific. See [DingTalk turn output mode](./dingtalk#turn-output-mode) for presentation details and the conversation scope. Channel loops and webhook runs are unchanged.
 
 ## Scheduled Channel Loops
 
@@ -546,7 +602,7 @@ qwen channel status --daemon-url http://127.0.0.1:4170 --token secret
 qwen channel stop --daemon-url http://127.0.0.1:4170 --token secret
 ```
 
-This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. An explicit `--channel` selection takes precedence and fails daemon startup if it cannot become ready. On a flagless boot, the trusted primary workspace's `serve.channels` setting is restored. Secondary workspaces do not independently restore their own `serve.channels`. Without either source, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`.
+This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. An explicit `--channel` selection takes precedence and fails daemon startup if it cannot become ready. On a flagless boot, every trusted registered workspace's own `serve.channels` setting is restored, and a name that cannot be hosted is skipped with a log instead of stopping the others. `all` remains primary-workspace only. Registering a workspace later restores its channels too — without holding the registration open — once per daemon run, and not at all when the daemon was started with an explicit `--channel` or after `qwen channel stop`. Unlike the boot restore, one name it cannot host costs that workspace its whole list. Without any of these sources, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`, or until a workspace that configures its own `serve.channels` registers.
 
 Automatic restore skips invalid startup settings and validation or lease failures that occur before workers start, while preserving unrelated settings. After a worker startup fails, the daemon continues only once cleanup succeeds. A global runtime startup timeout or an unconfirmed worker stop still follows the normal startup-failure path; the service lease remains held while worker termination is unconfirmed. Check the daemon log for messages identifying `serve.channels` when a channel does not restore.
 

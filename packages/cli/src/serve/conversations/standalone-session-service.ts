@@ -20,7 +20,11 @@ import type {
   BridgeSessionSummary,
   BridgeStandaloneRestoreSessionRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
+import {
+  BridgeChannelClosedError,
+  BridgeTimeoutError,
+  type ServeWorkspaceProvidersStatus,
+} from '@qwen-code/acp-bridge/status';
 import {
   isScheduledTaskRunSource,
   STANDALONE_SESSION_SOURCE_TYPE,
@@ -42,6 +46,10 @@ import {
   type SessionWriterErrorKind,
   type SessionWriterLease,
 } from '@qwen-code/qwen-code-core';
+import {
+  AcpChildCapacityExceededError,
+  type AcpChildCapacity,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   parseCallerSuppliedSessionId,
   normalizeSessionIdForLookup,
@@ -77,6 +85,47 @@ import {
   type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
 
+import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  emitDaemonLog,
+  recordDaemonError,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+
+interface CreationDiagnostic {
+  sessionId: string;
+  relatedSessionId?: string;
+  workspaceId?: string;
+  phase:
+    | 'runtime'
+    | 'parent_validation'
+    | 'directory_prepare'
+    | 'spawn_pre_dispatch'
+    | 'spawn_dispatched'
+    | 'source_persistence'
+    | 'durable_validation'
+    | 'model_selection'
+    | 'binding'
+    | 'initial_prompt';
+  reason:
+    | 'unknown'
+    | 'rpc_timeout'
+    | 'transport_closed'
+    | 'runtime_changed'
+    | 'source_not_confirmed';
+  dispatchState: 'not_dispatched' | 'dispatched' | 'unknown';
+  cleanupOutcome:
+    | 'not_needed'
+    | 'rolled_back'
+    | 'closed'
+    | 'quarantined'
+    | 'unknown';
+}
+
+interface CreationAttempt {
+  diagnostic: CreationDiagnostic;
+  cause?: unknown;
+}
+
 const debugLogger = createDebugLogger('STANDALONE_SESSION_SERVICE');
 
 export type StandaloneSessionServiceErrorCode =
@@ -98,14 +147,17 @@ export type StandaloneSessionServiceErrorCode =
 
 export class StandaloneSessionServiceError extends Error {
   override readonly name = 'StandaloneSessionServiceError';
+  creationDiagnostic?: Readonly<CreationDiagnostic>;
 
   constructor(
     readonly code: StandaloneSessionServiceErrorCode,
     readonly sessionId: string | undefined,
     message: string,
     readonly retryable = false,
+    readonly capacity?: AcpChildCapacity,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -222,6 +274,7 @@ export type RestoreStandaloneSessionOptions = Pick<
   | 'clientId'
   | 'historyPageSize'
   | 'liveReplayMode'
+  | 'compactedReplayMode'
   | 'hideInheritedHistory'
   | 'approvalMode'
 >;
@@ -237,6 +290,7 @@ export interface RestoredStandaloneSession extends BridgeRestoredSession {
 }
 
 export interface StandaloneSessionServiceOptions {
+  daemonLog?: Pick<DaemonLogger, 'warn'>;
   ensureRuntime(): Promise<WorkspaceRuntime>;
   assertRuntimeCurrent(runtime: WorkspaceRuntime): void;
   quarantineRuntime(runtime: WorkspaceRuntime): Promise<void>;
@@ -301,8 +355,11 @@ type StoredStandaloneState =
     };
 
 class TerminalQuarantineSignal extends Error {
-  constructor(readonly completion: Promise<void>) {
-    super('Terminal Conversations runtime quarantine started');
+  constructor(
+    readonly completion: Promise<void>,
+    cause?: unknown,
+  ) {
+    super('Terminal Conversations runtime quarantine started', { cause });
   }
 }
 
@@ -326,6 +383,7 @@ function serviceError(
   code: StandaloneSessionServiceErrorCode,
   sessionId: string,
   retryable = code === 'working_directory_missing',
+  cause?: unknown,
 ): StandaloneSessionServiceError {
   const messages: Record<StandaloneSessionServiceErrorCode, string> = {
     invalid_request: 'The standalone session request is invalid.',
@@ -359,6 +417,8 @@ function serviceError(
     sessionId,
     messages[code],
     retryable,
+    undefined,
+    { cause },
   );
 }
 
@@ -438,6 +498,8 @@ function mergeLiveStandaloneSummary(
     ...(live.activeWorkState !== undefined
       ? { activeWorkState: live.activeWorkState }
       : {}),
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     ...(live.isWaitingForPermission !== undefined
       ? { isWaitingForPermission: live.isWaitingForPermission }
       : {}),
@@ -2329,6 +2391,9 @@ export class StandaloneSessionService {
               ...(action === 'load' && options.historyPageSize !== undefined
                 ? { historyPageSize: options.historyPageSize }
                 : {}),
+              ...(action === 'load' && options.compactedReplayMode !== undefined
+                ? { compactedReplayMode: options.compactedReplayMode }
+                : {}),
               ...(action === 'load' && options.liveReplayMode !== undefined
                 ? { liveReplayMode: options.liveReplayMode }
                 : {}),
@@ -2490,16 +2555,10 @@ export class StandaloneSessionService {
     request: CreateStandaloneChildSessionRequest,
     prompt: string,
   ): Promise<CreatedStandaloneChildSession> {
-    const { sessionId: parentSessionId } = parseRequiredSessionId(
-      request.parentSessionId,
-    );
-    if (parentSessionId === normalizeSessionIdForLookup(request.sessionId)) {
-      throw serviceError('standalone_session_conflict', parentSessionId);
-    }
     const created = await this.createInternal(
       request,
       prompt,
-      parentSessionId,
+      request,
       request.promptId,
     );
     if (!created.initialPrompt) {
@@ -2514,13 +2573,39 @@ export class StandaloneSessionService {
   private async createInternal(
     request: CreateStandaloneSessionRequest,
     prompt?: string,
-    parentSessionId?: string,
+    parentRequest?: Pick<
+      CreateStandaloneChildSessionRequest,
+      'parentSessionId'
+    >,
     promptId: string = randomUUID(),
   ): Promise<CreatedStandaloneSessionInternal> {
     const { sessionId } = parseRequiredSessionId(request.sessionId);
     let entry: CreatingEntry | undefined;
+    const attempt: CreationAttempt = {
+      diagnostic: {
+        sessionId,
+        phase: 'runtime',
+        reason: 'unknown',
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      },
+    };
     try {
+      if (parentRequest !== undefined)
+        attempt.diagnostic.phase = 'parent_validation';
+      const parentSessionId =
+        parentRequest === undefined
+          ? undefined
+          : parseRequiredSessionId(parentRequest.parentSessionId).sessionId;
+      if (parentSessionId !== undefined) {
+        attempt.diagnostic.phase = 'parent_validation';
+        attempt.diagnostic.relatedSessionId = parentSessionId;
+        if (parentSessionId === sessionId)
+          throw serviceError('standalone_session_conflict', parentSessionId);
+      }
+      attempt.diagnostic.phase = 'runtime';
       const runtime = await this.options.ensureRuntime();
+      attempt.diagnostic.workspaceId = runtime.workspaceId;
       return await this.options.runRuntimeActivity(runtime, async () => {
         this.options.assertRuntimeCurrent(runtime);
         await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
@@ -2553,6 +2638,7 @@ export class StandaloneSessionService {
                 request,
                 prompt,
                 promptId,
+                attempt,
                 persistedParentSessionId,
               ),
           );
@@ -2563,6 +2649,7 @@ export class StandaloneSessionService {
         return this.options.lifecycle.runSharedMany(
           [parentSessionId],
           async () => {
+            attempt.diagnostic.phase = 'parent_validation';
             const persistedParentSessionId =
               await this.assertCwdReadyUnderShared(runtime, parentSessionId);
             const parent = runtime.bridge.getSessionSummary(parentSessionId);
@@ -2582,9 +2669,25 @@ export class StandaloneSessionService {
       });
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) {
-        await error.completion.catch(() => undefined);
-        throw serviceError('standalone_creation_outcome_unknown', sessionId);
+        attempt.cause ??= error.cause ?? error;
+        attempt.diagnostic.cleanupOutcome = 'unknown';
+        await error.completion.then(
+          () => {
+            attempt.diagnostic.cleanupOutcome = 'quarantined';
+          },
+          () => undefined,
+        );
+        const outcome = serviceError(
+          'standalone_creation_outcome_unknown',
+          sessionId,
+          false,
+          attempt.cause,
+        );
+        this.recordCreationFailure(attempt, outcome);
+        throw outcome;
       }
+      attempt.cause ??= error;
+      this.recordCreationFailure(attempt, error);
       throw error;
     } finally {
       const ownedEntry = entry;
@@ -2596,6 +2699,53 @@ export class StandaloneSessionService {
         this.creating.delete(sessionId);
         ownedEntry.reservation?.release();
       }
+    }
+  }
+
+  private recordCreationFailure(
+    attempt: CreationAttempt,
+    error: unknown,
+  ): void {
+    const diagnostic = attempt.diagnostic;
+    const cause =
+      attempt.cause instanceof StandaloneSessionSpawnError
+        ? attempt.cause.cause
+        : attempt.cause;
+    if (diagnostic.reason === 'unknown') {
+      if (cause instanceof BridgeTimeoutError)
+        diagnostic.reason = 'rpc_timeout';
+      else if (cause instanceof BridgeChannelClosedError)
+        diagnostic.reason = 'transport_closed';
+      else if (cause instanceof ConversationRuntimeOwnershipError)
+        diagnostic.reason = 'runtime_changed';
+    }
+    if (error instanceof StandaloneSessionServiceError) {
+      error.creationDiagnostic = { ...diagnostic };
+    }
+    const message = 'Standalone session creation failed.';
+    const attributes = {
+      'session.id': diagnostic.sessionId,
+      'creation.phase': diagnostic.phase,
+      'creation.reason': diagnostic.reason,
+      'creation.dispatch_state': diagnostic.dispatchState,
+      'creation.cleanup_outcome': diagnostic.cleanupOutcome,
+      ...(diagnostic.relatedSessionId
+        ? { 'creation.related_session_id': diagnostic.relatedSessionId }
+        : {}),
+      ...(diagnostic.workspaceId
+        ? { 'workspace.id': diagnostic.workspaceId }
+        : {}),
+    };
+    try {
+      recordDaemonError(undefined, new Error(message), attributes);
+      emitDaemonLog(message, attributes);
+    } catch {
+      /* Diagnostics must not affect creation. */
+    }
+    try {
+      this.options.daemonLog?.warn(message, { ...diagnostic });
+    } catch {
+      /* Best effort. */
     }
   }
 
@@ -2637,18 +2787,23 @@ export class StandaloneSessionService {
     },
     prompt: string | undefined,
     promptId: string,
+    attempt: CreationAttempt,
     parentSessionId?: string,
   ): Promise<CreatedStandaloneSessionInternal> {
+    attempt.diagnostic.phase = 'durable_validation';
     this.options.assertRuntimeCurrent(runtime);
     await this.reconcileDeletionUnderExclusive(runtime, sessionId);
     this.options.assertRuntimeCurrent(runtime);
     await this.assertPersistedSessionAbsent(runtime, sessionId);
     this.options.assertRuntimeCurrent(runtime);
+    attempt.diagnostic.phase = 'directory_prepare';
     const prepared =
       await this.options.workspace.prepareStandaloneDirectory(sessionId);
     this.options.assertRuntimeCurrent(runtime);
     this.directoryStates.set(sessionId, { pinned: prepared.identity });
 
+    attempt.diagnostic.phase = 'spawn_pre_dispatch';
+    attempt.diagnostic.dispatchState = 'unknown';
     let session: BridgeSession;
     try {
       session = await runtime.bridge.spawnStandaloneSession({
@@ -2663,16 +2818,48 @@ export class StandaloneSessionService {
           : {}),
       });
     } catch (error) {
+      attempt.cause = error;
+      attempt.diagnostic.dispatchState =
+        error instanceof StandaloneSessionSpawnError
+          ? error.dispatched
+            ? 'dispatched'
+            : 'not_dispatched'
+          : 'unknown';
+      if (attempt.diagnostic.dispatchState !== 'not_dispatched')
+        attempt.diagnostic.phase = 'spawn_dispatched';
       if (error instanceof StandaloneSessionSpawnError && !error.dispatched) {
         try {
           await this.assertPersistedSessionAbsent(runtime, sessionId);
         } catch {
           this.beginTerminalQuarantine(runtime);
         }
-        throw serviceError('standalone_creation_rolled_back', sessionId, true);
+        const outcome = serviceError(
+          'standalone_creation_rolled_back',
+          sessionId,
+          true,
+          error,
+        );
+        attempt.diagnostic.cleanupOutcome = 'rolled_back';
+        if (error.cause instanceof AcpChildCapacityExceededError) {
+          throw new StandaloneSessionServiceError(
+            outcome.code,
+            sessionId,
+            outcome.message,
+            outcome.retryable,
+            {
+              code: error.cause.code,
+              maxConcurrentChildren: error.cause.maxConcurrentChildren,
+              committedAcpChildren: error.cause.committedAcpChildren,
+            },
+            { cause: error },
+          );
+        }
+        throw outcome;
       }
       this.beginTerminalQuarantine(runtime);
     }
+    attempt.diagnostic.dispatchState = 'dispatched';
+    attempt.diagnostic.phase = 'spawn_dispatched';
     this.assertRuntimeCurrentOrQuarantine(runtime);
     if (
       session.attached ||
@@ -2689,9 +2876,20 @@ export class StandaloneSessionService {
       this.beginTerminalQuarantine(runtime);
     }
     if (session.sourcePersisted !== true) {
+      attempt.diagnostic.phase = 'source_persistence';
+      attempt.diagnostic.reason = 'source_not_confirmed';
+      const outcome = serviceError(
+        'standalone_creation_rolled_back',
+        sessionId,
+        true,
+      );
+      attempt.cause = outcome;
+      attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.cleanRollbackBeforePersistence(runtime, sessionId);
-      throw serviceError('standalone_creation_rolled_back', sessionId, true);
+      attempt.diagnostic.cleanupOutcome = 'rolled_back';
+      throw outcome;
     }
+    attempt.diagnostic.phase = 'durable_validation';
 
     try {
       await this.assertDurableStandaloneSession(
@@ -2701,6 +2899,7 @@ export class StandaloneSessionService {
       );
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
+      attempt.cause = error;
       this.beginTerminalQuarantine(runtime);
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
@@ -2709,7 +2908,11 @@ export class StandaloneSessionService {
       request.modelServiceId !== undefined &&
       session.modelApplied === false
     ) {
+      attempt.diagnostic.phase = 'model_selection';
+      attempt.cause = serviceError('model_selection_failed', sessionId, true);
+      attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.cleanRollbackBeforePersistence(runtime, sessionId);
+      attempt.diagnostic.cleanupOutcome = 'rolled_back';
       try {
         await this.options.workspace.discardEmptyConversationDirectory(
           sessionId,
@@ -2725,9 +2928,11 @@ export class StandaloneSessionService {
     let initialPrompt:
       | CreatedStandaloneChildSession['initialPrompt']
       | undefined;
+    attempt.diagnostic.phase = 'binding';
     try {
       await this.bindAndRelease(runtime, sessionId, prepared.identity);
       if (prompt !== undefined) {
+        attempt.diagnostic.phase = 'initial_prompt';
         initialPrompt = await this.admitInitialPrompt(
           runtime.bridge,
           sessionId,
@@ -2738,8 +2943,16 @@ export class StandaloneSessionService {
       this.assertRuntimeCurrentOrQuarantine(runtime);
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
+      attempt.cause = error;
+      attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
-      throw serviceError('standalone_creation_outcome_unknown', sessionId);
+      attempt.diagnostic.cleanupOutcome = 'closed';
+      throw serviceError(
+        'standalone_creation_outcome_unknown',
+        sessionId,
+        false,
+        error,
+      );
     }
 
     try {
@@ -2793,8 +3006,10 @@ export class StandaloneSessionService {
           expectation,
         );
       } catch (retryError) {
-        if (retryError instanceof TerminalQuarantineSignal) throw retryError;
-        this.beginTerminalQuarantine(runtime);
+        if (retryError instanceof TerminalQuarantineSignal) {
+          throw new TerminalQuarantineSignal(retryError.completion, error);
+        }
+        this.beginTerminalQuarantine(runtime, error);
       }
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
@@ -2822,9 +3037,11 @@ export class StandaloneSessionService {
           expectation,
         );
       } catch (retryError) {
-        if (retryError instanceof TerminalQuarantineSignal) throw retryError;
+        if (retryError instanceof TerminalQuarantineSignal) {
+          throw new TerminalQuarantineSignal(retryError.completion, error);
+        }
         this.directoryStates.set(sessionId, { pinned });
-        this.beginTerminalQuarantine(runtime);
+        this.beginTerminalQuarantine(runtime, error);
       }
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
@@ -3187,18 +3404,29 @@ export class StandaloneSessionService {
         },
       },
     );
-    void turn.then(resolveAdmission, resolveAdmission);
+    let admissionFailure: unknown;
+    void turn.then(resolveAdmission, (error: unknown) => {
+      admissionFailure = error;
+      resolveAdmission();
+    });
     await admission;
-    if (!admitted) throw new Error('Initial prompt was not admitted');
+    if (!admitted) {
+      throw new Error('Initial prompt was not admitted', {
+        cause: admissionFailure,
+      });
+    }
     return { promptId, lastEventId, turn };
   }
 
-  private beginTerminalQuarantine(runtime: WorkspaceRuntime): never {
+  private beginTerminalQuarantine(
+    runtime: WorkspaceRuntime,
+    cause?: unknown,
+  ): never {
     try {
       this.options.assertRuntimeCurrent(runtime);
     } catch (error) {
       this.freezeForTerminalQuarantine(runtime);
-      throw new TerminalQuarantineSignal(Promise.reject(error));
+      throw new TerminalQuarantineSignal(Promise.reject(error), cause ?? error);
     }
     let completion: Promise<void>;
     try {
@@ -3208,7 +3436,7 @@ export class StandaloneSessionService {
       completion = Promise.reject(error);
     }
     if (!this.terminal) this.freezeForTerminalQuarantine(runtime);
-    throw new TerminalQuarantineSignal(completion);
+    throw new TerminalQuarantineSignal(completion, cause);
   }
 
   private assertRuntimeCurrentOrQuarantine(runtime: WorkspaceRuntime): void {
@@ -3216,7 +3444,7 @@ export class StandaloneSessionService {
       this.options.assertRuntimeCurrent(runtime);
     } catch (error) {
       this.freezeForTerminalQuarantine(runtime);
-      throw new TerminalQuarantineSignal(Promise.reject(error));
+      throw new TerminalQuarantineSignal(Promise.reject(error), error);
     }
   }
 }

@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { devices, expect, test } from '@playwright/test';
+import { devices, expect, test, type Page } from '@playwright/test';
 import type {
   DaemonEvent,
   DaemonSessionSummary,
   DaemonSessionContextUsageStatus,
+  DaemonSettingDescriptor,
 } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
@@ -17,6 +18,7 @@ import {
   toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
+  type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
@@ -24,6 +26,7 @@ import {
   fillComposer,
   gotoNewSession,
   gotoSession,
+  gotoSettingsHarness,
   installScenario,
   resolveBaseURL,
   submitLocalCommand,
@@ -34,6 +37,204 @@ import {
 const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
+
+/** Fixed so the subagent prompt ids below can name it before it is built. */
+const TRAJECTORY_SESSION_ID = 'web-shell-trajectory-session';
+
+function trajectoryUpdate(update: Record<string, unknown>): DaemonEvent {
+  return {
+    v: 1,
+    type: 'session_update',
+    data: update,
+  } as unknown as DaemonEvent;
+}
+
+function trajectoryRecordMeta(recordId: string): Record<string, unknown> {
+  return {
+    qwenTranscript: { sourceRecordIds: [recordId], segmentId: `${recordId}:0` },
+    'qwen.session.recordId': recordId,
+  };
+}
+
+/**
+ * A transcript page in the shape paged replay produces, covering what the
+ * table has to say something about: a request that failed and was retried, a
+ * tool with its own duration, and a delegated round rolled up onto the call
+ * that spawned it.
+ */
+function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
+  const agentCallId = 'call_delegate01';
+  const subagentId = `general-purpose-${agentCallId}`;
+  // Recorded start times, in ms from the first request. The second turn opens
+  // over a minute later, which the overview cuts out of its axis.
+  const at = (offset: number) => 1_760_000_000_000 + offset;
+  return [
+    trajectoryUpdate({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: 'Audit the config loader and fix it.' },
+      _meta: trajectoryRecordMeta('rec-1-user'),
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 1840,
+          startedAt: at(0),
+          status: 'error',
+          model: 'qwen3.8-max',
+        },
+        'qwen.session.recordId': 'rec-1-failed',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 7823,
+          startedAt: at(2100),
+          ttftMs: 3908,
+          status: 'ok',
+          model: 'qwen3.8-max',
+        },
+        'qwen.session.recordId': 'rec-1-timing',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: {
+        type: 'text',
+        text: 'Reading the loader before changing anything.',
+      },
+      _meta: {
+        usage: { inputTokens: 21_309, outputTokens: 252, totalTokens: 21_561 },
+        ...trajectoryRecordMeta('rec-1-answer'),
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call_read01',
+      status: 'in_progress',
+      title: 'ReadFile: config.ts',
+      kind: 'read',
+      _meta: { toolName: 'read_file', ...trajectoryRecordMeta('rec-1-call') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 16,
+          startedAt: at(9923),
+          callId: 'call_read01',
+          toolName: 'read_file',
+          toolStatus: 'success',
+        },
+        'qwen.session.recordId': 'rec-1-tooltiming',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call_read01',
+      status: 'completed',
+      _meta: { toolName: 'read_file', ...trajectoryRecordMeta('rec-1-result') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId: agentCallId,
+      status: 'in_progress',
+      title: 'Agent: map the call sites',
+      kind: 'think',
+      _meta: { toolName: 'agent', ...trajectoryRecordMeta('rec-1-agentcall') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 4879,
+          startedAt: at(9960),
+          ttftMs: 1102,
+          status: 'ok',
+          model: 'qwen3.8-max',
+          subagentId,
+          promptId: `${sessionId}#${subagentId}#0`,
+        },
+        'qwen.session.recordId': 'rec-1-subreq',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 31,
+          startedAt: at(14839),
+          callId: 'call_subglob01',
+          toolName: 'glob',
+          toolStatus: 'success',
+          promptId: `${sessionId}#${subagentId}#0`,
+        },
+        'qwen.session.recordId': 'rec-1-subtool',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 5101,
+          startedAt: at(9939),
+          callId: agentCallId,
+          toolName: 'agent',
+          toolStatus: 'success',
+        },
+        'qwen.session.recordId': 'rec-1-agenttiming',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: agentCallId,
+      status: 'completed',
+      _meta: { toolName: 'agent', ...trajectoryRecordMeta('rec-1-agentdone') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: 'Now run the tests.' },
+      _meta: trajectoryRecordMeta('rec-2-user'),
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 3972,
+          startedAt: at(75_000),
+          ttftMs: 1030,
+          status: 'ok',
+          model: 'qwen3.8-max',
+        },
+        'qwen.session.recordId': 'rec-2-timing',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Tests pass.' },
+      _meta: {
+        usage: { inputTokens: 12_307, outputTokens: 214, totalTokens: 12_521 },
+        ...trajectoryRecordMeta('rec-2-answer'),
+      },
+    }),
+  ];
+}
 
 function createTerminalTurnErrorScenario(sessionId: string) {
   return createWebShellDaemonScenario({
@@ -102,8 +303,138 @@ function createTerminalGoalStatusEvent(
   };
 }
 
+/**
+ * The settings panel's host-driven exclusions only exist when the host passes
+ * the `settings` prop, which the standalone entry never does — so these
+ * scenarios render the shell through the settings harness page, which maps
+ * `?exclude=` onto that prop.
+ */
+function createSettingsPanelScenario(
+  theme: VisualTheme,
+): WebShellDaemonScenario {
+  const descriptors: DaemonSettingDescriptor[] = [
+    {
+      key: 'general.enableAutoUpdate',
+      type: 'boolean',
+      label: 'Auto-update',
+      category: 'General',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'general.showSessionRecap',
+      type: 'boolean',
+      label: 'Session Recap',
+      category: 'General',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'ui.theme',
+      type: 'enum',
+      label: 'Theme',
+      category: 'UI',
+      requiresRestart: false,
+      default: 'Qwen Dark',
+      options: [
+        { value: 'Qwen Dark', label: 'Qwen Dark' },
+        { value: 'Qwen Light', label: 'Qwen Light' },
+      ],
+      values: {
+        effective: theme === 'light' ? 'Qwen Light' : 'Qwen Dark',
+      },
+    },
+    {
+      key: 'output.showTimestamps',
+      type: 'boolean',
+      label: 'Show Timestamps',
+      // The real schema files this under General; the panel must render the
+      // category set a daemon actually serves.
+      category: 'General',
+      requiresRestart: false,
+      default: false,
+      values: { effective: false },
+    },
+    {
+      key: 'tools.webSearch.enabled',
+      type: 'boolean',
+      label: 'Web Search',
+      category: 'Tools',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'fastModel',
+      type: 'string',
+      label: 'Fast Model',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    },
+    {
+      key: 'modelFallbacks',
+      type: 'string',
+      label: 'Model Fallbacks',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    },
+  ];
+  return createWebShellDaemonScenario({
+    settings: { settings: descriptors },
+  });
+}
+
+async function openSettingsPanel(page: Page): Promise<void> {
+  await submitLocalCommand(page, '/settings');
+  const nav = page.getByRole('navigation', { name: 'Settings' });
+  await expect(nav).toBeVisible();
+  // Rows render only for the active category, and which category is active
+  // follows the fixture's descriptor order — gate on a descriptor-derived nav
+  // button instead, which renders for every group. Only a General descriptor
+  // creates one, so this still cannot resolve before the settings fetch lands.
+  await expect(nav.getByRole('button', { name: /^General/ })).toBeVisible();
+}
+
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('mobile composer controls', async ({ browser }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const context = await browser.newContext({
+        ...devices['Pixel 7'],
+        viewport: { width: 390, height: 844 },
+        baseURL,
+        reducedMotion: 'reduce',
+      });
+      try {
+        const page = await context.newPage();
+        const scenario = createWebShellDaemonScenario();
+        const daemon = await installScenario(page, scenario, baseURL);
+        await gotoSession(page, scenario, daemon, theme);
+        const textarea = page.locator(
+          'textarea[data-web-shell-composer-editor]',
+        );
+        await textarea.fill(
+          'Review the mobile layout\nKeep this working draft.',
+        );
+        await captureScreenshot(page, `mobile-composer-${theme}`);
+        await page
+          .getByRole('button', { name: 'Add to message', exact: true })
+          .tap();
+        await expect(
+          page.getByText('Reference file', { exact: true }),
+        ).toBeVisible();
+        await captureScreenshot(page, `mobile-composer-add-${theme}`);
+      } finally {
+        await context.close();
+      }
+    });
+
     test('context usage', async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         supportedCommands: {
@@ -170,6 +501,33 @@ for (const theme of THEMES) {
         panel.getByRole('button', { name: 'Compress context', exact: true }),
       ).toBeEnabled();
       await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
+    test('trajectory', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        transcriptPage: {
+          events: trajectoryTranscriptEvents(TRAJECTORY_SESSION_ID),
+        },
+        sessionId: TRAJECTORY_SESSION_ID,
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'Toggle right panel' }).click();
+      await page.getByTestId('right-panel-open-trajectory').click();
+      const rows = page.getByTestId('trajectory-rows');
+      await expect(rows).toBeVisible();
+      await expect(
+        page.locator('[data-testid="trajectory-row-request"]').first(),
+      ).toContainText('qwen3.8-max');
+      // The failed request and its retry, the read, the delegation, the
+      // subagent's own request and the second turn. The subagent's glob has
+      // no row in the window, so it has nowhere to be drawn.
+      await expect(page.getByTestId('trajectory-span')).toHaveCount(6);
+      await captureScreenshot(page, `trajectory-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {
@@ -1297,6 +1655,88 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `theme-dialog-${theme}`);
     });
 
+    test(`settings panel`, async ({ page }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      // The mock daemon has no GET /workspace/models route; answer with an
+      // empty list so the model block renders providers without an error hint.
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ json: { models: [] } });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme);
+      await openSettingsPanel(page);
+
+      const nav = page.getByRole('navigation', { name: 'Settings' });
+      await expect(nav.getByRole('button', { name: /^UI/ })).toBeVisible();
+      await expect(nav.getByRole('button', { name: /^Tools/ })).toBeVisible();
+      await nav.getByRole('button', { name: /^Model/ }).click();
+      await expect(page.getByText('Fast Model', { exact: true })).toBeVisible();
+      await expect(page.getByTestId('model-management')).toBeVisible();
+      await captureScreenshot(page, `settings-panel-${theme}`);
+    });
+
+    test(`settings panel with host exclusions`, async ({ page }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ json: { models: [] } });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme, [
+        'builtin:chat-width',
+        'builtin:model-management',
+        'setting:fast-model',
+        'setting:timestamps',
+        'setting:web-search',
+      ]);
+      await openSettingsPanel(page);
+
+      // Excluded rows vanish, and a category left with nothing visible —
+      // here Tools — drops out of the nav entirely.
+      const nav = page.getByRole('navigation', { name: 'Settings' });
+      await expect(nav.getByRole('button', { name: /^Tools/ })).toHaveCount(0);
+      // Rows render only for the active category, so the chat-width absence
+      // is observable only after opening UI — pin the category itself first.
+      await nav.getByRole('button', { name: /^UI/ }).click();
+      await expect(page.getByText('Theme', { exact: true })).toBeVisible();
+      await expect(page.getByText('Chat width', { exact: true })).toHaveCount(
+        0,
+      );
+      // General lost only `setting:timestamps`, so the category keeps its nav
+      // button and its surviving rows while the excluded row leaves.
+      await nav.getByRole('button', { name: /^General/ }).click();
+      await expect(
+        page.getByText('Auto-update', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText('Show Timestamps', { exact: true }),
+      ).toHaveCount(0);
+      await nav.getByRole('button', { name: /^Model/ }).click();
+      await expect(
+        page.getByText('Model Fallbacks', { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText('Fast Model', { exact: true })).toHaveCount(
+        0,
+      );
+      await expect(page.getByTestId('model-management')).toHaveCount(0);
+      await captureScreenshot(page, `settings-panel-exclusions-${theme}`);
+    });
+
     test(`permission panel`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [permissionRequestEvent('perm-visual', { id: 1 })],
@@ -1312,6 +1752,71 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-permission-panel]'),
       ).toBeVisible();
       await captureScreenshot(page, `permission-panel-${theme}`);
+    });
+
+    test(`edit approval diff`, async ({ page }, testInfo) => {
+      // Edit permission_request payloads carry the change as a `{ type: 'diff',
+      // path, oldText, newText }` content block alongside outside-workspace
+      // warnings. The Web Shell adapter used to drop the diff block, so the
+      // approval card showed only the warning and the user approved a file
+      // change without seeing it (#11966). Seed the exact shape
+      // `permissionUtils.buildPermissionRequestContent` emits so a regression
+      // in either the adapter or the approval card resurfaces here.
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          {
+            id: 1,
+            v: 1,
+            type: 'permission_request',
+            data: {
+              requestId: 'perm-edit-visual',
+              toolCall: {
+                toolCallId: 'perm-edit-visual',
+                title: 'Edit: /outside/example.txt',
+                kind: 'edit',
+                _meta: { toolName: 'replace' },
+                content: [
+                  {
+                    type: 'content',
+                    content: {
+                      type: 'text',
+                      text: 'Path is outside the workspace',
+                    },
+                  },
+                  {
+                    type: 'diff',
+                    path: '/outside/example.txt',
+                    oldText: 'hello world\nline two\n',
+                    newText: 'hello Qwen\nline two\nline three\n',
+                  },
+                ],
+              },
+              options: [
+                { optionId: 'allow_once', label: 'Allow once' },
+                { optionId: 'reject_once', label: 'Reject' },
+              ],
+            },
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await expect(
+        page.locator('[data-web-shell-permission-panel]'),
+      ).toBeVisible();
+      await expect(
+        page.getByText('Path is outside the workspace'),
+      ).toBeVisible();
+      // The diff renderer paints deletion/addition rows before any option is
+      // chosen — this is exactly what the pre-fix approval card was missing.
+      await expect(page.getByText('hello world')).toBeVisible();
+      await expect(page.getByText('hello Qwen')).toBeVisible();
+      await captureScreenshot(page, `edit-approval-diff-${theme}`);
     });
 
     test(`code review artifact`, async ({ page }, testInfo) => {

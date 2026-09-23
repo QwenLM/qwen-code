@@ -4,7 +4,7 @@ mod desktop_state;
 mod runtime;
 
 use command_group::GroupChild;
-use desktop_state::{default_window_size, restore_window, SettingsStore};
+use desktop_state::{default_window_size, restore_window, zoom_after, SettingsStore, DEFAULT_ZOOM};
 use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
+use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewWindowBuilder};
 use tauri::{
     AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
     WindowEvent,
@@ -36,6 +36,71 @@ static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+// The webview engines expose no zoom UI, and the daemon-served Web Shell has
+// no zoom setting of its own, so the shortcuts are captured in the page and
+// handed to the shell, which owns and persists the factor. Tauri's own
+// zoom_hotkeys_enabled polyfill is deliberately not used: it tracks the level
+// in page-local state that resets on every document load and cannot be seeded
+// with the persisted value.
+const ZOOM_HOTKEY_SCRIPT: &str = r#"
+(() => {
+  const send = (action) => {
+    window.__TAURI__?.core?.invoke('change_zoom', { action })?.catch(() => {});
+  };
+  const zoomFor = (key) => {
+    if (key === '-') return 'out';
+    if (key === '=' || key === '+') return 'in';
+    if (key === '0') return 'reset';
+    return undefined;
+  };
+  window.addEventListener(
+    'keydown',
+    (event) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const action = zoomFor(event.key);
+      if (!action) return;
+      event.preventDefault();
+      send(action);
+    },
+    true,
+  );
+  // A trackpad pinch reaches the page as a burst of ctrlKey wheel events whose
+  // per-event deltaY is small, while a mouse notch arrives as a single large
+  // one. Accumulate the deltas so one zoom step corresponds to one notch worth
+  // of movement instead of one step per event: a gentle pinch would otherwise
+  // sweep the factor to the clamp and persist it.
+  const WHEEL_ZOOM_THRESHOLD = 60;
+  let wheelDelta = 0;
+  window.addEventListener(
+    'wheel',
+    (event) => {
+      if (!event.ctrlKey || event.shiftKey) {
+        wheelDelta = 0;
+        return;
+      }
+      // A horizontal swipe carries no deltaY: leave it and its scroll alone.
+      if (event.deltaY === 0) return;
+      wheelDelta += event.deltaY;
+      // The gesture is ours from its first owned event, not only from the one
+      // that commits a step. preventDefault just cancels the native scroll, so
+      // without this the page's own wheel consumers still read the pinch - and
+      // every sub-threshold accumulation event inside it - as a scroll that
+      // provably will not happen: they drop the transcript selection and
+      // anchor, and page older/newer history in. Both unowned early returns
+      // sit above this, so a gesture the shell does not zoom on keeps
+      // propagating untouched.
+      event.preventDefault();
+      event.stopPropagation();
+      if (Math.abs(wheelDelta) < WHEEL_ZOOM_THRESHOLD) return;
+      send(wheelDelta < 0 ? 'in' : 'out');
+      wheelDelta = 0;
+    },
+    { capture: true, passive: false },
+  );
+})();
+"#;
+#[cfg(target_os = "macos")]
+const MACOS_TITLEBAR_INIT_SCRIPT: &str = "window.__QWEN_CODE_MACOS_TITLEBAR__ = true;";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +109,15 @@ struct BootstrapState {
     status: &'static str,
     workspace: Option<String>,
     error: Option<String>,
+}
+
+// The wire names are the strings ZOOM_HOTKEY_SCRIPT sends.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ZoomAction {
+    In,
+    Out,
+    Reset,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +167,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             bootstrap_state,
+            change_zoom,
             choose_workspace,
             open_logs,
             restart_runtime,
@@ -181,6 +256,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let settings = SettingsStore::load(&handle).map_err(std::io::Error::other)?;
     let window_state = settings.window();
+    let zoom = settings.zoom().unwrap_or(DEFAULT_ZOOM);
     let log_path = desktop_log_path(&handle).map_err(std::io::Error::other)?;
     if let Some(parent) = log_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -206,10 +282,25 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
     let (width, height) = default_window_size();
 
-    let window = WebviewWindowBuilder::new(&handle, "main", WebviewUrl::App("index.html".into()))
+    let window_builder = WebviewWindowBuilder::new(
+        &handle,
+        "main",
+        WebviewUrl::App("index.html".into()),
+    )
         .title("Qwen Code")
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
+        .initialization_script(ZOOM_HOTKEY_SCRIPT)
+        .on_page_load(|webview, payload| {
+            // Re-apply on every document: the bootstrap page and the
+            // daemon-served Web Shell are separate loads of the same webview.
+            if !matches!(payload.event(), PageLoadEvent::Finished) {
+                return;
+            }
+            if let Some(state) = webview.try_state::<ApplicationState>() {
+                let _ = webview.set_zoom(state.settings.zoom().unwrap_or(DEFAULT_ZOOM));
+            }
+        })
         .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
         .on_new_window(|url, _features| {
             if is_safe_external_url(&url) {
@@ -230,9 +321,17 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }),
             DownloadEvent::Finished { .. } => true,
             _ => false,
-        })
-        .build()?;
+        });
+    #[cfg(target_os = "macos")]
+    let window_builder = window_builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .initialization_script(MACOS_TITLEBAR_INIT_SCRIPT);
+    let window = window_builder.build()?;
     restore_window(&window, window_state.as_ref());
+    // Applied before the first document loads; on_page_load re-applies it for
+    // every later document, including the daemon-served Web Shell.
+    let _ = window.set_zoom(zoom);
 
     handle.manage(ApplicationState {
         runtime: Mutex::new(None),
@@ -294,6 +393,30 @@ fn bootstrap_workspace(
     last_workspace
         .map(|(workspace, _)| workspace)
         .or(persisted_workspace)
+}
+
+// Unlike the commands above, this one is reachable from the daemon-served Web
+// Shell as well as the bootstrap page: the shortcuts are captured inside
+// whichever document currently fills the window. Both origins are listed in
+// capabilities/, which is what keeps other pages from reaching it.
+#[tauri::command]
+fn change_zoom(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+    action: ZoomAction,
+) -> Result<(), String> {
+    let current = state.settings.zoom().unwrap_or(DEFAULT_ZOOM);
+    let zoom = match action {
+        ZoomAction::In => zoom_after(current, 1),
+        ZoomAction::Out => zoom_after(current, -1),
+        ZoomAction::Reset => DEFAULT_ZOOM,
+    };
+    webview
+        .set_zoom(zoom)
+        .map_err(|error| format!("Failed to set zoom: {error}"))?;
+    state.settings.stage_zoom(zoom);
+    state.window_dirty.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]

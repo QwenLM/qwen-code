@@ -34,6 +34,15 @@ const mocks = vi.hoisted(() => ({
   statSync: vi.fn((_path: string): { mtimeMs: number } => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
+  // realpathSync is redirectedAncestor's canonicalisation probe. Unmocked it
+  // hit the REAL filesystem, and on Windows each call on the '/repo/…'
+  // fixture spellings — drive-relative there — re-read the spied
+  // process.cwd() through win32 drive resolution, so the cwd-once witness
+  // counted 9 such reads against the expected 1 (#11890). The default is the
+  // same fail-open throw statSync carries: every fixture path is nonexistent.
+  realpathSync: vi.fn((_path: string): string => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
   rmSync: vi.fn(),
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
@@ -97,6 +106,9 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const realpathSync = Object.assign(mocks.realpathSync, {
+    native: mocks.realpathSync,
+  });
   return {
     ...actual,
     default: {
@@ -106,6 +118,7 @@ vi.mock('node:fs', async (importOriginal) => {
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
       statSync: mocks.statSync,
+      realpathSync,
       rmSync: mocks.rmSync,
     },
     existsSync: mocks.existsSync,
@@ -113,6 +126,7 @@ vi.mock('node:fs', async (importOriginal) => {
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
     statSync: mocks.statSync,
+    realpathSync,
     rmSync: mocks.rmSync,
   };
 });
@@ -132,13 +146,13 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
     return lease
       ? {
           lease,
-          path: `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+          path: `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
         }
       : null;
   },
   reviewLeaseHeldByAnotherSession: mocks.reviewLeaseHeldByAnotherSession,
-  reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+  reviewLeasePath: (_repositoryRoot: string, target: string) =>
+    `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
   isReviewLeaseFile: (fileName: string) =>
     /^qwen-review-lease-pr-\d+\.json$/.test(fileName),
 }));
@@ -222,6 +236,9 @@ describe('runCleanup', () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     mocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.realpathSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     // Same leak class for the listing (#9272): the retention tests install
@@ -351,6 +368,15 @@ describe('runCleanup', () => {
     // uses win32 semantics on Windows and has exactly one live `process.cwd()`
     // (`cleanup.ts:754`) with no platform branch. A posix-absolute cwd makes
     // the count platform-independent, so the witness runs on every lane.
+    //
+    // The second leg of the same artifact (#11890): `redirectedAncestor`'s
+    // canonicalisation probes go through the real `realpathSync`, and on
+    // Windows each one re-resolves the drive-relative '/repo/…' spellings
+    // through win32 path resolution, which reads `process.cwd()` for the
+    // drive — 9 reads across the run's three ancestor walks, counted against
+    // the expected 1. `realpathSync` is mocked above with the same
+    // fail-open ENOENT those probes always met here, so no fs internal
+    // reaches the spy.
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/repo');
     try {
       runCleanup('pr-123');
@@ -926,6 +952,38 @@ describe('runCleanup', () => {
       '/repo/.qwen/tmp/review-pr-123-base.lock',
       { recursive: true, force: true },
     );
+    // ...AND the host-side one, once the tree it guards is gone (the default
+    // `existsSync` answer above): the lease-release reclaim skips locks, so
+    // without this sweep a killed builder's lock outlived its tree and wedged
+    // the next review of this PR for the whole staleness window — every ask
+    // took EEXIST from `mkdirSync` and reported "another probe is building —
+    // the fast path will then reuse it" over a tree this command had already
+    // removed, a recovery that cannot happen.
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /\/review-state\/[0-9a-f]{64}\/base-tree\/pr-123\/review-pr-123-base\.lock$/,
+      ),
+      { recursive: true, force: true },
+    );
+  });
+
+  it('keeps the host-side base-tree build lock while its tree still stands', () => {
+    // The release is keyed on the tree being GONE: a base tree that would not
+    // delete may still have a killed builder's container writing into it, and
+    // removing its lock lets the next review build over that tree at once,
+    // where a lock that ages out at least holds the next build off for the
+    // staleness window.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation(
+      (path: string) => path === '/repo/.qwen/tmp/review-pr-123-base',
+    );
+
+    runCleanup('pr-123');
+
+    const hostSide = mocks.rmSync.mock.calls
+      .map(([path]) => String(path))
+      .filter((path) => path.includes('/review-state/'));
+    expect(hostSide).toEqual([]);
   });
 
   it('never sweeps lease files, even for a target whose name collides with the lease prefix (#9205)', () => {

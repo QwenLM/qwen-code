@@ -122,6 +122,7 @@ mod tests {
             checked: None,
             enabled: Some(true),
             selected: None,
+            focused: None,
             description: None,
             depth: 0,
             parent_element_index: None,

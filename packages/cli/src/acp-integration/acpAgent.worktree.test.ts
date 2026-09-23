@@ -77,6 +77,13 @@ vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
   PROTOCOL_VERSION: '1.0.0',
 }));
 
+vi.mock('./acp-output.js', () => ({
+  createAcpOutput: () => ({
+    stream: new WritableStream<Uint8Array>(),
+    close: () => Promise.resolve(),
+  }),
+}));
+
 vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
   ndJsonStream: vi.fn().mockReturnValue({}),
 }));
@@ -108,8 +115,8 @@ const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
 });
 
 // The agent imports the peer-messaging transport statically; its own core
-// imports would reach past this suite's exhaustive core mock, and nothing
-// here turns messaging on.
+// imports would reach past this suite's exhaustive core mock. Messaging is
+// on by default, so the session settings below turn it off.
 vi.mock('../peerMessaging/peer-messaging.js', () => ({
   PeerMessaging: { start: vi.fn() },
 }));
@@ -249,6 +256,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
   listWorkflowSnapshots: vi.fn().mockResolvedValue([]),
+  claimInterruptedWorkflowRuns: vi.fn().mockResolvedValue([]),
   HookEventName: {
     PreToolUse: 'PreToolUse',
     PostToolUse: 'PostToolUse',
@@ -430,7 +438,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
 
   function makeSessionSettings() {
     return {
-      merged: { mcpServers: {} },
+      // Messaging is on by default, and on it registers every loaded
+      // session through a config this suite does not stage. The suite is
+      // about worktree restore, so it turns the switch off.
+      merged: { mcpServers: {}, agents: { crossSessionMessaging: false } },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;

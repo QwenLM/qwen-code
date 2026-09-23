@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { LinkIcon, PlusIcon } from 'lucide-react';
+import { PlusIcon } from 'lucide-react';
 import type {
   DaemonSessionAttachmentReference,
   SessionSource,
@@ -10,7 +10,12 @@ import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { FileTypeIcon } from '../FileTypeIcon';
+import type { WebShellSource } from '../../customization';
+import { SourceList } from '../sources/SourceList';
+import {
+  getSourceEntries,
+  sourceLocation as entryLocation,
+} from '../sources/sourceEntries';
 import { Skeleton } from '../ui/skeleton';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
@@ -71,20 +76,7 @@ export function SourcesSection({
     return () => onDialogOpenChange?.(false);
   }, [adding, onDialogOpenChange, state?.supported]);
   const sources = state?.supported ? state.sources : [];
-  const attachmentIds = new Set(
-    sources.flatMap((source) =>
-      source.locator.type === 'attachment' ? [source.locator.attachmentId] : [],
-    ),
-  );
-  const entries: Array<
-    | { type: 'source'; source: SessionSource }
-    | { type: 'attachment'; attachment: DaemonSessionAttachmentReference }
-  > = sources.map((source) => ({ type: 'source', source }));
-  for (const attachment of attachments) {
-    if (attachmentIds.has(attachment.attachmentId)) continue;
-    attachmentIds.add(attachment.attachmentId);
-    entries.push({ type: 'attachment', attachment });
-  }
+  const entries = getSourceEntries(sources, attachments);
   if (
     !state?.supported &&
     !entries.length &&
@@ -143,50 +135,18 @@ export function SourcesSection({
           </Button>
         </div>
       )}
-      <ul className={styles.attachmentFiles}>
-        {(expanded ? entries : entries.slice(0, 3)).map((entry) =>
-          entry.type === 'source' ? (
-            <li key={`source:${entry.source.id}`}>
-              <button
-                type="button"
-                className={styles.attachmentFile}
-                title={sourceLocation(entry.source)}
-                onClick={() => onOpen?.(entry.source)}
-                aria-label={`${t('sources.open')} ${entry.source.title}`}
-              >
-                {entry.source.kind === 'link' ? (
-                  <LinkIcon
-                    size={16}
-                    strokeWidth={1.7}
-                    className={styles.attachmentFileIcon}
-                  />
-                ) : (
-                  <FileTypeIcon
-                    name={sourceLocation(entry.source)}
-                    size={16}
-                    strokeWidth={1.7}
-                    className={styles.attachmentFileIcon}
-                    aria-hidden="true"
-                  />
-                )}
-                <span className={styles.attachmentFileName}>
-                  {entry.source.title}
-                </span>
-              </button>
-            </li>
-          ) : (
-            <li key={`attachment:${entry.attachment.attachmentId}`}>
-              <AttachmentRow
-                attachment={entry.attachment}
-                onReadImage={onReadImage}
-                onImagePreview={onImagePreview}
-                onAttachmentPreview={onAttachmentPreview}
-                onPreviewError={onAttachmentPreviewError}
-              />
-            </li>
-          ),
-        )}
-      </ul>
+      <SourceList
+        entries={expanded ? entries : entries.slice(0, 3)}
+        onOpen={(entry) =>
+          openSourceEntry(entry, {
+            onOpen,
+            onReadImage,
+            onImagePreview,
+            onAttachmentPreview,
+            onAttachmentPreviewError,
+          })
+        }
+      />
       {loading && !entries.length && (
         <ul
           className={styles.attachmentFiles}
@@ -227,14 +187,7 @@ export function SourcesSection({
 }
 
 export function sourceLocation(source: SessionSource): string {
-  switch (source.locator.type) {
-    case 'workspace_file':
-      return source.locator.workspacePath;
-    case 'attachment':
-      return source.locator.attachmentId;
-    case 'url':
-      return source.locator.url;
-  }
+  return entryLocation({ type: 'source', source });
 }
 
 function AddSourceDialog({
@@ -346,57 +299,37 @@ function AddSourceDialog({
   );
 }
 
-function AttachmentRow({
-  attachment,
-  onReadImage,
-  onImagePreview,
-  onAttachmentPreview,
-  onPreviewError,
-}: {
-  attachment: DaemonSessionAttachmentReference;
-  onReadImage?: (attachmentId: string) => Promise<string>;
-  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
-  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
-  onPreviewError?: (error: unknown) => void;
-}) {
-  const isImage = attachment.type === 'image';
-  const openPreview = () => {
-    if (isImage) {
-      const source: ImageTabSource = {
-        kind: 'attachment',
-        attachmentId: attachment.attachmentId,
-      };
-      void onReadImage?.(attachment.attachmentId)
-        .then((dataUrl) => {
-          onImagePreview?.(dataUrl, attachment.attachmentId, source);
-        })
-        .catch((error: unknown) => onPreviewError?.(error));
-      return;
-    }
-    onAttachmentPreview?.({
-      name: attachment.attachmentId,
-      mimeType: attachment.mimeType,
-      attachmentId: attachment.attachmentId,
-    });
-  };
-  return (
-    <button
-      type="button"
-      className={styles.attachmentFile}
-      title={attachment.attachmentId}
-      onClick={openPreview}
-    >
-      <FileTypeIcon
-        name={attachment.attachmentId}
-        mimeType={attachment.mimeType}
-        size={16}
-        strokeWidth={1.7}
-        className={styles.attachmentFileIcon}
-        aria-hidden="true"
-      />
-      <span className={styles.attachmentFileName}>
-        {attachment.attachmentId}
-      </span>
-    </button>
-  );
+export function openSourceEntry(
+  entry: WebShellSource,
+  actions: Pick<
+    SourcesSectionProps,
+    | 'onOpen'
+    | 'onReadImage'
+    | 'onImagePreview'
+    | 'onAttachmentPreview'
+    | 'onAttachmentPreviewError'
+  >,
+) {
+  if (entry.type === 'source') {
+    actions.onOpen?.(entry.source);
+    return;
+  }
+  const attachment = entry.attachment;
+  if (attachment.type === 'image') {
+    void actions
+      .onReadImage?.(attachment.attachmentId)
+      .then((dataUrl) =>
+        actions.onImagePreview?.(dataUrl, attachment.attachmentId, {
+          kind: 'attachment',
+          attachmentId: attachment.attachmentId,
+        }),
+      )
+      .catch((error: unknown) => actions.onAttachmentPreviewError?.(error));
+    return;
+  }
+  actions.onAttachmentPreview?.({
+    name: attachment.attachmentId,
+    mimeType: attachment.mimeType,
+    attachmentId: attachment.attachmentId,
+  });
 }
