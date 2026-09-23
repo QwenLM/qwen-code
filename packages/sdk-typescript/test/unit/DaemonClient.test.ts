@@ -3640,7 +3640,10 @@ describe('DaemonClient', () => {
       // code-based catch covers both sides of the transport.
       await expect(
         client.createOrAttachSession({ startupConfig, sessionScope: 'single' }),
-      ).rejects.toMatchObject({ code: 'invalid_startup_config' });
+      ).rejects.toMatchObject({
+        code: 'invalid_startup_config',
+        message: expect.stringContaining('Invalid startupConfig'),
+      });
       await expect(
         client.createOrAttachSession({
           startupConfig,
