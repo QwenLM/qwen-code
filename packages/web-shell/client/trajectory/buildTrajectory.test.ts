@@ -342,7 +342,7 @@ describe('buildTrajectory', () => {
       expect(new Set(tools.map((row) => row.key)).size).toBe(2);
     });
 
-    it('ignores a start time on a tool frame', () => {
+    it('keeps the start time a tool frame recorded', () => {
       const rows = buildTrajectory([
         block(toolBlock('call_a')),
         {
@@ -352,7 +352,22 @@ describe('buildTrajectory', () => {
             durationMs: 35,
             callId: 'call_a',
             startedAt: 123,
-          } as DaemonTranscriptTimingMeta,
+          },
+        },
+      ]).rows;
+
+      expect(rows.find((row) => row.kind === 'tool')?.timing).toEqual({
+        durationMs: 35,
+        startedAt: 123,
+      });
+    });
+
+    it('gives a tool no start time when its frame has none', () => {
+      const rows = buildTrajectory([
+        block(toolBlock('call_a')),
+        {
+          kind: 'timing',
+          timing: { kind: 'tool', durationMs: 35, callId: 'call_a' },
         },
       ]).rows;
 

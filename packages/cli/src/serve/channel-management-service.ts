@@ -8,6 +8,7 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
   PairingStore,
+  resolvePrivatePolicy,
   sanitizeLogText,
   type PairingRequest,
 } from '@qwen-code/channel-base';
@@ -405,7 +406,7 @@ export function createChannelManagementService(
     const config = channels[name]!;
     assertWorkspaceConfig(config);
     if (
-      config['senderPolicy'] !== 'pairing' &&
+      resolvePrivatePolicy(config) !== 'pairing' &&
       config['groupPolicy'] !== 'pairing'
     ) {
       throw new ChannelManagementError(

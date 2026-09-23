@@ -147,6 +147,7 @@ const composerCoreState = vi.hoisted(() => ({
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
+  searchMode: false,
   openHistorySearch: vi.fn(),
   imageDropCapture: vi.fn(),
   ingestFiles: vi.fn(),
@@ -287,7 +288,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         currentMode: 'default',
         sessionName: undefined,
         searchState: {
-          searchMode: false,
+          searchMode: composerCoreState.searchMode,
           searchQuery: '',
           searchMatches: [],
           searchActiveIndex: 0,
@@ -371,6 +372,7 @@ afterEach(() => {
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
+  composerCoreState.searchMode = false;
   composerCoreState.openHistorySearch.mockReset();
   composerCoreState.imageDropCapture.mockReset();
   composerCoreState.ingestFiles.mockReset();
@@ -3715,6 +3717,246 @@ describe('ChatEditor mobile composer actions', () => {
       expect(document.activeElement).not.toBe(backend.textareaRef.current);
     } finally {
       document.removeEventListener('click', onClick);
+    }
+  });
+
+  function historyPanelFit(container: HTMLElement) {
+    const panel = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-history-search]',
+    )!.parentElement!.parentElement!;
+    return {
+      room: panel.style.getPropertyValue('--chat-editor-search-room'),
+      shift: panel.style.getPropertyValue('--chat-editor-search-shift'),
+    };
+  }
+
+  // Only the composer surface and hidden-overflow ancestors get a real top, so
+  // measuring any other node changes the result.
+  function mockComposerGeometry(geometry: {
+    composerTop: number;
+    clipTop: number;
+  }) {
+    return vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { top: geometry.composerTop } as DOMRect;
+        }
+        return {
+          top: this.style.overflowY === 'hidden' ? geometry.clipTop : -1000,
+        } as DOMRect;
+      });
+  }
+
+  type CapturedResizeObserver = {
+    callback: ResizeObserverCallback;
+    targets: Set<Element>;
+  };
+
+  // The harness ResizeObserver stub never fires, so re-measure paths wired
+  // through observe() are only reachable when the test invokes the callback.
+  function captureResizeObservers(): {
+    observers: CapturedResizeObserver[];
+    restore: () => void;
+  } {
+    const observers: CapturedResizeObserver[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly captured: CapturedResizeObserver;
+      constructor(callback: ResizeObserverCallback) {
+        this.captured = { callback, targets: new Set() };
+        observers.push(this.captured);
+      }
+      observe(target: Element) {
+        this.captured.targets.add(target);
+      }
+      unobserve(target: Element) {
+        this.captured.targets.delete(target);
+      }
+      disconnect() {
+        this.captured.targets.clear();
+      }
+    } as typeof ResizeObserver;
+    return {
+      observers,
+      restore: () => {
+        globalThis.ResizeObserver = original;
+      },
+    };
+  }
+
+  function fireResize(
+    observers: readonly CapturedResizeObserver[],
+    target: Element,
+  ): void {
+    for (const observer of observers) {
+      if (observer.targets.has(target)) {
+        observer.callback([], {} as ResizeObserver);
+      }
+    }
+  }
+
+  it('limits the history panel to the room above the composer', () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const rect = mockComposerGeometry({ composerTop: 182, clipTop: 0 });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('re-measures the history panel and keeps it below a clipping ancestor', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const geometry = { composerTop: 182, clipTop: 0 };
+    const rect = mockComposerGeometry(geometry);
+    const settle = (dispatch: () => void) =>
+      act(async () => {
+        dispatch();
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container).room).toBe('174px');
+
+      // A header above the clipping pane leaves less than the minimum height,
+      // so the panel moves down over the composer instead of under the header.
+      container.style.overflowY = 'hidden';
+      geometry.clipTop = 120;
+      await settle(() => window.dispatchEvent(new Event('resize')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '96px',
+        shift: '42px',
+      });
+
+      geometry.composerTop = 300;
+      await settle(() => container.dispatchEvent(new Event('scroll')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '172px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('re-measures the history panel when the composer itself resizes', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const geometry = { composerTop: 182, clipTop: 0 };
+    const rect = mockComposerGeometry(geometry);
+    const { observers, restore } = captureResizeObservers();
+    try {
+      const container = renderChatEditor({});
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+
+      // The composer grows (a multi-line draft, a new attachment); the panel
+      // re-fits through the ResizeObserver on the container.
+      geometry.composerTop = 300;
+      await act(async () => {
+        fireResize(observers, surface);
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      expect(historyPanelFit(container)).toEqual({
+        room: '292px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+      restore();
+    }
+  });
+
+  it('fits the history panel to its rendered height, not its minimum', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const rect = mockComposerGeometry({ composerTop: 182, clipTop: 120 });
+    const { observers, restore } = captureResizeObservers();
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('searchPanel') ? 70 : 0;
+      });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+
+      // With no matches the panel is just the search bar (70px), so once the
+      // room drops to 54px the panel overlaps the composer by its own 16px
+      // overflow rather than the 42px the 96px minimum would charge. The
+      // re-measure arrives through the ResizeObserver on the panel, which a
+      // change in match count resizes without touching the container.
+      const panel = container.querySelector<HTMLElement>(
+        '[class*="searchPanel"]',
+      )!;
+      container.style.overflowY = 'hidden';
+      await act(async () => {
+        fireResize(observers, panel);
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      expect(historyPanelFit(container)).toEqual({
+        room: '70px',
+        shift: '16px',
+      });
+    } finally {
+      height.mockRestore();
+      rect.mockRestore();
+      restore();
+    }
+  });
+
+  it('adds the measured workspace row height to the composer cap', () => {
+    mobileComposer('draft');
+    const { observers, restore } = captureResizeObservers();
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('mobileContextRow') ? 92 : 0;
+      });
+    try {
+      // The branch usually arrives after the composer mounts.
+      const container = renderChatEditor({});
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('');
+      rerenderChatEditor(container, { gitBranch: 'main' });
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('92px');
+
+      // A long branch can wrap an already-mounted row; only the
+      // ResizeObserver refreshes the allowance then.
+      const row = surface.querySelector<HTMLElement>(
+        '[class*="mobileContextRow"]',
+      )!;
+      height.mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('mobileContextRow') ? 136 : 0;
+      });
+      act(() => fireResize(observers, row));
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('136px');
+    } finally {
+      height.mockRestore();
+      restore();
     }
   });
 

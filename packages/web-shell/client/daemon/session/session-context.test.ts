@@ -157,6 +157,37 @@ describe('session context', () => {
     ).toBe('/conversations');
   });
 
+  it('opens a Live session on a daemon serving a single project', () => {
+    // The reported failure: one project workspace, so the daemon withholds
+    // `multi_workspace_sessions` (it counts user workspaces and drops the Live
+    // entry as internal) while advertising the Live workspace in the same
+    // payload. Shape copied from a real 0.24.3 `/capabilities`.
+    expect(
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['realtime_voice_web', 'session_load'],
+        modelServices: [],
+        workspaces: [
+          {
+            id: 'b3b7ec583d548205',
+            cwd: '/Users/me/Desktop/qwen-code',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: '6899bd1e20ba5254',
+            cwd: '/Users/me/Documents/Qwen Code/Conversations',
+            displayName: 'Conversations',
+            primary: false,
+            trusted: true,
+            kind: 'live',
+          },
+        ],
+      }),
+    ).toBe('/Users/me/Documents/Qwen Code/Conversations');
+  });
+
   it('fails closed for missing, ambiguous, or untrusted Live runtimes', () => {
     expect(() =>
       resolveLiveSessionWorkspaceCwd({
@@ -164,17 +195,9 @@ describe('session context', () => {
         mode: 'native',
         features: [],
         modelServices: [],
-        workspaces: [
-          {
-            id: 'live',
-            cwd: '/conversations',
-            primary: false,
-            trusted: true,
-            kind: 'live',
-          },
-        ],
+        workspaces: [],
       }),
-    ).toThrow('does not advertise multi-workspace session routing');
+    ).toThrow('does not advertise a Live session runtime');
     expect(() =>
       resolveLiveSessionWorkspaceCwd({
         v: 1,
@@ -361,7 +384,7 @@ describe('session context', () => {
         modelServices: [],
         workspaces: [],
       } as unknown as Parameters<typeof resolveLiveSessionWorkspaceCwd>[0]),
-    ).toThrow('does not advertise multi-workspace session routing');
+    ).toThrow('does not advertise a Live session runtime');
     expect(() =>
       resolveLiveSessionWorkspaceCwd({
         v: 1,

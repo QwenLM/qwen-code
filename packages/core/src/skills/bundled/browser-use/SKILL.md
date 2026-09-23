@@ -19,8 +19,11 @@ The SDK checks the actual connection and protocol instead of reading Chrome's
 extension preferences.
 
 If the extension does not connect, ask the user to open Chrome and check the
-extension in the intended profile. There is no store listing yet: build the
-extension from `packages/chrome-extension` in the Qwen Code repository (its
+extension in the intended profile. It installs from the Chrome Web Store:
+https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph
+
+If the store reports it is not available in the user's region, they can build
+it from `packages/chrome-extension` in the Qwen Code repository (its
 README) and load `dist/extension` through `chrome://extensions` (Developer mode
 → Load unpacked). After installation or enabling it, retry the connection.
 

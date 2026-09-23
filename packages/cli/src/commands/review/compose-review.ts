@@ -29,6 +29,7 @@ import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
@@ -1553,9 +1554,11 @@ export interface ComposeReviewResult {
   remediation: string[];
   /**
    * The FIXes the coverage check withheld because the plan's wall would
-   * refuse the build they name, each with the gate's arithmetic — printed
-   * to stderr as `NOTE:` lines beside the FIX lines, never rendered into
-   * the body. A gap the body discloses with no FIX beside it is explained
+   * refuse the build they name, each with the gate's arithmetic — and the
+   * one repair that is named but never performed mid-round (selection
+   * drift: re-planning moves the epoch the round's evidence is fenced on).
+   * Printed to stderr as `NOTE:` lines beside the FIX lines, never rendered
+   * into the body. A gap the body discloses with no FIX beside it is explained
    * here, not left to look like an oversight.
    */
   waivedFixes: string[];
@@ -5261,6 +5264,12 @@ function composeReviewBody(
   // and a fabrication about a chunk nobody receipted. The public body would give
   // the author a false cause.
   const missingReceipts: number[] = [];
+  // Declarations of an unreadable line from records whose chunk id the plan
+  // does not carry (`coverage.ts` — `unplannedDeclarations`). The same fact as
+  // an `uncoverable` entry and the same cap, kept apart because the id is not
+  // a chunk of this plan: rendered through the chunk translation it was
+  // counted as a section of the author's diff.
+  const unplannedDeclared: number[] = [];
 
   // The plan's chunk→files table and the chunks somebody demonstrably read,
   // for the body renderer and the opener. Empty when no plan could be used —
@@ -5764,7 +5773,31 @@ function composeReviewBody(
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      // Operator register only, and NOT pushed through `coverageEntries`: that
+      // channel caps (every entry folds into the unreviewed-dimension cap and
+      // the posted "Not reviewed:" list), and a check this new must not be
+      // able to take an Approve away before anyone has seen how often it
+      // fires.
+      //
+      // A NOTE, not a FIX. A `FIX:` line is a repair the skill tells the
+      // orchestrator to perform this round, and re-capturing or re-planning
+      // must NOT be performed mid-round: the plan's mtime is the epoch the
+      // round's prompt records and transcripts are fenced on. So it rides the
+      // channel for repairs that are named and withheld. What is withheld is
+      // exactly that — the suffix does not forbid repairing an unreadable
+      // path, which moves no plan.
+      if (cov.selectionDrift !== null) {
+        waivedFixes.push(
+          // Names the artifact, not a direction: this command prints no
+          // coverage summary, so "the coverage below" pointed at the VOLUME
+          // and CONVERGENCE lines that follow it.
+          `selection drift: ${cov.selectionDrift}. The coverage this round ` +
+            `reports is against the plan as written; do not re-capture or ` +
+            `re-plan mid-round.`,
+        );
+      }
       for (const id of cov.missingChunks) missingReceipts.push(id);
+      unplannedDeclared.push(...cov.unplannedDeclarations);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
         // `chunk 5 (src/big.min.js)` vs the bare `chunk 5` here. A strict-equality
@@ -5892,14 +5925,23 @@ function composeReviewBody(
       // Both cap — a run that cannot show what it read has not shown it read
       // anything — but a reader chasing "could not read the transcripts" over a
       // plan with no `chunks[]` is chasing the wrong thing.
+      //
+      // A third, for the same reason: outcomes that do not partition the plan
+      // are a defect in the coverage walk, and "the plan could not be used"
+      // would send the operator to re-capture a diff that was never the
+      // problem.
       const why =
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
-          : `the plan could not be used (${(err as Error).message})`;
+          : err instanceof ChunkPartitionError
+            ? `the coverage check contradicted its own plan (${err.message})`
+            : `the plan could not be used (${(err as Error).message})`;
       const whyZh =
         err instanceof TranscriptsUnavailableError
           ? `无法读取 agent 的运行记录（${err.message}）`
-          : `plan 无法使用（${(err as Error).message}）`;
+          : err instanceof ChunkPartitionError
+            ? `覆盖率检查与其自身的 plan 相矛盾（${err.message}）`
+            : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
@@ -6215,7 +6257,9 @@ function composeReviewBody(
   const cappedBy: string[] = [];
   if (cannotTell.length > 0) cappedBy.push('cannot-tell-existing-critical');
   if (missingReceipts.length > 0) cappedBy.push('chunk-nobody-read');
-  if (uncoverable.length > 0) cappedBy.push('uncoverable-chunk');
+  if (uncoverable.length > 0 || unplannedDeclared.length > 0) {
+    cappedBy.push('uncoverable-chunk');
+  }
   if (unreviewed.length + coverageEntries.length > 0) {
     cappedBy.push('unreviewed-dimension');
   }
@@ -6239,6 +6283,7 @@ function composeReviewBody(
   const scopeUnproven =
     missingReceipts.length > 0 ||
     uncoverable.length > 0 ||
+    unplannedDeclared.length > 0 ||
     contextUnavailable ||
     coverageEntries.some((entry) => entry !== budgetEntry);
 
@@ -7103,6 +7148,8 @@ function composeReviewBody(
       });
     }
   }
+  // Unplanned declarations the caller relayed WITH the file they span.
+  const relayedInFull = new Set<number>();
   if (uncoverable.length > 0) {
     // The CLI's own entries are bare `chunk <id>` (pushed above, from the
     // report) and render through the same translation as every other chunk
@@ -7113,8 +7160,31 @@ function composeReviewBody(
     const callerNamed: string[] = [];
     for (const e of uncoverable) {
       const m = /^chunk (\d+)$/.exec(e);
-      if (m) bareIds.push(Number(m[1]));
-      else callerNamed.push(e);
+      // A bare id the plan does not carry can only be the caller's — the
+      // report's own are planned by construction — and it renders as the
+      // caller wrote it: counted as one of this diff's sections, it would
+      // state a gap in a plan that has none there.
+      if (m && planCarries(Number(m[1]), plannedChunks)) {
+        bareIds.push(Number(m[1]));
+        continue;
+      }
+      // One fact, said once, when the caller relays a declaration the
+      // coverage walk found itself — the same rule the planned ids get where
+      // the walk's are merged in (`chunk 5` vs `chunk 5 (src/big.min.js)`).
+      // A bare relay adds nothing to the walk's own sentence and is dropped;
+      // a richer one names the file, so IT is kept and the walk's sentence
+      // stands down for that id.
+      const relayed = /^chunk (\d+)(?= \S|$)/.exec(e);
+      if (relayed && unplannedDeclared.includes(Number(relayed[1]))) {
+        if (m) continue;
+        relayedInFull.add(Number(relayed[1]));
+      }
+      // A bare id the plan lacks used to collapse through the chunk
+      // translation, which counted it once however often it was relayed;
+      // rendered verbatim it is still said once. Every other entry is the
+      // caller's prose and renders exactly as it always has.
+      if (m && callerNamed.includes(e)) continue;
+      callerNamed.push(e);
     }
     const bareGap =
       bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
@@ -7123,9 +7193,26 @@ function composeReviewBody(
     const callerShown = callerNamed.map((entry) => stripCommentGrammar(entry));
     const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerShown];
     const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerShown];
+    // Nothing left to name when every entry was the caller relaying what the
+    // walk already disclosed: a sentence with no subject is not a disclosure.
+    if (shown.length > 0) {
+      notReviewedParts.push({
+        en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
+        zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+      });
+    }
+  }
+  const declaredUnsaid = new Set(
+    unplannedDeclared.filter((id) => !relayedInFull.has(id)),
+  );
+  if (declaredUnsaid.size > 0) {
+    // Said as what it is — a line, reported by an agent — and not through the
+    // sentence above: "a line THERE" needs a section of this diff to point
+    // at, and the plan has none for this id.
+    const by = unplannedChunkAgents(declaredUnsaid.size);
     notReviewedParts.push({
-      en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
-      zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+      en: `Not reviewed: a line of the diff that no read can reach — reported by ${by.en}.`,
+      zh: `未审查：diff 中有一行超出单次读取上限、任何读取都无法到达——由${by.zh} 报告。`,
     });
   }
   // One disclosure per subject, one sentence per cause — structurally, not by
@@ -7287,10 +7374,19 @@ function composeReviewBody(
     // selector — and the partition below keys on the INTERNAL subject, so a
     // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
+    const unplannedIds = new Set<number>();
     const named = new Map<string, { zh: string; count: number }>();
     for (const e of entries) {
       const m = /^chunk (\d+)$/.exec(e.subject);
-      if (m) chunkIds.push(Number(m[1]));
+      if (m && !planCarries(Number(m[1]), plannedChunks)) {
+        // The id came out of a launch prompt's text, and this plan has no
+        // such chunk — a record from another chunking of the diff. Collapsed
+        // with the rest it was counted against THIS plan: a two-chunk plan
+        // read in full told the author that "1 of the diff's 2 sections"
+        // went unreviewed. It is an agent, not a section, and is named as
+        // one — in every arm, since they all arrive here as `chunk <id>`.
+        unplannedIds.add(Number(m[1]));
+      } else if (m) chunkIds.push(Number(m[1]));
       else {
         const subject = e.publicSubject ?? e.subject;
         const existing = named.get(subject);
@@ -7302,16 +7398,20 @@ function composeReviewBody(
           });
       }
     }
+    const unplanned =
+      unplannedIds.size > 0 ? unplannedChunkAgents(unplannedIds.size) : null;
     const gap =
       chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
     const shown = [
       ...(gap ? [gap.phrase] : []),
+      ...(unplanned ? [unplanned.en] : []),
       ...[...named].map(([subject, { count }]) =>
         count > 1 ? `${subject} (×${count})` : subject,
       ),
     ].map((part) => stripCommentGrammar(part));
     const shownZh = [
       ...(gap ? [gap.phraseZh] : []),
+      ...(unplanned ? [unplanned.zh] : []),
       ...[...named.values()].map(({ zh, count }) =>
         count > 1 ? `${zh}（×${count}）` : zh,
       ),
@@ -7489,7 +7589,8 @@ function composeReviewBody(
   const hasCoverageGaps =
     unreviewed.length + coverageEntries.length > 0 ||
     missingReceipts.length > 0 ||
-    uncoverable.length > 0;
+    uncoverable.length > 0 ||
+    unplannedDeclared.length > 0;
   const coverageOpener: Bi | undefined = nothingCertified
     ? {
         keep: 1,
@@ -8654,6 +8755,38 @@ function publicAgentSubject(label: string): string | undefined {
   return /^chunk \d+$/.test(label)
     ? undefined
     : mdField(JSON.stringify(compressSummary(label.replace(/[`\r\n]+/g, ' '))));
+}
+
+/**
+ * Does this plan carry the chunk? True when there is no plan to ask — with no
+ * chunk table nothing can be called foreign to it, and the callers keep the
+ * counting fallback they always had.
+ */
+function planCarries(
+  id: number,
+  planned: ReadonlyArray<{ id: number }>,
+): boolean {
+  return planned.length === 0 || planned.some((p) => p.id === id);
+}
+
+/**
+ * How the posted body names records whose chunk id the plan does not carry.
+ *
+ * Counted by CHUNK, because that is what is known: disclosures are kept one
+ * per subject, so three records that all claim `chunk 9` arrive as one. The
+ * count lives in the phrase itself — the `(×N)` suffix the named subjects
+ * take reads wrong after "an agent".
+ */
+function unplannedChunkAgents(chunks: number): { en: string; zh: string } {
+  return chunks === 1
+    ? {
+        en: 'an agent launched for a chunk this plan does not carry',
+        zh: '一个被指派到当前 plan 中不存在的 chunk 的 agent',
+      }
+    : {
+        en: `agents launched for ${chunks} chunks this plan does not carry`,
+        zh: `被指派到当前 plan 中不存在的 ${chunks} 个 chunk 的 agent`,
+      };
 }
 
 /**
