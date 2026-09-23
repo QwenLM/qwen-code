@@ -8083,6 +8083,46 @@ describe('Session', () => {
       );
     });
 
+    it.each([
+      "Model 'qwen-typo' not found for authType 'openai'",
+      "Image-only model 'qwen-image' cannot be used as the primary model",
+      "Voice-only model 'qwen-voice' cannot be used as the primary model",
+      "Realtime-only model 'qwen-realtime' cannot be used as the primary model",
+    ])(
+      'maps the caller-caused switchModel refusal to invalid params: %s',
+      async (message) => {
+        switchModelSpy.mockRejectedValueOnce(new Error(message));
+        const rejection: unknown = await session
+          .setModel({
+            sessionId: 'test-session-id',
+            modelId: `qwen-typo(${AuthType.USE_OPENAI})`,
+          })
+          .then(
+            () => {
+              throw new Error('expected setModel to reject');
+            },
+            (error: unknown) => error,
+          );
+        expect(rejection).toBeInstanceOf(RequestError);
+        expect((rejection as RequestError).code).toBe(-32602);
+        expect((rejection as Error).message).toBe(`Invalid params: ${message}`);
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      },
+    );
+
+    it('keeps daemon-side switchModel faults as internal errors', async () => {
+      const fault = new Error(
+        "Missing API key for openai auth. Current model: 'gpt-5.4'.",
+      );
+      switchModelSpy.mockRejectedValueOnce(fault);
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.4(${AuthType.USE_OPENAI})`,
+        }),
+      ).rejects.toBe(fault);
+    });
+
     it('rejects empty/whitespace model IDs', async () => {
       await expect(
         session.setModel({

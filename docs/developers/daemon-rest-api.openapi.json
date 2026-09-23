@@ -286,7 +286,7 @@
             }
           },
           "422": {
-            "description": "startup_config_rejected: the requested selection was rejected or could not be confirmed. The daemon closes the new live session and rolls back the persisted recording of a caller-supplied sessionId on a best-effort basis, so the id can be retried; verify the live-session set through GET /daemon/status?detail=full.",
+            "description": "startup_config_rejected: the requested selection was rejected or could not be confirmed. The daemon attempts to close the new live session and rolls back the persisted recording of a caller-supplied sessionId, both on a best-effort basis; a close or rollback it could not complete is logged and the definite rejection is still returned. Retryability of a caller-supplied id is self-certifying: retry the create; a 409 session_id_conflict means the id is still occupied.",
             "content": {
               "application/json": {
                 "schema": {

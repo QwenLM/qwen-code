@@ -2750,17 +2750,7 @@ export class StandaloneSessionService {
       request.modelServiceId !== undefined &&
       session.modelApplied === false
     ) {
-      await this.cleanRollbackBeforePersistence(runtime, sessionId);
-      try {
-        await this.options.workspace.discardEmptyConversationDirectory(
-          sessionId,
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      this.directoryStates.delete(sessionId);
+      await this.rollbackSessionAndDiscardDirectory(runtime, sessionId);
       throw serviceError('model_selection_failed', sessionId, true);
     }
     let initialPrompt:
@@ -2804,17 +2794,7 @@ export class StandaloneSessionService {
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
       if (startupPreparationFailed) {
-        await this.cleanRollbackBeforePersistence(runtime, sessionId);
-        try {
-          await this.options.workspace.discardEmptyConversationDirectory(
-            sessionId,
-          );
-        } catch (cleanupError) {
-          debugLogger.warn(
-            `Could not discard the rolled-back standalone directory for ${sessionId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          );
-        }
-        this.directoryStates.delete(sessionId);
+        await this.rollbackSessionAndDiscardDirectory(runtime, sessionId);
         throw error;
       }
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
@@ -3212,6 +3192,21 @@ export class StandaloneSessionService {
       if (error instanceof TerminalQuarantineSignal) throw error;
       this.beginTerminalQuarantine(runtime);
     }
+  }
+
+  private async rollbackSessionAndDiscardDirectory(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<void> {
+    await this.cleanRollbackBeforePersistence(runtime, sessionId);
+    try {
+      await this.options.workspace.discardEmptyConversationDirectory(sessionId);
+    } catch (error) {
+      debugLogger.warn(
+        `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.directoryStates.delete(sessionId);
   }
 
   private async closeOwnedSessionOrQuarantine(

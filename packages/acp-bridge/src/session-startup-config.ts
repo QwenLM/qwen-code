@@ -104,27 +104,15 @@ function rejectInvalidSelection(error: unknown): never {
   ) {
     throw error;
   }
+  // Only a deterministic parameter rejection is a definite, client-caused
+  // refusal: the child maps its own caller-caused setter refusals (an
+  // unknown or media-only primary model, an unsupported effort) to
+  // invalidParams. Internal errors (-32603) also carry auth, credential,
+  // timeout and transport failures — uncertain outcomes that stay unmapped.
   if (error.code === -32602) {
     throw new SessionStartupConfigError(
       'startup_config_rejected',
       error.message,
-    );
-  }
-  // A non-RequestError rejection from the setter (e.g. an unregistered
-  // model refused by `switchModel`) crosses ACP as internalError; the
-  // deterministic detail survives only in `data.details`. Transport,
-  // timeout and auth failures never take this shape and stay unmapped.
-  if (
-    error.code === -32603 &&
-    'data' in error &&
-    error.data !== null &&
-    typeof error.data === 'object' &&
-    'details' in error.data &&
-    typeof error.data.details === 'string'
-  ) {
-    throw new SessionStartupConfigError(
-      'startup_config_rejected',
-      error.data.details,
     );
   }
   throw error;

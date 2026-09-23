@@ -7007,6 +7007,100 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/new rolls back the persisted recording after a definite startup rejection so the caller id stays retryable', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440005';
+    // The spawn persists its recording before the selection is rejected
+    // and the bridge closes the live session.
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(sessionId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      );
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 445,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32603,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(bridge.killed).toContain(sessionId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 446,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      result: { sessionId: string };
+    };
+    expect(retryFrame.result.sessionId).toBe(sessionId);
+    reader.close();
+  });
+
+  it('session/new keeps the persisted recording when a startup failure outcome is uncertain', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440006';
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(sessionId);
+      throw new Error('transport closed');
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 447,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).not.toMatchObject({
+      errorKind: 'startup_config_rejected',
+    });
+    expect(bridge.killed).not.toContain(sessionId);
+
+    // The recording survives, so a corrected retry of the same id still
+    // answers the persisted-admission conflict instead of attaching.
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 448,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(retryFrame.error).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'persisted',
+      },
+    });
+    reader.close();
+  });
+
   it('session/new always uses thread scope (ACP standard compliance)', async () => {
     // ACP standard: session/new MUST create a new isolated session.
     // sessionScope param is ignored; bridge always gets 'thread'.

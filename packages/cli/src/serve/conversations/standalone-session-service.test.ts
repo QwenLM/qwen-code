@@ -737,6 +737,135 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('runs the same rollback sequence for a rejected startup selection and an unapplied scheduled-child model', async () => {
+    // The startup-config branch and the model_selection_failed branch
+    // share one rollback helper; both must run the identical sequence so
+    // the two copies cannot drift.
+    const sequences: string[][] = [];
+    let current: string[] | undefined;
+    const instrument = (h: Harness) => {
+      current = [];
+      sequences.push(current);
+      h.bridge.killSession.mockImplementation(async () => {
+        current?.push('killSession');
+        return true;
+      });
+      h.discardEmptyConversationDirectory.mockImplementation(async () => {
+        current?.push('discardEmptyConversationDirectory');
+        return true;
+      });
+    };
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        current?.push('removeSession');
+        return true;
+      });
+
+    // Branch 1: a definite startup-config rejection.
+    mockDurableStandalone();
+    let persisted = false;
+    vi.mocked(SessionService.prototype.findSessionIdIgnoringCase)
+      .mockReset()
+      .mockImplementation(async () => (persisted ? sessionId : undefined));
+    removeSession.mockImplementation(async () => {
+      current?.push('removeSession');
+      persisted = false;
+      return true;
+    });
+    const startupHarness = createHarness();
+    instrument(startupHarness);
+    startupHarness.bridge.spawnStandaloneSession.mockImplementation(
+      async () => {
+        persisted = true;
+        return {
+          sessionId,
+          workspaceCwd: root.canonicalRoot,
+          attached: false,
+          sourceType: 'standalone',
+          sourcePersisted: true,
+        };
+      },
+    );
+    startupHarness.bridge.setSessionConfigOption.mockRejectedValueOnce(
+      RequestError.invalidParams(undefined, 'selection failed'),
+    );
+    await expect(
+      startupHarness.service.createWithInitialPrompt(
+        { sessionId, startupConfig: { modelServiceId: 'gpt-5.4(openai)' } },
+        'hello',
+      ),
+    ).rejects.toMatchObject({ code: 'startup_config_rejected' });
+
+    // Branch 2: the scheduled child's spawn-time model apply failed.
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    const storageParentSessionId = sessionId.toUpperCase();
+    vi.mocked(SessionService.prototype.findSessionIdIgnoringCase)
+      .mockReset()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId)
+      .mockResolvedValueOnce(storageParentSessionId)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(childSessionId)
+      .mockResolvedValueOnce(undefined);
+    vi.mocked(SessionService.prototype.readCreationMetadataIfReadable)
+      .mockReset()
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValue({
+        sourceType: 'standalone',
+        parentSessionId: storageParentSessionId,
+      });
+    removeSession.mockImplementation(async () => {
+      current?.push('removeSession');
+      return true;
+    });
+    const childHarness = createHarness();
+    instrument(childHarness);
+    await childHarness.service.createWithInitialPrompt(
+      { sessionId },
+      'parent task',
+    );
+    childHarness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    childHarness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId: childSessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      parentSessionPersisted: true,
+      modelApplied: false,
+    });
+    await expect(
+      childHarness.service.createChildWithInitialPrompt(
+        {
+          sessionId: childSessionId,
+          parentSessionId: sessionId,
+          promptId: 'prompt-child',
+          modelServiceId: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+        },
+        'child task',
+      ),
+    ).rejects.toMatchObject({
+      code: 'model_selection_failed',
+      sessionId: childSessionId,
+    });
+
+    expect(sequences).toEqual([
+      ['killSession', 'removeSession', 'discardEmptyConversationDirectory'],
+      ['killSession', 'removeSession', 'discardEmptyConversationDirectory'],
+    ]);
+  });
+
   it('surfaces a failed spawn-time model apply as modelApplied false', async () => {
     mockDurableStandalone();
     const harness = createHarness();

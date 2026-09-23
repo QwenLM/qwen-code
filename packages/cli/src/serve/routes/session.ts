@@ -3637,7 +3637,8 @@ export function registerSessionRoutes(
         isSessionStartupConfigError(err) &&
         err.code === 'startup_config_rejected'
       ) {
-        await runWithWorkspaceRuntimeStorage(runtime, () =>
+        let rollbackError: unknown;
+        const removed = await runWithWorkspaceRuntimeStorage(runtime, () =>
           deleteDaemonSessionIfOrphan({
             sessionId: requestedSessionId,
             service: createWorkspaceRuntimeSessionService(runtime),
@@ -3645,17 +3646,28 @@ export function registerSessionRoutes(
             coordinator: archiveCoordinator,
           }),
         ).catch((cleanupError: unknown) => {
+          rollbackError = cleanupError;
+          return false;
+        });
+        if (!removed) {
+          // The definite rejection still owes the caller its 422, so an
+          // inconclusive rollback — refused because the session stayed
+          // live, or failed outright — is a daemon-log line, not a throw.
           daemonLog?.warn(
-            'startup rejection recording rollback failed; the session id may stay occupied',
+            'startup rejection recording rollback was inconclusive; the session id may stay occupied',
             {
               sessionId: requestedSessionId,
-              error:
-                cleanupError instanceof Error
-                  ? cleanupError.message
-                  : String(cleanupError),
+              ...(rollbackError === undefined
+                ? {}
+                : {
+                    error:
+                      rollbackError instanceof Error
+                        ? rollbackError.message
+                        : String(rollbackError),
+                  }),
             },
           );
-        });
+        }
       }
       // Only the plain creation path can promise that the initialize
       // handshake preceded every durable mutation: `branch`/`worktree`

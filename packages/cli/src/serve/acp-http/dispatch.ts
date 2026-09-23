@@ -1950,14 +1950,36 @@ export class AcpDispatcher {
             // Always use sessionScope 'thread' regardless of client params.
             // The REST surface (POST /session) supports 'single' for
             // backward compat, but the ACP endpoint follows the standard.
-            const session = await sessionRuntime.bridge.spawnOrAttach({
-              workspaceCwd: cwd,
-              clientId: conn.clientId,
-              sessionScope: 'thread',
-              ...(startupConfig ? { startupConfig } : {}),
-              ...source,
-              ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
-            });
+            const session = await sessionRuntime.bridge
+              .spawnOrAttach({
+                workspaceCwd: cwd,
+                clientId: conn.clientId,
+                sessionScope: 'thread',
+                ...(startupConfig ? { startupConfig } : {}),
+                ...source,
+                ...(requestedSessionId
+                  ? { sessionId: requestedSessionId }
+                  : {}),
+              })
+              .catch(async (error: unknown) => {
+                // Mirror the REST route: a definite startup rejection
+                // already closed the live session, but the recording the
+                // spawn persisted survives — roll it back so the
+                // caller-supplied id stays retryable. Uncertain outcomes
+                // keep it: the close result is unknown.
+                if (
+                  requestedSessionId !== undefined &&
+                  isSessionStartupConfigError(error) &&
+                  error.code === 'startup_config_rejected'
+                ) {
+                  await this.removeOrphanSession(
+                    requestedSessionId,
+                    true,
+                    sessionRuntime,
+                  );
+                }
+                throw error;
+              });
             const ownership = this.ownershipReceipt(
               conn,
               session.sessionId,

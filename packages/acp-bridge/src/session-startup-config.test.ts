@@ -152,26 +152,24 @@ describe('session startup configuration', () => {
     }
   });
 
-  it('maps the unknown-model internal-error wire shape to startup_config_rejected', async () => {
-    // `switchModel` refuses an unregistered model with a plain Error, which
-    // ACP serializes as internalError; the detail survives in data.details.
-    const detail = "Model 'qwen-typo' not found for authType 'openai'";
-    const setSessionConfigOption = vi.fn().mockRejectedValue({
-      code: -32603,
-      message: 'Internal error',
-      data: { details: detail },
-    });
-    await expect(
-      applySessionStartupConfig(
-        { setSessionConfigOption },
-        'session',
-        startupConfig,
-      ),
-    ).rejects.toMatchObject({
-      code: 'startup_config_rejected',
-      message: detail,
-    });
+  it('leaves the internal-error wire shape unmapped even with a details string', async () => {
+    // -32603 is what every child-side internal fault produces — auth,
+    // credential, timeout and transport failures included — so even a
+    // refusal-shaped `data.details` is an uncertain outcome, not a definite
+    // rejection. The child maps its caller-caused refusals to invalidParams
+    // before they reach the wire.
+    const setSessionConfigOption = vi.fn();
     for (const shape of [
+      {
+        code: -32603,
+        message: 'Internal error',
+        data: { details: "Model 'qwen-typo' not found for authType 'openai'" },
+      },
+      {
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'Missing API key for openai auth' },
+      },
       { code: -32603, message: 'Internal error' },
       { code: -32603, message: 'Internal error', data: { details: 42 } },
       { code: -32603, message: 'Internal error', data: null },
