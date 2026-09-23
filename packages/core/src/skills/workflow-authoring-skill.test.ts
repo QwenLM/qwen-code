@@ -79,6 +79,7 @@ function stubConfig(options: StubOptions = {}) {
     }),
     getVisibleTools: () => new Set(visibleTools),
     getToolMode: () => toolMode,
+    getCodeModeOnly: () => toolMode === ToolMode.CodeModeOnly,
     isSkillEnabled,
     getDisabledSkillLevels: () => new Set(disabledLevels),
   } as unknown as Config;
