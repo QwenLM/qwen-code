@@ -250,6 +250,14 @@ describe('GitlabChannel', () => {
       ch.disconnect();
     });
 
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+      expect(ch.config.operators).toEqual(['alice']);
+      ch.disconnect();
+    });
+
     it('does not warn about groupPolicy when pairing is configured', async () => {
       const stderr = vi
         .spyOn(process.stderr, 'write')

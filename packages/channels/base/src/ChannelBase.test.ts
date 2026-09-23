@@ -3339,6 +3339,138 @@ describe('ChannelBase', () => {
       expect(bridge.discardSession).not.toHaveBeenCalled();
     });
 
+    describe('shared-session operators', () => {
+      const group = {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        threadId: 'thread-1',
+      };
+
+      async function approveAs(
+        ch: TestChannel,
+        senderId: string,
+        requestId: string,
+      ): Promise<boolean> {
+        const before = respondToPermissionMock().mock.calls.length;
+        await ch.handleInbound(
+          envelope({ ...group, senderId, text: `/approve ${requestId}` }),
+        );
+        return respondToPermissionMock().mock.calls.length > before;
+      }
+
+      it('lets a paired user operate a group session under an open group axis', async () => {
+        const previousQwenHome = process.env['QWEN_HOME'];
+        process.env['QWEN_HOME'] = mkdtempSync(
+          join(tmpdir(), 'qwen-operators-'),
+        );
+        try {
+          const store = new PairingStore('test-chan', '/tmp');
+          store.approve(pairingCodeOf(store.createRequest('admin', 'Admin')));
+          const ch = createChannel({
+            senderPolicy: 'pairing',
+            groupPolicy: 'open',
+            groupSenderPolicy: 'open',
+            sessionScope: 'chat_thread',
+          });
+          const sessionId = await startSession(ch, {
+            ...group,
+            senderId: 'member',
+          });
+          emitPermission(sessionId, 'req-1');
+
+          expect(await approveAs(ch, 'member', 'req-1')).toBe(false);
+          expect(await approveAs(ch, 'admin', 'req-1')).toBe(true);
+        } finally {
+          if (previousQwenHome === undefined) {
+            delete process.env['QWEN_HOME'];
+          } else {
+            process.env['QWEN_HOME'] = previousQwenHome;
+          }
+        }
+      });
+
+      it('keeps every member an operator when both sender axes are open', async () => {
+        const ch = createChannel({
+          senderPolicy: 'open',
+          groupPolicy: 'open',
+          groupSenderPolicy: 'open',
+          sessionScope: 'chat_thread',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'stranger', 'req-1')).toBe(true);
+      });
+
+      it('lets allowedGroupUsers operate under an allowlist group axis', async () => {
+        const ch = createChannel({
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+          groupPolicy: 'open',
+          groupSenderPolicy: 'allowlist',
+          allowedGroupUsers: ['bob'],
+          sessionScope: 'chat_thread',
+        });
+        const sessionId = await startSession(ch, { ...group, senderId: 'bob' });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'bob', 'req-1')).toBe(true);
+      });
+
+      it('lets an explicit operators list override allowedUsers', async () => {
+        const ch = createChannel({
+          allowedUsers: ['boss', 'carol'],
+          operators: ['carol'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'boss',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'boss', 'req-1')).toBe(false);
+        expect(ch.sent.at(-1)?.text).toContain('Only authorized members');
+        expect(await approveAs(ch, 'carol', 'req-1')).toBe(true);
+      });
+
+      it('treats an empty operators list as no operators, not as unrestricted', async () => {
+        const ch = createChannel({
+          senderPolicy: 'open',
+          operators: [],
+          groupPolicy: 'open',
+          sessionScope: 'chat_thread',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'alice', 'req-1')).toBe(false);
+      });
+
+      it('leaves sessions that are not shared to their own sender', async () => {
+        const ch = createChannel({
+          operators: [],
+          groupPolicy: 'open',
+          sessionScope: 'user',
+        });
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'alice', 'req-1')).toBe(true);
+      });
+    });
+
     it('uses ACP option kinds for approval and denial', async () => {
       const ch = createChannel();
       const sessionId = await startSession(ch);
@@ -10784,6 +10916,91 @@ describe('ChannelBase', () => {
           allowedUsers: ['owner'],
           groupPolicy: 'open',
           sessionScope: 'thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+      vi.mocked(bridge.prompt).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = () => resolve('agent response');
+          }),
+      );
+      const strangerPrompt = ch.handleInbound(
+        envelope({
+          senderId: 'stranger',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot create a loop',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+
+      finishPrompt?.();
+      await strangerPrompt;
+    });
+
+    it('channel loop tools refuse a group-axis caller that /loop refuses', async () => {
+      let finishPrompt: (() => void) | undefined;
+      const createForTarget = vi.fn().mockResolvedValue({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '* * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'owner',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      } satisfies ChannelLoop);
+      const ch = createChannel(
+        {
+          senderPolicy: 'pairing',
+          groupPolicy: 'open',
+          groupSenderPolicy: 'open',
+          sessionScope: 'chat_thread',
         },
         {
           loopController: {

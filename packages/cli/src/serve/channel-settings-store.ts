@@ -160,7 +160,11 @@ function assertSharedField(
     }
     return true;
   }
-  if (key === 'allowedUsers' || key === 'allowedGroupUsers') {
+  if (
+    key === 'allowedUsers' ||
+    key === 'allowedGroupUsers' ||
+    key === 'operators'
+  ) {
     if (
       !Array.isArray(value) ||
       value.some((item) => typeof item !== 'string')

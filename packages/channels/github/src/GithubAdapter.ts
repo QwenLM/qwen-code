@@ -630,6 +630,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.config.allowedGroupUsers = allowedGroup;
       this.groupSenderGate?.replaceAllowedUsers(allowedGroup);
     }
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
     this.migrateLegacyPublicationState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;

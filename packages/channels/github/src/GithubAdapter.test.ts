@@ -1081,6 +1081,16 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+
+      expect(config.operators).toEqual(['alice']);
+      channel.disconnect();
+    });
+
     it('rejects an allowlist containing only the authenticated GitHub account', async () => {
       const config = makeConfig({
         senderPolicy: 'allowlist',
