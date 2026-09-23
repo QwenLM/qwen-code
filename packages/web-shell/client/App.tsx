@@ -186,7 +186,10 @@ import {
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
 import { ThreadsRoute } from './components/workspace-agents/ThreadsRoute';
-import { useAgentChatEntry } from './components/workspace-agents/useAgentChatEntry';
+import {
+  conversationContext,
+  useAgentChatEntry,
+} from './components/workspace-agents/useAgentChatEntry';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
@@ -18051,12 +18054,17 @@ export function App({
     (message: string) => pushToast('error', message),
     [pushToast],
   );
+  const displayMessagesRef = useRef(displayMessages);
+  displayMessagesRef.current = displayMessages;
+  const getMentionContext = useCallback(
+    () => conversationContext(displayMessagesRef.current),
+    [],
+  );
   const agentChatEntry = useAgentChatEntry({
-    enabled:
-      isChatEmptyState &&
-      Boolean(
-        workspace.capabilities?.features?.includes('agent_collaboration_v1'),
-      ),
+    enabled: Boolean(
+      workspace.capabilities?.features?.includes('agent_collaboration_v1'),
+    ),
+    getContext: getMentionContext,
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,

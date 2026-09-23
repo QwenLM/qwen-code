@@ -506,6 +506,14 @@ const EN: Messages = {
   'collab.run.stalled': (v) =>
     `${v?.agent} has shown no progress for ${v?.elapsed}. It may be stuck.`,
   'collab.run.stop': 'Stop',
+  'collab.mention.provider': 'Agents',
+  'collab.mention.noAttachments':
+    'Attachments cannot be sent to an agent yet. Send text to start.',
+  'collab.agentStatus.idle': 'Idle',
+  'collab.agentStatus.working': 'Working',
+  'collab.agentStatus.blocked': 'Waiting for you',
+  'collab.agentStatus.offline': 'Runtime offline',
+  'collab.agentStatus.error': 'Needs attention',
   'collab.team.title': 'Team',
   'collab.team.members': (v) => `Members (${v?.count ?? 0})`,
   'collab.team.empty': 'No agent has joined yet.',
@@ -4581,6 +4589,13 @@ const ZH: Messages = {
   'collab.run.stalled': (v) =>
     `${v?.agent} 已经 ${v?.elapsed} 没有进展，可能卡住了`,
   'collab.run.stop': '停止',
+  'collab.mention.provider': 'Agent',
+  'collab.mention.noAttachments': '暂时不能把附件发给 Agent，请先用文字发起。',
+  'collab.agentStatus.idle': '空闲',
+  'collab.agentStatus.working': '正在工作',
+  'collab.agentStatus.blocked': '等你处理',
+  'collab.agentStatus.offline': 'Runtime 离线',
+  'collab.agentStatus.error': '需要处理',
   'collab.team.title': '团队',
   'collab.team.members': (v) => `成员（${v?.count ?? 0}）`,
   'collab.team.empty': '还没有 Agent 加入。',
