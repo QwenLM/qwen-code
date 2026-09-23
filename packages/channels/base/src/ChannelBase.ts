@@ -6208,12 +6208,24 @@ export abstract class ChannelBase {
     isGroup?: boolean;
     chatId: string;
   }): GroupSenderPolicy {
-    if (target.isGroup !== true) return 'inherit';
+    if (target.isGroup !== true || this.isPersonalConversation(target)) {
+      return 'inherit';
+    }
     const configured =
       this.groupConfigFor(target.chatId)?.senders ??
       this.groupConfigFor('*')?.senders;
     if (configured) return configured;
     return this.isApprovedPairingGroup(target.chatId) ? 'open' : 'inherit';
+  }
+
+  /**
+   * Whether a group-shaped conversation acts on behalf of one person, such as
+   * a document comment thread or a task. Its sender and operators then follow
+   * `senderPolicy` like a direct message, and `groups` does not apply; its
+   * group shape still decides routing, memory, and presentation.
+   */
+  protected isPersonalConversation(_target: { chatId: string }): boolean {
+    return false;
   }
 
   private groupAllowedUsersFor(chatId: string): string[] {

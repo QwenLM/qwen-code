@@ -1021,13 +1021,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     return TODO_POLL_INTERVAL_MS;
   }
 
+  /** Document comments and native todos are one person's requests. */
+  protected override isPersonalConversation(target: {
+    chatId: string;
+  }): boolean {
+    return (
+      this.documentSet.has(target.chatId) || this.todoTargets.has(target.chatId)
+    );
+  }
+
   protected override preflightInbound(
     envelope: Envelope,
   ): boolean | Promise<boolean> {
-    if (
-      !this.documentSet.has(envelope.chatId) &&
-      !this.todoTargets.has(envelope.chatId)
-    ) {
+    if (!this.isPersonalConversation(envelope)) {
       return super.preflightInbound(envelope);
     }
     const result = this.gate.check(envelope.senderId, envelope.senderName);
