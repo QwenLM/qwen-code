@@ -69,6 +69,14 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         script: 'return { marker: "WORKFLOW_MODEL_RESULT_12176" };',
         marker: 'WORKFLOW_MODEL_RESULT_12176',
       },
+      {
+        source: 'slash',
+        status: 'completed',
+        script:
+          'const error = new Error("WORKFLOW_VM_ERROR_12176"); error.stack = "Error: WORKFLOW_VM_ERROR_12176\\n\\tat report-probe.js"; return { marker: "WORKFLOW_ERROR_RESULT_12176", failed: ["fr"], errors: [error], error };',
+        marker: 'WORKFLOW_ERROR_RESULT_12176',
+        reportedError: 'WORKFLOW_VM_ERROR_12176',
+      },
     ])('delivers $marker once', async (testCase) => {
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
@@ -194,6 +202,11 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       if (isSlash && testCase.status === 'completed') {
         expect(screen).toContain('Reported failed: ["fr"]');
       }
+      if (testCase.reportedError) {
+        expect(screen).toContain(
+          `Reported error: Error: ${testCase.reportedError}`,
+        );
+      }
       const requests = server.requests.filter(
         ({ body }) => body['stream'] === true,
       );
@@ -205,6 +218,16 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         isSlash ? 1 : 0,
       );
       expect(messages).toContain(testCase.marker);
+      if (testCase.reportedError) {
+        const reported = messages.match(
+          /<reported-failures>([\s\S]*?)<\/reported-failures>/,
+        )?.[1];
+        expect(reported).toContain(
+          `Reported error: Error: ${testCase.reportedError}`,
+        );
+        expect(reported).toContain('  at report-probe.js');
+        expect(reported).not.toContain('Reported errors: [{}]');
+      }
       if (testCase.largeResult) {
         expect(
           messages.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
@@ -237,6 +260,13 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         followUpRequests.at(-1)!.body['messages'],
       );
       expect(followUp).toContain(testCase.marker);
+      if (testCase.reportedError) {
+        expect(
+          followUp.match(
+            /<reported-failures>([\s\S]*?)<\/reported-failures>/,
+          )?.[1],
+        ).toContain(testCase.reportedError);
+      }
       if (testCase.largeResult) {
         expect(followUp).toContain('<result-truncated>');
         expect(followUp).toContain(

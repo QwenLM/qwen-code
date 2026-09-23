@@ -83,7 +83,10 @@ import {
   type WorkflowTask,
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
-import { stringifyWorkflowResult } from '../../agents/workflow-result-format.js';
+import {
+  sanitizeWorkflowText,
+  stringifyWorkflowResult,
+} from '../../agents/workflow-result-format.js';
 import {
   buildWorkflowSizeGuidelineParagraph,
   resolveWorkflowSizeGuidelineSetting,
@@ -716,7 +719,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       const failureText = cancelled
         ? 'Workflow cancelled.'
         : `Workflow failed: ${clampForDisplay(
-            sanitizeBlock(message),
+            sanitizeWorkflowText(message),
             TRAILER_ERROR_CHARS,
           )}`;
       const trailer = buildRunTrailer(
@@ -1063,23 +1066,6 @@ function sanitizeLine(text: string): string {
   return stripAnsiAndControl(text);
 }
 
-/**
- * Sanitize text whose line structure is meaningful (the script excerpt).
- *
- * `stripAnsiAndControl` removes C0 controls, and `\n` is one of them — running
- * it over a script would collapse it to a single unreadable line. Sanitize each
- * line separately so the structure survives while escape sequences do not.
- * Tabs become spaces first, since they would otherwise be stripped and silently
- * destroy indentation.
- */
-function sanitizeBlock(text: string): string {
-  return text
-    .replace(/\t/g, '  ')
-    .split('\n')
-    .map((line) => stripAnsiAndControl(line))
-    .join('\n');
-}
-
 /** Clamp already-sanitized text, naming what was dropped rather than eliding it. */
 function clampForDisplay(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -1266,7 +1252,10 @@ function buildConfirmationPrompt(
       loaded
         ? `Script (${WORKFLOW_RULE_DIGEST_KEY} ${loaded.digest}):`
         : 'Script:',
-      clampForDisplay(sanitizeBlock(scriptText), CONFIRM_SCRIPT_EXCERPT_CHARS),
+      clampForDisplay(
+        sanitizeWorkflowText(scriptText),
+        CONFIRM_SCRIPT_EXCERPT_CHARS,
+      ),
     );
   }
 

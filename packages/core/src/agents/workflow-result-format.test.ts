@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createContext, runInContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   stringifyWorkflowResult,
@@ -11,7 +12,45 @@ import {
 } from './workflow-result-format.js';
 
 describe('workflow result formatting', () => {
-  it('shares result semantics between compact notifications and pretty tool cards', () => {
+  it('retains the message of an Error created in a different VM realm', () => {
+    const failure: unknown = runInContext(
+      'new Error("disk full")',
+      createContext({}),
+    );
+    expect(failure).not.toBeInstanceOf(Error);
+    expect(Object.prototype.toString.call(failure)).toBe('[object Error]');
+    expect(stringifyWorkflowResult(failure)).toContain('disk full');
+  });
+
+  it('retains nested VM Error messages in compact and pretty results', () => {
+    const failure: unknown = runInContext(
+      'new Error("disk full")',
+      createContext({}),
+    );
+    for (const pretty of [false, true]) {
+      expect(stringifyWorkflowResult({ errors: [failure] }, pretty)).toContain(
+        'disk full',
+      );
+    }
+  });
+
+  it('keeps the fallback for a circular result containing an Error', () => {
+    const result: { error: Error; self?: unknown } = {
+      error: new Error('disk full'),
+    };
+    result.self = result;
+    expect(stringifyWorkflowResult(result)).toBe(
+      '(workflow returned a non-JSON-serializable value of type object)',
+    );
+  });
+
+  it('renders an Error without a stack using its name and message', () => {
+    const error = new TypeError('invalid input');
+    error.stack = undefined;
+    expect(stringifyWorkflowResult(error)).toBe('TypeError: invalid input');
+  });
+
+  it('shares result semantics between compact notifications and pretty tool results', () => {
     for (const pretty of [false, true]) {
       expect(stringifyWorkflowResult(undefined, pretty)).toBe(
         '(workflow returned no value)',

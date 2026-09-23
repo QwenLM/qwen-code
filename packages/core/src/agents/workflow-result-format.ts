@@ -4,6 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { types } from 'node:util';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
+
+function renderError(error: Error): string {
+  const name = typeof error.name === 'string' ? error.name : 'Error';
+  const message = String(error.message ?? '');
+  return typeof error.stack === 'string' && error.stack.includes(message)
+    ? error.stack
+    : `${name}: ${message}`;
+}
+
 export function stringifyWorkflowResult(
   result: unknown,
   pretty = false,
@@ -11,12 +22,32 @@ export function stringifyWorkflowResult(
   if (result === undefined) return '(workflow returned no value)';
   if (typeof result === 'string') return result;
   try {
+    // Workflow values cross a VM boundary, where instanceof Error is false.
+    if (types.isNativeError(result)) return renderError(result);
     return (
-      JSON.stringify(result, null, pretty ? 2 : undefined) ?? String(result)
+      JSON.stringify(
+        result,
+        (_key, value: unknown) =>
+          types.isNativeError(value) ? renderError(value) : value,
+        pretty ? 2 : undefined,
+      ) ?? String(result)
     );
   } catch {
     return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
   }
+}
+
+/**
+ * Preserve line structure and indentation while removing terminal controls.
+ * stripAnsiAndControl removes newlines and tabs, so sanitize per line after
+ * expanding tabs to spaces.
+ */
+export function sanitizeWorkflowText(text: string): string {
+  return text
+    .replace(/\t/g, '  ')
+    .split('\n')
+    .map((line) => stripAnsiAndControl(line))
+    .join('\n');
 }
 
 export function truncateWorkflowText(text: string, maxChars: number): string {

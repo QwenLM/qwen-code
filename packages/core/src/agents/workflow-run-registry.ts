@@ -50,6 +50,7 @@ import {
   reportedFailureLines,
 } from './workflow-failure-lines.js';
 import {
+  sanitizeWorkflowText,
   stringifyWorkflowResult,
   truncateWorkflowText,
 } from './workflow-result-format.js';
@@ -689,11 +690,7 @@ export class WorkflowRunRegistry {
     const summary = `${prefix} "${label}" ${statusText}.`;
     const resultText =
       entry.status === 'completed'
-        ? stringifyWorkflowResult(entry.result)
-            .replace(/\t/g, '  ')
-            .split('\n')
-            .map((line) => stripAnsiAndControl(line))
-            .join('\n')
+        ? sanitizeWorkflowText(stringifyWorkflowResult(entry.result))
         : '';
     const failures = buildFailureLines(entry);
     const reported = reportedFailureLines(entry.result);

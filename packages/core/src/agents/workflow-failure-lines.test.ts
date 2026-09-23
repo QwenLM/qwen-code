@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createContext, runInContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   buildFailureLines,
@@ -13,6 +14,18 @@ import {
 } from './workflow-failure-lines.js';
 
 describe('buildFailureLines', () => {
+  it('keeps a dispatch failure Unicode pair intact at the line limit', () => {
+    const [line] = buildFailureLines({
+      runId: 'wf_reporting',
+      dispatches: [
+        { status: 'failed', label: 'a', error: 'x'.repeat(395) + '🙂' },
+      ],
+    });
+    expect(line.length).toBeLessThanOrEqual(MAX_FAILURE_LINE_CHARS);
+    expect(line).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(line).toContain('… (truncated)');
+  });
+
   it('bounds each rendered failure and reports an honest omitted count', () => {
     const lines = buildFailureLines({
       runId: 'wf_1',
@@ -37,14 +50,72 @@ describe('buildFailureLines', () => {
       buildFailureLines({
         runId: 'wf_1',
         dispatches: [
-          { status: 'failed', label: '\u001b[31mbad', error: 'boom\u0000' },
+          {
+            status: 'failed',
+            label: '\u001b[31mbad',
+            error: 'boom\n\tat run\u0000',
+          },
         ],
       }),
-    ).toEqual(['[bad] boom']);
+    ).toEqual(['[bad] boom\n  at run']);
   });
 });
 
 describe('reportedFailureLines', () => {
+  it('retains a VM Error message in the reported failure field', () => {
+    const failure: unknown = runInContext(
+      'new Error("disk full")',
+      createContext({}),
+    );
+    expect(reportedFailureLines({ error: failure })[0]).toContain('disk full');
+    expect(reportedFailureLines({ errors: [failure] })[0]).toContain(
+      'disk full',
+    );
+  });
+
+  it.each([
+    ['plain object', {}],
+    ['null-prototype object', Object.create(null) as object],
+    ['Map', new Map()],
+    ['Set', new Set()],
+  ])('omits an empty %s failure value', (_name, failure) => {
+    expect(reportedFailureLines({ rows: 1, failed: failure })).toEqual([]);
+  });
+
+  it.each([
+    ['ANSI', '\u001b[31m\u001b[0m'],
+    ['newline', '\n'],
+    ['bell', '\u0007'],
+  ])('omits a %s-only error value', (_name, error) => {
+    expect(reportedFailureLines({ error })).toEqual([]);
+  });
+
+  it('keeps nonempty failures when another field has no visible content', () => {
+    expect(reportedFailureLines({ failed: ['fr'], error: '\n' })).toEqual([
+      'Reported failed: ["fr"]',
+    ]);
+  });
+
+  it('retains stack-trace line breaks and separates tabbed columns', () => {
+    expect(
+      reportedFailureLines({ error: 'Error: boom\nat run (wf.js:3)\na\tb' }),
+    ).toEqual(['Reported error: Error: boom\nat run (wf.js:3)\na  b']);
+  });
+
+  it('retains serialized failure details and literal JSON-looking strings', () => {
+    class FailureRecord {
+      toJSON() {
+        return { reason: 'disk full' };
+      }
+    }
+    expect(
+      reportedFailureLines({ errors: new FailureRecord(), error: '{}' }),
+    ).toEqual([
+      'Reported errors: {"reason":"disk full"}',
+      'Reported error: {}',
+    ]);
+  });
+
   it('bounds script-reported failures inside the shared formatter', () => {
     const lines = reportedFailureLines({
       failed: Array(5_000).fill('x'.repeat(200)),

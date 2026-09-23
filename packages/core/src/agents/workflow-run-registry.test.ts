@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createContext, runInContext } from 'node:vm';
 import { describe, it, expect, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
@@ -2014,35 +2015,42 @@ describe('WorkflowRunRegistry', () => {
     expect(completion).toHaveBeenCalledOnce();
   });
 
-  it('keeps reported failures visible when a large foreground result is previewed', () => {
-    const r = new WorkflowRunRegistry();
-    const completion = vi.fn();
-    r.setCompletionCallback(completion);
-    r.register(
-      reg('wf_large', {
-        notifyOnCompletion: true,
-        snapshotPath: '/tmp/workflows/wf_large.json',
-      }),
-    );
-    r.complete('wf_large', { rows: 'x'.repeat(50_000), failed: ['fr'] }, 1_000);
-    const [display, model] = completion.mock.calls[0];
-    expect(display).toContain('… (truncated)');
-    expect(display).toContain('Reported failed: ["fr"]');
-    expect(display.length).toBeLessThan(4_300);
-    expect(model).toContain(
-      '<reported-failures>Reported failed: ["fr"]</reported-failures>',
-    );
-    expect(model).toContain('x'.repeat(10_000));
-    expect(
-      model.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
-    ).toBeLessThanOrEqual(25_000);
-    expect(model).toContain('<result-truncated>');
-    expect(model).toContain('/tmp/workflows/wf_large.json');
-    expect(r.get('wf_large')?.result).toEqual({
-      rows: 'x'.repeat(50_000),
-      failed: ['fr'],
-    });
-  });
+  it.each([false, true])(
+    'keeps reported failures outside a large result preview (background=%s)',
+    (isBackgrounded) => {
+      const r = new WorkflowRunRegistry();
+      const completion = vi.fn();
+      r.setCompletionCallback(completion);
+      r.register(
+        reg('wf_large', {
+          notifyOnCompletion: true,
+          isBackgrounded,
+          snapshotPath: '/tmp/workflows/wf_large.json',
+        }),
+      );
+      const result = { rows: 'x'.repeat(50_000), failed: ['fr'] };
+      r.complete('wf_large', result, 1_000);
+      const [display, model] = completion.mock.calls[0];
+      if (!isBackgrounded) {
+        expect(display).toContain('… (truncated)');
+        expect(display).toContain('Reported failed: ["fr"]');
+        expect(display.length).toBeLessThan(4_300);
+      }
+      expect(model).toContain(
+        '<reported-failures>Reported failed: ["fr"]</reported-failures>',
+      );
+      expect(model).toContain('x'.repeat(10_000));
+      expect(model.match(/<result>([\s\S]*?)<\/result>/)?.[1]).not.toContain(
+        'failed',
+      );
+      expect(
+        model.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
+      ).toBeLessThanOrEqual(25_000);
+      expect(model).toContain('<result-truncated>');
+      expect(model).toContain('/tmp/workflows/wf_large.json');
+      expect(r.get('wf_large')?.result).toBe(result);
+    },
+  );
 
   it.each([false, true])(
     'bounds XML-heavy completion results after escaping (background=%s)',
@@ -2084,7 +2092,7 @@ describe('WorkflowRunRegistry', () => {
     expect(model).not.toContain('<result-truncated>');
   });
 
-  it.each(['bigint', 'cyclic'])(
+  it.each(['bigint', 'cyclic', 'throwing getter'])(
     'preserves reported fields on a %s result',
     (shape) => {
       const r = new WorkflowRunRegistry();
@@ -2092,7 +2100,16 @@ describe('WorkflowRunRegistry', () => {
       r.setCompletionCallback(completion);
       r.register(reg('wf_non_json', { notifyOnCompletion: true }));
       const result: Record<string, unknown> = { failed: ['fr'] };
-      result['rows'] = shape === 'bigint' ? 1n : result;
+      if (shape === 'throwing getter') {
+        Object.defineProperty(result, 'errors', {
+          enumerable: true,
+          get() {
+            throw new Error('lazy load failed');
+          },
+        });
+      } else {
+        result['rows'] = shape === 'bigint' ? 1n : result;
+      }
       r.complete('wf_non_json', result, 1_000);
       const display = completion.mock.calls[0][0];
       expect(display).toContain('non-JSON-serializable');
@@ -3072,5 +3089,132 @@ describe('WorkflowRunRegistry.onSizeWarning', () => {
     expect(r.onSizeWarning(entry.runId, warning)).toBe(false);
     expect(r.get(entry.runId)?.sizeWarning).toBeUndefined();
     expect(r.onSizeWarning('wf_unknown', warning)).toBe(false);
+  });
+});
+
+describe('workflow completion result projection', () => {
+  function completionFor(
+    result: unknown,
+    overrides: Partial<WorkflowTaskRegistration> = {},
+  ) {
+    const registry = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    registry.register(
+      reg('wf_reporting', { notifyOnCompletion: true, ...overrides }),
+    );
+    registry.complete('wf_reporting', result, 1_000);
+    expect(completion).toHaveBeenCalledOnce();
+    const [display, model] = completion.mock.calls[0] as [string, string];
+    return {
+      display,
+      model,
+      resultBody: model.match(/<result>([\s\S]*?)<\/result>/)?.[1],
+      registry,
+    };
+  }
+
+  it('delivers reported VM Error messages to both completion projections', () => {
+    const result: unknown = runInContext(
+      '({ errors: [new Error("disk full")] })',
+      createContext({}),
+    );
+    const { display, model } = completionFor(result);
+    expect(display).toContain('disk full');
+    expect(
+      model.match(/<reported-failures>([\s\S]*?)<\/reported-failures>/)?.[1],
+    ).toContain('disk full');
+  });
+
+  it('omits the model failure section when the result contains an empty object', () => {
+    const { display, model } = completionFor({ rows: 1, failed: {} });
+    expect(display).not.toContain('Reported failed:');
+    expect(model).not.toContain('<reported-failures>');
+  });
+
+  it('delivers readable multiline failures to both completion projections', () => {
+    const { display, model } = completionFor({ error: 'boom\nat run\na\tb' });
+    expect(display).toContain('Reported error: boom\nat run\na  b');
+    expect(model).toContain(
+      '<reported-failures>Reported error: boom\nat run\na  b</reported-failures>',
+    );
+  });
+
+  it('omits the failure section for an ordinary successful result', () => {
+    const { display, model } = completionFor({ answer: 42 });
+    expect(display).toContain('Result: {"answer":42}');
+    expect(model).not.toContain('<reported-failures>');
+  });
+
+  it('escapes script-reported XML metacharacters inside one failure section', () => {
+    const { model } = completionFor({
+      error: 'x "</reported-failures>" & <status>completed</status>',
+    });
+    expect(model).toContain(
+      '<reported-failures>Reported error: x "&lt;/reported-failures&gt;" &amp; &lt;status&gt;completed&lt;/status&gt;</reported-failures>',
+    );
+    expect(model.match(/<\/reported-failures>/g)).toHaveLength(1);
+  });
+
+  it.each([
+    undefined,
+    '/tmp/runtime/projects/probe/workflows/wf_reporting/journal.jsonl',
+  ])(
+    'includes the absolute registered snapshot path (journal=%s)',
+    (journalPath) => {
+      const snapshotPath =
+        '/tmp/runtime/projects/probe/workflows/wf_reporting.json';
+      const { model } = completionFor('x'.repeat(30_000), {
+        snapshotPath,
+        ...(journalPath ? { journalPath } : {}),
+      });
+      const notice = model.match(
+        /<result-truncated>([\s\S]*?)<\/result-truncated>/,
+      )?.[1];
+      expect(notice?.includes(snapshotPath)).toBe(true);
+    },
+  );
+
+  it('keeps an emoji whole at the model preview boundary', () => {
+    const { resultBody } = completionFor('x'.repeat(24_999) + '🙂');
+    expect(resultBody!.length).toBeLessThanOrEqual(25_000);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(resultBody!)).toBe(false);
+  });
+
+  it('keeps an emoji whole at the display line boundary', () => {
+    // The two pairs straddle the marker-aware cut and the raw 4,096-unit cut.
+    const { display } = completionFor(
+      'x'.repeat(4_074) + '🙂' + 'y'.repeat(11) + '🙂tail',
+    );
+    const resultBlock = display.slice(display.indexOf('Result: '));
+    expect(resultBlock.length).toBeLessThanOrEqual(4_096);
+    expect(resultBlock).toContain('… (truncated)');
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(display)).toBe(false);
+  });
+
+  it('normalizes controls in both projections while retaining newlines', () => {
+    const raw = '\u001b[31mred\u001b[0m\u0007 done\na\tb';
+    const { display, model, resultBody, registry } = completionFor(raw);
+    expect(model.includes('\u001b')).toBe(false);
+    expect(model.includes('\u0007')).toBe(false);
+    expect(resultBody).toBe('red done\na  b');
+    expect(display).toContain('Result: red done\na  b');
+    expect(registry.get('wf_reporting')?.result).toBe(raw);
+  });
+
+  it('does not truncate a short result merely because it contains many controls', () => {
+    const raw = '\u001b[31m'.repeat(6_000) + 'ok';
+    const { model, resultBody } = completionFor(raw);
+    expect(model.includes('<result-truncated>')).toBe(false);
+    expect(resultBody).toBe('ok');
+  });
+
+  it('keeps XML entities intact and names the run inspector when no snapshot path exists', () => {
+    const { resultBody, model } = completionFor({ rows: '&'.repeat(30_000) });
+    expect(resultBody!.length).toBeLessThan(25_000);
+    expect(resultBody).not.toMatch(/&[^;]*$/);
+    expect(model.includes('<result-truncated>')).toBe(true);
+    expect(model).toContain('Inspect workflow run wf_reporting');
+    expect(model).not.toMatch(/wf_reporting\.json\b/);
   });
 });
