@@ -55,12 +55,15 @@ Browser Use ships with Qwen Code as a bundled skill and its runtime resources.
 No separate Browser Use runtime package or second Qwen extension is required;
 the existing Qwen Chrome extension is reused. The skill's `runtime/` directory
 contains the Browser SDK, Native Host, and pinned Playwright dependency. The
-skill registers `runtime/node_modules` with the existing Node
-REPL and imports `runtime/index.js`; the CLI does not execute browser logic.
-The kernel evaluates that import in an isolated realm without Node globals, so
-the runtime bundle binds `process` itself at its top through `createRequire`;
-the build's load check runs in the main realm and cannot detect a missing
-binding, so a kernel-backed test pins it. Source development, transpiled builds, and the published CLI use this same
+skill imports `runtime/index.js` into the existing Node REPL without
+registering any module directory; the CLI does not execute browser logic.
+The kernel evaluates that import in an isolated realm without Node globals and
+resolves bare imports only from registered module roots and the working
+directory's `node_modules`, so the runtime bundle
+binds `process` and loads its pinned `playwright-core` itself through
+`createRequire`, which resolves from the bundle's own location. The build's
+load check runs in the main realm and cannot detect either gap, so a
+kernel-backed test pins both. Source development, transpiled builds, and the published CLI use this same
 layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
@@ -73,8 +76,11 @@ tree; the normal installation `prepare` hook builds the package those copies
 come from. After changing Browser Use sources or dependencies, run
 `npm run build --workspace=@qwen-code/browser-use` and start `npm run dev`
 again to refresh the development copy. CLI and Core continue to run directly
-from TypeScript source. If the runtime is missing, the skill's existing setup
-check reports the incomplete runtime when invoked.
+from TypeScript source. If the runtime entry is missing, the import fails and
+the skill tells the model to stop and report an incomplete runtime. If its
+pinned `playwright-core` is missing, the SDK reports the incomplete runtime
+itself, and it also refuses a `playwright-core` of another version that Node's
+lookup finds further up the directory tree.
 
 Browser Use is available to the model by default and is selected according to
 the user's task. Users can disable it through `/skills` or `skills.disabled`,
