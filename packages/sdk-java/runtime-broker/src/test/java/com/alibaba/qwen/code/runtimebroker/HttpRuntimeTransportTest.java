@@ -138,6 +138,19 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void rejectsAnInvalidIsolationClassAsProtocolFailure() throws IOException {
+        ObjectNode body = successBody();
+        body.put("isolationClass", "tenant");
+        reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+        RuntimeBrokerException failure = awaitFailure();
+
+        assertEquals(400, failure.getStatusCode());
+        assertEquals("managed_runtime_attestation_invalid", failure.getCode());
+        assertFalse(failure.isRetryable());
+    }
+
+    @Test
     void rejectsAnOversizedAttestationResponse() {
         reply.set(json(200, new byte[HttpRuntimeTransport.BODY_LIMIT_BYTES
                 + 1]));
@@ -148,6 +161,18 @@ class HttpRuntimeTransportTest {
         assertEquals("managed_runtime_attestation_too_large",
                 failure.getCode());
         assertFalse(failure.isRetryable());
+    }
+
+    @Test
+    void keepsAnOversizedServerFailureRetryable() {
+        reply.set(json(503, new byte[HttpRuntimeTransport.BODY_LIMIT_BYTES
+                + 1]));
+
+        RuntimeBrokerException failure = awaitFailure();
+
+        assertEquals(503, failure.getStatusCode());
+        assertEquals("managed_runtime_unavailable", failure.getCode());
+        assertTrue(failure.isRetryable());
     }
 
     @Test

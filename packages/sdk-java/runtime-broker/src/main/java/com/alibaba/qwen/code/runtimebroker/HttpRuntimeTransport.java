@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -67,14 +69,18 @@ public final class HttpRuntimeTransport {
         CompletableFuture<RuntimeAttestation> result =
                 new CompletableFuture<>();
         client.sendAsync(request(lease, body),
-                HttpResponse.BodyHandlers.ofByteArray())
+                HttpResponse.BodyHandlers.ofInputStream())
                 .whenComplete((response, error) -> {
                     if (error != null) {
                         result.completeExceptionally(unavailable(error));
                         return;
                     }
-                    try {
-                        result.complete(parse(response, lease, request, seed));
+                    try (InputStream stream = response.body()) {
+                        byte[] bytes = readAtMost(stream);
+                        result.complete(parse(response, bytes, lease, request,
+                                seed));
+                    } catch (IOException exception) {
+                        result.completeExceptionally(unavailable(exception));
                     } catch (RuntimeException exception) {
                         result.completeExceptionally(exception);
                     }
@@ -116,14 +122,31 @@ public final class HttpRuntimeTransport {
                 .build();
     }
 
-    private static RuntimeAttestation parse(HttpResponse<byte[]> response,
-            RuntimeLease lease, RuntimeProvisionRequest request,
+    private static byte[] readAtMost(InputStream stream) throws IOException {
+        byte[] buffer = new byte[BODY_LIMIT_BYTES + 1];
+        int offset = 0;
+        while (offset < buffer.length) {
+            int read = stream.read(buffer, offset, buffer.length - offset);
+            if (read < 0) {
+                break;
+            }
+            offset += read;
+        }
+        byte[] payload = new byte[offset];
+        System.arraycopy(buffer, 0, payload, 0, offset);
+        return payload;
+    }
+
+    private static RuntimeAttestation parse(HttpResponse<?> response,
+            byte[] bytes, RuntimeLease lease, RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed) {
-        byte[] bytes = response.body();
+        int status = response.statusCode();
         if (bytes.length > BODY_LIMIT_BYTES) {
+            if (status >= 500) {
+                throw failure(status);
+            }
             throw tooLarge();
         }
-        int status = response.statusCode();
         if (status != 200) {
             throw failure(status);
         }
@@ -181,7 +204,7 @@ public final class HttpRuntimeTransport {
                     scope,
                     JsonCodec.requiredString(fields, "provisionRequestId",
                             "attestation"));
-        } catch (RuntimeBrokerException exception) {
+        } catch (RuntimeBrokerException | IllegalArgumentException exception) {
             throw protocol("Managed Runtime attestation response is invalid.");
         }
     }
