@@ -212,7 +212,7 @@ test('Settings adds a verified computer and returns to Connections @smoke', asyn
   await page.getByLabel('Daemon address').fill(REMOTE_ORIGIN);
   await page.getByRole('button', { name: 'Add connection' }).click();
 
-  await expect(page).toHaveURL(sourceUrl);
+  await expect(page).toHaveURL(new URL('/settings', sourceUrl).href);
   await expect(
     page
       .getByRole('navigation', { name: 'Settings' })
