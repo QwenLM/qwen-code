@@ -662,6 +662,32 @@ describe.skipIf(process.platform === 'win32')(
       expect(isSignalTermination('SIGTERM')).toBe(true);
     });
 
+    it('keeps the exemption across a PLAN round trip', async () => {
+      // `enter_plan_mode` is model-callable from AUTO and `exit_plan_mode`
+      // restores it, so one session can make two real transitions and end in
+      // exactly the autonomy posture it started in. PLAN cannot execute a
+      // commit, so the excursion cannot add an exemption either — clearing on
+      // it bought nothing and cost the agent a false "not made by the agent in
+      // this session" block on its own commit, with no escape from inside
+      // AUTO. Both legs are excluded, or the return leg alone still wipes it.
+      await commitAndAssertExempt();
+
+      const realConfig = makeFakeConfig({
+        targetDir: repoDir,
+        cwd: repoDir,
+        approvalMode: ApprovalMode.AUTO,
+      });
+      vi.spyOn(realConfig, 'isTrustedFolder').mockReturnValue(true);
+      expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
+
+      realConfig.setApprovalMode(ApprovalMode.PLAN);
+      expect(realConfig.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      realConfig.setApprovalMode(ApprovalMode.AUTO);
+      expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
+
+      expect(amendVerdict()).toBeNull();
+    });
+
     it('keeps the root registry when a derived overlay changes its own mode', async () => {
       // `deriveApprovalModeConfig` installs an own `setApprovalMode` that
       // delegates to the prototype method, so a subagent's child-local

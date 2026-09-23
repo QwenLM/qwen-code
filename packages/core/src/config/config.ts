@@ -8415,7 +8415,18 @@ export class Config {
       // its own mode is child-local, not a decision about the root session's
       // autonomy. Clearing there cost the root a false "not made by the agent
       // in this session" block on its own commit.
-      if (!isDerivedConfig(this)) {
+      //
+      // PLAN is excluded on both legs for the same reason. `enter_plan_mode`
+      // is model-callable from AUTO and `exit_plan_mode` restores it, so the
+      // round trip is two real transitions that end in the posture it started
+      // in — and PLAN cannot execute a commit, so the excursion cannot add an
+      // exemption either. Clearing on it bought nothing and cost the agent a
+      // false block on its own commit, with no escape from inside AUTO.
+      if (
+        !isDerivedConfig(this) &&
+        mode !== ApprovalMode.PLAN &&
+        fromMode !== ApprovalMode.PLAN
+      ) {
         clearSessionCommits();
       }
     }
