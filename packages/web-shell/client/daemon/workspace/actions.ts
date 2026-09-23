@@ -139,7 +139,7 @@ export function createDaemonWorkspaceActions({
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'PATCH',
-          headers: createDaemonHeaders(token),
+          headers: createDaemonJsonHeaders(token),
           body: JSON.stringify({ isPinned }),
         }),
         'Update workspace pin timed out',
