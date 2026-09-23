@@ -3049,6 +3049,11 @@ const EN: Messages = {
   'trajectory.range.status': (v) =>
     `Showing ${v?.shown ?? 0} of ${v?.total ?? 0} rows in the selected time`,
   'trajectory.range.clear': 'Clear time selection',
+  'trajectory.zoom.in': 'Zoom in',
+  'trajectory.zoom.out': 'Zoom out',
+  'trajectory.zoom.reset': 'Show the whole run',
+  'trajectory.zoom.window': (v) => `${v?.to ?? ''} of ${v?.busy ?? ''}`,
+  'trajectory.zoom.aria': (v) => `, zoomed to ${v?.from ?? ''}–${v?.to ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
   'trajectory.overview.lane.requests': 'req',
@@ -6867,6 +6872,11 @@ const ZH: Messages = {
   'trajectory.range.status': (v) =>
     `已筛选：区间内 ${v?.shown ?? 0} / ${v?.total ?? 0} 行`,
   'trajectory.range.clear': '清除时间区间',
+  'trajectory.zoom.in': '放大',
+  'trajectory.zoom.out': '缩小',
+  'trajectory.zoom.reset': '显示整段',
+  'trajectory.zoom.window': (v) => `${v?.to ?? ''} / ${v?.busy ?? ''}`,
+  'trajectory.zoom.aria': (v) => `，已放大到 ${v?.from ?? ''}–${v?.to ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
   'trajectory.overview.lane.requests': '请求',
   'trajectory.overview.lane.tools': '工具',

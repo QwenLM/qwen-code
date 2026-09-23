@@ -61,6 +61,25 @@
   /* A drag on a touch screen selects time rather than scrolling the page. */
   touch-action: none;
   cursor: crosshair;
+  /* Zoomed in, the layer below is wider than the track; only the stretch in
+     view is shown. */
+  overflow: hidden;
+}
+
+.plot[data-panning='true'] {
+  cursor: grabbing;
+}
+
+/*
+ * The whole run, drawn in percent of itself. Zoom and pan are this layer's
+ * offset and width alone: at no zoom it is exactly the track.
+ */
+.domain {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--domain-left, 0%);
+  width: var(--domain-width, 100%);
 }
 
 /*
@@ -158,6 +177,46 @@
   font-size: 9px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
+}
+
+.axisEnd {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Sized to fit the 16px axis row, so the strip's height does not move. */
+.zoomButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.zoomButton:first-of-type {
+  margin-left: 4px;
+}
+
+.zoomButton:hover:not([aria-disabled='true']),
+.zoomButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.zoomButton:focus-visible {
+  outline: 1px solid var(--ring);
+}
+
+.zoomButton[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .notice {

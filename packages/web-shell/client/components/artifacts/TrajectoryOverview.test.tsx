@@ -33,11 +33,20 @@ afterEach(() => {
   mounted.length = 0;
 });
 
+/** Render the last mounted overview again with new props, same root. */
+let rerender: (props: Partial<TrajectoryOverviewProps>) => void = () => {};
+
 function render(props: Partial<TrajectoryOverviewProps>): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   mounted.push({ root, container });
+  rerender = (next) => draw(root, next);
+  draw(root, props);
+  return container;
+}
+
+function draw(root: Root, props: Partial<TrajectoryOverviewProps>) {
   act(() => {
     root.render(
       <I18nProvider language="en">
@@ -51,7 +60,6 @@ function render(props: Partial<TrajectoryOverviewProps>): HTMLElement {
       </I18nProvider>,
     );
   });
-  return container;
 }
 
 const ROW = { kind: 'message', key: 'x' } as unknown as TrajectoryRow;
@@ -127,6 +135,46 @@ function plotOf(container: HTMLElement): HTMLElement {
 
 /** Client x of a point `fraction` of the way along the track. */
 const at = (fraction: number) => PLOT_LEFT + fraction * PLOT_WIDTH;
+
+/** A wheel turn over the track; returns the event to read `defaultPrevented`. */
+function wheel(
+  target: Element,
+  clientX: number,
+  delta: { deltaX?: number; deltaY?: number; deltaMode?: number },
+): WheelEvent {
+  const event = new WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    clientX,
+    deltaX: delta.deltaX ?? 0,
+    deltaY: delta.deltaY ?? 0,
+    deltaMode: delta.deltaMode ?? 0,
+  });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+function domainOf(container: HTMLElement): HTMLElement {
+  return container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-domain"]',
+  )!;
+}
+
+const layer = (container: HTMLElement) => {
+  const domain = domainOf(container);
+  return {
+    left: domain.style.getPropertyValue('--domain-left'),
+    width: domain.style.getPropertyValue('--domain-width'),
+    zoomed: domain.dataset['zoomed'] === 'true',
+  };
+};
+
+const button = (container: HTMLElement, name: 'in' | 'out' | 'reset') =>
+  container.querySelector<HTMLButtonElement>(
+    `[data-testid="trajectory-zoom-${name}"]`,
+  )!;
 
 const overviewOf = (container: HTMLElement) =>
   container.querySelector<HTMLElement>('[data-testid="trajectory-overview"]');
@@ -327,10 +375,8 @@ describe('TrajectoryOverview', () => {
         onRangeChange,
       });
       const plot = plotOf(container);
-      // A right press starts no gesture of its own.
+      // Linux and macOS raise the menu on the press, before the release.
       pointer(plot, 'pointerdown', at(0.5), 2);
-      pointer(plot, 'pointerup', at(0.5), 2);
-      expect(onRangeChange).not.toHaveBeenCalled();
       const menu = new MouseEvent('contextmenu', {
         bubbles: true,
         cancelable: true,
@@ -339,6 +385,11 @@ describe('TrajectoryOverview', () => {
         plot.dispatchEvent(menu);
       });
       expect(menu.defaultPrevented).toBe(true);
+      // The menu event itself clears nothing; the release that did not move
+      // does, once.
+      expect(onRangeChange).not.toHaveBeenCalled();
+      pointer(plot, 'pointerup', at(0.5), 2);
+      expect(onRangeChange).toHaveBeenCalledTimes(1);
       expect(onRangeChange).toHaveBeenCalledWith(undefined);
     });
 
@@ -407,5 +458,237 @@ describe('TrajectoryOverview', () => {
     );
     expect(only!.style.getPropertyValue('--left')).toBe('0%');
     expect(only!.style.getPropertyValue('--width')).toBe('0%');
+  });
+  describe('viewport', () => {
+    // MODEL spans 2000 ms. A wheel of -400 px at the middle zooms by
+    // exp(-0.6): 1097.62 ms in view, from 451.19 to 1548.81 ms. These numbers
+    // were worked out apart from the code, and are written out here so a
+    // change to the formula shows up as a failure rather than a new answer.
+    const zoomedMiddle = (container: HTMLElement) =>
+      wheel(plotOf(container), at(0.5), { deltaY: -400 });
+
+    it('draws the whole run in the track until it is zoomed', () => {
+      const container = render({ model: MODEL });
+      expect(layer(container)).toEqual({
+        left: '0%',
+        width: '100%',
+        zoomed: false,
+      });
+    });
+
+    it('zooms around the pointer and keeps the page from scrolling', () => {
+      const container = render({ model: MODEL });
+      const event = zoomedMiddle(container);
+      expect(event.defaultPrevented).toBe(true);
+      expect(layer(container)).toEqual({
+        left: '-41.106%',
+        width: '182.212%',
+        zoomed: true,
+      });
+    });
+
+    it('keeps the point under the pointer where it was', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      wheel(plot, at(0.25), { deltaY: -400 });
+      // 500 ms was under the pointer before the zoom; it must still be.
+      pointer(plot, 'pointerdown', at(0.25));
+      pointer(plot, 'pointermove', at(0.25) + 20);
+      pointer(plot, 'pointerup', at(0.25) + 20);
+      expect(onRangeChange.mock.calls[0]![0].start).toBeCloseTo(500, 9);
+    });
+
+    it('reads a wheel that counts in lines as the pixels it stands for', () => {
+      const container = render({ model: MODEL });
+      wheel(plotOf(container), at(0.5), { deltaY: -25, deltaMode: 1 });
+      expect(layer(container).width).toBe('182.212%');
+    });
+
+    it('goes back to the whole run, and then lets the page scroll', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      wheel(plotOf(container), at(0.5), { deltaY: 2000 });
+      expect(layer(container)).toEqual({
+        left: '0%',
+        width: '100%',
+        zoomed: false,
+      });
+      const again = wheel(plotOf(container), at(0.5), { deltaY: 100 });
+      expect(again.defaultPrevented).toBe(false);
+    });
+
+    it('stops at the narrowest stretch', () => {
+      const container = render({ model: MODEL });
+      wheel(plotOf(container), at(0.5), { deltaY: -100_000 });
+      expect(layer(container).width).toBe('10000%');
+      expect(button(container, 'in').getAttribute('aria-disabled')).toBe(
+        'true',
+      );
+    });
+
+    it('pans a zoomed strip sideways, up to the end of the run', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      const event = wheel(plotOf(container), at(0.5), { deltaX: 100_000 });
+      expect(event.defaultPrevented).toBe(true);
+      expect(layer(container).left).toBe('-82.212%');
+    });
+
+    it('leaves a sideways swipe alone when there is nowhere to pan', () => {
+      const container = render({ model: MODEL });
+      const event = wheel(plotOf(container), at(0.5), { deltaX: 300 });
+      expect(event.defaultPrevented).toBe(false);
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('pans with the right button and leaves the selection alone', () => {
+      const onRangeChange = vi.fn();
+      const container = render({
+        model: MODEL,
+        range: { start: 0, end: 500 },
+        onRangeChange,
+      });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      // Dragging left by a quarter of the track brings later time into view.
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.25), 2);
+      expect(plot.dataset['panning']).toBe('true');
+      pointer(plot, 'pointerup', at(0.25), 2);
+      expect(layer(container).left).toBe('-66.106%');
+      expect(plot.dataset['panning']).toBeUndefined();
+      expect(onRangeChange).not.toHaveBeenCalled();
+    });
+
+    it('lets a right press only clear, not pan, at the whole run', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.25), 2);
+      pointer(plot, 'pointerup', at(0.25), 2);
+      expect(layer(container).zoomed).toBe(false);
+      expect(onRangeChange).not.toHaveBeenCalled();
+    });
+
+    it('ignores the other button while one press is under way', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      pointer(plot, 'pointerdown', at(0.1));
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.4));
+      pointer(plot, 'pointerup', at(0.4));
+      expect(onRangeChange).toHaveBeenCalledTimes(1);
+      expect(onRangeChange).toHaveBeenCalledWith({ start: 200, end: 800 });
+    });
+
+    it('does not zoom under a drag in progress', () => {
+      const container = render({ model: MODEL });
+      const plot = plotOf(container);
+      pointer(plot, 'pointerdown', at(0.1));
+      pointer(plot, 'pointermove', at(0.4));
+      const event = wheel(plot, at(0.4), { deltaY: -400 });
+      expect(event.defaultPrevented).toBe(false);
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('selects time through the zoom', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      pointer(plot, 'pointerdown', at(0.2));
+      pointer(plot, 'pointermove', at(0.6));
+      pointer(plot, 'pointerup', at(0.6));
+      const range = onRangeChange.mock.calls[0]![0];
+      expect(range.start).toBeCloseTo(670.713, 3);
+      expect(range.end).toBeCloseTo(1109.762, 3);
+    });
+
+    it('stops a drag at the edges of what is in view', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      pointer(plot, 'pointerdown', PLOT_LEFT - 50);
+      pointer(plot, 'pointermove', PLOT_LEFT + PLOT_WIDTH + 50);
+      pointer(plot, 'pointerup', PLOT_LEFT + PLOT_WIDTH + 50);
+      const range = onRangeChange.mock.calls[0]![0];
+      expect(range.start).toBeCloseTo(451.188, 3);
+      expect(range.end).toBeCloseTo(1548.812, 3);
+    });
+
+    it('zooms from the buttons around the middle of what is in view', () => {
+      const container = render({ model: MODEL });
+      act(() => button(container, 'in').click());
+      // One wheel notch: exp(-0.18), 1670.54 ms centred on 1000 ms.
+      expect(layer(container)).toEqual({
+        left: '-9.861%',
+        width: '119.722%',
+        zoomed: true,
+      });
+      act(() => button(container, 'out').click());
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('offers reset and zoom out only once zoomed, without disabling them', () => {
+      const container = render({ model: MODEL });
+      for (const name of ['out', 'reset'] as const) {
+        expect(button(container, name).getAttribute('aria-disabled')).toBe(
+          'true',
+        );
+        expect(button(container, name).disabled).toBe(false);
+      }
+      zoomedMiddle(container);
+      expect(button(container, 'reset').getAttribute('aria-disabled')).toBe(
+        null,
+      );
+      act(() => button(container, 'reset').click());
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('keeps the buttons where assistive technology can reach them', () => {
+      const container = render({ model: MODEL });
+      for (const name of ['in', 'out', 'reset'] as const) {
+        const el = button(container, name);
+        expect(el.closest('[aria-hidden="true"]')).toBeNull();
+        expect(el.getAttribute('aria-label')).toBeTruthy();
+      }
+      expect(overviewOf(container)!.getAttribute('role')).toBe('group');
+    });
+
+    it('says which stretch is in view', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      expect(
+        container.querySelector('[data-testid="trajectory-overview-from"]')!
+          .textContent,
+      ).toBe('451ms');
+      expect(
+        container.querySelector('[data-testid="trajectory-overview-busy"]')!
+          .textContent,
+      ).toBe('1.5s of 2.0s');
+      expect(overviewOf(container)!.getAttribute('aria-label')).toBe(
+        'Timeline of 3 timed records, 2.0s of activity, zoomed to 451ms–1.5s',
+      );
+    });
+
+    it('leaves each span placed in percent of the whole run', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      const [req] = spansOf(container);
+      expect(req!.style.getPropertyValue('--left')).toBe('0%');
+      expect(req!.style.getPropertyValue('--width')).toBe('50%');
+    });
+
+    it('lets the zoom go when the run is read again', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      expect(layer(container).zoomed).toBe(true);
+      rerender({ model: { ...MODEL } });
+      expect(layer(container).zoomed).toBe(false);
+    });
   });
 });
