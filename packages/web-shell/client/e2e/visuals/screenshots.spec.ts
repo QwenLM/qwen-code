@@ -1726,6 +1726,71 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `permission-panel-${theme}`);
     });
 
+    test(`edit approval diff`, async ({ page }, testInfo) => {
+      // Edit permission_request payloads carry the change as a `{ type: 'diff',
+      // path, oldText, newText }` content block alongside outside-workspace
+      // warnings. The Web Shell adapter used to drop the diff block, so the
+      // approval card showed only the warning and the user approved a file
+      // change without seeing it (#11966). Seed the exact shape
+      // `permissionUtils.buildPermissionRequestContent` emits so a regression
+      // in either the adapter or the approval card resurfaces here.
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          {
+            id: 1,
+            v: 1,
+            type: 'permission_request',
+            data: {
+              requestId: 'perm-edit-visual',
+              toolCall: {
+                toolCallId: 'perm-edit-visual',
+                title: 'Edit: /outside/example.txt',
+                kind: 'edit',
+                _meta: { toolName: 'replace' },
+                content: [
+                  {
+                    type: 'content',
+                    content: {
+                      type: 'text',
+                      text: 'Path is outside the workspace',
+                    },
+                  },
+                  {
+                    type: 'diff',
+                    path: '/outside/example.txt',
+                    oldText: 'hello world\nline two\n',
+                    newText: 'hello Qwen\nline two\nline three\n',
+                  },
+                ],
+              },
+              options: [
+                { optionId: 'allow_once', label: 'Allow once' },
+                { optionId: 'reject_once', label: 'Reject' },
+              ],
+            },
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await expect(
+        page.locator('[data-web-shell-permission-panel]'),
+      ).toBeVisible();
+      await expect(
+        page.getByText('Path is outside the workspace'),
+      ).toBeVisible();
+      // The diff renderer paints deletion/addition rows before any option is
+      // chosen — this is exactly what the pre-fix approval card was missing.
+      await expect(page.getByText('hello world')).toBeVisible();
+      await expect(page.getByText('hello Qwen')).toBeVisible();
+      await captureScreenshot(page, `edit-approval-diff-${theme}`);
+    });
+
     test(`code review artifact`, async ({ page }, testInfo) => {
       // The dedicated code-review renderer is gated three ways: the
       // `session_artifacts` capability, an artifact whose metadata marks it
