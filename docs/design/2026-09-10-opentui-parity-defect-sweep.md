@@ -2661,6 +2661,16 @@ What was verified, and how far the verification reaches:
   regressions reported above, and each of the eleven then keeps one differing row
   instead of three — the banner's row count, which the fixed region also cropped
   closer to ink's.
+- **Those two arms ran on the tree before it merged main; the after arm has been
+  re-run on the tree after it.** The merge moved main into this branch, so its
+  frames are not the ones the comparison above measured. Re-running the whole
+  matrix on the merged tree yields the same eighty-eight legs, the same two
+  hundred sixty-six captures, the same two empty ones, the same nine idle
+  timeouts on the same three ink legs, and a verdict for every one of the one
+  hundred thirty-five checkpoints that matches the earlier after arm exactly —
+  except the timed spinner sample, which counts phrases and so moves between any
+  two runs. The counts this section states therefore hold on the merged tree, not
+  only on the one the two arms were cut from.
 - **Decisions 62 through 65 have no frame behind them.** The palette revision,
   the two mirror reads and the approval dialog's remembered row were all read off
   the source against ink's, pinned by a unit case each and shown to discriminate
