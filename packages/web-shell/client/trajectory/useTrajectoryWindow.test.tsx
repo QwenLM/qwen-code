@@ -225,28 +225,41 @@ describe('useTrajectoryWindow', () => {
       );
     });
 
-    it('counts the pages read while the walk is under way', async () => {
-      const older = deferred<TrajectoryPageResult>();
-      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) =>
-        cursor
-          ? older.promise
-          : page([userText('newest', 'rec-2')], {
-              hasMore: true,
-              nextCursor: 'c1',
-            }),
-      );
+    it('draws nothing until the walk ends, counting pages as it goes', async () => {
+      const oldest = deferred<TrajectoryPageResult>();
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor === 'c2') return oldest.promise;
+        if (cursor === 'c1') {
+          return page([userText('middle', 'rec-2')], {
+            hasMore: true,
+            nextCursor: 'c2',
+          });
+        }
+        return page([userText('newest', 'rec-3')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      });
       const view = render(loadPage);
       await act(async () => {});
 
+      // Two pages are in and a third is on its way: showing the two now would
+      // mean putting the third above rows the reader can already see.
+      expect(loadPage).toHaveBeenCalledTimes(3);
       expect(view.latest().status).toBe('loading');
-      expect(view.latest().loadedPages).toBe(1);
+      expect(view.latest().loadedPages).toBe(2);
       expect(view.latest().trajectory).toBeUndefined();
 
       await act(async () => {
-        older.resolve(page([userText('oldest', 'rec-1')]));
+        oldest.resolve(page([userText('oldest', 'rec-1')]));
       });
       expect(view.latest().status).toBe('ready');
-      expect(view.latest().loadedPages).toBe(2);
+      expect(view.latest().loadedPages).toBe(3);
+      expect(promptTexts(view.latest())).toEqual([
+        'oldest',
+        'middle',
+        'newest',
+      ]);
     });
 
     it('stops at the page cap and says history is left', async () => {
