@@ -78,7 +78,7 @@ The first-run menu lets you connect a model provider. Choose one of:
 
 > [!note]
 >
-> When you first authenticate Qwen Code with your Qwen account, a workspace called ".qwen" is automatically created for you. This workspace provides centralized cost tracking and management for all Qwen Code usage in your organization.
+> Qwen Code stores its configuration and customizations in `.qwen` directories: `~/.qwen/` for user-level settings (e.g. `settings.json`) and global custom commands, and `<project>/.qwen/` for project-specific files such as custom commands and summaries.
 
 > [!tip]
 >
@@ -228,7 +228,7 @@ Here are the most important commands for daily use:
 | `/doctor`             | Check current authentication and environment     | `/doctor`                     |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |
-| `/clear`              | Clear terminal screen content                    | `/clear` (shortcut: `Ctrl+L`) |
+| `/clear`              | Clear conversation history and free up context   | `/clear` (aliases: `reset`, `new`) |
 | `/theme`              | Change Qwen Code visual theme                    | `/theme`                      |
 | `/language`           | View or change language settings                 | `/language`                   |
 | → `ui [language]`     | Set UI interface language                        | `/language ui zh-CN`          |
