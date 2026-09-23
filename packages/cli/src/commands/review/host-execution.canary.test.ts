@@ -20,7 +20,7 @@
 // that quietly stops being an attack fails here rather than certifying the
 // gates that walked around it.
 //
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
@@ -112,9 +112,11 @@ describe('a planted repository reaches no host-side execution', () => {
   };
 
   beforeEach(() => {
+    vi.stubEnv('QWEN_HOME', tmp('qwen-canary-home-'));
     gitIsolation = isolateHostGitConfig();
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
     for (const dir of made.splice(0))
       rmSync(dir, { recursive: true, force: true });
     gitIsolation.dispose();

@@ -24,6 +24,7 @@ import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 
 vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -34,7 +35,6 @@ vi.mock('../../WebShellContexts', async () => {
 });
 
 const {
-  buildUnifiedDiff,
   extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,

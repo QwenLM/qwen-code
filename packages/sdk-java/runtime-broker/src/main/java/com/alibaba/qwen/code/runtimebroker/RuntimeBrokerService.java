@@ -664,7 +664,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ToolExecutionRecord executing = enterExecuting(claimed);
         if (executing == null || executing.isSettled()
                 || executing.getState()
-                        != ToolExecutionRecord.State.EXECUTING) {
+                        != ToolExecutionRecord.State.EXECUTING
+                || !ownsDispatch(executing, claimed)) {
             return CompletableFuture.completedFuture(null);
         }
         DispatchRenewal renewal = new DispatchRenewal(

@@ -79,7 +79,7 @@ let root: Root | null = null;
 
 function render(
   loadPage: TrajectoryPageLoader | undefined,
-  options?: { pageSize?: number },
+  options?: { pageSize?: number; maxPages?: number },
 ): {
   latest: () => TrajectoryWindow;
   rerender: (next: TrajectoryPageLoader | undefined) => void;
@@ -145,17 +145,341 @@ describe('useTrajectoryWindow', () => {
     ]);
   });
 
-  it('says when the session has history the page left out', async () => {
+  it('stops where the daemon hands out no cursor, and says history is left', async () => {
     const loadPage = vi.fn(async () =>
       page([userText('newest', 'rec-1')], { hasMore: true }),
     );
     const view = render(loadPage);
     await act(async () => {});
 
-    // Nothing here can reach that history yet, so the window reports it as a
-    // fact about the page rather than as something to act on.
+    // There is nothing to ask the next page for, so the walk ends here and
+    // the window reports the rest as a fact rather than as something to act on.
     expect(view.latest().truncated).toBe(true);
+    expect(view.latest().status).toBe('ready');
     expect(loadPage).toHaveBeenCalledTimes(1);
+  });
+
+  describe('walking back', () => {
+    /** Pages keyed by the cursor that asks for them; `''` is the newest. */
+    function chain(
+      pages: Record<string, TrajectoryPageResult | Error>,
+    ): TrajectoryPageLoader & ReturnType<typeof vi.fn> {
+      return vi.fn(async ({ cursor }: { limit: number; cursor?: string }) => {
+        const entry = pages[cursor ?? ''];
+        if (entry === undefined) throw new Error(`no page at ${cursor}`);
+        if (entry instanceof Error) throw entry;
+        return entry;
+      });
+    }
+
+    function promptTexts(window: TrajectoryWindow): string[] {
+      return window
+        .trajectory!.rows.filter((row) => row.kind === 'user')
+        .map((row) => (row.kind === 'user' ? row.block.text : ''));
+    }
+
+    it('follows each cursor and folds the pages oldest first', async () => {
+      const loadPage = chain({
+        '': page([userText('newest', 'rec-3')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('middle', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'c2',
+        }),
+        c2: page([userText('oldest', 'rec-1')]),
+      });
+      const statuses: string[] = [];
+      let latest: TrajectoryWindow | undefined;
+      function Probe() {
+        latest = useTrajectoryWindow(loadPage);
+        statuses.push(`${latest.status}:${latest.trajectory ? 'drawn' : '-'}`);
+        return null;
+      }
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root!.render(<Probe />);
+      });
+      await act(async () => {});
+
+      expect(loadPage.mock.calls.map((call) => call[0])).toEqual([
+        { limit: 250 },
+        { limit: 250, cursor: 'c1' },
+        { limit: 250, cursor: 'c2' },
+      ]);
+      expect(promptTexts(latest!)).toEqual(['oldest', 'middle', 'newest']);
+      expect(latest!.truncated).toBe(false);
+      expect(latest!.loadedPages).toBe(3);
+      // Drawn once, whole: no render shows a window that later grows above
+      // the rows already on screen.
+      const firstDrawn = statuses.findIndex((entry) => entry.endsWith('drawn'));
+      expect(statuses[firstDrawn]).toBe('ready:drawn');
+      expect(statuses.slice(0, firstDrawn).every((e) => e.endsWith(':-'))).toBe(
+        true,
+      );
+      expect(statuses.filter((e) => e.startsWith('ready')).length).toBe(
+        statuses.length - firstDrawn,
+      );
+    });
+
+    it('draws nothing until the walk ends, counting pages as it goes', async () => {
+      const oldest = deferred<TrajectoryPageResult>();
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor === 'c2') return oldest.promise;
+        if (cursor === 'c1') {
+          return page([userText('middle', 'rec-2')], {
+            hasMore: true,
+            nextCursor: 'c2',
+          });
+        }
+        return page([userText('newest', 'rec-3')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      // Two pages are in and a third is on its way: showing the two now would
+      // mean putting the third above rows the reader can already see.
+      expect(loadPage).toHaveBeenCalledTimes(3);
+      expect(view.latest().status).toBe('loading');
+      expect(view.latest().loadedPages).toBe(2);
+      expect(view.latest().trajectory).toBeUndefined();
+
+      await act(async () => {
+        oldest.resolve(page([userText('oldest', 'rec-1')]));
+      });
+      expect(view.latest().status).toBe('ready');
+      expect(view.latest().loadedPages).toBe(3);
+      expect(promptTexts(view.latest())).toEqual([
+        'oldest',
+        'middle',
+        'newest',
+      ]);
+    });
+
+    it('stops at the page cap and says history is left', async () => {
+      const pages: Record<string, TrajectoryPageResult> = {};
+      for (let i = 0; i < 6; i += 1) {
+        pages[i === 0 ? '' : `c${i}`] = page(
+          [userText(`page ${i}`, `rec-${i}`)],
+          { hasMore: true, nextCursor: `c${i + 1}` },
+        );
+      }
+      const loadPage = chain(pages);
+      const view = render(loadPage, { maxPages: 3 });
+      await act(async () => {});
+
+      expect(loadPage).toHaveBeenCalledTimes(3);
+      expect(view.latest().loadedPages).toBe(3);
+      expect(view.latest().truncated).toBe(true);
+      expect(promptTexts(view.latest())).toEqual([
+        'page 2',
+        'page 1',
+        'page 0',
+      ]);
+    });
+
+    it('stops at the default cap of four pages', async () => {
+      const pages: Record<string, TrajectoryPageResult> = {};
+      for (let i = 0; i < 6; i += 1) {
+        pages[i === 0 ? '' : `c${i}`] = page(
+          [userText(`page ${i}`, `rec-${i}`)],
+          { hasMore: true, nextCursor: `c${i + 1}` },
+        );
+      }
+      const loadPage = chain(pages);
+      render(loadPage);
+      await act(async () => {});
+
+      expect(loadPage).toHaveBeenCalledTimes(4);
+    });
+
+    it('keeps the newer pages when an older one cannot be read', async () => {
+      const loadPage = chain({
+        '': page([userText('newest', 'rec-3')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('middle', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'c2',
+        }),
+        c2: new Error('socket hang up'),
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      expect(view.latest().status).toBe('ready');
+      expect(view.latest().error).toBeUndefined();
+      expect(view.latest().olderFailure).toEqual({
+        kind: 'unreadable',
+        message: 'socket hang up',
+      });
+      expect(view.latest().truncated).toBe(true);
+      expect(promptTexts(view.latest())).toEqual(['middle', 'newest']);
+      expect(loadPage).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves a partial older page out rather than folding its hole', async () => {
+      const loadPage = chain({
+        '': page([userText('newest', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('half of it', 'rec-1')], {
+          partial: true as const,
+          hasMore: true,
+          nextCursor: 'c2',
+        }),
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      expect(view.latest().olderFailure).toEqual({ kind: 'partial' });
+      expect(promptTexts(view.latest())).toEqual(['newest']);
+      expect(loadPage).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not walk back from a newest page it could not read', async () => {
+      const loadPage = chain({
+        '': page([], {
+          replayError: 'Replay conversion failed for this page',
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('older', 'rec-1')]),
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      expect(view.latest().status).toBe('error');
+      expect(loadPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds the whole window on retry after an older page failed', async () => {
+      let olderFails = true;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          return page([userText('newest', 'rec-2')], {
+            hasMore: true,
+            nextCursor: 'c1',
+          });
+        }
+        if (olderFails) throw new Error('down');
+        return page([userText('oldest', 'rec-1')]);
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+      expect(view.latest().olderFailure).toBeDefined();
+
+      olderFails = false;
+      await act(async () => {
+        view.latest().refresh();
+      });
+
+      expect(view.latest().olderFailure).toBeUndefined();
+      expect(view.latest().truncated).toBe(false);
+      expect(promptTexts(view.latest())).toEqual(['oldest', 'newest']);
+    });
+
+    it('abandons a walk that a refresh superseded', async () => {
+      const staleOlder = deferred<TrajectoryPageResult>();
+      let round = 0;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          round += 1;
+          return page([userText(`newest ${round}`, `rec-n${round}`)], {
+            hasMore: true,
+            nextCursor: `c-${round}`,
+          });
+        }
+        if (cursor === 'c-1') return staleOlder.promise;
+        return page([userText('fresh older', 'rec-o2')]);
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+      expect(loadPage).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        view.latest().refresh();
+      });
+      expect(loadPage).toHaveBeenCalledTimes(4);
+      const settled = view.latest();
+
+      await act(async () => {
+        staleOlder.resolve(
+          page([userText('stale older', 'rec-o1')], {
+            hasMore: true,
+            nextCursor: 'c-stale',
+          }),
+        );
+      });
+
+      // The old walk neither writes nor asks for the page after its reply.
+      expect(loadPage).toHaveBeenCalledTimes(4);
+      expect(view.latest().loadedPages).toBe(settled.loadedPages);
+      expect(promptTexts(view.latest())).toEqual(['fresh older', 'newest 2']);
+    });
+
+    it('abandons a walk when the component unmounts', async () => {
+      const older = deferred<TrajectoryPageResult>();
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) =>
+        cursor
+          ? older.promise
+          : page([userText('newest', 'rec-2')], {
+              hasMore: true,
+              nextCursor: 'c1',
+            }),
+      );
+      render(loadPage);
+      await act(async () => {});
+
+      const current = root!;
+      act(() => current.unmount());
+      root = null;
+
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await act(async () => {
+        older.resolve(
+          page([userText('older', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'c2',
+          }),
+        );
+      });
+      expect(errors).not.toHaveBeenCalled();
+      expect(loadPage).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the whole window when a refresh of the newest page fails', async () => {
+      let newestFails = false;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          if (newestFails) throw new Error('down');
+          return page([userText('newest', 'rec-2')], {
+            hasMore: true,
+            nextCursor: 'c1',
+          });
+        }
+        return page([userText('oldest', 'rec-1')]);
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      newestFails = true;
+      await act(async () => {
+        view.latest().refresh();
+      });
+
+      expect(view.latest().status).toBe('error');
+      expect(promptTexts(view.latest())).toEqual(['oldest', 'newest']);
+      expect(view.latest().loadedPages).toBe(2);
+    });
   });
 
   it('replaces the page on refresh rather than adding to it', async () => {

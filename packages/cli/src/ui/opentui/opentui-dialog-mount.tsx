@@ -595,7 +595,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return <OpenTuiRewindDialog settings={settings} onClose={onClose} />;
 
     case 'diff':
-      return <OpenTuiDiffDialog settings={settings} onClose={onClose} />;
+      return (
+        <OpenTuiDiffDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      );
 
     case 'stats':
       return <OpenTuiStatsDialog config={config} onClose={onClose} />;

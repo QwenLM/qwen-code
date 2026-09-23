@@ -342,6 +342,7 @@ import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
+import { resolveLiveNativeHostEnabled } from './live/native-host-enabled.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
 import {
@@ -812,10 +813,24 @@ export function createServeApp(
   deps: ServeAppDeps = {},
 ): Application {
   if (
-    opts.childHeapMode === 'admit' &&
-    deps.managedChildProcesses?.policy.snapshot().mode !== 'admit'
+    (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== opts.childHeapMode
   ) {
     throw new TypeError('ACP admission requires managed child process wiring.');
+  }
+  if (
+    opts.childHeapMode === 'enforce' &&
+    ((deps.bridge && !deps.managedChildProcesses?.ownsBridge?.(deps.bridge)) ||
+      deps.workspaceRegistry
+        ?.listManaged()
+        .some(
+          (runtime) =>
+            !deps.managedChildProcesses?.ownsBridge?.(runtime.bridge),
+        ))
+  ) {
+    throw new TypeError(
+      'ACP heap enforcement requires managed bridge ownership.',
+    );
   }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
@@ -1039,15 +1054,17 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
-  // Live Voice needs a Web Shell to control it. The audio endpoint is either
-  // the native macOS Host (`/live/host`) or the Web Shell page itself
-  // (`/live/web`), so only the native ingress is platform-bound.
+  // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
+  // Shell page itself (`/live/web`) on every platform; the native macOS Host
+  // (`/live/host`) is opt-in through QWEN_SERVE_LIVE_NATIVE_HOST=1.
   const liveVoiceSurfaceAvailable =
     opts.serveWebShell !== false &&
     typeof deps.webShellDir === 'string' &&
     acpHttpEnabledAtBoot;
   const liveNativeHostAvailable =
-    liveVoiceSurfaceAvailable && runtimePlatform === 'darwin';
+    liveVoiceSurfaceAvailable &&
+    runtimePlatform === 'darwin' &&
+    resolveLiveNativeHostEnabled(daemonEnvAtBoot);
   const primaryRuntimeTrustAuthoritative =
     deps.workspaceTrustHotReloadAvailable === true ||
     deps.primaryWorkspaceTrusted !== undefined ||
@@ -1791,6 +1808,7 @@ export function createServeApp(
       ),
     );
     standaloneSessionService = new StandaloneSessionService({
+      daemonLog,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);
@@ -2361,7 +2379,8 @@ export function createServeApp(
       ? () => deps.managedChildProcesses!.registry.committedProcessCount
       : undefined,
     childAdmissionEnforced:
-      deps.managedChildProcesses?.policy.snapshot().mode === 'admit',
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit' ||
+      deps.managedChildProcesses?.policy.snapshot().mode === 'enforce',
   });
 
   if (conversationRuntimeManager) {

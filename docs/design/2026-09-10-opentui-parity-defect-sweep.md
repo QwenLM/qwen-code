@@ -538,13 +538,17 @@ width; and its radio rows are numbered. Both now measure the same at a
 hundred-column terminal, and declining lands on the same composer and the same
 footer row in both legs.
 
-Two residuals are recorded rather than chased. ink's box has no right border —
-its own margin pushes a full-width box one column past what its parent can print
-and the right edge is clipped, which is an overflow artifact rather than a
-choice, and every popup here draws a closed box. And one wrapped continuation
-line in the body carries an extra leading space here, which is the break-rule
-difference already recorded for the context-file list; matching it would mean
-reimplementing the wrap the renderer already provides.
+Two residuals were recorded rather than chased; the second is since closed.
+ink's box has no right border — its own margin pushes a full-width box one
+column past what its parent can print and the right edge is clipped, which is an
+overflow artifact rather than a choice, and every popup here draws a closed box.
+The closed one: a line of the body carried an extra leading space here, and
+re-measuring it on the acceptance frames puts that space on the paragraph's
+**first** row rather than on its continuation — at `@opentui` 0.5.8 that row sat
+one column right of ink's (`│  Approval is bound…` against ink's
+`│ Approval is bound…`) while the continuation already matched. From 0.5.9 on,
+both rows match ink column for column, so the pin move retires this residual
+without any change to our own layout code.
 
 ## Decision 21 — the question dialog is ported whole, except where ink is wrong
 
@@ -2456,7 +2460,14 @@ What was verified, and how far the verification reaches:
   card's header and arguments row another: at a hundred columns the same
   arguments collapse to the same number of hidden characters on both legs and
   still cost this renderer one more physical row. Matching the break points would
-  mean reimplementing the wrap algorithm the renderer already provides. A wrapped
+  mean reimplementing the wrap algorithm the renderer already provides. What it
+  did get is a measurement: across a 123-point width sweep of three wrapped
+  paragraphs, the pinned renderer now breaks where ink breaks on 105 points
+  against 90 at `@opentui` 0.5.8 — fifteen break positions gained, none lost.
+  The eighteen that remain are all one paragraph, at widths where ink fills the
+  row a column further. No whole-row verdict moved, because the rows carrying
+  this also carry the popup width and the missing row numbers recorded
+  elsewhere, so this divergence narrowed rather than closed. A wrapped
   header also loses the space between the tool's display name and its
   description, which a scenario raising the same header with the arguments row
   switched off reproduces unchanged — the control arm that keeps this last part

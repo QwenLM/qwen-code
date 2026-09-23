@@ -351,6 +351,16 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         items: { type: 'string' },
       },
+      tokenQr: {
+        type: 'boolean',
+        label: 'Token QR',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: false,
+        description:
+          "Print the token-bearing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-token-qr suppresses the QR for that run. Same effect as qwen serve --token-qr.",
+        showInDialog: false,
+      },
       maxConcurrentSubSessionsPerCaller: {
         type: 'integer',
         label: 'Max Concurrent Sub-Sessions Per Caller',
@@ -2739,6 +2749,31 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
+      executionSandbox: {
+        type: 'object',
+        label: 'Tool Execution Sandbox',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as
+          | import('./execution-sandbox-settings.js').ExecutionSandboxSettings
+          | undefined,
+        description:
+          'Linux tool execution confinement. Operator scopes only; workspace settings cannot override it. Model/auth/session traffic stays on the host.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          required: ['filesystem', 'network'],
+          additionalProperties: false,
+          properties: {
+            backend: { type: 'string', enum: ['auto', 'bwrap'] },
+            filesystem: {
+              type: 'string',
+              enum: ['read-only', 'workspace-write'],
+            },
+            network: { type: 'string', enum: ['open', 'closed'] },
+          },
+        },
+      },
       codeModeOnly: {
         type: 'boolean',
         label: 'Code Mode Only (Experimental)',
@@ -4118,7 +4153,7 @@ const SETTINGS_SCHEMA = {
             default:
               'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
             description:
-              'Advanced override for the DashScope Realtime WebSocket endpoint.',
+              'Base URL of the DashScope Realtime service, such as https://dashscope.aliyuncs.com/compatible-mode/v1; a Realtime WebSocket URL is also accepted.',
             showInDialog: false,
           },
           voice: {
