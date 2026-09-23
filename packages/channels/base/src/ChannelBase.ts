@@ -460,6 +460,8 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
+  /** Sender axis for group traffic; `undefined` means it follows `gate`. */
+  protected groupSenderGate?: SenderGate;
   protected router: SessionRouter;
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
@@ -1423,6 +1425,17 @@ export abstract class ChannelBase {
       config.allowedUsers,
       pairingStore,
     );
+    // Undefined keeps the group axis on `senderPolicy`, which is the historical
+    // behavior. A decoupled axis gets its own gate and its own member list, and
+    // never pairs: an approval would also unlock direct messages.
+    this.groupSenderGate =
+      config.groupSenderPolicy === 'open' ||
+      config.groupSenderPolicy === 'allowlist'
+        ? new SenderGate(
+            config.groupSenderPolicy,
+            config.allowedGroupUsers ?? [],
+          )
+        : undefined;
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
@@ -4942,7 +4955,9 @@ export abstract class ChannelBase {
       this.dmGate.check(envelope).allowed &&
       (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
         ? true
-        : this.gate.isAllowed(normalizedTarget.senderId)) &&
+        : this.senderGateFor(envelope.isGroup).isAllowed(
+            normalizedTarget.senderId,
+          )) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -5837,6 +5852,11 @@ export abstract class ChannelBase {
   }): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
     const authorized = this.config.allowedUsers;
+    // A decoupled group axis admits members no allowlist vouches for, so an
+    // empty list must not mean "unrestricted" for group targets.
+    if (target.isGroup && this.groupSenderGate && authorized.length === 0) {
+      return false;
+    }
     return authorized.length === 0 || authorized.includes(target.senderId);
   }
 
@@ -6051,7 +6071,7 @@ export abstract class ChannelBase {
     const senderId = truncateGroupHistoryField(envelope.senderId);
     if (
       this.config.groupPolicy !== 'pairing' &&
-      !this.gate.isAllowed(senderId)
+      !this.senderGateFor(true).isAllowed(senderId)
     ) {
       return;
     }
@@ -6144,7 +6164,9 @@ export abstract class ChannelBase {
     const lines =
       this.config.groupPolicy === 'pairing'
         ? entries
-        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+        : entries.filter((entry) =>
+            this.senderGateFor(true).isAllowed(entry.senderId),
+          );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6159,6 +6181,15 @@ export abstract class ChannelBase {
     });
 
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
+  }
+
+  /**
+   * Sender gate that applies to one message axis. Group traffic follows
+   * `groupSenderPolicy` once it is decoupled; otherwise both axes share one
+   * gate, which is the historical behavior.
+   */
+  protected senderGateFor(isGroup: boolean): SenderGate {
+    return isGroup && this.groupSenderGate ? this.groupSenderGate : this.gate;
   }
 
   protected preflightInbound(
@@ -6213,16 +6244,19 @@ export abstract class ChannelBase {
       return true;
     }
 
+    const senderGate = this.senderGateFor(envelope.isGroup);
+
     if (
       options.deferPairingRequests === true &&
+      senderGate === this.gate &&
       this.config.senderPolicy === 'pairing' &&
-      !this.gate.isAllowed(envelope.senderId)
+      !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
       return true;
     }
 
-    const result = this.gate.check(envelope.senderId, envelope.senderName);
+    const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
@@ -6242,7 +6276,9 @@ export abstract class ChannelBase {
             return false;
           });
       }
-      this.logPreflightRejected('sender_denied');
+      this.logPreflightRejected(
+        senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+      );
       return false;
     }
 

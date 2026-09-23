@@ -528,6 +528,39 @@ describe('parseChannelConfig', () => {
     );
   });
 
+  it('rejects an unknown groupSenderPolicy instead of widening access', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        groupSenderPolicy: 'opne',
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "groupSenderPolicy" must be one of: inherit, open, allowlist.',
+    );
+  });
+
+  it('keeps the group sender axis when it is configured', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      groupSenderPolicy: 'allowlist',
+      allowedGroupUsers: ['member1'],
+    });
+
+    expect(result.groupSenderPolicy).toBe('allowlist');
+    expect(result.allowedGroupUsers).toEqual(['member1']);
+  });
+
+  it('rejects a non-array allowedGroupUsers', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        allowedGroupUsers: 'member1',
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "allowedGroupUsers" must be an array of user IDs.',
+    );
+  });
+
   it('drops empty identity and memory scope objects', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
