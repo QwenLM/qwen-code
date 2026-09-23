@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
@@ -15,15 +16,14 @@ final class JsonCodec {
     static Map<String, Object> parseObject(byte[] bytes, String context) {
         Object parsed;
         try {
-            parsed = JSON.parse(bytes);
+            parsed = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8),
+                    JSONReader.Feature.DisableReferenceDetect);
         } catch (RuntimeException exception) {
-            throw new RuntimeBrokerException(400,
-                    "runtime_broker_invalid_json",
-                    context + " contains invalid JSON.", false);
+            throw new RuntimeBrokerException(400, "runtime_broker_invalid_json",
+                    context + " contains invalid JSON.", false, exception);
         }
         if (!(parsed instanceof Map)) {
-            throw new RuntimeBrokerException(400,
-                    "runtime_broker_invalid_json",
+            throw new RuntimeBrokerException(400, "runtime_broker_invalid_json",
                     context + " must be a JSON object.", false);
         }
         @SuppressWarnings("unchecked")

@@ -9,7 +9,7 @@
     <description>Embeddable Java control-plane broker for Qwen Hosted Harness tool runtimes.</description>
 
     <properties>
-        <maven.compiler.release>11</maven.compiler.release>
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
         <fastjson2.version>2.0.60</fastjson2.version>
