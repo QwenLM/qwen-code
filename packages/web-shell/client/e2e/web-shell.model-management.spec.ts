@@ -104,7 +104,7 @@ async function evidence(page: Page, name: string) {
     });
   }
 }
-test('default host retains add and delete controls', async ({
+test('default host retains add and delete controls @smoke', async ({
   page,
 }, testInfo) => {
   await openHarness(page, testInfo);
@@ -192,7 +192,7 @@ for (const allowAdd of [true, false]) {
     }
   });
 }
-test('closing add permission dismisses an open provider dialog', async ({
+test('closing add permission dismisses an open provider dialog @smoke', async ({
   page,
 }, testInfo) => {
   await openHarness(page, testInfo);
@@ -209,7 +209,7 @@ test('closing add permission dismisses an open provider dialog', async ({
   await expect(dialog).toHaveCount(0);
 });
 
-test('disabled model management preserves model switching', async ({
+test('disabled model management preserves model switching @smoke', async ({
   page,
 }, testInfo) => {
   const daemon = await openHarness(page, testInfo, {
@@ -225,7 +225,7 @@ test('disabled model management preserves model switching', async ({
   await expect.poll(() => daemon.modelRequests().length).toBe(1);
 });
 
-test('closing deletion permission clears pending confirmation', async ({
+test('closing deletion permission clears pending confirmation @smoke', async ({
   page,
 }, testInfo) => {
   await openHarness(page, testInfo);
