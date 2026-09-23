@@ -568,6 +568,24 @@ export class McpClient {
         if (this.isDisconnecting) {
           return;
         }
+        // A JSON-RPC -32601 (Method not found) is the server explicitly
+        // saying "I do not implement this method family". For legacy-era
+        // tools-only servers this surfaces as an HTTP 400 carrying a
+        // JSON-RPC error body; the transport's outer `catch` wraps it in
+        // an SdkHttpError before onerror fires. The discovery layer
+        // already swallows -32601 via `isMethodNotFound` (`listMcpPrompts`
+        // / `listMcpResources` return []), but by that time the status
+        // registry is already poisoned and `/mcp` shows the server red.
+        // Mirror the discovery-layer tolerance here so a missing
+        // prompts/resources capability does not flip status to
+        // DISCONNECTED. Transport-level errors (ECONNREFUSED, proxy
+        // 502, etc.) still fall through to DISCONNECTED.
+        if (isMethodNotFound(error)) {
+          debugLogger.error(
+            `MCP method-not-found (${this.serverName}): ${getErrorMessage(error)}`,
+          );
+          return;
+        }
         // capture the upstream error
         // BEFORE the synchronous `updateStatus(DISCONNECTED)` cascades
         // to PoolEntry's statusChangeListener. The listener's

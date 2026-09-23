@@ -1571,6 +1571,114 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
 
+    // Issue #12496: a JSON-RPC -32601 "Method not found" response from a
+    // legacy-era tools-only server (e.g. GitLab built-in MCP) used to
+    // flip status to DISCONNECTED via the SDK's `client.onerror` even
+    // though the discovery layer already tolerates -32601 (returns
+    // `[]`). The onerror path must mirror the discovery tolerance so
+    // a missing prompts/resources capability does not poison the
+    // status registry. Other transport errors (ECONNREFUSED, 502,
+    // etc.) still flip DISCONNECTED.
+    it('does not flip status to DISCONNECTED on a -32601 onerror (#12496)', async () => {
+      const mockedClient: Record<string, unknown> = {
+        connect: vi.fn(),
+        discover: vi.fn(),
+        disconnect: vi.fn(),
+        getStatus: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
+        request: vi.fn().mockResolvedValue({ tools: [] }),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const serverName = `method-not-found-${Date.now()}`;
+      const client = new McpClient(
+        serverName,
+        {
+          command: 'test-command',
+        },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+
+      // The production code does `this.client.onerror = (error) => {…}` —
+      // capture the assigned callback off the mock so we can invoke it
+      // directly, simulating the SDK transport's outer `catch` firing
+      // onerror with a -32601 JSON-RPC response.
+      const onerror = mockedClient['onerror'] as (error: unknown) => void;
+      const error32601 = Object.assign(
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+        ),
+        { code: 'CLIENT_HTTP_NOT_IMPLEMENTED' },
+      );
+      onerror(error32601);
+
+      // Status must stay CONNECTED. The earlier disconnect poison on
+      // -32601 made the server red in `/mcp` even though tools/list
+      // had succeeded.
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+    });
+
+    it('still flips status to DISCONNECTED on a real transport error after #12496', async () => {
+      const mockedClient: Record<string, unknown> = {
+        connect: vi.fn(),
+        discover: vi.fn(),
+        disconnect: vi.fn(),
+        getStatus: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
+        request: vi.fn().mockResolvedValue({ tools: [] }),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const serverName = `real-error-${Date.now()}`;
+      const client = new McpClient(
+        serverName,
+        {
+          command: 'test-command',
+        },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+
+      const onerror = mockedClient['onerror'] as (error: unknown) => void;
+      onerror(new Error('TypeError: fetch failed: ECONNREFUSED'));
+
+      // Real transport errors must still flip DISCONNECTED.
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+    });
+
     it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
       // F2 (#4175) pool path: a single shared McpClient produces this
       // snapshot once; per-session SessionMcpView instances each register
