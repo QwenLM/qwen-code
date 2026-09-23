@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertExecutionSandboxSupported,
+  readOperatorSandboxSettings,
+  InvalidExecutionSandboxConfigError,
+} from '../config/execution-sandbox-settings.js';
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
@@ -111,7 +116,10 @@ import {
 } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
-import { printRemoteQuickstart } from './remote-quickstart.js';
+import {
+  printRemoteQuickstart,
+  tokenQrNoEffectReason,
+} from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -3339,6 +3347,14 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
+  assertExecutionSandboxSupported(
+    readOperatorSandboxSettings(),
+    'serve / ACP / web terminals',
+  );
+  assertExecutionSandboxSupported(
+    deps.bootSettings ?? {},
+    'serve / ACP / web terminals',
+  );
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
@@ -4037,19 +4053,27 @@ async function runQwenServeImpl(
   } catch (err) {
     // Invalid policy values must fail startup loudly. Discriminate by
     // error class rather than substring-matching the message.
-    if (err instanceof InvalidPolicyConfigError) {
+    if (
+      err instanceof InvalidPolicyConfigError ||
+      err instanceof InvalidExecutionSandboxConfigError
+    ) {
       throw err;
     }
     // All other settings-read failures (corrupted JSON, transient
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* / serve.channels ` +
+        `policy.* / serve.channels / serve.tokenQr ` +
         `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
-        `to apply context.fileName / policy.* / serve.channels overrides.`,
+        `to apply context.fileName / policy.* / serve.channels / ` +
+        `serve.tokenQr overrides.`,
     );
   }
+  assertExecutionSandboxSupported(
+    bootSettings ?? {},
+    'serve / ACP / web terminals',
+  );
   // Init daemon logger early so all subsequent lifecycle events
   // (bridge spawn diagnostics, shutdown errors) are captured to file.
   const daemonLogBaseDir = await resolveDaemonLogBaseDirForRun({
@@ -4973,11 +4997,16 @@ async function runQwenServeImpl(
         },
       );
     } catch (err) {
+      if (err instanceof InvalidExecutionSandboxConfigError) throw err;
       writeStderrLine(
         `qwen serve: could not read full settings for runtime startup ` +
           `(${err instanceof Error ? err.message : String(err)}); falling back to defaults.`,
       );
     }
+    assertExecutionSandboxSupported(
+      runtimeBootSettings?.merged ?? {},
+      'serve workspace runtimes',
+    );
     if (
       deps.trustedWorkspace === undefined &&
       runtimeBootSettings &&
@@ -6304,6 +6333,10 @@ async function runQwenServeImpl(
     };
 
     for (const workspaceInput of workspaceInputs.slice(1)) {
+      assertExecutionSandboxSupported(
+        readOperatorSandboxSettings(),
+        'serve workspace runtimes',
+      );
       const secondaryDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
         bootTrustSnapshot,
         workspaceInput.cwd,
@@ -6322,12 +6355,17 @@ async function runQwenServeImpl(
           },
         );
       } catch (err) {
+        if (err instanceof InvalidExecutionSandboxConfigError) throw err;
         writeStderrLine(
           `qwen serve: could not read full settings for secondary workspace ` +
             `${workspaceInput.cwd} (${err instanceof Error ? err.message : String(err)}); ` +
             `falling back to defaults.`,
         );
       }
+      assertExecutionSandboxSupported(
+        secondarySettings?.merged ?? {},
+        'serve workspace runtimes',
+      );
       if (!secondaryTrusted) {
         daemonLog.warn('secondary workspace is not trusted', {
           workspace: workspaceInput.cwd,
@@ -6974,6 +7012,10 @@ async function runQwenServeImpl(
         provenance === 'managed-scratch' || provenance === 'live-conversation'
           ? true
           : (buildOptions?.trusted ?? decision.targetTrusted);
+      assertExecutionSandboxSupported(
+        readOperatorSandboxSettings(),
+        'serve workspace runtimes',
+      );
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd, {
@@ -6982,6 +7024,7 @@ async function runQwenServeImpl(
           workspaceTrusted: trusted,
         });
       } catch (err) {
+        if (err instanceof InvalidExecutionSandboxConfigError) throw err;
         // Match the startup secondary-workspace path: surface why full settings
         // couldn't be read instead of silently falling back to defaults.
         writeStderrLine(
@@ -6990,6 +7033,10 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
+      assertExecutionSandboxSupported(
+        wsSettings?.merged ?? {},
+        'serve workspace runtimes',
+      );
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings, trusted);
       const wsCustomIgnoreFiles =
         wsSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
@@ -10019,6 +10066,64 @@ async function runQwenServeImpl(
       // way in.
       const boundAddress =
         typeof addr === 'object' && addr ? addr.address : opts.hostname;
+      // The settings source is resolved here rather than in the yargs
+      // command layer so the serve fast path (which never runs that
+      // handler) honors serve.tokenQr identically. An explicit flag
+      // (either polarity) wins over the setting; the setting applies
+      // only when the flag was omitted.
+      const settingTokenQr = bootSettings?.serve?.tokenQr;
+      if (
+        opts.tokenQr === undefined &&
+        settingTokenQr !== undefined &&
+        typeof settingTokenQr !== 'boolean'
+      ) {
+        // Validated here rather than in the shared settings reader:
+        // throwing there would discard the whole summary — policy.* and
+        // serve.channels with it, silently downgrading permission
+        // mediation to its default — because of a display knob. Name the
+        // field and its type, never the value: a malformed value may be a
+        // literal token pasted into the setting, and a `${VAR}` placeholder
+        // outside INTERNAL_SECRET_ENV_VARS is substituted before it reaches
+        // here — echoing either would re-publish a live bearer into
+        // captured stderr on every boot.
+        writeStderrLine(
+          `qwen serve: serve.tokenQr must be a boolean; ignoring a ${typeof settingTokenQr} value.`,
+        );
+      }
+      // A workspace settings file may carry serve.tokenQr, but only
+      // operator-owned scopes may set it. The interactive CLI warns about
+      // the drop via getSettingsWarnings; the serve fast path has no
+      // LoadedSettings, so the one path that reads the key names it itself.
+      for (const ignoredKey of bootSettings?.ignoredWorkspaceKeys ?? []) {
+        writeStderrLine(
+          `qwen serve: ${ignoredKey} in workspace settings ` +
+            `(${path.join(boundWorkspace, '.qwen', 'settings.json')}) is ` +
+            'ignored; it is honored from user, system, and system-defaults ' +
+            'scopes only.',
+        );
+      }
+      // One resolved posture, not a requested/vetoed boolean pair whose two
+      // falses mean opposite things: the veto is derived from the flag
+      // alone, so a settings-level `false` only declines the opt-in and
+      // leaves the default policy suppression in charge.
+      const tokenQrMode =
+        opts.tokenQr === false
+          ? ('veto' as const)
+          : opts.tokenQr === true || settingTokenQr === true
+            ? ('force' as const)
+            : ('policy' as const);
+      // Name why a requested QR cannot print instead of discarding the
+      // request silently — the same silent-no-op shape this flag exists to
+      // remove. Outside the `if (token)` block on purpose: a loopback bind
+      // with no bearer is the commonest inert case, and it must be reported
+      // too.
+      const tokenQrNoEffect = tokenQrNoEffectReason({
+        requested: tokenQrMode === 'force',
+        webShellMounted,
+        boundAddress,
+        generated: generatedToken,
+      });
+      if (tokenQrNoEffect) writeStderrLine(tokenQrNoEffect);
       if (token) {
         void printRemoteQuickstart({
           bind: opts.hostname,
@@ -10028,6 +10133,7 @@ async function runQwenServeImpl(
           token,
           generated: generatedToken,
           web: webShellMounted,
+          tokenQrMode,
         });
       }
       // Operator log on stderr too (systemd/docker/k8s default

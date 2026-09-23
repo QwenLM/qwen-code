@@ -1126,9 +1126,16 @@ const mockRemoteQuickstart = vi.hoisted(() => ({
   print: vi.fn(),
 }));
 
-vi.mock('./remote-quickstart.js', () => ({
-  printRemoteQuickstart: mockRemoteQuickstart.print,
-}));
+vi.mock('./remote-quickstart.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./remote-quickstart.js')>();
+  // Only the printer is stubbed; the real quickstartPrintMode /
+  // tokenQrNoEffectReason must stay, or boot-time callers get undefined.
+  return {
+    ...actual,
+    printRemoteQuickstart: mockRemoteQuickstart.print,
+  };
+});
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -13738,6 +13745,307 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(arg.generated).toBe(false);
       expect(arg.token).toBe('env-token-bound-pin');
     } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('resolves tokenQr from opts and from boot settings', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-token-qr');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge(), bootSettings: {} },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+      await started.close();
+      started = undefined;
+
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { tokenQr: true } },
+        },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'force',
+      );
+      await started.close();
+      started = undefined;
+
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          tokenQr: true,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'force',
+      );
+      await started.close();
+      started = undefined;
+
+      // An explicit flag veto (--no-token-qr) must beat an enabling
+      // setting — otherwise the flag is a dead switch on a credential
+      // guard.
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          tokenQr: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { tokenQr: true } },
+        },
+      );
+      // The printer must be able to tell a deliberate veto from policy
+      // suppression, or its hint advises the flag just passed.
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'veto',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('says so when the token QR was requested but the Web Shell is not mounted', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-no-web');
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      // Non-loopback so the Web Shell really is the operative cause; on a
+      // loopback bind no quickstart block prints at all and the diagnostic
+      // must name that instead.
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          tokenQr: true,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(stderrWrites.join('')).toContain(
+        '--token-qr / serve.tokenQr has no effect because the Web Shell is not mounted.',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('stays quiet about the token QR when nobody requested it', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-unrequested');
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge(), bootSettings: {} },
+      );
+      expect(stderrWrites.join('')).not.toContain('has no effect');
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('reports the inert token QR on a loopback bind with no bearer at all', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', '');
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-loopback-')),
+    );
+    // Mounted Web Shell, so the loopback bind — not a missing UI — is the
+    // operative cause. No bearer exists on loopback, which is exactly the
+    // case the diagnostic must not skip.
+    writeWebShellFixture(tmpDir);
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: true,
+          tokenQr: true,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      const output = stderrWrites.join('');
+      expect(output).toContain(
+        'has no effect on this bind: a loopback listener prints no quickstart QR.',
+      );
+      expect(output).not.toContain('Web Shell is not mounted');
+      expect(mockRemoteQuickstart.print).not.toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('warns about a malformed serve.tokenQr and keeps the rest of the settings', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-malformed');
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: {
+            // A display knob must not take the policy summary down with it:
+            // the reader passes the bad value through and the consumer warns.
+            policy: { permissionStrategy: 'consensus', consensusQuorum: 2 },
+            // Secret-shaped on purpose: a mis-keyed literal bearer — or a
+            // `${VAR}` placeholder outside INTERNAL_SECRET_ENV_VARS, which
+            // the loader substitutes before the consumer sees it — must
+            // never be echoed. The warning names the field and its type,
+            // never the value.
+            serve: { tokenQr: 'super-secret-bearer' },
+          },
+        },
+      );
+      expect(stderrWrites.join('')).toContain(
+        'serve.tokenQr must be a boolean; ignoring a string value.',
+      );
+      expect(stderrWrites.join('')).not.toContain('super-secret-bearer');
+      expect(stderrWrites.join('')).not.toContain('could not read settings');
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('names a workspace-scoped serve.tokenQr as ignored instead of dropping it silently', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-ws-scope');
+    // The real loader runs for this case (no deps.bootSettings), so pin the
+    // system scopes to absent files the way the enclosing beforeEach pins
+    // the user scope with a fresh QWEN_HOME.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-ws-scope-')),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+      path.join(tmpDir, 'no-system-settings.json'),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(tmpDir, 'no-system-defaults.json'),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      const output = stderrWrites.join('');
+      expect(output).toContain('serve.tokenQr in workspace settings');
+      expect(output).toContain(
+        'is ignored; it is honored from user, system, and system-defaults scopes only.',
+      );
+      // The dropped value never reaches resolution: the printer still sees
+      // the default posture, not the opt-in the workspace asked for.
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+    } finally {
+      stderrSpy.mockRestore();
       vi.unstubAllEnvs();
       await started?.close();
     }

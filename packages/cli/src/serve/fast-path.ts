@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertExecutionSandboxSupported,
+  InvalidExecutionSandboxConfigError,
+} from '../config/execution-sandbox-settings.js';
 import type { RunHandle } from './run-qwen-serve.js';
 import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
@@ -85,6 +89,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['web', 'serveWebShell'],
   ['open', 'open'],
   ['open-with-auth', 'open-with-auth'],
+  ['token-qr', 'tokenQr'],
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
   ['experimental-lsp', 'experimentalLsp'],
@@ -527,6 +532,7 @@ function emitHeadlessYoloWarning(
   const warning = getHeadlessYoloSafetyWarning({
     getApprovalMode: () => settings.tools?.approvalMode,
     getSandbox: () => settings.tools?.sandbox,
+    getShellExecutionSandbox: () => settings.tools?.executionSandbox,
   });
   if (warning) {
     writeStderrLine(warning);
@@ -583,6 +589,7 @@ export async function tryRunServeFastPath(
       parsed.options.workspace,
     );
   } catch (err) {
+    if (err instanceof InvalidExecutionSandboxConfigError) throw err;
     writeStderrLine(
       `qwen serve: fast-path bootstrap failed, falling back to full startup: ${
         err instanceof Error ? err.message : String(err)
@@ -590,6 +597,10 @@ export async function tryRunServeFastPath(
     );
     return false;
   }
+  assertExecutionSandboxSupported(
+    settings ?? {},
+    'serve / ACP / web terminals',
+  );
   applyRateLimitEnvDefaults(parsed.options, process.env);
   discardRateLimitTuningWhenDisabled(parsed.options);
 

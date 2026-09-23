@@ -70,6 +70,19 @@ export interface ServeOptions {
    * still fails the remote-bind check.
    */
   token?: string;
+  /**
+   * Print the token-bearing QR even when it would be withheld —
+   * an operator-supplied (stable) token on captured (non-TTY) stdout. The
+   * default suppression keeps stable credentials out of collected logs; this
+   * opt-in declares the log pipeline as trusted as the daemon host. An
+   * explicit value (either polarity) wins over the `serve.tokenQr` setting;
+   * `undefined` means the flag was omitted and the setting applies. `true`
+   * has no effect for generated tokens or interactive terminals, where the QR
+   * already prints; `false` suppresses it on every path, including those two
+   * — a generated bearer still reaches the operator as its own plain-text
+   * line, so the veto costs access to nothing.
+   */
+  tokenQr?: boolean;
   mode: ServeMode;
   /** Registration capacity, including primary and user scratch workspaces.
    * Defaults to QWEN_SERVE_MAX_WORKSPACES or 256; accepts integers 1..256.

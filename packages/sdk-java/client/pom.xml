@@ -29,7 +29,7 @@
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
         <jacoco-maven-plugin.version>0.8.12</jacoco-maven-plugin.version>
         <junit5.version>5.14.1</junit5.version>
-        <fastjson2.version>2.0.60</fastjson2.version>
+        <fastjson2.version>2.0.65</fastjson2.version>
         <slf4j-api.version>2.0.17</slf4j-api.version>
         <commons-lang3.version>3.20.0</commons-lang3.version>
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>

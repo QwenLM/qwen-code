@@ -213,6 +213,7 @@ interface ServeArgs {
   web: boolean;
   open: boolean;
   'open-with-auth': boolean;
+  'token-qr'?: boolean;
   'local-control': boolean;
   'local-control-address'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -391,6 +392,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Open the Web Shell with bearer authentication on loopback. Reuse --token or QWEN_SERVER_TOKEN, or generate a temporary 256-bit token and deliver it in the URL fragment. In headless environments, print the fragment URL for manual opening.',
+      })
+      .option('token-qr', {
+        type: 'boolean',
+        description:
+          'Print the token-bearing QR even when stdout is captured (not an interactive terminal) and the bearer is an operator-supplied (stable) token, which is withheld by default to keep stable credentials out of collected logs. Enable only when the log pipeline is as trusted as the daemon host. Can also be set via the serve.tokenQr setting (user, system, and system-defaults scopes only); the flag wins when passed. --no-token-qr suppresses the startup quickstart token QR for that run on every quickstart path — interactive terminal and generated token included. It does not govern the Local Control pairing QR, which --local-control prints by design.',
       })
       .option('local-control', {
         type: 'boolean',
@@ -886,6 +892,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        ...(argv['token-qr'] !== undefined
+          ? { tokenQr: argv['token-qr'] }
+          : {}),
         ...(argv['tls-cert'] !== undefined
           ? { tlsCert: argv['tls-cert'] }
           : {}),
