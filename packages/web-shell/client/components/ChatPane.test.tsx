@@ -3916,12 +3916,14 @@ it('preserves a stopped pane draft even when model setup is disabled', () => {
   );
   expect(sendPrompt).not.toHaveBeenCalled();
 });
-it.each(['builtin-command', 'project'])(
+it.each(['builtin-command', 'project', 'missing'])(
   'uses loaded %s identity for the auth menu and dispatch',
   async (source) => {
     connectionState.commands = [
       { name: 'clear', source: 'builtin-command' },
-      { name: 'auth', source },
+      // A ready snapshot without any auth entry (disabled list, SSH
+      // whitelist) must fail closed exactly like the builtin identity does.
+      ...(source === 'missing' ? [] : [{ name: 'auth', source }]),
     ];
     render({ modelManagement: { allowAdd: false } });
     const names = latestChatEditorProps.commands.map(

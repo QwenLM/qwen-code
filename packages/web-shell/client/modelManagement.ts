@@ -53,7 +53,11 @@ export function isModelSetupCommand(
     const resolved =
       commands.find((command) => command.name === firstToken) ??
       commands.find((command) => command.altNames?.includes(firstToken));
-    return resolved?.name === 'auth' && resolved.source === 'builtin-command';
+    // A ready snapshot with no entry for a bare setup name means the daemon
+    // dropped the builtin (disabled list, SSH whitelist) and no project/user
+    // command shadows it — fail closed instead of dispatching past the host.
+    if (!resolved) return MODEL_SETUP_COMMAND_NAMES.has(firstToken);
+    return resolved.name === 'auth' && resolved.source === 'builtin-command';
   }
   return MODEL_SETUP_COMMAND_NAMES.has(firstToken);
 }

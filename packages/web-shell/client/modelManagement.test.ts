@@ -76,6 +76,17 @@ describe('model management policy', () => {
     ];
     expect(isModelSetupCommand('/auth acme', commands)).toBe(false);
   });
+  it('fails closed when a ready snapshot carries no setup command at all', () => {
+    // slashCommands.disabled: ['auth'] or an SSH policy whitelist produce a
+    // builtin-marked snapshot without auth; with no project/user shadow the
+    // bare names have no daemon command to resolve to, so refuse them.
+    const commands = [{ name: 'clear', source: 'builtin-command' }];
+    expect(isModelSetupCommand('/auth', commands)).toBe(true);
+    expect(isModelSetupCommand('/login staging', commands)).toBe(true);
+    expect(isModelSetupCommand('/connect', commands)).toBe(true);
+    expect(isModelSetupCommand('/model', commands)).toBe(false);
+    expect(isModelSetupCommand('/unknown', commands)).toBe(false);
+  });
   it('treats a snapshot without builtin entries as still loading', () => {
     expect(
       isModelSetupCommand('/auth', [{ name: 'auth', source: 'project' }]),
