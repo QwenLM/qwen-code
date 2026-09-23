@@ -286,7 +286,7 @@ export function TrajectoryOverview({
   const panBy = useCallback(
     (fromStart: number, length: number, deltaMs: number): boolean => {
       const whole = modelRef.current?.total ?? 0;
-      if (!(length < whole)) return false;
+      // At the whole run the clamp pins the start at 0, which is no change.
       const start = Math.min(whole - length, Math.max(0, fromStart + deltaMs));
       if (start === currentView().start) return false;
       applyViewport({ start, end: start + length });

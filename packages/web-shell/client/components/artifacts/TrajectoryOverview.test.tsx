@@ -518,6 +518,20 @@ describe('TrajectoryOverview', () => {
       expect(again.defaultPrevented).toBe(false);
     });
 
+    it('keeps a zoom out near the end of the run inside the run', () => {
+      const container = render({ model: MODEL });
+      const plot = plotOf(container);
+      // In at 90%: 812.14–1909.76 ms. Out by exp(0.3) around 10% would reach
+      // 2255 ms, past the end, so the stretch is pushed back to finish there.
+      wheel(plot, at(0.9), { deltaY: -400 });
+      wheel(plot, at(0.1), { deltaY: 200 });
+      expect(layer(container)).toEqual({
+        left: '-34.986%',
+        width: '134.986%',
+        zoomed: true,
+      });
+    });
+
     it('stops at the narrowest stretch', () => {
       const container = render({ model: MODEL });
       wheel(plotOf(container), at(0.5), { deltaY: -100_000 });
