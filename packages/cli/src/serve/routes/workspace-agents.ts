@@ -65,6 +65,7 @@ import {
   decideDispatch,
   resolveTargets,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatch-policy.js';
+import { queuedAhead } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
 import {
   finishRunInTransaction,
   hasLiveDescendant,
@@ -239,14 +240,17 @@ function runView(
   thread: Thread,
   run: ThreadRun,
   agents: readonly WorkspaceAgent[],
+  threads: readonly Thread[],
 ) {
   const agent = agents.find((candidate) => candidate.id === run.agentId);
+  const ahead = queuedAhead(threads, thread.id, run.id);
   return {
     id: run.id,
     agentId: run.agentId,
     agentName: agent?.name ?? run.agentId,
     ...(agent?.color ? { agentColor: agent.color } : {}),
     status: run.status,
+    ...(ahead > 0 ? { queueAhead: ahead } : {}),
     ...(run.progress?.attempt === run.attempts
       ? { progress: run.progress }
       : {}),
@@ -699,7 +703,7 @@ export function registerWorkspaceAgentRoutes(
                 : undefined),
           })),
         })),
-        runs: thread.runs.map((run) => runView(thread, run, agents)),
+        runs: thread.runs.map((run) => runView(thread, run, agents, threads)),
         children: threads
           .filter((candidate) => candidate.parentThreadId === thread.id)
           .map((candidate) => {

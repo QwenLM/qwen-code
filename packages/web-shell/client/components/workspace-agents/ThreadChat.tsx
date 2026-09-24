@@ -62,7 +62,12 @@ function describeLiveRun(
 ): { text: string; stalled: boolean } {
   const agent = run.agentName;
   if (run.status === 'queued') {
-    return { text: t('collab.run.queued', { agent }), stalled: false };
+    return {
+      text: run.queueAhead
+        ? t('collab.run.queuedBehind', { agent, count: run.queueAhead })
+        : t('collab.run.queued', { agent }),
+      stalled: false,
+    };
   }
   if (run.status === 'cancelling') {
     return { text: t('collab.run.stopping', { agent }), stalled: false };

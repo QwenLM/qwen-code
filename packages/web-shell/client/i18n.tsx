@@ -491,6 +491,7 @@ const EN: Messages = {
   'collab.elapsed.minutes': (v) => `${v?.minutes ?? 0}m ${v?.seconds ?? 0}s`,
   'collab.run.queued': (v) =>
     `${v?.agent} is queued and starts when it is free`,
+  'collab.run.queuedBehind': (v) => `${v?.agent} is queued, ${v?.count} ahead`,
   'collab.run.starting': (v) => `Starting ${v?.agent}…`,
   'collab.run.resuming': (v) => `${v?.agent} is resuming its session…`,
   'collab.run.stopping': (v) => `Stopping ${v?.agent}…`,
@@ -4679,6 +4680,8 @@ const ZH: Messages = {
   'collab.elapsed.minutes': (v) =>
     `${v?.minutes ?? 0} 分 ${v?.seconds ?? 0} 秒`,
   'collab.run.queued': (v) => `${v?.agent} 排队中，空出来就开始`,
+  'collab.run.queuedBehind': (v) =>
+    `${v?.agent} 排队中，前面还有 ${v?.count} 个`,
   'collab.run.starting': (v) => `正在唤起 ${v?.agent}…`,
   'collab.run.resuming': (v) => `${v?.agent} 正在继续原会话…`,
   'collab.run.stopping': (v) => `正在停止 ${v?.agent}…`,
