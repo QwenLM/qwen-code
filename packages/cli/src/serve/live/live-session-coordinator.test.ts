@@ -69,6 +69,7 @@ interface PendingTurn {
 
 type FakeRealtimeSession = QwenRealtimeSession & {
   pushAudio: ReturnType<typeof vi.fn>;
+  pushImage: ReturnType<typeof vi.fn>;
   commitInputAudio: ReturnType<typeof vi.fn>;
   clearInputAudio: ReturnType<typeof vi.fn>;
   cancelResponse: ReturnType<typeof vi.fn>;
@@ -224,6 +225,7 @@ function makeHarness(
     list: () => [runtime],
   } as unknown as WorkspaceRegistry;
   const host = {
+    setScreenFeedState: vi.fn(() => true),
     setCallState: vi.fn(() => true),
     setCoordinator: vi.fn(() => true),
     setPendingPermission: vi.fn(() => true),
@@ -244,6 +246,7 @@ function makeHarness(
       resolveClosed = resolve;
     }),
     pushAudio: vi.fn(() => true),
+    pushImage: vi.fn(() => true),
     commitInputAudio: vi.fn(() => true),
     clearInputAudio: vi.fn(() => true),
     cancelResponse: vi.fn(() => true),
@@ -448,6 +451,19 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps an established voice session when the user stops before speaking', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+
+    await harness.coordinator.stop({ epoch: 1, callId: 'call-1' });
+
+    expect(harness.bridge.killSession).not.toHaveBeenCalled();
+  });
+
   it('releases completed input and delegation tracking during a long call', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({
@@ -555,6 +571,68 @@ describe('LiveSessionCoordinator', () => {
     await expect(
       harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
     ).resolves.toBeUndefined();
+  });
+
+  it('keeps newer speech pending when a cancelled input transcript arrives late', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onInputCommitted?.({ callEpoch: 1, itemId: 'old' });
+    harness.callbacks.onSpeechStarted?.({ callEpoch: 1, itemId: 'current' });
+    harness.callbacks.onInputTranscriptDone?.({
+      callEpoch: 1,
+      itemId: 'old',
+      text: 'Cancelled words',
+    });
+    harness.callbacks.onInputCancelled?.({ callEpoch: 1, itemId: 'old' });
+    let stopped = false;
+    const stopping = harness.coordinator
+      .stop({ epoch: 1, callId: 'call-1' })
+      .then(() => {
+        stopped = true;
+      });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    expect(harness.realtime.commitInputAudio).toHaveBeenCalledOnce();
+    harness.callbacks.onInputCommitted?.({ callEpoch: 1, itemId: 'current' });
+    harness.callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'current-response',
+      inputItemId: 'current',
+      status: 'completed',
+    });
+    await stopping;
+  });
+
+  it('retires only the cancelled input and drains the remaining turn before stopping', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onInputCommitted?.({ callEpoch: 1, itemId: 'old' });
+    harness.callbacks.onInputCommitted?.({ callEpoch: 1, itemId: 'current' });
+    let stopped = false;
+    const stopping = harness.coordinator
+      .stop({ epoch: 1, callId: 'call-1' })
+      .then(() => {
+        stopped = true;
+      });
+    harness.callbacks.onInputCancelled?.({ callEpoch: 1, itemId: 'old' });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    harness.callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'current-response',
+      inputItemId: 'current',
+      status: 'completed',
+    });
+    await stopping;
+    expect(stopped).toBe(true);
   });
 
   it('stops without waiting for response.done after a handoff is admitted', async () => {
@@ -1008,11 +1086,21 @@ describe('LiveSessionCoordinator', () => {
       mode: 'new',
     });
 
-    await harness.coordinator.speakToUser('live-new', '正在检查，请稍等。');
+    await expect(
+      harness.coordinator.speakToUser('live-new', '正在检查，请稍等。'),
+    ).resolves.toBe(true);
 
     expect(harness.realtime.speakToUser).toHaveBeenCalledWith(
       '正在检查，请稍等。',
     );
+    await expect(
+      harness.coordinator.speakToUser('another-session', '错误路由'),
+    ).rejects.toThrow(/No active Live conversation owns/u);
+
+    await harness.coordinator.stop({ epoch: 1, callId: 'call-1' });
+    await expect(
+      harness.coordinator.speakToUser('live-new', '刷新后继续的任务'),
+    ).resolves.toBe(false);
     await expect(
       harness.coordinator.speakToUser('another-session', '错误路由'),
     ).rejects.toThrow(/No active Live conversation owns/u);
@@ -1477,7 +1565,7 @@ describe('LiveSessionCoordinator', () => {
     });
   });
 
-  it('stops immediately while backend work continues and persists the final realtime tail', async () => {
+  it('cancels the Live coordinator turn while preserving the final realtime tail', async () => {
     const harness = makeHarness({
       transcriptTail: [{ role: 'user', text: '先停下语音' }],
     });
@@ -1494,11 +1582,15 @@ describe('LiveSessionCoordinator', () => {
       activeTranscript: [{ role: 'user', text: '执行长任务' }],
     });
     await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+    const turnSignal = vi.mocked(harness.bridge.sendPrompt).mock.calls[0][2];
+    if (!turnSignal) throw new Error('Expected a Live turn signal.');
+    expect(turnSignal.aborted).toBe(false);
 
     await expect(
       harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
     ).resolves.toBeUndefined();
 
+    expect(turnSignal.aborted).toBe(true);
     expect(harness.bridge.appendSessionLiveTranscript).toHaveBeenCalledWith(
       'live-new',
       [{ role: 'user', text: '先停下语音' }],
@@ -1507,7 +1599,7 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.pendingTurns).toHaveLength(1);
     expect(harness.realtime.close).toHaveBeenCalledOnce();
 
-    await harness.finishTurn(0, [{ type: 'message', text: '后台已完成。' }]);
+    await harness.finishTurn(0, []);
   });
 
   it('reports a final transcript persistence failure while stopping', async () => {
@@ -1526,6 +1618,48 @@ describe('LiveSessionCoordinator', () => {
     ).resolves.toEqual({
       error: 'Live Voice could not persist the final transcript.',
     });
+  });
+
+  it('finishes stopping when final transcript persistence never settles', async () => {
+    const harness = makeHarness({
+      gracefulStopDrainMs: 5,
+      transcriptTail: [{ role: 'user', text: '最后一句' }],
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    vi.spyOn(harness.bridge, 'appendSessionLiveTranscript').mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toEqual({
+      error: 'Live Voice could not finish stopping before the stop deadline.',
+    });
+    expect(harness.realtime.close).toHaveBeenCalledOnce();
+  });
+
+  it('finishes stopping when clearing the Live session marker never settles', async () => {
+    const harness = makeHarness({ gracefulStopDrainMs: 5 });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    vi.spyOn(
+      harness.bridge,
+      'setSessionLiveConversationActive',
+    ).mockImplementation(() => new Promise<void>(() => undefined));
+
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toEqual({
+      error: 'Live Voice could not finish stopping before the stop deadline.',
+    });
+    expect(harness.realtime.close).toHaveBeenCalledOnce();
   });
 
   it('reports the message of a rejection that is not an Error', async () => {
@@ -1586,5 +1720,210 @@ describe('LiveSessionCoordinator', () => {
       blocker: 'provider_config',
       message: 'Live Voice failed to start: Invalid API key.',
     });
+  });
+});
+
+describe('Live screen feed call lifecycle', () => {
+  const call = { epoch: 1, callId: 'call-1', mode: 'new' as const };
+  const start = {
+    type: 'host.screen_feed_start' as const,
+    epoch: 1,
+    feedId: 'feed-1',
+  };
+  const frame = (image: string, feedId = 'feed-1') => ({
+    type: 'host.screen_feed_frame' as const,
+    epoch: 1,
+    feedId,
+    image,
+  });
+  const audio = { epoch: 1, callId: 'call-1', pcm16: Buffer.alloc(4) };
+
+  it('uses the voice connection, retaining only the latest frame until audio starts', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    harness.coordinator.handleScreenFeed({ ...start, epoch: 0 });
+    expect(harness.host.setScreenFeedState).not.toHaveBeenCalled();
+    harness.coordinator.handleScreenFeed(start);
+    expect(harness.host.setScreenFeedState).toHaveBeenLastCalledWith(
+      1,
+      'feed-1',
+      'starting',
+    );
+    harness.coordinator.handleScreenFeed(frame('old'));
+    harness.coordinator.handleScreenFeed(frame('latest'));
+    expect(harness.realtime.pushImage).not.toHaveBeenCalled();
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledExactlyOnceWith(
+      'latest',
+    );
+    expect(harness.host.setScreenFeedState).toHaveBeenLastCalledWith(
+      1,
+      'feed-1',
+      'streaming',
+    );
+    expect(harness.openRealtimeSession).toHaveBeenCalledOnce();
+    expect(harness.realtime.speakToUser).not.toHaveBeenCalled();
+    expect(harness.realtime.commitInputAudio).not.toHaveBeenCalled();
+    harness.coordinator.dispose();
+  });
+
+  it('discards pending frames on replacement, explicit stop and call stop', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    harness.coordinator.handleScreenFeed(start);
+    harness.coordinator.handleScreenFeed(frame('old'));
+    harness.coordinator.handleScreenFeed({ ...start, feedId: 'feed-2' });
+    harness.coordinator.handleScreenFeed(frame('stale'));
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).not.toHaveBeenCalled();
+    harness.coordinator.handleScreenFeed(frame('current', 'feed-2'));
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledExactlyOnceWith(
+      'current',
+    );
+    harness.coordinator.handleScreenFeed({
+      type: 'host.screen_feed_stop',
+      epoch: 1,
+      feedId: 'feed-2',
+    });
+    expect(harness.realtime.sendBackendContext).toHaveBeenLastCalledWith(
+      expect.stringContaining('historical'),
+    );
+    harness.coordinator.handleScreenFeed(frame('after-stop', 'feed-2'));
+    expect(harness.realtime.pushImage).toHaveBeenCalledOnce();
+    harness.coordinator.handleScreenFeed({ ...start, feedId: 'feed-3' });
+    const stopping = harness.coordinator.stop(call);
+    harness.coordinator.handleScreenFeed(frame('after-call', 'feed-3'));
+    expect(harness.realtime.pushImage).toHaveBeenCalledOnce();
+    await stopping;
+  });
+
+  it('bounds burst traffic and continues static frames without requesting speech', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    vi.useFakeTimers();
+    harness.coordinator.pushAudio(audio);
+    harness.coordinator.handleScreenFeed(start);
+    harness.coordinator.handleScreenFeed(frame('same'));
+    harness.coordinator.pushAudio(audio);
+    harness.coordinator.handleScreenFeed(frame('burst'));
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    harness.coordinator.handleScreenFeed(frame('same'));
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledTimes(2);
+    expect(harness.realtime.speakToUser).not.toHaveBeenCalled();
+    harness.coordinator.dispose();
+  });
+
+  it('waits for fresh audio even after earlier audio and keeps only the latest paused frame', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    harness.coordinator.pushAudio(audio);
+    harness.coordinator.handleScreenFeed(start);
+    harness.coordinator.handleScreenFeed(frame('old'));
+    harness.coordinator.handleScreenFeed(frame('latest'));
+    expect(harness.realtime.pushImage).not.toHaveBeenCalled();
+    harness.realtime.pushAudio.mockReturnValueOnce(false);
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).not.toHaveBeenCalled();
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledExactlyOnceWith(
+      'latest',
+    );
+    const audioOrder =
+      harness.realtime.pushAudio.mock.invocationCallOrder.at(-1)!;
+    expect(
+      harness.realtime.pushImage.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(audioOrder);
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledOnce();
+    harness.coordinator.dispose();
+  });
+
+  it('retains the latest rate-limited frame until eligible audio arrives', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    vi.useFakeTimers();
+    harness.coordinator.handleScreenFeed(start);
+    harness.coordinator.handleScreenFeed(frame('first'));
+    harness.coordinator.pushAudio(audio);
+    harness.coordinator.handleScreenFeed(frame('superseded'));
+    harness.coordinator.pushAudio(audio);
+    await vi.advanceTimersByTimeAsync(500);
+    harness.coordinator.handleScreenFeed(frame('latest'));
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledExactlyOnceWith('first');
+    await vi.advanceTimersByTimeAsync(400);
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage.mock.calls).toEqual([
+      ['first'],
+      ['latest'],
+    ]);
+    harness.coordinator.handleScreenFeed(frame('stopped'));
+    harness.coordinator.handleScreenFeed({
+      type: 'host.screen_feed_stop',
+      epoch: 1,
+      feedId: 'feed-1',
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledTimes(2);
+    harness.coordinator.dispose();
+  });
+
+  it('clears queued image when no more frames arrive', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    vi.useFakeTimers();
+    harness.coordinator.handleScreenFeed(start);
+    harness.coordinator.handleScreenFeed(frame('abandoned'));
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(harness.host.setScreenFeedState).toHaveBeenLastCalledWith(
+      1,
+      'feed-1',
+      'error',
+      expect.stringContaining('stopped arriving'),
+    );
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).not.toHaveBeenCalled();
+    expect(harness.host.failCall).not.toHaveBeenCalled();
+    harness.coordinator.dispose();
+  });
+
+  it('does not retain a provider-rejected frame for later replay', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    harness.coordinator.pushAudio(audio);
+    harness.coordinator.handleScreenFeed(start);
+    harness.realtime.pushImage.mockReturnValueOnce(false);
+    harness.coordinator.handleScreenFeed(frame('dropped'));
+    harness.coordinator.pushAudio(audio);
+    expect(harness.realtime.pushImage).toHaveBeenCalledExactlyOnceWith(
+      'dropped',
+    );
+    expect(harness.host.failCall).not.toHaveBeenCalled();
+    harness.coordinator.dispose();
+  });
+
+  it('stops only the feed when image transport throws', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start(call);
+    harness.coordinator.pushAudio(audio);
+    harness.coordinator.handleScreenFeed(start);
+    harness.realtime.pushImage.mockImplementation(() => {
+      throw new Error('socket');
+    });
+    harness.coordinator.handleScreenFeed(frame('rejected'));
+    expect(() => harness.coordinator.pushAudio(audio)).not.toThrow();
+    expect(harness.host.setScreenFeedState).toHaveBeenLastCalledWith(
+      1,
+      'feed-1',
+      'error',
+      expect.any(String),
+    );
+    expect(harness.host.failCall).not.toHaveBeenCalled();
+    harness.coordinator.dispose();
   });
 });

@@ -3985,6 +3985,11 @@ export interface DaemonLiveStatus {
   blocker?: DaemonLiveBlocker;
   message?: string;
   callId?: string;
+  coordinator?: {
+    workspaceCwd: string;
+    workspaceId?: string;
+    sessionId: string;
+  };
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
