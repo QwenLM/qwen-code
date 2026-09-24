@@ -24,6 +24,7 @@ export type DaemonUiEventType =
   | 'user.image.delta'
   | 'user.file.delta'
   | 'user.resource_link.delta'
+  | 'user.resource.delta'
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -174,6 +175,23 @@ export type DaemonResourceLink = {
 export interface DaemonUiUserResourceLinkEvent extends DaemonUiEventBase {
   type: 'user.resource_link.delta';
   resourceLink: DaemonResourceLink;
+  meta?: DaemonTextDeltaMeta;
+}
+
+export type DaemonEmbeddedResource = {
+  type: 'resource';
+  resource: {
+    uri: string;
+    text: string;
+    mimeType?: string | null;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+export interface DaemonUiUserResourceEvent extends DaemonUiEventBase {
+  type: 'user.resource.delta';
+  resource: DaemonEmbeddedResource;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -790,6 +808,7 @@ export type DaemonUiEvent =
   | DaemonUiUserImageEvent
   | DaemonUiUserFileEvent
   | DaemonUiUserResourceLinkEvent
+  | DaemonUiUserResourceEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiAssistantUsageEvent
@@ -1079,6 +1098,8 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   }>;
   /** Original ACP resource links, with their URI and attachment metadata. */
   resourceLinks?: DaemonResourceLink[];
+  /** Original bounded ACP embedded text resources. */
+  embeddedResources?: DaemonEmbeddedResource[];
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */

@@ -1000,6 +1000,27 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         ...(updateMeta ? { _meta: updateMeta } : {}),
       } as SessionUpdate);
     }
+    const embeddedResources = payload?.['embeddedResources'];
+    for (const block of Array.isArray(embeddedResources)
+      ? embeddedResources
+      : []) {
+      if (
+        !isObjectRecord(block) ||
+        block['type'] !== 'resource' ||
+        !isObjectRecord(block['resource']) ||
+        typeof block['resource']['uri'] !== 'string' ||
+        block['resource']['uri'].length === 0 ||
+        typeof block['resource']['text'] !== 'string'
+      ) {
+        continue;
+      }
+      const updateMeta = buildUpdateMeta(meta);
+      yield emit({
+        sessionUpdate: 'user_message_chunk',
+        content: structuredClone(block),
+        ...(updateMeta ? { _meta: updateMeta } : {}),
+      } as SessionUpdate);
+    }
   }
 
   private *projectAssistantRecord(

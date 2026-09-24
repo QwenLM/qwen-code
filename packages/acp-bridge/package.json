@@ -60,6 +60,10 @@
       "types": "./dist/sessionAttachments.d.ts",
       "import": "./dist/sessionAttachments.js"
     },
+    "./embeddedResourceReplay": {
+      "types": "./dist/embedded-resource-replay.d.ts",
+      "import": "./dist/embedded-resource-replay.js"
+    },
     "./sessionSource": {
       "types": "./dist/session-source.d.ts",
       "import": "./dist/session-source.js"

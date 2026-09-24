@@ -21,6 +21,7 @@ import type {
   SetSessionModelResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
+import { snapshotReplayableEmbeddedResources } from './embedded-resource-replay.js';
 import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
@@ -154,6 +155,7 @@ import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -10027,6 +10029,23 @@ export function createSessionControlPlane(
                     perBlock.resolvedBlocks,
                   );
                 }
+                const attachmentReferences = dispatchBlocks.filter(
+                  isSessionAttachmentReference,
+                );
+                // resolveContent passes direct ACP blocks through by identity.
+                // Track expansion provenance by position: URI alone can also
+                // belong to a distinct direct resource in the same prompt.
+                const directBlocks = new Set(dispatchBlocks);
+                const nativeResourceIndexes = resolvedPrompt.flatMap(
+                  (block, index) =>
+                    block.type === 'resource' && !directBlocks.has(block)
+                      ? [index]
+                      : [],
+                );
+                snapshotReplayableEmbeddedResources(
+                  resolvedPrompt,
+                  nativeResourceIndexes,
+                );
                 const normalized: PromptRequest = telemetry.injectPromptContext(
                   {
                     ...req,
@@ -10087,6 +10106,7 @@ export function createSessionControlPlane(
                   }
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
+                  delete meta[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY];
                   // Channel classification is authenticated channel-worker
                   // metadata; the daemon prompt route validates the worker
                   // authorization and re-arms it through the trusted
@@ -10123,12 +10143,13 @@ export function createSessionControlPlane(
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
                   }
-                  const attachmentReferences = dispatchBlocks.filter(
-                    isSessionAttachmentReference,
-                  );
                   if (attachmentReferences.length > 0) {
                     meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY] =
                       attachmentReferences;
+                  }
+                  if (nativeResourceIndexes.length > 0) {
+                    meta[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY] =
+                      nativeResourceIndexes;
                   }
                   if (context?.channelPrompt === true) {
                     meta[CHANNEL_PROMPT_META_KEY] = true;

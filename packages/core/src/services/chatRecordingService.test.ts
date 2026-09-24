@@ -520,6 +520,34 @@ describe('ChatRecordingService', () => {
       });
     });
 
+    it('writes bounded embedded text resources on a resource-only user record', async () => {
+      const embeddedResources = [
+        {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        },
+      ];
+      chatRecordingService.recordUserMessage(
+        '',
+        undefined,
+        { displayText: '', hookContext: '', embeddedResources },
+        'embedded-prompt',
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.daemonPromptId).toBe('embedded-prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: '',
+        embeddedResources,
+      });
+    });
+
     it('records mid-turn attachment references without inline bytes', async () => {
       const attachmentReferences = [
         {

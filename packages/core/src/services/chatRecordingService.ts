@@ -469,6 +469,8 @@ export interface UserPromptRecordPayload {
   attachmentReferences?: UserPromptAttachmentReference[];
   /** Original ACP resource references, independent of model-input expansion. */
   resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
+  /** Bounded original ACP text resources, independent of model-input expansion. */
+  embeddedResources?: Array<Extract<ContentBlock, { type: 'resource' }>>;
 }
 
 export interface UserPromptAttachmentReference {
