@@ -480,18 +480,26 @@ describe('agent versioned store', () => {
     const root = JSON.parse(await fs.readFile(rootPath, 'utf8')) as Thread;
     await writeRaw(rootPath, { ...root, tokensUsed: 0 });
 
-    const result = await postMessage(
+    // An agent's post is held by the cap; a person's post still gets through.
+    const fromAgent = await postMessage(
       PROJECT_ROOT,
       'th_grandchild',
-      { from: HUMAN_AUTHOR_ID, text: 'continue' },
-      { agents: [ALICE] },
+      { from: BOB.id, text: 'continue' },
+      { agents: [ALICE, BOB] },
     );
-
-    expect(result.outcomes[0]?.decision).toEqual({
+    expect(fromAgent.outcomes[0]?.decision).toEqual({
       kind: 'skip',
       reason: 'token_budget_exhausted',
     });
-    expect(result.dispatched).toEqual([]);
+    expect(fromAgent.dispatched).toEqual([]);
+
+    const fromPerson = await postMessage(
+      PROJECT_ROOT,
+      'th_grandchild',
+      { from: HUMAN_AUTHOR_ID, text: 'continue' },
+      { agents: [ALICE, BOB] },
+    );
+    expect(fromPerson.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
   });
 });
 

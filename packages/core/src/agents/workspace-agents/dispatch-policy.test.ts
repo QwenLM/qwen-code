@@ -174,7 +174,7 @@ describe('decideDispatch', () => {
     ).toEqual({ kind: 'dispatch' });
   });
 
-  it('does not let a person bypass the token gate', () => {
+  it('lets a person continue past the token budget', () => {
     expect(
       decideDispatch(
         context({
@@ -184,7 +184,7 @@ describe('decideDispatch', () => {
           },
         }),
       ),
-    ).toEqual({ kind: 'skip', reason: 'token_budget_exhausted' });
+    ).toEqual({ kind: 'dispatch' });
   });
 
   it('uses the current thread turn count', () => {

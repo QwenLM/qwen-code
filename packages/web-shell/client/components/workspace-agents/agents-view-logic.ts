@@ -318,8 +318,8 @@ export function explainSkip(
       };
     case 'token_budget_exhausted':
       return {
-        what: 'this thread tree has spent its token budget',
-        fix: 'This limit is never reset. Open a new thread to continue.',
+        what: 'this thread tree has spent its token budget, so agents no longer wake each other',
+        fix: 'A reply from you can still wake them.',
       };
     case 'thread_done':
       return {

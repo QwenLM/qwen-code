@@ -652,7 +652,7 @@ const EN: Messages = {
   'collab.skip.turn_budget_exhausted':
     'The agents have used their unattended turns. Your reply lets them continue.',
   'collab.skip.token_budget_exhausted':
-    'This conversation has used its token budget. Start a new conversation to continue.',
+    'This conversation has used its token budget, so agents no longer wake each other. A reply from you can still wake them.',
   'collab.skip.thread_done':
     'This conversation is done. Start a new one to continue.',
   'collab.skip.self_trigger': (v) => `${v?.name} cannot wake itself.`,
@@ -4867,7 +4867,7 @@ const ZH: Messages = {
   'collab.skip.turn_budget_exhausted':
     'Agent 已用完无人值守的轮数。你回复一句，它们就能继续。',
   'collab.skip.token_budget_exhausted':
-    '这个对话的 token 预算已用完，请新开一个对话继续。',
+    '这个对话的 token 预算已用完，Agent 之间不再互相唤醒。你自己的回复仍然可以唤醒它们。',
   'collab.skip.thread_done': '这个对话已经结束，请新开一个继续。',
   'collab.skip.self_trigger': (v) => `${v?.name} 不能唤醒自己。`,
   'collab.skip.other': (v) => `${v?.name} 这次不会被唤醒。`,

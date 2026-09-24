@@ -89,9 +89,10 @@ export interface DispatchContext {
  *
  * Order is load-bearing. Identity and routing come first, so a decision never
  * depends on run state a concurrent writer could change. Budget precedes the
- * queue checks so an exhausted tree cannot keep folding new work into a run it
- * should not have. Coalescing precedes the queue limit because joining an
- * existing run adds nothing to the queue.
+ * queue checks so agents on an exhausted tree cannot keep folding new work
+ * into a run; a person's post passes the budgets on purpose. Coalescing
+ * precedes the queue limit because joining an existing run adds nothing to
+ * the queue.
  */
 export function decideDispatch(context: DispatchContext): DispatchDecision {
   const { thread, message, target } = context;
@@ -122,19 +123,17 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
     return { kind: 'skip', reason: 'self_trigger' };
   }
 
-  // The loop breaker. A person posting is the signal that the conversation is
-  // wanted, and resets this thread's turn counter at the call site.
+  // The loop breakers stop agents waking each other unattended. A person
+  // posting is the signal that the conversation is wanted: it resets this
+  // thread's turn counter at the call site and passes the tree-wide token cap,
+  // which keeps binding every agent-authored post after it.
   if (message.from !== HUMAN_AUTHOR_ID) {
     if (context.budget.autoTurnsUsed >= DEFAULT_THREAD_AUTO_TURN_BUDGET) {
       return { kind: 'skip', reason: 'turn_budget_exhausted' };
     }
-  }
-
-  // Token spend is a hard tree-wide cap, including human-authored triggers.
-  // A person can start a fresh root thread rather than silently bypass money
-  // already spent by this one.
-  if (context.budget.tokensUsed >= DEFAULT_THREAD_TOKEN_BUDGET) {
-    return { kind: 'skip', reason: 'token_budget_exhausted' };
+    if (context.budget.tokensUsed >= DEFAULT_THREAD_TOKEN_BUDGET) {
+      return { kind: 'skip', reason: 'token_budget_exhausted' };
+    }
   }
 
   // An agent has one body, so at most one run of its own can be live on this
