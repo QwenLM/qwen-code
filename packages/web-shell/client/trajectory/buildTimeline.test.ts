@@ -164,6 +164,10 @@ describe('buildTimeline', () => {
       ['r2', 1020, 1520],
     ]);
     expect(model.total).toBe(1520);
+    // Nothing to leave out in this mode, so all of the domain is activity.
+    expect(model.mode).toBe('active');
+    expect(model.activeMs).toBe(1520);
+    expect(model.originMs).toBe(BASE);
   });
 
   it('removes a gap once however many spans run in parallel after it', () => {
@@ -270,5 +274,90 @@ describe('buildTimeline', () => {
     const first = buildTimeline(trajectory)!;
     expect(first.spans.map((span) => span.rowKey)).toEqual(['r', 't']);
     expect(buildTimeline(trajectory)).toEqual(first);
+  });
+
+  describe('clock mode', () => {
+    /** A request and its tool, then a minute of nothing, then a request. */
+    const twoTurns = () =>
+      trajectoryOf(
+        [
+          request('r1', { startedAt: BASE, durationMs: 1000 }),
+          tool('t1', { startedAt: BASE + 1000, durationMs: 250 }),
+        ],
+        [request('r2', { startedAt: BASE + 60_000, durationMs: 500 })],
+      );
+
+    it('leaves the idle time between turns on the axis', () => {
+      const model = buildTimeline(twoTurns(), { mode: 'clock' })!;
+
+      expect(
+        model.spans.map((span) => [span.rowKey, span.start, span.end]),
+      ).toEqual([
+        ['r1', 0, 1000],
+        ['t1', 1000, 1250],
+        ['r2', 60_000, 60_500],
+      ]);
+      expect(model.mode).toBe('clock');
+      expect(model.total).toBe(60_500);
+      expect(model.activeMs).toBe(1750);
+      expect(model.originMs).toBe(BASE);
+    });
+
+    it('marks later turns where they really started', () => {
+      expect(buildTimeline(twoTurns(), { mode: 'clock' })!.turnMarks).toEqual([
+        { turnIndex: 2, at: 60_000 },
+      ]);
+      expect(buildTimeline(twoTurns())!.turnMarks).toEqual([
+        { turnIndex: 2, at: 1250 },
+      ]);
+    });
+
+    it('counts parallel and overlapping calls once towards activity', () => {
+      const model = buildTimeline(
+        trajectoryOf([
+          request('r', { startedAt: BASE, durationMs: 100 }),
+          tool('slow', { startedAt: BASE + 100, durationMs: 400 }),
+          tool('fast', { startedAt: BASE + 100, durationMs: 10 }),
+          tool('inner', { startedAt: BASE + 300, durationMs: 10 }),
+          request('r2', { startedAt: BASE + 10_500, durationMs: 100 }),
+        ]),
+        { mode: 'clock' },
+      )!;
+
+      expect(model.total).toBe(10_600);
+      // 0–500 busy, 500–10 500 idle, 10 500–10 600 busy.
+      expect(model.activeMs).toBe(600);
+    });
+
+    it('starts the axis at the earliest start, whatever order the rows are in', () => {
+      // A subagent's request can be listed before a main-session call that
+      // started earlier than it.
+      const model = buildTimeline(
+        trajectoryOf([
+          request('late', { startedAt: BASE + 5000, durationMs: 100 }),
+          request('early', { startedAt: BASE + 2000, durationMs: 100 }),
+        ]),
+        { mode: 'clock' },
+      )!;
+
+      expect(model.originMs).toBe(BASE + 2000);
+      expect(model.spans.map((span) => [span.rowKey, span.start])).toEqual([
+        ['early', 0],
+        ['late', 3000],
+      ]);
+    });
+
+    it('draws nothing it would have to guess a start for, either', () => {
+      const model = buildTimeline(
+        trajectoryOf([
+          request('r', { startedAt: BASE, durationMs: 100 }),
+          tool('t', { durationMs: 50 }),
+        ]),
+        { mode: 'clock' },
+      )!;
+
+      expect(model.spans.map((span) => span.rowKey)).toEqual(['r']);
+      expect(model.droppedRows).toBe(1);
+    });
   });
 });

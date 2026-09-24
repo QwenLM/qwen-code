@@ -117,6 +117,79 @@ public final class HttpRuntimeTransport {
         return returned;
     }
 
+    public CompletionStage<Void> execute(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        Map<String, Object> body = sessionBody(session);
+        body.put("reference", reference);
+        return post(lease, "/internal/managed-runtime/v2/execute", body)
+                .thenApply(ignored -> null);
+    }
+
+    private Map<String, Object> sessionBody(RuntimeSession session) {
+        RuntimeScope scope = session.getScope();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 2);
+        body.put("tenantId", scope.getTenantId());
+        body.put("workspaceId", scope.getWorkspaceId());
+        body.put("workspaceCwd", scope.getCanonicalCwd());
+        body.put("sessionId", session.getRuntimeSessionId());
+        body.put("turnKind", session.getTurnKind());
+        return body;
+    }
+
+    private CompletionStage<byte[]> post(RuntimeLease lease, String path,
+            Map<String, Object> body) {
+        HttpRequest httpRequest = HttpRequest.newBuilder(
+                lease.getEndpoint().resolve(path))
+                .timeout(requestTimeout)
+                .header("Authorization", "Bearer " + lease.getToken())
+                .header("Cache-Control", "no-store")
+                .header("Content-Type", "application/json")
+                .header("X-Qwen-Managed-Lease-Id", lease.getLeaseId())
+                .header("X-Qwen-Managed-Lease-Epoch",
+                        Long.toString(lease.getEpoch()))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(
+                        JsonCodec.encode(body)))
+                .build();
+        CompletableFuture<byte[]> result = new CompletableFuture<>();
+        CompletableFuture<HttpResponse<BoundedBody>> exchange = client
+                .sendAsync(httpRequest,
+                        info -> new BoundedBodySubscriber(BODY_LIMIT_BYTES));
+        exchange.whenComplete((response, error) -> {
+            if (error != null) {
+                result.completeExceptionally(unavailable(unwrap(error)));
+                return;
+            }
+            BoundedBody responseBody = response.body();
+            if (responseBody.overflow() || response.statusCode() != 200) {
+                result.completeExceptionally(
+                        failure(response.statusCode() == 200
+                                ? 413 : response.statusCode()));
+                return;
+            }
+            result.complete(responseBody.bytes());
+        });
+        CompletableFuture<byte[]> returned = result
+                .orTimeout(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                .handle((value, error) -> {
+                    if (error == null) {
+                        return value;
+                    }
+                    Throwable cause = unwrap(error);
+                    if (cause instanceof RuntimeBrokerException failure) {
+                        throw failure;
+                    }
+                    throw unavailable(cause);
+                });
+        returned.whenComplete((value, error) -> {
+            if (error != null || returned.isCancelled()) {
+                exchange.cancel(true);
+                result.cancel(false);
+            }
+        });
+        return returned;
+    }
+
     private static Throwable unwrap(Throwable error) {
         Throwable cause = error;
         while (cause instanceof CompletionException
