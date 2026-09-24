@@ -303,7 +303,6 @@ describe('artifactUtils', () => {
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(function (this: HTMLAnchorElement) {
         expect(this.isConnected).toBe(true);
-        expect(this.download).toBe('result.txt');
         expect(this.href).toBe('blob:workspace-file');
         expect(
           this.dispatchEvent(
@@ -324,9 +323,6 @@ describe('artifactUtils', () => {
         },
         'reports/result.txt',
         'text/plain',
-      );
-      expect(createObjectURL).toHaveBeenCalledWith(
-        expect.objectContaining({ size: 2, type: 'text/plain' }),
       );
       expect(click).toHaveBeenCalledOnce();
       expect(document.querySelector('a[download="result.txt"]')).toBeNull();

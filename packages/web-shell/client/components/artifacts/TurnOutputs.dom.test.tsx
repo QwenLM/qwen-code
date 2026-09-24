@@ -740,6 +740,9 @@ describe('host artifact visibility', () => {
       status: 'available',
       workspacePath: `/primary/report-${i}.txt`,
     })) as DaemonSessionArtifact[];
+    const originalArtifacts = structuredClone(artifacts);
+    artifacts.forEach(Object.freeze);
+    Object.freeze(artifacts);
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -783,7 +786,7 @@ describe('host artifact visibility', () => {
     expect(container.textContent).toBe('');
     render();
     expect(container.textContent).toContain('Report 2');
-    expect(artifacts).toHaveLength(6);
+    expect(artifacts).toEqual(originalArtifacts);
     act(() => root.unmount());
   });
 });

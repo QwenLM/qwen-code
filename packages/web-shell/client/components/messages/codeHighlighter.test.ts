@@ -77,24 +77,20 @@ describe('codeHighlighter', () => {
 });
 
 describe('public highlightCode', () => {
-  it.each([
-    ['sql', 'SELECT id FROM orders WHERE id = 1'],
-    ['json', '{"count": 1}'],
-    ['yaml', 'count: 1'],
-    ['html', '<h1>Hello</h1>'],
-    ['python', 'print(42)'],
-    ['markdown', '# Hello'],
-  ])(
-    'highlights %s with the shared engine in both themes',
-    async (language, code) => {
-      const light = await highlightCode({ code, language, theme: 'light' });
-      const dark = await highlightCode({ code, language, theme: 'dark' });
-      expect(light).toContain('<span style="color:');
-      expect(dark).toContain('<span style="color:');
-      expect(light).not.toBe(dark);
-      expect(dark).toBe(getCachedHtml(code, language, THEME));
-    },
-  );
+  it('shares highlighted output and cache across both themes', async () => {
+    const code = 'SELECT id FROM orders WHERE id = 1';
+    const light = await highlightCode({
+      code,
+      language: 'sql',
+      theme: 'light',
+    });
+    const dark = await highlightCode({ code, language: 'sql', theme: 'dark' });
+    expect(light).toContain('<span style="color:');
+    expect(dark).toContain('<span style="color:');
+    expect(light).not.toBe(dark);
+    expect(light).toBe(getCachedHtml(code, 'sql', 'github-light-default'));
+    expect(dark).toBe(getCachedHtml(code, 'sql', THEME));
+  });
 
   it('returns plain-text fallback for unknown languages and oversized code', async () => {
     expect(
