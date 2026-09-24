@@ -268,7 +268,7 @@ class LocalProcessRuntimeProvisionerTest {
                     new InMemoryRuntimeSessionRepository(),
                     new InMemoryToolExecutionRepository(
                             java.time.Clock.systemUTC()),
-                    "broker", Duration.ofMillis(100), Duration.ofMinutes(1));
+                    "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
             try {
                 ExecutionException failure = org.junit.jupiter.api.Assertions
                         .assertThrows(ExecutionException.class,
@@ -329,7 +329,11 @@ class LocalProcessRuntimeProvisionerTest {
         }
     }
 
-    /** Fences every renewal so provisioning loses its claim mid-boot. */
+    /**
+     * Adopts the worker, then refuses to publish READY. The service must
+     * release that lease. This does not wait for the renewal timer, which
+     * can lose the race on a fast machine.
+     */
     private static final class FencingBindingRepository
             implements RuntimeBindingRepository {
         private final InMemoryRuntimeBindingRepository delegate =
@@ -362,6 +366,10 @@ class LocalProcessRuntimeProvisionerTest {
         public RuntimeBindingRecord compareAndSet(
                 RuntimeBindingRecord expected,
                 RuntimeBindingRecord replacement) {
+            if (replacement.getState()
+                    == RuntimeBindingRecord.State.READY) {
+                return null;
+            }
             return delegate.compareAndSet(expected, replacement);
         }
 
@@ -375,7 +383,8 @@ class LocalProcessRuntimeProvisionerTest {
         public RuntimeBindingRecord renewOperation(String bindingId,
                 String owner, long operationGeneration,
                 Duration leaseDuration) {
-            return null;
+            return delegate.renewOperation(bindingId, owner,
+                    operationGeneration, leaseDuration);
         }
     }
 
