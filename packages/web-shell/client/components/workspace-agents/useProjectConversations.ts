@@ -55,7 +55,8 @@ export function useProjectConversations(cwds: readonly string[]) {
           } catch {
             return {
               sessions: sessionsByCwd.current.get(cwd) ?? [],
-              error: `无法加载项目对话：${cwd.split(/[\\/]/).at(-1)}`,
+              // The project's name; the sidebar words the failure.
+              error: cwd.split(/[\\/]/).at(-1),
             };
           }
         }),

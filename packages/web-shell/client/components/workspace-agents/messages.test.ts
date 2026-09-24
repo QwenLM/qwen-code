@@ -9,6 +9,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../../i18n';
+import {
+  formatElapsed,
+  statusReasonLabel,
+  triggerLabel,
+} from './agents-view-logic';
 import { COLLAB_MESSAGES_EN, COLLAB_MESSAGES_ZH } from './messages';
 import * as transcriptStub from './messages.transcript-stub';
 
@@ -24,6 +29,23 @@ describe('collaboration messages', () => {
         count: 2,
       }),
     ).toBe('lead 排队中，前面还有 2 个');
+  });
+
+  it("translate the server's triggers, status reasons and durations", () => {
+    // The server words triggers in English; a Chinese page showed them raw.
+    const zh = getTranslator('zh-CN');
+    expect(triggerLabel('mentioned by you', zh)).toBe('你 @ 了它');
+    expect(triggerLabel('mentioned by lead', zh)).toBe('lead @ 了它');
+    expect(triggerLabel('something new', zh)).toBe('something new');
+    expect(formatElapsed(405_000, zh)).toBe('6 分 45 秒');
+    // Status reasons: the live line comes in Chinese, the rest in English.
+    const en = getTranslator('en');
+    expect(statusReasonLabel('3 个智能体执行中，1 个排队中', en)).toBe(
+      '3 working, 1 queued',
+    );
+    expect(statusReasonLabel('no outstanding close obligation', zh)).toBe(
+      '没有待处理的事',
+    );
   });
 
   it('hold only collab keys, translated one for one', () => {
