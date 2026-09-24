@@ -14126,6 +14126,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     // The control in the other direction: deferring the hook context must
     // not turn the gate off for producers that build `error.message`
     // separately.
+    vi.mocked(fsWriteFile).mockClear();
     const message = await runBudgetedFailure({ hookContext: HOOK_CONTEXT });
 
     const suffix = `\n\n${HOOK_CONTEXT}`;
@@ -14134,6 +14135,12 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(isAlreadyTruncated(body)).toBe(true);
     expect(body).not.toContain('exit 7');
     expect(body).not.toContain(HOOK_CONTEXT);
+    // The gate persisted the producer's body alone: the context is appended
+    // after it, not folded into what it bounded.
+    const persisted = vi
+      .mocked(fsWriteFile)
+      .mock.calls.map(([, content]) => content);
+    expect(persisted).toEqual([FAILURE_BODY]);
   });
 
   it('caps oversized failure-hook context without touching the body', async () => {
@@ -14144,9 +14151,22 @@ describe('CoreToolScheduler telemetry spans', () => {
       hookContext: 'h'.repeat(200_000),
     });
 
-    expect(message.startsWith(`${FAILURE_BODY}\n\nh`)).toBe(true);
-    expect(message.length).toBeLessThan(
-      FAILURE_BODY.length + 2 * DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    expect(message).toBe(
+      `${FAILURE_BODY}\n\n${'h'.repeat(kept)}\n... [truncated, ${200_000 - kept} more characters]`,
+    );
+  });
+
+  it('never cuts failure-hook context between the halves of a surrogate pair', async () => {
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD - 1;
+    const hookContext = `${'h'.repeat(kept)}\u{1F600}${'t'.repeat(100)}`;
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext,
+    });
+
+    expect(message).toBe(
+      `${FAILURE_BODY}\n\n${'h'.repeat(kept)}\n... [truncated, ${hookContext.length - kept} more characters]`,
     );
   });
 
