@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
 import { LIVE_MESSAGES_EN } from './live/messages';
+import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
@@ -424,6 +425,21 @@ describe('build artifact — transcript entry (#11031)', () => {
     );
     expect(present).toEqual([]);
     expect(js).not.toContain('Talk in this browser');
+  });
+
+  it('carries no collaboration strings and looks none up', () => {
+    // Same arrangement as Live Voice: the collaboration dictionary is stubbed
+    // in this build, which is only safe while no transcript surface asks for
+    // one of its keys.
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const keys = Object.keys(COLLAB_MESSAGES_EN);
+    expect(keys.length).toBeGreaterThan(50);
+    expect(
+      keys.filter((key) => js.includes(`"${key}"`) || js.includes(`'${key}'`)),
+    ).toEqual([]);
   });
 
   it('still carries what a transcript actually renders', () => {
