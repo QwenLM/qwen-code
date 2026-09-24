@@ -19,7 +19,10 @@ function model(spans: TimelineSpan[]): TimelineModel {
   return {
     spans,
     turnMarks: [],
+    mode: 'active',
     total: Math.max(0, ...spans.map((s) => s.end)),
+    activeMs: Math.max(0, ...spans.map((s) => s.end)),
+    originMs: 0,
     droppedRows: 0,
   };
 }

@@ -326,11 +326,13 @@ export async function downloadWorkspaceFile(
     link.href = url;
     link.download =
       normalizePath(workspacePath).split('/').at(-1) ?? workspacePath;
+    // Prevent embedding hosts from replacing the native download with navigation.
+    link.addEventListener('click', (event) => event.stopPropagation());
     document.body.appendChild(link);
     link.click();
     link.remove();
   } finally {
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 }
 

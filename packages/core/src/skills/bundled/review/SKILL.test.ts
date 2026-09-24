@@ -514,7 +514,11 @@ describe('bundled review skill', () => {
     const builders = commands.filter((command) =>
       command.startsWith('"${QWEN_CODE_CLI:-qwen}" review agent-prompt '),
     );
-    expect(builders).toHaveLength(4);
+    // invariant-a (Step 3D repair), verify (Step 4), the two reverse-audit
+    // builds (Step 5), and the Step 6B fix-audit — one agent, still a
+    // recorded follow-up, so still a manifest riding `emit-workflow
+    // --batch`, never a hand-carried prompt.
+    expect(builders).toHaveLength(5);
     for (const command of builders) {
       expect(command).toContain('--batch');
       expect(command).toMatch(/> [^\n]+\.json/);
@@ -1119,6 +1123,157 @@ describe('bundled review skill', () => {
     expect(body).not.toContain('possible only on Aone');
     expect(body).toContain("relay the target's coordinates");
     expect(body).toContain('Never assemble an Aone link yourself');
+  });
+
+  it('pins the Step 6B fix audit as a scoped disclosure, not a re-review', () => {
+    const body = coreBody();
+    const step = body.slice(
+      body.indexOf('### Step 6B: Apply the findings (`--fix`)'),
+      body.indexOf('## Step 7: Submit PR review'),
+    );
+    expect(step.length).toBeGreaterThan(0);
+    // The ordering the audit's correctness turns on: the snapshot is taken
+    // BEFORE the first edit, the outcomes are recorded BEFORE the audit (it
+    // reads them off the rebuilt artifact), the hunks producer runs before
+    // the consumer, and the audit runs BEFORE the report_findings re-issue
+    // (its notes ride that call).
+    const at = (needle: string) => {
+      const i = step.indexOf(needle);
+      expect(i, `Step 6B lost: ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    expect(at('review fix-delta --snapshot')).toBeLessThan(
+      at('Apply each finding to the working tree'),
+    );
+    expect(
+      at('--outcomes .qwen/tmp/qwen-review-{target}-outcomes.json'),
+    ).toBeLessThan(at('review fix-delta \\\n  --since'));
+    expect(at('review fix-delta \\\n  --since')).toBeLessThan(
+      at('--role fix-audit'),
+    );
+    expect(at('--role fix-audit')).toBeLessThan(
+      at('**Then re-issue the `report_findings` call, outcomes on it.**'),
+    );
+    // Producer and consumer sides derive from the SAME strings: a rename of
+    // any producer `--out` path must touch the constant the consumer needle
+    // reads, or the auditor reads a stale leftover at the old path.
+    const snapshotPath = '.qwen/tmp/qwen-review-{target}-fix-snapshot.json';
+    const hunksPath = '.qwen/tmp/qwen-review-{target}-fix-hunks.diff';
+    const artifactPath = '.qwen/tmp/qwen-review-{target}-findings.json';
+    expect(step).toContain(`--out ${snapshotPath}`);
+    expect(step).toContain(`--since ${snapshotPath}`);
+    expect(step).toContain(`--out ${hunksPath}`);
+    expect(step).toContain(`--hunks ${hunksPath}`);
+    expect(step).toContain(`--out ${artifactPath}`);
+    expect(step).toContain(`--findings ${artifactPath}`);
+    // Failure-coupled: without the `&&` a failed `--since` leaves the
+    // auditor running over a previous run's hunks at the same path.
+    expect(step).toContain(`--out ${hunksPath} && \\`);
+    expect(step).toContain('The `&&` is load-bearing');
+    // `--plan` is `demandOption: true` on the builder.
+    expect(step).toContain(
+      'review agent-prompt --plan <the plan report from Step 1> --role fix-audit',
+    );
+    // Two things answer to "fix audit": the PR re-review's narrowed ROUND
+    // and this step's one AGENT. The step says which, and why they never
+    // meet in one run.
+    expect(step).toContain(
+      'It is not the **fix-audit round** Step 1 routes on when it chooses the topology',
+    );
+    expect(step).toContain(
+      'its target is a pull request, where `fix.effective` is false',
+    );
+    // The constraints that keep it from being the forbidden re-review, and
+    // the disclosure-not-finding rule that closes the back door.
+    expect(step).toContain('never the reviewed diff');
+    expect(step).toContain('one agent, and not a re-review');
+    expect(step).toContain('It produces no verdict and files no finding.');
+    expect(step).toContain('It reports two things, and both are disclosures:');
+    expect(step).toContain('hunks in, disclosures out, no verdict');
+    expect(step).toContain(
+      '**An unpinned assumption is a disclosure, not a finding.**',
+    );
+    expect(step).toContain('It never enters `findings-in.json`');
+    expect(step).toContain('never counts toward `fresh` or `induced`');
+    expect(step).toContain(
+      'never into `findings-in.json`, the census, or the verdict',
+    );
+    expect(step).toContain('**Do not re-run Steps 1–6**');
+    expect(step).toContain('precisely so that it is not one');
+    // Skip only when the ledger AND the tree agree nothing was applied.
+    expect(step).toContain(
+      '**Skip the audit — and say so in one line — only when the ledger holds no `fixed` outcome and the hunks file is empty**',
+    );
+    // The two ledger/tree mismatches are diagnoses, each with a foreign-write
+    // exit that never invents an outcome.
+    expect(step).toContain(
+      '**Hunks that landed beside a ledger with no `fixed` outcome**',
+    );
+    expect(step).toContain('do not invent a `fixed` outcome to clear it');
+    expect(step).toContain(
+      'Fix audit: not run — hunks carry edits no outcome owns',
+    );
+    expect(step).toContain('**An empty hunks file beside a `fixed` outcome**');
+    expect(step).toContain('Fix audit: not run — <what the command said>');
+    expect(step).toContain(
+      'disclosed and moved past, never a reason to touch the outcomes or the artifact',
+    );
+    // The scope `fix-delta --since` prints is relayed beside the return: an
+    // all-clear without it claims more than the command saw.
+    expect(step).toContain(
+      '**`fix-delta --since` states its scope on stderr, every run**',
+    );
+    expect(step).toContain('`HEAD moved between the two moments`');
+    // …relayed with what it actually means: the hunks still compare the
+    // working tree, so a committed edit IS in them.
+    expect(step).toContain('so a committed edit is in them');
+    // Several auditor lines for one id share that finding's single note.
+    expect(step).toContain(
+      'joined with `; `, after any note the fix round already wrote',
+    );
+    expect(step).toContain(
+      'Repeat those lines under the **Fix audit** heading',
+    );
+    // Both of the auditor's line forms have a ledger-note template, and the
+    // re-issue carries the note to the client.
+    expect(step).toContain(
+      'run the `review findings --outcomes` command above again',
+    );
+    expect(step).toContain('for every `fixed` the fix audit annotated');
+    expect(step).toContain(
+      '`fix audit: unpinned — assumes <…>; pin with: <…>` for an assumption',
+    );
+    expect(step).toContain(
+      '`fix audit: unattested — no hunk in the audit input touches <its locations>`',
+    );
+    expect(step).toContain('`subagent_type: "review-agent"`');
+    // Reach, stated exactly: the local/file `--fix` path only.
+    expect(step).toContain(
+      'this audit runs where Step 6B runs — the `local` and `file` `--fix` path, the one `fix.effective` admits',
+    );
+    expect(step).toContain('the path #10153 covers');
+    // The interactive path: the plan `agent-prompt --plan` needs is swept on
+    // a local target and survives on a file target.
+    expect(step).toContain(
+      'Fix audit: not run — plan report swept by Step 9 cleanup',
+    );
+    expect(step).toContain('**On a `local` target the plan is gone**');
+    expect(step).toContain(
+      '**On a FILE target no sweep ever reaches the plan**',
+    );
+    expect(step).toContain("**run the audit on this path in Step 6B's order**");
+    // The file-target path's order and inputs: snapshot BEFORE the first
+    // edit, and the REBUILT artifact as --findings, never the saved one.
+    expect(step).toContain('look **before the first edit**');
+    expect(step).toContain(
+      'and **that rebuilt artifact** as `--findings`, never the saved artifact itself',
+    );
+    expect(step).toContain(
+      '`agent-prompt --role fix-audit … --hunks … --batch`, `emit-workflow --batch`',
+    );
+    expect(step).toContain(
+      'Fix audit: not run — file-review plan removed at Step 9',
+    );
   });
 
   it('pins the fix-witness mandate in all three of its halves', () => {
