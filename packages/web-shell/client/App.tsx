@@ -13586,6 +13586,53 @@ export function App({
     [createNewSession],
   );
 
+  /**
+   * Post-delete landing for the session the client is currently attached to:
+   * leave the deleted conversation and open a fresh draft in the same
+   * workspace context. Shared by the Session Overview panel, the sidebar row
+   * delete, and the delete-session picker (issue #12619).
+   */
+  const handleCurrentSessionRemoved = useCallback(
+    async (removed: { sessionId: string; workspaceCwd: string }) => {
+      const current = connectionRef.current;
+      const currentWorkspaceCwd =
+        current.workspaceCwd ||
+        lockedWorkspaceCwd ||
+        workspacesRef.current.find((entry) => entry.primary)?.cwd;
+      if (
+        current.sessionId !== removed.sessionId ||
+        (currentWorkspaceCwd && currentWorkspaceCwd !== removed.workspaceCwd)
+      ) {
+        return;
+      }
+      const cleared = await createNewSession(
+        {
+          kind: 'workspace',
+          cwd: removed.workspaceCwd,
+        },
+        {
+          keepView: true,
+          keepPanel: true,
+        },
+      );
+      const latest = connectionRef.current;
+      const latestWorkspaceCwd =
+        latest.workspaceCwd ||
+        lockedWorkspaceCwd ||
+        workspacesRef.current.find((entry) => entry.primary)?.cwd;
+      if (
+        cleared &&
+        (!latestWorkspaceCwd || latestWorkspaceCwd === removed.workspaceCwd) &&
+        (latest.sessionId === removed.sessionId ||
+          latest.sessionId === undefined)
+      ) {
+        onSessionIdChange?.(undefined);
+      }
+      return cleared;
+    },
+    [createNewSession, lockedWorkspaceCwd, onSessionIdChange],
+  );
+
   const switchWorkspace = useCallback(
     async (
       workspaceCwd: string | undefined,
@@ -19121,6 +19168,24 @@ export function App({
                 workspaceCwd={lockedWorkspaceCwd}
                 onDeleted={(sessionIds) => {
                   closeUsageTabs(sessionIds);
+                  // Deleting the attached session must leave the deleted
+                  // conversation: open a fresh draft in the same context,
+                  // mirroring the Session Overview (#12619).
+                  const current = connectionRef.current;
+                  if (
+                    current.sessionId &&
+                    sessionIds.includes(current.sessionId)
+                  ) {
+                    void handleCurrentSessionRemoved({
+                      sessionId: current.sessionId,
+                      workspaceCwd:
+                        current.workspaceCwd ||
+                        lockedWorkspaceCwd ||
+                        workspacesRef.current.find((entry) => entry.primary)
+                          ?.cwd ||
+                        '',
+                    });
+                  }
                   store.dispatch([
                     {
                       type: 'status',
@@ -19410,7 +19475,28 @@ export function App({
                     returnToChat();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
-                  onSessionsDeleted={closeUsageTabs}
+                  onSessionsDeleted={(sessionIds) => {
+                    closeUsageTabs(sessionIds);
+                    // Deleting the attached session must leave the deleted
+                    // conversation: open a fresh draft in the same context,
+                    // mirroring the Session Overview (#12619).
+                    const current = connectionRef.current;
+                    if (
+                      !current.sessionId ||
+                      !sessionIds.includes(current.sessionId)
+                    ) {
+                      return;
+                    }
+                    void handleCurrentSessionRemoved({
+                      sessionId: current.sessionId,
+                      workspaceCwd:
+                        current.workspaceCwd ||
+                        lockedWorkspaceCwd ||
+                        workspacesRef.current.find((entry) => entry.primary)
+                          ?.cwd ||
+                        '',
+                    });
+                  }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   onMobileClose={closeMobileDrawer}
@@ -20003,49 +20089,7 @@ export function App({
                         // Split view cannot exist below the breakpoint; the
                         // panel hides the action when the prop is absent.
                         onOpenSplit={isLargeScreen ? openSplitView : undefined}
-                        onCurrentSessionRemoved={async (removed) => {
-                          const current = connectionRef.current;
-                          const currentWorkspaceCwd =
-                            current.workspaceCwd ||
-                            lockedWorkspaceCwd ||
-                            workspacesRef.current.find(
-                              (entry) => entry.primary,
-                            )?.cwd;
-                          if (
-                            current.sessionId !== removed.sessionId ||
-                            (currentWorkspaceCwd &&
-                              currentWorkspaceCwd !== removed.workspaceCwd)
-                          ) {
-                            return;
-                          }
-                          const cleared = await createNewSession(
-                            {
-                              kind: 'workspace',
-                              cwd: removed.workspaceCwd,
-                            },
-                            {
-                              keepView: true,
-                              keepPanel: true,
-                            },
-                          );
-                          const latest = connectionRef.current;
-                          const latestWorkspaceCwd =
-                            latest.workspaceCwd ||
-                            lockedWorkspaceCwd ||
-                            workspacesRef.current.find(
-                              (entry) => entry.primary,
-                            )?.cwd;
-                          if (
-                            cleared &&
-                            (!latestWorkspaceCwd ||
-                              latestWorkspaceCwd === removed.workspaceCwd) &&
-                            (latest.sessionId === removed.sessionId ||
-                              latest.sessionId === undefined)
-                          ) {
-                            onSessionIdChange?.(undefined);
-                          }
-                          return cleared;
-                        }}
+                        onCurrentSessionRemoved={handleCurrentSessionRemoved}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         manageLiveState={false}

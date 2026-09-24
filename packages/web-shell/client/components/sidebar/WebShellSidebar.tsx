@@ -1968,7 +1968,12 @@ export function WebShellSidebar({
   );
   const canDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
-      !isCurrentSession(session) && canShowDeleteSession(session),
+      // The current session is deletable too (issue #12619), but deleting the
+      // session the client is attached to tears its runtime down — match the
+      // Session Overview's idle-only policy for that case.
+      (!isCurrentSession(session) ||
+        (!session.hasActivePrompt && session.activeWorkState !== 'active')) &&
+      canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
   );
   const canOrganizeSession = useCallback(
@@ -4656,11 +4661,12 @@ export function WebShellSidebar({
                           key: 'delete',
                           icon: <Trash2Icon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.delete'),
-                          disabled: busy || isCurrent,
+                          disabled: busy || !canDeleteSession(session),
                           destructive: true,
-                          title: isCurrent
-                            ? t('sidebar.currentDeleteDisabled')
-                            : undefined,
+                          title:
+                            isCurrent && running
+                              ? t('sidebar.currentDeleteDisabled')
+                              : undefined,
                           visible:
                             showDelete && inlineActionItems.has('delete'),
                           onClick: () => {
@@ -4792,9 +4798,9 @@ export function WebShellSidebar({
                             {showDelete && !inlineActionItems.has('delete') && (
                               <DropdownMenuItem
                                 variant="destructive"
-                                disabled={busy || isCurrent}
+                                disabled={busy || !canDeleteSession(session)}
                                 title={
-                                  isCurrent
+                                  isCurrent && running
                                     ? t('sidebar.currentDeleteDisabled')
                                     : undefined
                                 }

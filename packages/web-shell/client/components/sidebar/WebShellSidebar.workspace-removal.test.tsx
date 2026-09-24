@@ -1198,8 +1198,10 @@ describe('WebShellSidebar workspace removal', () => {
     });
     await expandWorkspace('other');
 
+    // Current-session delete is allowed while the session is idle (#12619);
+    // archive keeps its current-session restriction.
     expect(inlineSessionAction('Locked current', 'Delete')?.disabled).toBe(
-      true,
+      false,
     );
     expect(
       (await openSessionMenuItem('Locked current', 'Archive')).getAttribute(
@@ -2473,7 +2475,8 @@ describe('WebShellSidebar workspace removal', () => {
     const rename = inlineSessionAction('Current no-cwd primary', 'Rename');
     const remove = inlineSessionAction('Current no-cwd primary', 'Delete');
     expect(rename?.disabled).toBe(false);
-    expect(remove?.disabled).toBe(true);
+    // Current-session delete is allowed while the session is idle (#12619).
+    expect(remove?.disabled).toBe(false);
     const archive = await openSessionMenuItem(
       'Current no-cwd primary',
       'Archive',
@@ -2482,7 +2485,6 @@ describe('WebShellSidebar workspace removal', () => {
 
     await act(async () => {
       click(archive);
-      click(remove!);
       await Promise.resolve();
     });
     expect(
@@ -2491,9 +2493,7 @@ describe('WebShellSidebar workspace removal', () => {
       ),
     ).toBe(false);
 
-    expect(document.body.textContent).not.toContain('Delete Session');
     expect(active.archiveSession).not.toHaveBeenCalled();
-    expect(active.deleteSession).not.toHaveBeenCalled();
   });
 
   it('deduplicates pending no-cwd primary renames and clears the busy identity afterward', async () => {

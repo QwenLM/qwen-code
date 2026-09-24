@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
-import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  useConnection,
+  type DaemonSessionSummary,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
@@ -70,9 +73,21 @@ export function DeleteSessionDialog({
     [sessions, filterQuery],
   );
 
+  // The current session is deletable (issue #12619), but deleting the session
+  // the client is attached to tears its runtime down — match the Session
+  // Overview's idle-only policy for that case.
+  const blocksCurrentDelete = useCallback(
+    (session: DaemonSessionSummary) =>
+      session.sessionId === currentSessionId &&
+      (Boolean(session.hasActivePrompt) ||
+        session.activeWorkState === 'active'),
+    [currentSessionId],
+  );
+
   const toggleSelection = useCallback(
-    (sessionId: string) => {
-      if (sessionId === currentSessionId) return;
+    (session: DaemonSessionSummary) => {
+      if (blocksCurrentDelete(session)) return;
+      const sessionId = session.sessionId;
       setSelectedIds((prev) => {
         const next = new Set(prev);
         if (next.has(sessionId)) {
@@ -83,7 +98,7 @@ export function DeleteSessionDialog({
         return next;
       });
     },
-    [currentSessionId],
+    [blocksCurrentDelete],
   );
 
   useEffect(() => {
@@ -120,7 +135,7 @@ export function DeleteSessionDialog({
     onActiveIndexChange: setSelectedIdx,
     onConfirm: (index) => {
       const session = filtered[index];
-      if (session) toggleSelection(session.sessionId);
+      if (session) toggleSelection(session);
     },
   });
 
@@ -184,7 +199,7 @@ export function DeleteSessionDialog({
 
     const session = filtered[selectedIdx];
     if (!session) return;
-    if (session.sessionId === currentSessionId) {
+    if (blocksCurrentDelete(session)) {
       setMessage(t('delete.cannotCurrent'));
       return;
     }
@@ -204,7 +219,7 @@ export function DeleteSessionDialog({
         setDeleting(false);
       });
   }, [
-    currentSessionId,
+    blocksCurrentDelete,
     deleteSession,
     deleteSessions,
     deleting,
@@ -285,6 +300,7 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
+            const deleteBlocked = blocksCurrentDelete(s);
             return (
               <SessionRow
                 key={s.sessionId}
@@ -293,7 +309,7 @@ export function DeleteSessionDialog({
                 active={i === selectedIdx}
                 ariaSelected={isChecked}
                 current={false}
-                disabled={isCurrent}
+                disabled={deleteBlocked}
                 leading={
                   <span
                     className={dp(
@@ -313,7 +329,7 @@ export function DeleteSessionDialog({
                 }
                 onClick={() => {
                   setSelectedIdx(i);
-                  if (!isCurrent) toggleSelection(s.sessionId);
+                  toggleSelection(s);
                 }}
                 onActivate={() => setSelectedIdx(i)}
               />
