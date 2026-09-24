@@ -325,6 +325,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                   ? MACOS_TITLEBAR_CLASS
                   : undefined,
                 header: {
+                  showMobileAccess: true,
                   items: [
                     'title',
                     'environment',
