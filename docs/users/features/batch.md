@@ -124,8 +124,9 @@ newer models default it on, and thinking tokens can eat the 50% discount.
 Provider limits: a file must be homogeneous — one model and one thinking
 configuration for every line (a per-line `model` overrides the default, so a
 mixed file is rejected server-side only after upload) — and at most 6 MB per
-line, 500 MB / 50 000 lines per file. Context is capped at 256K per batch
-request.
+line, 500 MB / 50 000 lines per file; `qwen batch` checks these three before
+uploading. The provider also caps context at 256K per batch request; that one
+is not checked locally, so an oversized request fails on the provider side.
 
 `--window` sets the completion window (default `24h`, maximum `14d`). A longer
 window does not make the job slower; it is the deadline, not the schedule.
@@ -275,7 +276,7 @@ nothing and deletes no remote file, and it refuses while a batch may still
 be running or holds uncollected results (the record is the only way to
 collect or reconcile them) unless you pass `--force`. Delivered files are
 yours and are never touched. The design contract for this workflow is
-[`docs/design/2026-09-23-agent-prepared-batch-api.md`](../design/2026-09-23-agent-prepared-batch-api.md).
+[`docs/design/2026-09-23-agent-prepared-batch-api.md`](../../design/2026-09-23-agent-prepared-batch-api.md).
 
 ## Verifying locally without an API key
 

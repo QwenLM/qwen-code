@@ -36,12 +36,14 @@
 ### `/batch-api <任务>`（交互式）
 
 独立的内置 skill `packages/core/src/skills/bundled/batch-api/`，与现有
-`/batch`（实时并行 worker，保持不变）并列，而不是塞进它里面。两者不能互相
-替代：`/batch` 的 worker 能调用工具、几分钟内就地改文件；`/batch-api` 的
-请求是单轮、无工具、只写新目标文件、要等几小时。该 skill 设置
-`disable-model-invocation: true`，选择 Batch 永远是用户的显式动作——模型
-既不能自行进入、也不能自行退出这个模式。它的 `allowedTools` 只授予只读
-工具；写计划文件和执行会花钱的 `qwen batch run` 仍走正常的审批提示。
+`/batch`（实时并行 worker）并列，而不是塞进它里面。两者不能互相替代：`/batch`
+的 worker 能调用工具、几分钟内就地改文件；`/batch-api` 的请求是单轮、无工具、
+只写新目标文件、要等几小时。`/batch` 的行为不变，只在它对模型可见的描述里加了
+一句，让模型可以*建议*用户输入 `/batch-api`。新 skill 设置
+`disable-model-invocation: true`，模型无法调用它——进入 Batch 路径永远是用户的
+显式动作。它的 `allowedTools` 预批准 `glob`、`grep_search` 和 `read_file`（权限
+规则会把后者扩展到整个读取工具族，即 `list_directory` 与 `zoom_image`），全部
+只读；写计划文件和执行会花钱的 `qwen batch run` 仍走正常的审批提示。
 
 该 skill 只让模型做语义工作：
 

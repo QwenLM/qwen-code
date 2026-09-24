@@ -56,11 +56,37 @@ export interface BatchApiError extends Error {
   status?: number;
 }
 
+/** A provider id (batch or file) that is safe as a single URL segment. */
+const ID_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * Refuse an id that is not a single path component. Ids come from argv, a
+ * task ledger or a provider response; one carrying `/`, `..` or `?` would
+ * turn into a different URL (and, for `fetch`, a filename outside `--out`).
+ */
+export function assertBatchId(id: string, kind = 'batch'): void {
+  if (!ID_SEGMENT.test(id)) {
+    throw new Error(
+      `invalid ${kind} id "${id}": expected a single id component (letters, digits, dot, dash, underscore)`,
+    );
+  }
+}
+
+// Every request below carries the API key. The routes this client builds are
+// all of these shapes; anything else — an id that smuggled in `../` — would
+// send the key to another path on the host, so it is refused before sending,
+// whichever caller assembled it.
+const BATCH_ROUTE =
+  /^\/(?:batches|files)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/(?:cancel|content))?)?(?:\?[A-Za-z0-9_=&.-]*)?$/;
+
 export async function batchRequest(
   ep: BatchEndpoint,
   route: string,
   init: RequestInit = {},
 ): Promise<Response> {
+  if (!BATCH_ROUTE.test(route)) {
+    throw new Error(`refusing a request outside the Batch API paths: ${route}`);
+  }
   const res = await fetch(`${ep.baseUrl}${route}`, {
     ...init,
     headers: { Authorization: `Bearer ${ep.apiKey}`, ...(init.headers ?? {}) },

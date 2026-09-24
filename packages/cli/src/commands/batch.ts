@@ -28,6 +28,7 @@ import {
   MAX_LINE_BYTES,
   assertValidWindow,
   batchRequest as api,
+  assertBatchId,
   uploadBatchJsonl,
   downloadRemoteFile,
 } from './batch-client.js';
@@ -413,8 +414,10 @@ export async function submitBatch(
   }
 }
 
-export const getBatch = async (ep: BatchEndpoint, id: string) =>
-  (await (await api(ep, `/batches/${id}`)).json()) as BatchJob;
+export const getBatch = async (ep: BatchEndpoint, id: string) => {
+  assertBatchId(id);
+  return (await (await api(ep, `/batches/${id}`)).json()) as BatchJob;
+};
 
 /** One line: id, status, N/M done, phase from the timestamps, deadline. */
 export function describeBatch(job: BatchJob, now = Date.now() / 1000): string {
@@ -444,11 +447,7 @@ export async function fetchBatch(
   // The argv id becomes a URL segment and a filename verbatim: a value with
   // path separators (../../report) would write outside outDir, and the
   // download's final rename would replace whatever lives there.
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
-    throw new Error(
-      `invalid batch id "${id}": expected a single id component (letters, digits, dot, dash, underscore)`,
-    );
-  }
+  assertBatchId(id);
   const job = await getBatch(ep, id);
   if (!SETTLED.has(job.status)) {
     throw new Error(
@@ -613,8 +612,10 @@ const cancelCommand: CommandModule = {
         await cancelTask(workflowDeps(ep), argv['task'] as string);
         return;
       }
+      const id = argv['id'] as string;
+      assertBatchId(id);
       const job = (await (
-        await postJson(ep, `/batches/${argv['id'] as string}/cancel`, {})
+        await postJson(ep, `/batches/${id}/cancel`, {})
       ).json()) as BatchJob;
       writeStdoutLine(describeBatch(job));
     }),

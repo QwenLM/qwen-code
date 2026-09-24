@@ -9,9 +9,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
+import { batchRequest } from './batch-client.js';
 import {
   describeBatch,
   fetchBatch,
+  getBatch,
   prepareEndpoint,
   resolveEndpoint,
   submitBatch,
@@ -610,6 +612,43 @@ describe('submitBatch / fetchBatch', () => {
       /invalid batch id/,
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses an id that would move a status query off /batches', async () => {
+    // `status` (and `cancel`) put the id in the URL next to the API key;
+    // `../../x` would otherwise reach GET /x with the bearer token.
+    await expect(getBatch(ep, '../../escaped-namespace')).rejects.toThrow(
+      /invalid batch id/,
+    );
+    await expect(getBatch(ep, 'b?x=1')).rejects.toThrow(/invalid batch id/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('never sends the API key outside the Batch API paths', async () => {
+    for (const route of [
+      '/batches/../../escaped/cancel',
+      '/files/a/b/content',
+      '/models',
+      '/batches/batch-1/../../x',
+    ]) {
+      await expect(batchRequest(ep, route)).rejects.toThrow(
+        /outside the Batch API paths/,
+      );
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+    for (const route of [
+      '/files',
+      '/batches',
+      '/batches?limit=100&after=batch_abc-1',
+      '/batches/batch_abc/cancel',
+      '/files/file-batch.1/content',
+      '/files/file-1',
+    ]) {
+      await batchRequest(ep, route);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it('still reports a successful fetch when a remote delete fails', async () => {

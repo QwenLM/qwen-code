@@ -125,6 +125,12 @@ unset QWEN_CODE_NO_RELAUNCH
 # Inherited provider credentials must never be consulted here (ci.yml blanks
 # them for the no-AK gate for the same reason).
 unset DASHSCOPE_API_KEY DASHSCOPE_BASE_URL
+# Settings must come only from the HOME each step names. QWEN_HOME (common in
+# containers and sandboxes) or a machine-wide system settings file would win
+# over R3's qwen-oauth fixture, and R3 then runs with the API key and exits 0.
+unset QWEN_HOME
+export QWEN_CODE_SYSTEM_SETTINGS_PATH="${SCR}/no-system-settings.json"
+export QWEN_CODE_SYSTEM_DEFAULTS_PATH="${SCR}/no-system-defaults.json"
 export HOME="${SCR}/home"
 export OPENAI_API_KEY=sk-fake
 export OPENAI_MODEL=qwen-plus

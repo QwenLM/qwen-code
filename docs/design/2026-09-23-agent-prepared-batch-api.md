@@ -8,7 +8,7 @@ This document is the design contract for the workflow layer; the user-facing
 guide lives in `docs/users/features/batch.md`. A team explainer (Batch API
 traits, architecture diagrams of the three execution paths, the auto-collect
 design) is in
-[`2026-09-23-batch-api-overview.zh-CN.md`](./2026-09-23-batch-api-overview.zh-CN.md);
+[`2026-09-23-batch-api-overview.md`](./2026-09-23-batch-api-overview.md);
 first measured results are in
 [`docs/verification/batch-api/results-2026-09-23.md`](../verification/batch-api/results-2026-09-23.md).
 
@@ -45,13 +45,16 @@ Two product promises, kept separate:
 ### `/batch-api <task>` (interactive)
 
 A separate bundled skill, `packages/core/src/skills/bundled/batch-api/`,
-next to — not inside — the existing `/batch` (realtime parallel workers,
-unchanged). The two are not substitutes: `/batch` workers use tools and edit
-files in place within minutes; `/batch-api` requests are single-turn,
-tool-less, write only fresh targets, and take hours. The skill sets
-`disable-model-invocation: true`, so choosing Batch is always the user's
-explicit act — the model can neither enter nor leave this mode on its own.
-Its `allowedTools` grants read-only tools only; writing the plan and
+next to — not inside — the existing `/batch` (realtime parallel workers). The
+two are not substitutes: `/batch` workers use tools and edit files in place
+within minutes; `/batch-api` requests are single-turn, tool-less, write only
+fresh targets, and take hours. `/batch`'s behavior is unchanged; one sentence
+was added to its model-visible description so the model can _suggest_ that the
+user type `/batch-api`. The new skill sets `disable-model-invocation: true`, so
+the model cannot invoke it — entering the Batch path is always the user's
+explicit act. Its `allowedTools` pre-approves `glob`, `grep_search` and
+`read_file` (which the permission rules expand to the rest of the read family,
+`list_directory` and `zoom_image`) — all read-only; writing the plan and
 `qwen batch run` (which spends money) stay behind the approval prompt.
 
 The skill makes the model do the semantic work only:
