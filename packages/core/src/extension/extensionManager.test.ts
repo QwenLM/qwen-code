@@ -2960,6 +2960,93 @@ describe('extension tests', () => {
     });
   });
 
+  describe('refreshExtensionDetailsSnapshot', () => {
+    it('loads only the selected resources while preserving all snapshot identities', async () => {
+      for (const name of ['ext-a', 'ext-b', 'ext-c']) {
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name,
+          addContextFile: true,
+        });
+      }
+      const manager = createExtensionManager();
+      const load = vi.spyOn(manager, 'loadExtension');
+      const { snapshot, extension } =
+        await manager.refreshExtensionDetailsSnapshot('EXT-B');
+
+      expect(extension?.name).toBe('ext-b');
+      expect(extension?.contextFiles).toHaveLength(1);
+      expect(
+        Object.values(snapshot.extensions)
+          .map((entry) => entry.name)
+          .sort(),
+      ).toEqual(['ext-a', 'ext-b', 'ext-c']);
+      const loaded = await Promise.all(
+        load.mock.results.map((result) => result.value),
+      );
+      expect(
+        loaded
+          .filter((entry) => entry?.contextFiles.length)
+          .map((entry) => entry.name),
+      ).toEqual(['ext-b']);
+      expect(manager.getLoadedExtensions()).toEqual([]);
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()).toHaveLength(3);
+      expect(
+        manager
+          .getLoadedExtensions()
+          .every((entry) => entry.contextFiles.length === 1),
+      ).toBe(true);
+    });
+
+    it('returns null for a missing extension without loading other resources', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-a',
+        addContextFile: true,
+      });
+      const manager = createExtensionManager();
+      const load = vi.spyOn(manager, 'loadExtension');
+      const { extension } =
+        await manager.refreshExtensionDetailsSnapshot('missing');
+      expect(extension).toBeNull();
+      const loaded = await Promise.all(
+        load.mock.results.map((result) => result.value),
+      );
+      expect(loaded.every((entry) => entry?.contextFiles.length === 0)).toBe(
+        true,
+      );
+    });
+
+    it('reads plugin details without creating its data directory', async () => {
+      createAgentPlugin(path.join(userExtensionsDir, 'plugin-ext'), {
+        name: 'plugin-ext',
+      });
+      const storeDir = path.join(tempHomeDir, 'detail-store');
+      const manager = createExtensionManager({
+        extensionStore: new ExtensionStore({
+          extensionsDir: userExtensionsDir,
+          storeDir,
+        }),
+      });
+      const { extension } =
+        await manager.refreshExtensionDetailsSnapshot('plugin-ext');
+      expect(extension?.name).toBe('plugin-ext');
+      expect(fs.existsSync(path.join(storeDir, 'plugin-data'))).toBe(false);
+    });
+
+    it('fails closed on an unreadable installed entry', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      fs.symlinkSync(
+        path.join(userExtensionsDir, 'missing-target'),
+        path.join(userExtensionsDir, 'broken'),
+      );
+      await expect(
+        createExtensionManager().refreshExtensionDetailsSnapshot('ext-a'),
+      ).rejects.toThrow();
+    });
+  });
+
   describe('refreshCatalogSnapshot', () => {
     it('loads manifest identity fields without subresources', async () => {
       createExtension({

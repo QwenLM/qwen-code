@@ -221,6 +221,8 @@ import type {
   ForkSessionRequest,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
+  DaemonWorkspaceExtensionSummaries,
+  DaemonExtensionEntry,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
   ExtensionArchiveInstallRequest,
@@ -1832,6 +1834,22 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceExtensionsStatus>(
       '/workspace/extensions',
       'GET /workspace/extensions',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceExtensionSummaries(): Promise<DaemonWorkspaceExtensionSummaries> {
+    return await this.jsonRequest<DaemonWorkspaceExtensionSummaries>(
+      '/workspace/extensions/summary',
+      'GET /workspace/extensions/summary',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceExtensionDetails(name: string): Promise<DaemonExtensionEntry> {
+    return await this.jsonRequest<DaemonExtensionEntry>(
+      `/workspace/extensions/${urlEncode(name)}/details`,
+      'GET /workspace/extensions/:name/details',
       { mode: 'rest' },
     );
   }

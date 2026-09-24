@@ -6,6 +6,11 @@
 
 import * as crypto from 'node:crypto';
 import {
+  redactExtensionDisplaySource,
+  toExtensionEntry,
+  toExtensionSummary,
+} from './extension-status.js';
+import {
   ExtensionManager,
   redactUrlCredentials,
   stripAnsiAndControl,
@@ -25,9 +30,9 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
   STATUS_SCHEMA_VERSION,
-  type ServeExtensionCapabilities,
   type ServeExtensionEntry,
   type ServeWorkspaceExtensionsStatus,
+  type ServeWorkspaceExtensionSummaries,
 } from '@qwen-code/acp-bridge/status';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
@@ -41,19 +46,7 @@ const MAX_UNFINISHED_EXTENSION_OPERATIONS = 10;
 const sanitizeDaemonMessage = (message: string): string =>
   redactUrlCredentials(stripAnsiAndControl(message));
 
-export const redactExtensionDisplaySource = (source: string): string => {
-  const redacted = redactUrlCredentials(source);
-  if (redacted.startsWith('upload:')) return redacted;
-  if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
-  try {
-    const url = new URL(redacted);
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return redacted;
-  }
-};
+export { redactExtensionDisplaySource } from './extension-status.js';
 
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
@@ -226,6 +219,8 @@ export interface ExtensionsController {
     interactions?: ExtensionInteractionHandlers,
   ): ExtensionManager;
   buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
+  buildLocalExtensionSummaries(): Promise<ServeWorkspaceExtensionSummaries>;
+  buildLocalExtensionDetails(name: string): Promise<ServeExtensionEntry | null>;
   refreshExtensionsForAllSessions(): Promise<{
     refreshed: number;
     failed: number;
@@ -1028,78 +1023,7 @@ export function createExtensionsController(
       await extensionManager.refreshCache();
       const entries: ServeExtensionEntry[] = extensionManager
         .getLoadedExtensions()
-        .map((ext): ServeExtensionEntry => {
-          const capabilities: ServeExtensionCapabilities = {
-            mcpServerCount: ext.mcpServers
-              ? Object.keys(ext.mcpServers).length
-              : 0,
-            skillCount: ext.skills?.length ?? 0,
-            agentCount: ext.agents?.length ?? 0,
-            hookCount: ext.hooks
-              ? Object.values(ext.hooks).reduce(
-                  (sum, defs) => sum + (defs?.length ?? 0),
-                  0,
-                )
-              : 0,
-            commandCount: ext.commands?.length ?? 0,
-            contextFileCount: ext.contextFiles.length,
-            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
-            hasSettings: (ext.settings?.length ?? 0) > 0,
-          };
-          return {
-            kind: 'extension',
-            id: ext.id,
-            name: ext.name,
-            ...(ext.displayName ? { displayName: ext.displayName } : {}),
-            ...(ext.config.description
-              ? { description: ext.config.description }
-              : {}),
-            version: ext.version,
-            isActive: ext.isActive,
-            path: ext.path,
-            ...(ext.installMetadata?.source &&
-            ext.installMetadata.type !== 'snapshot'
-              ? {
-                  source: redactExtensionDisplaySource(
-                    ext.installMetadata.source,
-                  ),
-                }
-              : {}),
-            ...(ext.installMetadata?.type
-              ? { installType: ext.installMetadata.type }
-              : {}),
-            ...(ext.installMetadata?.originSource
-              ? { originSource: ext.installMetadata.originSource }
-              : {}),
-            ...(ext.installMetadata?.ref
-              ? { ref: ext.installMetadata.ref }
-              : {}),
-            ...(ext.installMetadata?.autoUpdate !== undefined
-              ? { autoUpdate: ext.installMetadata.autoUpdate }
-              : {}),
-            ...(ext.installMetadata?.type === 'snapshot'
-              ? { credentialPersistence: 'one_time' as const }
-              : ext.installMetadata?.credentialPersistence === 'stored'
-                ? { credentialPersistence: 'stored' as const }
-                : {}),
-            updateState:
-              ext.installMetadata?.type === 'snapshot'
-                ? 'not updatable'
-                : ext.installMetadata
-                  ? 'unknown'
-                  : 'not updatable',
-            capabilities,
-            details: {
-              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
-              commands: ext.commands ?? [],
-              skills: ext.skills?.map((skill) => skill.name) ?? [],
-              agents: ext.agents?.map((agent) => agent.name) ?? [],
-              contextFiles: ext.contextFiles,
-              settings:
-                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
-            },
-          };
-        });
+        .map(toExtensionEntry);
       const status = {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: boundWorkspace,
@@ -1114,11 +1038,55 @@ export function createExtensionsController(
       return status;
     };
 
+  const buildLocalExtensionSummaries =
+    async (): Promise<ServeWorkspaceExtensionSummaries> => {
+      const manager = createExtensionManager();
+      const { snapshot, extensions } = await manager.refreshCatalogSnapshot();
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: boundWorkspace,
+        initialized: true,
+        extensions: [
+          ...new Map(
+            extensions.map((extension) => [extension.name, extension]),
+          ).values(),
+        ].map((extension) => ({
+          ...toExtensionSummary(extension),
+          isActive:
+            manager.getExtensionActivationForIdentityFromSnapshot(
+              extension,
+              snapshot,
+              boundWorkspace,
+            ).effective === 'enabled',
+        })),
+      };
+    };
+
+  const buildLocalExtensionDetails = async (
+    name: string,
+  ): Promise<ServeExtensionEntry | null> => {
+    const manager = createExtensionManager();
+    const { snapshot, extension } =
+      await manager.refreshExtensionDetailsSnapshot(name);
+    if (!extension) return null;
+    return {
+      ...toExtensionEntry(extension),
+      isActive:
+        manager.getExtensionActivationForIdentityFromSnapshot(
+          extension,
+          snapshot,
+          boundWorkspace,
+        ).effective === 'enabled',
+    };
+  };
+
   return {
     boundWorkspace,
     workspace,
     createExtensionManager,
     buildLocalExtensionsStatus,
+    buildLocalExtensionSummaries,
+    buildLocalExtensionDetails,
     refreshExtensionsForAllSessions,
     getOperation: (operationId) => extensionOperations.get(operationId),
     getActiveOperations: () =>

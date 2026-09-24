@@ -1586,6 +1586,16 @@ export interface ServeWorkspaceExtensionsStatus {
   errors?: ServeStatusCell[];
 }
 
+export type ServeExtensionSummary = Omit<
+  ServeExtensionEntry,
+  'capabilities' | 'details'
+>;
+
+export type ServeWorkspaceExtensionSummaries = Omit<
+  ServeWorkspaceExtensionsStatus,
+  'extensions'
+> & { extensions: ServeExtensionSummary[] };
+
 export function createIdleWorkspaceExtensionsStatus(
   workspaceCwd: string,
 ): ServeWorkspaceExtensionsStatus {
