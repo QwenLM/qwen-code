@@ -228,6 +228,7 @@ function mount(
   overrides: Partial<{
     onOpenDiff: () => void;
     onOpenCommit: () => void;
+    onOpenWorktrees: () => void;
     onOpenLog: () => void;
     onOpenChange: (open: boolean) => void;
     onBranchChanged: () => void;
@@ -251,6 +252,7 @@ function mount(
           onBranchChanged={overrides.onBranchChanged}
           onOpenDiff={overrides.onOpenDiff}
           onOpenCommit={overrides.onOpenCommit}
+          onOpenWorktrees={overrides.onOpenWorktrees}
           onOpenLog={overrides.onOpenLog}
         >
           <button type="button">trigger</button>
@@ -410,6 +412,33 @@ describe('BranchPickerPopover actions', () => {
     clickButton('History');
 
     expect(onOpenLog).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('wires "Worktrees…" to onOpenWorktrees and closes', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const onOpenWorktrees = vi.fn();
+    const onOpenChange = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({ onOpenWorktrees, onOpenChange });
+    await flush();
+
+    clickButton('Worktrees…');
+
+    expect(onOpenWorktrees).toHaveBeenCalledTimes(1);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 

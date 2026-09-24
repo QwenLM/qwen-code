@@ -351,6 +351,19 @@ if (isInProcessFastPath()) {
     ...process.env,
     QWEN_CODE_LAUNCHER_PID: String(process.pid),
   };
+  // The child is a fresh Node image, so the cache reaches it only through
+  // NODE_COMPILE_CACHE; enabling it here also resolves the default directory
+  // and honours NODE_DISABLE_COMPILE_CACHE. Like the serve fast path, the
+  // value then reaches tool subprocesses too.
+  const { default: module } = await import('node:module');
+  const compileCache = module.enableCompileCache?.();
+  if (
+    !env['NODE_COMPILE_CACHE'] &&
+    compileCache?.status === module.constants?.compileCacheStatus?.ENABLED &&
+    compileCache?.directory
+  ) {
+    env['NODE_COMPILE_CACHE'] = compileCache.directory;
+  }
   const result = spawnSync(
     process.execPath,
     ['--expose-gc', cliPath, ...cliArgs],
