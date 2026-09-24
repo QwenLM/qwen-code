@@ -237,6 +237,13 @@
   outline: 1px solid var(--ring);
 }
 
+/* The mode switch, when on: a state, so it stays lit rather than only on
+   hover. */
+.zoomButton[aria-pressed='true'] {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
 .zoomButton[aria-disabled='true'] {
   opacity: 0.4;
   cursor: default;
