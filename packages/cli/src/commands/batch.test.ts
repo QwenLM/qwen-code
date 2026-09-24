@@ -9,11 +9,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
-import { batchRequest } from './batch-client.js';
+import { batchRequest, getBatchJob } from './batch-client.js';
 import {
   describeBatch,
   fetchBatch,
-  getBatch,
   prepareEndpoint,
   resolveEndpoint,
   submitBatch,
@@ -477,7 +476,7 @@ describe('submitBatch / fetchBatch', () => {
       fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE'),
     ).toEqual([]);
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('unreadable body'),
+      expect.stringContaining('may exist and be billing'),
     );
   });
 
@@ -493,38 +492,6 @@ describe('submitBatch / fetchBatch', () => {
       `${file}:2: custom_id "a" is already used by line 1`,
     );
     expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('reads a UTF-16LE input file (the PowerShell 5.1 `>` default)', async () => {
-    // The BOM strip alone cannot help here: every character is NUL-padded, so
-    // JSON.parse fails on line 1 with a message that does not name the cause.
-    const file = path.join(dir, 'utf16.jsonl');
-    fs.writeFileSync(file, '\uFEFF{"messages":[]}\n', 'utf16le');
-    fetchMock
-      .mockResolvedValueOnce(jsonRes({ id: 'file-1' }))
-      .mockResolvedValueOnce(jsonRes({ id: 'batch-1', status: 'validating' }));
-    const job = await submitBatch(ep, file, '24h');
-    expect(job.id).toBe('batch-1');
-    const form = fetchMock.mock.calls[0][1].body as FormData;
-    expect(
-      JSON.parse((await (form.get('file') as Blob).text()).trim()),
-    ).toEqual({
-      custom_id: '0',
-      method: 'POST',
-      url: '/v1/chat/completions',
-      body: { model: 'qwen-plus', messages: [] },
-    });
-  });
-
-  it('names the remedy for a UTF-16BE input file it cannot decode', async () => {
-    const file = path.join(dir, 'utf16be.jsonl');
-    fs.writeFileSync(
-      file,
-      Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('{}')]),
-    );
-    await expect(submitBatch(ep, file, '24h')).rejects.toThrow(
-      /UTF-16BE \(big-endian\) input is not supported/,
-    );
   });
 
   it('refuses to fetch an unsettled batch', async () => {
@@ -606,10 +573,10 @@ describe('submitBatch / fetchBatch', () => {
     // The id becomes `<id>.output.jsonl` under outDir and a URL segment:
     // separators or dots-only prefixes would write outside the directory.
     await expect(fetchBatch(ep, '../escape', dir, false)).rejects.toThrow(
-      /invalid batch id/,
+      /outside the Batch API paths/,
     );
     await expect(fetchBatch(ep, 'a/b', dir, false)).rejects.toThrow(
-      /invalid batch id/,
+      /outside the Batch API paths/,
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -617,10 +584,9 @@ describe('submitBatch / fetchBatch', () => {
   it('refuses an id that would move a status query off /batches', async () => {
     // `status` (and `cancel`) put the id in the URL next to the API key;
     // `../../x` would otherwise reach GET /x with the bearer token.
-    await expect(getBatch(ep, '../../escaped-namespace')).rejects.toThrow(
-      /invalid batch id/,
+    await expect(getBatchJob(ep, '../../escaped-namespace')).rejects.toThrow(
+      /outside the Batch API paths/,
     );
-    await expect(getBatch(ep, 'b?x=1')).rejects.toThrow(/invalid batch id/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

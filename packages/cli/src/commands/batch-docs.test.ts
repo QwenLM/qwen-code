@@ -354,23 +354,24 @@ describe('deliverResult', () => {
     expect(
       fs.readFileSync(path.join(root, 'docs', 'en', 'intro.md'), 'utf8'),
     ).toBe(content);
-    // The staging file is gone; only the target remains.
     expect(fs.readdirSync(path.join(root, 'docs', 'en'))).toEqual(['intro.md']);
   });
 
-  it('holds instead of failing when a target appears on a filesystem without hard links', () => {
+  it('holds instead of overwriting a target that appears while delivering', () => {
     const target = path.join(root, 'docs', 'en', 'intro.md');
-    const link = vi.spyOn(fs, 'linkSync').mockImplementation(() => {
-      // The target shows up between the existence check and the write.
-      fs.writeFileSync(target, 'written meanwhile');
-      throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
-    });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, 'written meanwhile');
+    const realExists = fs.existsSync;
+    // The target shows up between the existence check and the write.
+    const exists = vi
+      .spyOn(fs, 'existsSync')
+      .mockImplementation((p) => p !== target && realExists(p));
     try {
       const outcome = deliverResult(item(), content, root, sourceHash);
       expect(outcome.kind).toBe('held');
       expect(fs.readFileSync(target, 'utf8')).toBe('written meanwhile');
     } finally {
-      link.mockRestore();
+      exists.mockRestore();
     }
   });
 

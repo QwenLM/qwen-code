@@ -63,9 +63,7 @@ Unsuitable:
 - A handful of items, or a task the user needs answered soon. Batch's wait
   buys nothing there.
 
-If the task is unsuitable, say so in one short paragraph and stop. Do NOT
-silently do the work in the normal realtime loop instead — the user chose
-this mode explicitly and deserves the honest answer.
+If the task is unsuitable, say so in one short paragraph and stop.
 
 ## 2. Prepare lightly
 
@@ -141,8 +139,7 @@ relay it and stop). The `collect later with` line is only the manual
 fallback: collection is automatic (§5). If the command fails, relay its error
 and stop. The single exception: when the error names a field of the plan
 file itself (an invalid id, a duplicate target, an unknown field), fix that
-field once and run again. Never work around the executor by hand-crafting
-requests, calling the API directly, or doing the transform yourself.
+field once and run again.
 
 ## 5. Collecting later
 
@@ -165,12 +162,7 @@ loop on status. Tell the user:
   billed request.
 - Held results (source changed / target conflict) are delivered by re-running
   `qwen batch collect <task-id>` after the conflict is resolved.
-- `qwen batch list` shows all recorded tasks with their project;
-  `qwen batch cancel --task <task-id>` cancels the active job
-  (already-finished requests are still billed).
-- A task is tied to the endpoint and API key it was submitted with; after
-  switching accounts or regions, switch back to collect it.
-- `qwen batch clean <task-id>` deletes the local record once it is no
-  longer needed; it cancels nothing.
+- `qwen batch list`, `cancel --task <task-id>` and `clean <task-id>` are
+  described in `docs/users/features/batch.md`.
 - Estimates never include what this session spent preparing; do not
   describe the Batch estimate as the task's total cost or as a saving.

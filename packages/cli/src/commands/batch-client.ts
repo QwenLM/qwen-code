@@ -31,8 +31,8 @@ export const MAX_REQUESTS_PER_FILE = 50_000;
 export const MAX_FILE_BYTES = 500 * 1024 * 1024;
 export const MAX_LINE_BYTES = 6 * 1024 * 1024;
 // `completion_window` bounds, in hours: the provider offers 24h to 14d.
-export const MIN_WINDOW_HOURS = 24;
-export const MAX_WINDOW_HOURS = 14 * 24;
+const MIN_WINDOW_HOURS = 24;
+const MAX_WINDOW_HOURS = 14 * 24;
 
 /**
  * Reject a completion window the provider does not offer, before anything is
@@ -56,26 +56,11 @@ export interface BatchApiError extends Error {
   status?: number;
 }
 
-/** A provider id (batch or file) that is safe as a single URL segment. */
-const ID_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/**
- * Refuse an id that is not a single path component. Ids come from argv, a
- * task ledger or a provider response; one carrying `/`, `..` or `?` would
- * turn into a different URL (and, for `fetch`, a filename outside `--out`).
- */
-export function assertBatchId(id: string, kind = 'batch'): void {
-  if (!ID_SEGMENT.test(id)) {
-    throw new Error(
-      `invalid ${kind} id "${id}": expected a single id component (letters, digits, dot, dash, underscore)`,
-    );
-  }
-}
-
 // Every request below carries the API key. The routes this client builds are
-// all of these shapes; anything else — an id that smuggled in `../` — would
-// send the key to another path on the host, so it is refused before sending,
-// whichever caller assembled it.
+// all of these shapes; anything else — an id from argv, a task ledger or a
+// provider response that smuggled in `/`, `..` or `?` — would send the key to
+// another path on the host, so it is refused before sending, whichever
+// caller assembled it.
 const BATCH_ROUTE =
   /^\/(?:batches|files)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/(?:cancel|content))?)?(?:\?[A-Za-z0-9_=&.-]*)?$/;
 

@@ -431,36 +431,16 @@ export function deliverResult(
       reason: `target "${item.target}" already exists with different content; kept both`,
     };
   }
-  // Publish without a check-then-overwrite window: link() fails if the
-  // target appeared since the existence check above (another collect, an
-  // editor save), where rename() would silently replace it.
-  const tmp = `${targetPath}.${process.pid}.batch-tmp`;
-  fs.writeFileSync(tmp, content);
+  // Exclusive create: a target that appeared since the check above (another
+  // collect, an editor save) is refused, never overwritten.
   try {
-    fs.linkSync(tmp, targetPath);
+    fs.writeFileSync(targetPath, content, { flag: 'wx' });
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'EEXIST') {
-      return {
-        kind: 'held',
-        reason: `target "${item.target}" appeared while delivering; kept both`,
-      };
-    }
-    // Filesystems without hard links: exclusive create still refuses to
-    // overwrite, at the cost of atomicity.
-    try {
-      fs.writeFileSync(targetPath, content, { flag: 'wx' });
-    } catch (fallbackError) {
-      if ((fallbackError as NodeJS.ErrnoException).code === 'EEXIST') {
-        return {
-          kind: 'held',
-          reason: `target "${item.target}" appeared while delivering; kept both`,
-        };
-      }
-      throw fallbackError;
-    }
-  } finally {
-    fs.rmSync(tmp, { force: true });
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    return {
+      kind: 'held',
+      reason: `target "${item.target}" appeared while delivering; kept both`,
+    };
   }
   return { kind: 'delivered', targetPath };
 }

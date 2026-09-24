@@ -56,7 +56,6 @@ const MAX_LISTED = 3;
 export interface BatchAutoCollector {
   /** One pass; resolves to the delay before the next pass. */
   tick(): Promise<number>;
-  stop(): void;
 }
 
 const realPath = (p: string) => {
@@ -132,9 +131,6 @@ export function createBatchAutoCollector(
   const store = new BatchTaskStore(batchHomeDir(env));
   const nextPollAt = new Map<string, number>();
   const pollDelay = new Map<string, number>();
-  // Task id -> endpoint key it could not be collected with (another
-  // endpoint or key). Retried once the session's endpoint changes.
-  const wrongEndpoint = new Map<string, string>();
   // Batches already announced in notify mode; a later retry's new batch
   // is announced again.
   const announced = new Set<string>();
@@ -143,7 +139,6 @@ export function createBatchAutoCollector(
   const warnedAmbiguous = new Set<string>();
   let warnedNoEndpoint = false;
   let nextResolveAt = 0;
-  let stopped = options.mode === 'off';
 
   const backOff = (id: string) => {
     const delay = Math.min(
@@ -235,7 +230,6 @@ export function createBatchAutoCollector(
   };
 
   const tick = async (): Promise<number> => {
-    if (stopped) return MAX_POLL_DELAY_MS;
     let tasks: BatchTask[];
     try {
       tasks = store
@@ -278,10 +272,9 @@ export function createBatchAutoCollector(
         log(`batch auto-collect: no endpoint: ${String(error)}`);
       }
       if (ep) {
-        const key = endpointKey(ep);
         for (const task of due) {
-          if (wrongEndpoint.get(task.id) === key) continue;
-          wrongEndpoint.delete(task.id);
+          // A task pinned to another endpoint or key is refused like any
+          // other failure and simply backs off until the session switches.
           // Only a pass whose reconcile really ran and found nothing may
           // warn "may be billing" — not a lock held by a `run` still
           // submitting, not a transient network error.
@@ -291,11 +284,6 @@ export function createBatchAutoCollector(
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error);
-            if (/was submitted (to|with)/.test(message)) {
-              // Pinned to another endpoint or key: wait for the session to
-              // switch back instead of repeating the same refusal.
-              wrongEndpoint.set(task.id, key);
-            }
             reconciled = /has no submitted batch/.test(message);
             log(`batch auto-collect: ${task.id}: ${message}`);
           }
@@ -312,12 +300,7 @@ export function createBatchAutoCollector(
     return Math.max(1_000, Math.min(IDLE_SCAN_MS, soonest || IDLE_SCAN_MS));
   };
 
-  return {
-    tick,
-    stop: () => {
-      stopped = true;
-    },
-  };
+  return { tick };
 }
 
 /**
@@ -346,7 +329,6 @@ export function startBatchAutoCollect(
   void run();
   return () => {
     stopped = true;
-    collector.stop();
     if (timer) clearTimeout(timer);
   };
 }

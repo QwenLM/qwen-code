@@ -516,6 +516,7 @@ describe('collectTask', () => {
       promptTokens: 200,
       completionTokens: 100,
       requests: 2,
+      missing: 0,
     });
     // Remote input/output are deleted once results are safely local.
     const deleted = h.api.deleteFile.mock.calls.map(
@@ -539,6 +540,7 @@ describe('collectTask', () => {
       promptTokens: 200,
       completionTokens: 100,
       requests: 2,
+      missing: 0,
     });
     expect(
       fs.readFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'utf8'),

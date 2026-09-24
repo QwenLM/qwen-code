@@ -35,7 +35,6 @@ import {
   batchHomeDir,
   refreshTaskStatus,
   parseCustomId,
-  customIdOf,
   isAmbiguous,
   PRIVATE_DIR_MODE,
   PRIVATE_FILE_MODE,
@@ -644,7 +643,7 @@ const usageOfBody = (
  * whole (unsupported model, invalid file) has no per-line output, so these
  * are the only explanation of why every item failed.
  */
-export function jobErrorsOf(job: BatchJob): string[] {
+function jobErrorsOf(job: BatchJob): string[] {
   return (job.errors?.data ?? [])
     .slice(0, 5)
     .map((error) =>
@@ -821,18 +820,20 @@ async function collectLocked(
     };
     const reportMalformed = (message: string) =>
       deps.err(`[batch] attempt ${attempt.attempt}: skipping ${message}`);
+    // The item a result line belongs to, if it is one of this attempt's.
+    const itemOf = (customId: string | undefined) => {
+      const identity = customId ? parseCustomId(customId) : undefined;
+      return identity?.attempt === attempt.attempt
+        ? task.items.find((candidate) => candidate.id === identity.itemId)
+        : undefined;
+    };
     if (attempt.outputPath && fs.existsSync(attempt.outputPath)) {
       for (const line of parseOutputJsonl(
         fs.readFileSync(attempt.outputPath, 'utf8'),
         reportMalformed,
       )) {
-        const identity = line.custom_id
-          ? parseCustomId(line.custom_id)
-          : undefined;
-        const item = identity
-          ? task.items.find((candidate) => candidate.id === identity.itemId)
-          : undefined;
-        if (!identity || !item || identity.attempt !== attempt.attempt) {
+        const item = itemOf(line.custom_id);
+        if (!item) {
           deps.err(
             `[batch] ignoring result with unknown custom_id "${line.custom_id ?? ''}"`,
           );
@@ -893,14 +894,8 @@ async function collectLocked(
         fs.readFileSync(attempt.errorPath, 'utf8'),
         reportMalformed,
       )) {
-        const identity = line.custom_id
-          ? parseCustomId(line.custom_id)
-          : undefined;
-        const item = identity
-          ? task.items.find((candidate) => candidate.id === identity.itemId)
-          : undefined;
-        if (!item || identity?.attempt !== attempt.attempt) continue;
-        if (seen.has(item.id)) continue;
+        const item = itemOf(line.custom_id);
+        if (!item || seen.has(item.id)) continue;
         seen.add(item.id);
         // Same rule as the output loop.
         if (item.state === 'delivered' || !ownedBy(item, attempt)) {
@@ -923,14 +918,7 @@ async function collectLocked(
             : 'no result line for this request in the settled batch';
       }
     }
-    attempt.usage =
-      usage.missing > 0
-        ? usage
-        : {
-            promptTokens: usage.promptTokens,
-            completionTokens: usage.completionTokens,
-            requests: usage.requests,
-          };
+    attempt.usage = usage;
     refreshTaskStatus(task);
     store.save(task);
 
@@ -1072,7 +1060,6 @@ async function retryLocked(
   options: RetryOptions,
 ): Promise<void> {
   const task = store.load(taskId);
-  const api = deps.api ?? liveApi;
   assertSameEndpoint(task, deps.ep);
 
   if (task.attempts.some(isAmbiguous)) {
@@ -1134,15 +1121,11 @@ async function retryLocked(
       attempt.batchId &&
       !attempt.collected
     ) {
-      const job = await api.getBatch(deps.ep, attempt.batchId);
-      if (!SETTLED_STATUSES.has(job.status)) {
-        throw new Error(
-          `batch ${attempt.batchId} is still ${job.status}; wait for it to settle (or cancel it) before retrying.`,
-        );
-      }
-      // Its results may already contain what we are about to pay for again.
+      // Running, or settled with results that may already hold what we are
+      // about to pay for again: either way, collect (or cancel) comes first.
       throw new Error(
-        `batch ${attempt.batchId} has settled but is not collected yet; run \`qwen batch collect ${taskId}\` first.`,
+        `batch ${attempt.batchId} is not collected yet and may still be running; ` +
+          `run \`qwen batch collect ${taskId}\` (or cancel it) before retrying.`,
       );
     }
   }
@@ -1327,5 +1310,3 @@ async function cancelLocked(
       `Run \`qwen batch collect ${taskId}\` once it settles to harvest partial results.`,
   );
 }
-
-export { customIdOf };

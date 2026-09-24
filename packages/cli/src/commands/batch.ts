@@ -8,7 +8,7 @@
 // API jobs. Batch runs at half the realtime price with a >=24h completion
 // window, so it is a fan-out tool for many independent single-turn requests,
 // not a path for the agent loop. Rationale and measurements:
-// docs/design/2026-09-23-agent-prepared-batch-api.md
+// docs/design/2026-09-23-batch-api-design.md
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -27,10 +27,12 @@ import {
   MAX_FILE_BYTES,
   MAX_LINE_BYTES,
   assertValidWindow,
-  batchRequest as api,
-  assertBatchId,
   uploadBatchJsonl,
+  createBatchJob,
+  getBatchJob,
+  cancelBatchJob,
   downloadRemoteFile,
+  deleteRemoteFile,
 } from './batch-client.js';
 import {
   runPlan,
@@ -44,10 +46,7 @@ import {
 } from './batch-workflow.js';
 import type { GenerationConfigLike } from './batch-docs.js';
 
-export { assertValidWindow };
-
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-const SETTLED = SETTLED_STATUSES;
 
 export interface BatchEndpoint {
   apiKey: string;
@@ -179,13 +178,6 @@ const cliOptionsOf = (argv: Record<string, unknown>): BatchCliOptions => ({
   insecure: argv['insecure'] as boolean | undefined,
 });
 
-const postJson = (ep: BatchEndpoint, route: string, body: unknown) =>
-  api(ep, route, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
 /**
  * Accept either a full batch request line (`{custom_id, method, url, body}`)
  * or a bare chat-completions body; fill in the envelope and default model.
@@ -205,10 +197,10 @@ export function toRequestLine(
   // method/url to the defaults instead of failing here.
   const isEnvelope = 'body' in line || 'method' in line || 'url' in line;
   const suppliedId = line['custom_id'];
-  const label = suppliedId === undefined ? String(index) : String(suppliedId);
+  const customId = String(suppliedId ?? index);
   if (isEnvelope && !('body' in line)) {
     throw new Error(
-      `custom_id ${label}: a full request line must carry a "body" — ` +
+      `custom_id ${customId}: a full request line must carry a "body" — ` +
         `or write the bare chat-completions body on its own`,
     );
   }
@@ -220,7 +212,7 @@ export function toRequestLine(
     : '/v1/chat/completions';
   if (method !== 'POST' || url !== '/v1/chat/completions') {
     throw new Error(
-      `custom_id ${label}: only ` +
+      `custom_id ${customId}: only ` +
         `POST /v1/chat/completions is supported, got ${method} ${url}`,
     );
   }
@@ -234,39 +226,11 @@ export function toRequestLine(
     delete body['custom_id'];
   }
   return {
-    custom_id: suppliedId === undefined ? String(index) : String(suppliedId),
+    custom_id: customId,
     method,
     url,
     body: { model, ...body },
   };
-}
-
-/**
- * Pick the input file's encoding from its BOM. Windows PowerShell 5.1's `>`
- * and `Out-File` default to UTF-16LE (`FF FE`), Notepad and
- * `Out-File -Encoding utf8` to a UTF-8 BOM (`EF BB BF`); reading either as
- * plain UTF-8 makes `JSON.parse` fail on line 1 with a `\uFFFD` message that
- * does not name the actual problem. Node decodes UTF-16LE (leaving the BOM as
- * a `\uFEFF` the caller strips) but has no UTF-16BE, so that one is refused
- * with the remedy instead.
- */
-function detectJsonlEncoding(file: string): BufferEncoding {
-  const fd = fs.openSync(file, 'r');
-  try {
-    const head = Buffer.alloc(2);
-    const bytesRead = fs.readSync(fd, head, 0, 2, 0);
-    if (bytesRead < 2) return 'utf8';
-    if (head[0] === 0xff && head[1] === 0xfe) return 'utf16le';
-    if (head[0] === 0xfe && head[1] === 0xff) {
-      throw new Error(
-        `${file}: UTF-16BE (big-endian) input is not supported; re-save it as ` +
-          `UTF-8 (PowerShell: Out-File -Encoding utf8).`,
-      );
-    }
-    return 'utf8';
-  } finally {
-    fs.closeSync(fd);
-  }
 }
 
 export async function submitBatch(
@@ -280,7 +244,7 @@ export async function submitBatch(
   // never reaches the CLI's larger-heap relaunch, so four live copies of the
   // file would OOM the default heap. Only the joined output is held.
   const rl = readline.createInterface({
-    input: fs.createReadStream(file, detectJsonlEncoding(file)),
+    input: fs.createReadStream(file, 'utf8'),
     crlfDelay: Infinity,
   });
   let jsonl = '';
@@ -373,23 +337,16 @@ export async function submitBatch(
   // the only handle the user has. stderr, to keep stdout to the batch id.
   writeStderrLine(`[batch] uploaded input file ${uploaded.id}`);
 
-  let res: Response;
   try {
-    res = await postJson(ep, '/batches', {
-      input_file_id: uploaded.id,
-      endpoint: '/v1/chat/completions',
-      completion_window: window,
-    });
+    return await createBatchJob(ep, uploaded.id, window);
   } catch (error) {
     // Only a 4xx is the provider definitely refusing the job, which makes the
-    // uploaded input an orphan worth deleting. A 5xx or a dropped socket is
-    // ambiguous — the job may exist and be billing — and deleting its input
-    // file would break it, so keep the file and name it instead.
+    // uploaded input an orphan worth deleting. A 5xx, a dropped socket or an
+    // unreadable body is ambiguous — the job may exist and be billing — and
+    // deleting its input file would break it, so keep the file and name it.
     const status = (error as { status?: number } | undefined)?.status;
     if (typeof status === 'number' && status >= 400 && status < 500) {
-      await api(ep, `/files/${uploaded.id}`, { method: 'DELETE' }).catch(
-        () => undefined,
-      );
+      await deleteRemoteFile(ep, uploaded.id).catch(() => undefined);
     } else {
       writeStderrLine(
         `[batch] warning: POST /batches did not complete cleanly, so the job ` +
@@ -399,32 +356,14 @@ export async function submitBatch(
     }
     throw error;
   }
-  try {
-    return (await res.json()) as BatchJob;
-  } catch (error) {
-    // The create was accepted but its body is unreadable (a gateway HTML
-    // error page, say), so the job exists and its id never reached us.
-    // Deleting the input would destroy a live job's only local trace.
-    writeStderrLine(
-      `[batch] warning: POST /batches returned an unreadable body; the job ` +
-        `may have been created and its id was not reported. Input file ` +
-        `${uploaded.id} was kept; check the provider's batch list.`,
-    );
-    throw error;
-  }
 }
-
-export const getBatch = async (ep: BatchEndpoint, id: string) => {
-  assertBatchId(id);
-  return (await (await api(ep, `/batches/${id}`)).json()) as BatchJob;
-};
 
 /** One line: id, status, N/M done, phase from the timestamps, deadline. */
 export function describeBatch(job: BatchJob, now = Date.now() / 1000): string {
   const rc = job.request_counts ?? {};
   // Status first: failed/expired/cancelled are terminal, and deriving the
   // phase from timestamps alone would report them as still "running".
-  const phase = SETTLED.has(job.status)
+  const phase = SETTLED_STATUSES.has(job.status)
     ? job.status === 'completed' && job.in_progress_at && job.completed_at
       ? `ran ${job.completed_at - job.in_progress_at}s`
       : job.status
@@ -444,12 +383,10 @@ export async function fetchBatch(
   outDir: string,
   remove: boolean,
 ): Promise<{ job: BatchJob; written: string[] }> {
-  // The argv id becomes a URL segment and a filename verbatim: a value with
-  // path separators (../../report) would write outside outDir, and the
-  // download's final rename would replace whatever lives there.
-  assertBatchId(id);
-  const job = await getBatch(ep, id);
-  if (!SETTLED.has(job.status)) {
+  // The argv id also becomes a filename; the route check in batchRequest
+  // refuses one with path separators before anything is written.
+  const job = await getBatchJob(ep, id);
+  if (!SETTLED_STATUSES.has(job.status)) {
     throw new Error(
       `${id} is ${job.status}; results are only available once the batch settles.`,
     );
@@ -475,9 +412,7 @@ export async function fetchBatch(
       job.error_file_id,
     ].filter((fileId): fileId is string => Boolean(fileId));
     const results = await Promise.allSettled(
-      fileIds.map((fileId) =>
-        api(ep, `/files/${fileId}`, { method: 'DELETE' }),
-      ),
+      fileIds.map((fileId) => deleteRemoteFile(ep, fileId)),
     );
     results.forEach((result, i) => {
       if (result.status === 'rejected') {
@@ -543,7 +478,7 @@ const statusCommand: CommandModule = {
       }),
   handler: (argv) =>
     run(async () => {
-      const job = await getBatch(
+      const job = await getBatchJob(
         await prepareEndpoint(process.env, cliOptionsOf(argv)),
         argv['id'] as string,
       );
@@ -612,12 +547,9 @@ const cancelCommand: CommandModule = {
         await cancelTask(workflowDeps(ep), argv['task'] as string);
         return;
       }
-      const id = argv['id'] as string;
-      assertBatchId(id);
-      const job = (await (
-        await postJson(ep, `/batches/${id}/cancel`, {})
-      ).json()) as BatchJob;
-      writeStdoutLine(describeBatch(job));
+      writeStdoutLine(
+        describeBatch(await cancelBatchJob(ep, argv['id'] as string)),
+      );
     }),
 };
 

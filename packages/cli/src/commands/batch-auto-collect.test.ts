@@ -350,10 +350,10 @@ describe('batch auto-collect', () => {
     });
     await ac.tick();
     h.clock.now += 10 * 60_000;
-    await ac.tick(); // same wrong key: not even attempted again
+    await ac.tick(); // still the wrong key: refused again after the backoff
     expect(h.notices).toEqual([]);
     expect(h.api.getBatch).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(2);
 
     apiKey = 'k'; // back on the key the task was submitted with
     h.clock.now += 10 * 60_000;
