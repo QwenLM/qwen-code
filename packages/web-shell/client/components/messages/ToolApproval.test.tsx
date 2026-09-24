@@ -399,15 +399,20 @@ describe('ToolApproval accessibility', () => {
   });
 
   it('renders generic parameter content even when it equals the title', () => {
+    const input = { key: 'value' };
+    const text = JSON.stringify(input, null, 2);
     const adapted = extractPendingPermission([
       {
         id: 'permission-input',
         kind: 'permission',
         requestId: 'request-input',
         sessionId: 'session-input',
-        title: '{}',
+        title: text,
         options: [],
-        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        toolCall: {
+          rawInput: input,
+          _meta: { toolName: 'mcp__sample__write' },
+        },
         preview: { kind: 'generic' },
         createdAt: 1,
         updatedAt: 1,
@@ -415,7 +420,7 @@ describe('ToolApproval accessibility', () => {
     ])!;
     render(undefined, { ...adapted, options: request.options });
     const preview = container!.querySelector('pre');
-    expect(preview?.textContent).toBe('{}');
+    expect(preview?.textContent).toBe(text);
     const describedBy = container!
       .querySelector('[role="alertdialog"]')
       ?.getAttribute('aria-describedby')
@@ -426,6 +431,92 @@ describe('ToolApproval accessibility', () => {
       'request-input',
       'reject',
     );
+  });
+
+  it('omits the content body when the tool input is empty', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-empty-input',
+        kind: 'permission',
+        requestId: 'request-empty-input',
+        sessionId: 'session-input',
+        title: '{}',
+        options: [],
+        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    expect(container!.querySelector('pre')).toBeNull();
+  });
+
+  it('renders the command block for an execute-kind tool under a non-canonical name', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-exec',
+        kind: 'permission',
+        requestId: 'request-exec',
+        sessionId: 'session-exec',
+        title: 'mcp__shell__run: ls -la',
+        options: [],
+        toolCall: {
+          kind: 'execute',
+          _meta: { toolName: 'mcp__shell__run' },
+          rawInput: { command: 'ls -la' },
+          content: [],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const command = container!.querySelector('pre');
+    expect(command?.textContent).toBe('ls -la');
+  });
+
+  it('renders exec warnings alongside the command block', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-monitor',
+        kind: 'permission',
+        requestId: 'request-monitor',
+        sessionId: 'session-monitor',
+        title: 'monitor: ls $(pwd)',
+        options: [],
+        toolCall: {
+          kind: 'execute',
+          _meta: { toolName: 'monitor' },
+          rawInput: { command: 'ls $(pwd)' },
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Command substitution detected: $(pwd)',
+              },
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const blocks = Array.from(container!.querySelectorAll('pre')).map(
+      (el) => el.textContent,
+    );
+    expect(blocks).toContain('ls $(pwd)');
+    expect(blocks).toContain('Command substitution detected: $(pwd)');
+    const describedBy = container!
+      .querySelector('[role="alertdialog"]')
+      ?.getAttribute('aria-describedby');
+    for (const el of Array.from(container!.querySelectorAll('pre'))) {
+      expect(describedBy).toContain(el.id);
+    }
   });
 
   it('keeps the complete literal parameter body available without interpreting markup', () => {
