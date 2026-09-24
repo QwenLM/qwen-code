@@ -2492,3 +2492,48 @@ describe('untracked files on inode-unverifiable volumes (#8227 follow-up)', () =
     expect(result!.stats.linesAdded).toBe(0);
   });
 });
+
+describe('getGitWorkingTreeStatus in a caller\u2019s environment', () => {
+  it('answers about the checkout it was asked about, not the one GIT_DIR names', async () => {
+    const asked = await makeRepo();
+    const elsewhere = await makeRepo();
+    try {
+      await fs.writeFile(path.join(asked, 'a.txt'), 'a\n');
+      await git(asked, 'add', '.');
+      await git(asked, 'commit', '-q', '-m', 'init');
+      await git(asked, 'switch', '-q', '-c', 'asked-branch');
+      await fs.writeFile(path.join(asked, 'new.txt'), 'x\n');
+      for (const name of ['1', '2', '3']) {
+        await fs.writeFile(path.join(elsewhere, `${name}.txt`), 'y\n');
+      }
+      // The environment a daemon may have been started with: one that
+      // points every git it runs at some other repository. Given as the
+      // caller's environment, it has to be scrubbed of that, not obeyed.
+      const hostile = {
+        ...process.env,
+        GIT_DIR: path.join(elsewhere, '.git'),
+        GIT_WORK_TREE: elsewhere,
+      };
+      const status = await getGitWorkingTreeStatus(asked, { env: hostile });
+      expect([status?.branch, status?.untracked]).toEqual(['asked-branch', 1]);
+
+      // And the other half: the daemon's own environment is the hostile
+      // one, while the workspace's is clean. Running git in the process's
+      // environment instead of the one given would answer about `elsewhere`.
+      vi.stubEnv('GIT_DIR', path.join(elsewhere, '.git'));
+      vi.stubEnv('GIT_WORK_TREE', elsewhere);
+      const clean = { ...process.env };
+      delete clean['GIT_DIR'];
+      delete clean['GIT_WORK_TREE'];
+      const inClean = await getGitWorkingTreeStatus(asked, { env: clean });
+      expect([inClean?.branch, inClean?.untracked]).toEqual([
+        'asked-branch',
+        1,
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(asked, { recursive: true, force: true });
+      await fs.rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+});

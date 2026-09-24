@@ -9,17 +9,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -44,6 +50,9 @@ class HttpRuntimeTransportTest {
             new AtomicReference<>();
     private final AtomicReference<String> capturedPath =
             new AtomicReference<>();
+    private final AtomicReference<Headers> capturedHeaders =
+            new AtomicReference<>();
+    private final CountDownLatch requested = new CountDownLatch(1);
 
     @BeforeEach
     void setUp() throws IOException {
@@ -57,12 +66,14 @@ class HttpRuntimeTransportTest {
                 .toFile());
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
+            requested.countDown();
             captured.set(exchange.getRequestBody().readAllBytes());
             capturedAuthorization.set(exchange.getRequestHeaders()
                     .getFirst("Authorization"));
             capturedCacheControl.set(exchange.getRequestHeaders()
                     .getFirst("Cache-Control"));
             capturedPath.set(exchange.getRequestURI().getRawPath());
+            capturedHeaders.set(exchange.getRequestHeaders());
             Reply planned = reply.get();
             exchange.getResponseHeaders().set("Cache-Control",
                     planned.cacheControl);
@@ -245,7 +256,7 @@ class HttpRuntimeTransportTest {
             assertEquals(503, failure.getStatusCode());
             assertTrue(failure.isRetryable());
             assertTrue(System.nanoTime() - started < 1_500_000_000L);
-            java.util.concurrent.CompletableFuture<RuntimeAttestation> pending =
+            CompletableFuture<RuntimeAttestation> pending =
                     impatient.attest(lease,
                             new RuntimeProvisionRequest(scope, "session-1"),
                             seed).toCompletableFuture();
@@ -288,7 +299,7 @@ class HttpRuntimeTransportTest {
                         HttpClient.newBuilder()
                                 .version(HttpClient.Version.HTTP_1_1).build(),
                         Duration.ofMillis(callerCancels ? 10_000 : 300));
-                java.util.concurrent.CompletableFuture<RuntimeAttestation> pending =
+                CompletableFuture<RuntimeAttestation> pending =
                         attest(client, drip.getAddress().getPort())
                                 .toCompletableFuture();
                 if (callerCancels) {
@@ -478,6 +489,81 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void sendsEveryFixtureRequestHeader() throws Exception {
+        JsonNode success = find("success");
+        reply.set(json(200, JSON.writeValueAsBytes(
+                success.required("expected").required("body"))));
+
+        attest().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        success.required("request").required("headers").properties()
+                .forEach(header -> assertEquals(
+                        List.of(header.getValue().textValue()),
+                        capturedHeaders.get().get(header.getKey()),
+                        header.getKey()));
+    }
+
+    @Test
+    void sendsTheSameFixtureHeadersWhenExecuting() throws Exception {
+        reply.set(json(200, JSON.writeValueAsBytes(
+                findIn(toolSuite("execute"), "success").required("expected")
+                        .required("body"))));
+
+        transport.execute(lease(server.getAddress().getPort()),
+                toolSession(), toolReference())
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals("/internal/managed-runtime/v2/execute",
+                capturedPath.get());
+        find("success").required("request").required("headers")
+                .properties().forEach(header -> assertEquals(
+                        List.of(header.getValue().textValue()),
+                        capturedHeaders.get().get(header.getKey()),
+                        header.getKey()));
+    }
+
+    @Test
+    void rejectsAMalformedSuccessResponse() throws IOException {
+        byte[] valid = JSON.writeValueAsBytes(successBody());
+        ObjectNode unknownField = successBody();
+        unknownField.put("debug", true);
+        ObjectNode newerProtocol = successBody();
+        newerProtocol.put("protocolVersion", 3);
+        ObjectNode fractionalEpoch = successBody();
+        fractionalEpoch.put("epoch", 4.5);
+        ObjectNode fractionalProtocol = successBody();
+        fractionalProtocol.put("protocolVersion", 2.5);
+        ObjectNode roundedProtocol = successBody();
+        roundedProtocol.put("protocolVersion",
+                new BigDecimal("1.9999999999999999"));
+        Map<String, Reply> replies = new LinkedHashMap<>();
+        replies.put("cache", new Reply(200, valid, "private",
+                "application/json"));
+        replies.put("type", new Reply(200, valid, "no-store", "text/plain"));
+        replies.put("charset", new Reply(200, valid, "no-store",
+                "application/json; charset=utf-16"));
+        replies.put("field", json(200, JSON.writeValueAsBytes(unknownField)));
+        replies.put("version",
+                json(200, JSON.writeValueAsBytes(newerProtocol)));
+        replies.put("fractional version",
+                json(200, JSON.writeValueAsBytes(fractionalProtocol)));
+        replies.put("rounded version",
+                json(200, JSON.writeValueAsBytes(roundedProtocol)));
+        replies.put("epoch",
+                json(200, JSON.writeValueAsBytes(fractionalEpoch)));
+        for (Map.Entry<String, Reply> planned : replies.entrySet()) {
+            reply.set(planned.getValue());
+
+            RuntimeBrokerException failure = awaitFailure(planned.getKey());
+
+            assertEquals(400, failure.getStatusCode(), planned.getKey());
+            assertEquals("managed_runtime_attestation_invalid",
+                    failure.getCode(), planned.getKey());
+            assertFalse(failure.isRetryable(), planned.getKey());
+        }
+    }
+
+    @Test
     void statusRejectsANegativeSequence() {
         assertThrows(IllegalArgumentException.class,
                 () -> transport.status(
@@ -570,47 +656,209 @@ class HttpRuntimeTransportTest {
         return reference;
     }
 
-    private java.util.concurrent.CompletionStage<RuntimeAttestation> attest() {
+    @Test
+    void rejectsAProofFromAnotherRuntimeLeaseOrProvision() throws IOException {
+        String[][] changes = {
+            {"runtimeInstanceId", "runtime-other"},
+            {"runtimeIncarnation", "boot-other"},
+            {"leaseId", "lease-other"},
+            {"provisionRequestId", "provision-other"},
+        };
+        for (String[] change : changes) {
+            ObjectNode body = successBody();
+            body.put(change[0], change[1]);
+            reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+            RuntimeBrokerException failure = awaitFailure(change[0]);
+
+            assertEquals(409, failure.getStatusCode(), change[0]);
+            assertEquals("managed_runtime_identity_conflict",
+                    failure.getCode(), change[0]);
+            assertFalse(failure.isRetryable(), change[0]);
+        }
+        long epoch = successBody().required("epoch").longValue();
+        for (long otherEpoch : new long[] {epoch + 1, epoch - 1}) {
+            ObjectNode body = successBody();
+            body.put("epoch", otherEpoch);
+            reply.set(json(200, JSON.writeValueAsBytes(body)));
+            String label = "epoch " + otherEpoch;
+
+            RuntimeBrokerException failure = awaitFailure(label);
+
+            assertEquals(409, failure.getStatusCode(), label);
+            assertEquals("managed_runtime_identity_conflict",
+                    failure.getCode(), label);
+            assertFalse(failure.isRetryable(), label);
+        }
+    }
+
+    @Test
+    void refusesASeedThatDoesNotBindTheLease() throws InterruptedException {
+        JsonNode identity = suite.required("identity");
+        String leaseId = identity.required("leaseId").textValue();
+        long epoch = identity.required("epoch").longValue();
+        String token = identity.required("token").textValue();
+        int port = server.getAddress().getPort();
+
+        assertThrows(IllegalArgumentException.class, () -> attest(transport,
+                port, leaseId, epoch, "other-token"));
+        assertThrows(IllegalArgumentException.class, () -> attest(transport,
+                port, "other-lease", epoch, token));
+        assertThrows(IllegalArgumentException.class, () -> attest(transport,
+                port, leaseId, epoch + 1, token));
+        assertThrows(IllegalArgumentException.class, () -> attest(transport,
+                port, leaseId, epoch - 1, token));
+        assertFalse(requested.await(200, TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void acceptsAResponseOfExactlyTheLimit() throws Exception {
+        assertEquals(suite.required("route").required("responseBodyLimitBytes")
+                .intValue(), HttpRuntimeTransport.BODY_LIMIT_BYTES);
+        byte[] proof = JSON.writeValueAsBytes(successBody());
+        byte[] padded = new byte[HttpRuntimeTransport.BODY_LIMIT_BYTES];
+        Arrays.fill(padded, (byte) ' ');
+        System.arraycopy(proof, 0, padded, 0, proof.length);
+        reply.set(json(200, padded));
+
+        attest().toCompletableFuture().get(2, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void stopsReadingAtTheLimitWithoutWaitingForTheDeclaredBody()
+            throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch closed = new CountDownLatch(1);
+        HttpServer endless = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        endless.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            exchange.getResponseHeaders().set("Content-Type",
+                    "application/json");
+            exchange.sendResponseHeaders(200, 1L << 30);
+            OutputStream out = exchange.getResponseBody();
+            try {
+                // Keep the declared body coming: only the client closing
+                // its side can end this exchange early.
+                while (!release.await(5, TimeUnit.MILLISECONDS)) {
+                    out.write(new byte[HttpRuntimeTransport.BODY_LIMIT_BYTES
+                            + 1]);
+                    out.flush();
+                }
+            } catch (IOException gone) {
+                closed.countDown();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        endless.start();
+        try {
+            RuntimeBrokerException failure = awaitFailure(transport,
+                    endless.getAddress().getPort(), null);
+
+            assertEquals(413, failure.getStatusCode());
+            assertEquals("managed_runtime_attestation_too_large",
+                    failure.getCode());
+            assertTrue(closed.await(2, TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            endless.stop(0);
+        }
+    }
+
+    @Test
+    void doesNotFollowRedirects() throws Exception {
+        reply.set(json(200, JSON.writeValueAsBytes(successBody())));
+        String target = "http://127.0.0.1:" + server.getAddress().getPort()
+                + HttpRuntimeTransport.PATH;
+        HttpServer moved = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        moved.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Location", target);
+            exchange.sendResponseHeaders(307, -1);
+            exchange.close();
+        });
+        moved.start();
+        try {
+            RuntimeBrokerException failure = awaitFailure(transport,
+                    moved.getAddress().getPort(), null);
+
+            assertEquals(502, failure.getStatusCode());
+            assertEquals("managed_runtime_incompatible", failure.getCode());
+            assertFalse(failure.isRetryable());
+            assertNull(captured.get());
+        } finally {
+            moved.stop(0);
+        }
+    }
+
+    private CompletionStage<RuntimeAttestation> attest() {
         return attest(transport, server.getAddress().getPort());
     }
 
-    private java.util.concurrent.CompletionStage<RuntimeAttestation> attest(
+    private CompletionStage<RuntimeAttestation> attest(
             HttpRuntimeTransport client, int port) {
         JsonNode identity = suite.required("identity");
-        RuntimeScope scope = new RuntimeScope(
+        return attest(client, port, identity.required("leaseId").textValue(),
+                identity.required("epoch").longValue(),
+                identity.required("token").textValue());
+    }
+
+    private CompletionStage<RuntimeAttestation> attest(
+            HttpRuntimeTransport client, int port, String seedLeaseId,
+            long seedEpoch, String seedToken) {
+        JsonNode identity = suite.required("identity");
+        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
+                identity.required("provisionRequestId").textValue(),
+                identity.required("runtimeInstanceId").textValue(),
+                identity.required("runtimeIncarnation").textValue(),
+                seedLeaseId, seedEpoch, seedToken);
+        return client.attest(lease(port),
+                new RuntimeProvisionRequest(scope(), "session-1"), seed);
+    }
+
+    private RuntimeScope scope() {
+        JsonNode identity = suite.required("identity");
+        return new RuntimeScope(
                 identity.required("tenantId").textValue(),
                 identity.required("workspaceId").textValue(),
                 identity.required("workspaceGeneration").textValue(),
                 identity.required("workspaceCwd").textValue(),
                 identity.required("capabilityDigest").textValue(),
                 identity.required("isolationClass").textValue());
-        RuntimeLease lease = new RuntimeLease(
+    }
+
+    private RuntimeLease lease(int port) {
+        JsonNode identity = suite.required("identity");
+        return new RuntimeLease(
                 identity.required("runtimeInstanceId").textValue(),
                 URI.create("http://127.0.0.1:" + port + "/"),
                 identity.required("token").textValue(),
                 identity.required("leaseId").textValue(),
                 identity.required("epoch").longValue());
-        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
-                identity.required("provisionRequestId").textValue(),
-                identity.required("runtimeInstanceId").textValue(),
-                identity.required("runtimeIncarnation").textValue(),
-                identity.required("leaseId").textValue(),
-                identity.required("epoch").longValue(),
-                identity.required("token").textValue());
-        return client.attest(lease,
-                new RuntimeProvisionRequest(scope, "session-1"), seed);
     }
 
     private RuntimeBrokerException awaitFailure() {
+        return awaitFailure(null);
+    }
+
+    private RuntimeBrokerException awaitFailure(String label) {
+        return awaitFailure(transport, server.getAddress().getPort(), label);
+    }
+
+    private RuntimeBrokerException awaitFailure(HttpRuntimeTransport client,
+            int port, String label) {
         ExecutionException thrown = assertThrows(ExecutionException.class,
-                () -> attest().toCompletableFuture().get(2,
-                        TimeUnit.SECONDS));
+                () -> attest(client, port).toCompletableFuture().get(2,
+                        TimeUnit.SECONDS), label);
         Throwable cause = thrown.getCause();
         if (cause instanceof CompletionException completion
                 && completion.getCause() != null) {
             cause = completion.getCause();
         }
-        assertTrue(cause instanceof RuntimeBrokerException);
+        assertTrue(cause instanceof RuntimeBrokerException, label);
         return (RuntimeBrokerException) cause;
     }
 
