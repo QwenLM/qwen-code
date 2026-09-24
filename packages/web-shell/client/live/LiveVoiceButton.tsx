@@ -241,6 +241,7 @@ export function LiveVoiceButton({
     (status?.state === 'starting' ||
       connecting ||
       (starting &&
+        mode !== 'other-tab' &&
         (browserSupported || status?.available) &&
         !status?.message &&
         !browserHost.closeReason));

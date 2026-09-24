@@ -658,6 +658,34 @@ describe('LiveVoiceButton as a browser Host', () => {
     });
   });
 
+  it.each([false, true])(
+    'offers takeover of an idle browser host before starting (controlled: %s)',
+    (controlled) => {
+      mocks.result.status = {
+        v: 1,
+        available: true,
+        state: 'idle',
+        shortcut: '',
+        host: { kind: 'browser' },
+      };
+      const props = controlled ? { open: true } : {};
+      const container = mount(props);
+      if (!controlled) click(container.querySelector('button')!);
+
+      expect(document.querySelector('[data-live-establishing]')).toBeNull();
+      expect(mocks.result.browserHost.connect).not.toHaveBeenCalled();
+      expect(mocks.result.start).not.toHaveBeenCalled();
+      click(buttonNamed('live.browser.takeOver'));
+      expect(mocks.result.browserHost.connect).toHaveBeenCalledWith({
+        takeover: true,
+      });
+
+      mocks.result.browserHost.phase = 'connected';
+      act(() => mounted.at(-1)!.root.render(<LiveVoiceButton {...props} />));
+      expect(mocks.result.start).toHaveBeenCalledExactlyOnceWith('new');
+    },
+  );
+
   it('turns a refused lease into a takeover offer', () => {
     mocks.result.browserHost.phase = 'error';
     mocks.result.browserHost.closeReason = 'occupied';
