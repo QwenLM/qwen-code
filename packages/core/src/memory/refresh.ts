@@ -25,6 +25,7 @@ export interface MemoryWriteCandidate {
 
 export interface RefreshMemoryAfterWriteOptions {
   logContext?: string;
+  deliveryId?: symbol;
 }
 
 const WRITE_TOOL_NAMES = new Set<string>([
@@ -128,14 +129,20 @@ async function rebuildWrittenMemoryIndexes(
 
   await Promise.all([
     wroteProjectMemory
-      ? rebuildManagedAutoMemoryIndex(projectRoot).catch((err: unknown) => {
+      ? rebuildManagedAutoMemoryIndex(
+          projectRoot,
+          ...(options?.deliveryId === undefined ? [] : [options.deliveryId]),
+        ).catch((err: unknown) => {
           debugLogger.warn(
             `${logPrefix(options)}rebuildManagedAutoMemoryIndex failed: ${err}`,
           );
         })
       : Promise.resolve(),
     wroteUserMemory
-      ? rebuildUserAutoMemoryIndex(projectRoot).catch((err: unknown) => {
+      ? rebuildUserAutoMemoryIndex(
+          projectRoot,
+          ...(options?.deliveryId === undefined ? [] : [options.deliveryId]),
+        ).catch((err: unknown) => {
           debugLogger.warn(
             `${logPrefix(options)}rebuildUserAutoMemoryIndex failed: ${err}`,
           );
@@ -183,7 +190,10 @@ export async function refreshMemoryAfterManagedWrite(
       return false;
     }
 
-    await rebuildWrittenMemoryIndexes(candidates, projectRoot, options);
+    await rebuildWrittenMemoryIndexes(candidates, projectRoot, {
+      ...options,
+      deliveryId: config.getMemoryHookDeliveryId?.(),
+    });
 
     await refreshMemoryInstruction(config, options);
     return true;

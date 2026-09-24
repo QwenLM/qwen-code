@@ -479,7 +479,7 @@ export async function forgetManagedAutoMemoryMatches(
   projectRoot: string,
   matches: AutoMemoryForgetMatch[],
   now = new Date(),
-  options: { abortSignal?: AbortSignal } = {},
+  options: { abortSignal?: AbortSignal; memoryHookDeliveryId?: symbol } = {},
 ): Promise<AutoMemoryForgetResult> {
   options.abortSignal?.throwIfAborted();
   if (matches.length === 0) {
@@ -508,11 +508,21 @@ export async function forgetManagedAutoMemoryMatches(
   const flushMemoryChanges = async () => {
     if (deletedPaths.length > 0) {
       const paths = deletedPaths.splice(0, deletedPaths.length);
-      await notifyMemoryFileChange(paths, projectRoot, 'delete');
+      await notifyMemoryFileChange(
+        paths,
+        projectRoot,
+        'delete',
+        options.memoryHookDeliveryId,
+      );
     }
     if (updatedPaths.length > 0) {
       const paths = updatedPaths.splice(0, updatedPaths.length);
-      await notifyMemoryFileChange(paths, projectRoot, 'update');
+      await notifyMemoryFileChange(
+        paths,
+        projectRoot,
+        'update',
+        options.memoryHookDeliveryId,
+      );
     }
   };
 
@@ -627,7 +637,10 @@ export async function forgetManagedAutoMemoryMatches(
       options.abortSignal?.throwIfAborted();
       await bumpMetadata(projectRoot, now);
       options.abortSignal?.throwIfAborted();
-      await rebuildManagedAutoMemoryIndex(projectRoot);
+      await rebuildManagedAutoMemoryIndex(
+        projectRoot,
+        options.memoryHookDeliveryId,
+      );
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(
@@ -639,7 +652,10 @@ export async function forgetManagedAutoMemoryMatches(
   if (touchedScopes.has('user')) {
     try {
       options.abortSignal?.throwIfAborted();
-      await rebuildUserAutoMemoryIndex(projectRoot);
+      await rebuildUserAutoMemoryIndex(
+        projectRoot,
+        options.memoryHookDeliveryId,
+      );
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(

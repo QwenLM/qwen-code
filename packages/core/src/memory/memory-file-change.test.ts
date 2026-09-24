@@ -354,6 +354,71 @@ describe('memory file change hook', () => {
     expect(second).toHaveLength(1);
   });
 
+  it('falls back to the newest registration when the named id is for another workspace', async () => {
+    const projectRoot = await setup();
+    const other = path.join(tempDir!, 'other');
+    const seen: MemoryChangedNotice[] = [];
+    const elsewhere = registerMemoryChangedListener(other, () => {
+      seen.push({
+        paths: [],
+        relativePaths: [],
+        workspace: other,
+        enabled: true,
+      });
+    });
+    const here = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        projectRoot,
+        'update',
+        elsewhere.id,
+      );
+    } finally {
+      elsewhere();
+      here();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        scope: 'user',
+        operation: 'update',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+  });
+
+  it('emits create for a file that appears inside a coalesced window', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'new.md');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await withCoalescedMemoryChanges(
+        projectRoot,
+        registration.id,
+        async () => {
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, 'new\n');
+        },
+      );
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['user/new.md'],
+      }),
+    ]);
+  });
+
   it('reports a file removed inside a coalesced window once', async () => {
     const projectRoot = await setup();
     const file = path.join(tempDir!, 'memories', 'user', 'gone.md');

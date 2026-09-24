@@ -145,7 +145,10 @@ function recipientsFor(
     (registration) => registration.workspace === workspace,
   );
   if (deliveryId) {
-    return matched.filter((registration) => registration.id === deliveryId);
+    const named = matched.filter(
+      (registration) => registration.id === deliveryId,
+    );
+    if (named.length > 0) return named;
   }
   const newest = matched.at(-1);
   return newest ? [newest] : [];

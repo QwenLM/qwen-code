@@ -236,6 +236,7 @@ async function readAutoMemoryMetadata(
 
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
+  deliveryId?: symbol,
 ): Promise<string> {
   const [docs, metadata] = await Promise.all([
     scanAutoMemoryTopicDocuments(projectRoot),
@@ -246,6 +247,7 @@ export async function rebuildManagedAutoMemoryIndex(
     projectRoot,
     getAutoMemoryIndexPath(projectRoot),
     content,
+    { deliveryId },
   );
   return content;
 }
@@ -257,10 +259,13 @@ export async function rebuildManagedAutoMemoryIndex(
  */
 export async function rebuildUserAutoMemoryIndex(
   projectRoot: string,
+  deliveryId?: symbol,
 ): Promise<string> {
   const docs = await scanUserAutoMemoryTopicDocuments();
   const content = buildManagedAutoMemoryIndex(docs);
-  await writeMemoryIndex(projectRoot, getUserAutoMemoryIndexPath(), content);
+  await writeMemoryIndex(projectRoot, getUserAutoMemoryIndexPath(), content, {
+    deliveryId,
+  });
   return content;
 }
 
@@ -357,7 +362,7 @@ async function writeMemoryIndex(
   projectRoot: string,
   indexPath: string,
   content: string,
-  options: { noFollow?: boolean } = {},
+  options: { noFollow?: boolean; deliveryId?: symbol } = {},
 ): Promise<void> {
   const existing = await fs.readFile(indexPath, 'utf-8').catch(() => null);
   if (existing === content) {
@@ -371,5 +376,6 @@ async function writeMemoryIndex(
     indexPath,
     projectRoot,
     existing === null ? 'create' : 'update',
+    options.deliveryId,
   );
 }

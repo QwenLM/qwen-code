@@ -41,7 +41,7 @@
 - `operation`：`create`、`update` 或 `delete`。
 - `workspace`：工作区绝对路径。项目和团队记忆带上。用户记忆省略。
 
-`write_file` 和 `edit` 的目标在托管记忆根目录内时发通知。`/forget` 在删除或改写之后发通知。`MEMORY.md` 重建在索引写完后发通知，内容相同时跳过。dream 和 extract 会在 agent（含索引重建）前后比较记忆目录，按差异只发一次。agent 里用 shell 删掉的文件是一条 `delete`。调度文件在分类时被排除。
+`write_file` 和 `edit` 的目标在托管记忆根目录内时发通知。`/forget` 在删除或改写之后发通知。`MEMORY.md` 重建在索引写完后发通知，内容相同时跳过。定时 dream 和 extract 会在 agent（含索引重建）前后比较记忆目录，按差异只发一次。agent 里用 shell 删掉的文件是一条 `delete`。手动 `/dream` 是把提示交给主 agent，这一轮里的 shell 删除不在这次快照里。调度文件在分类时被排除。
 
 ### 开关
 

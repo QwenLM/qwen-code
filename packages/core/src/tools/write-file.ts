@@ -661,12 +661,16 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         diffStat,
       };
 
-      await notifyMemoryFileChange(
-        file_path,
-        this.config.getProjectRoot(),
-        operation === FileOperation.CREATE ? 'create' : 'update',
-        this.config.getMemoryHookDeliveryId(),
-      );
+      try {
+        await notifyMemoryFileChange(
+          file_path,
+          this.config.getProjectRoot(),
+          operation === FileOperation.CREATE ? 'create' : 'update',
+          this.config.getMemoryHookDeliveryId?.(),
+        );
+      } catch {
+        // The write already landed. Notification must not fail the tool.
+      }
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),

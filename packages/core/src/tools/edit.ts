@@ -743,12 +743,16 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         llmSuccessMessageParts.push(snippetText);
       }
 
-      await notifyMemoryFileChange(
-        this.params.file_path,
-        this.config.getProjectRoot(),
-        editData.isNewFile ? 'create' : 'update',
-        this.config.getMemoryHookDeliveryId(),
-      );
+      try {
+        await notifyMemoryFileChange(
+          this.params.file_path,
+          this.config.getProjectRoot(),
+          editData.isNewFile ? 'create' : 'update',
+          this.config.getMemoryHookDeliveryId?.(),
+        );
+      } catch {
+        // The edit already landed. Notification must not fail the tool.
+      }
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),

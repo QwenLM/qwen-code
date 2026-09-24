@@ -1457,7 +1457,7 @@ export class MemoryManager {
     projectRoot: string,
     matches: AutoMemoryForgetMatch[],
     now?: Date,
-    options: { abortSignal?: AbortSignal } = {},
+    options: { abortSignal?: AbortSignal; memoryHookDeliveryId?: symbol } = {},
   ): Promise<AutoMemoryForgetResult> {
     return forgetManagedAutoMemoryMatches(projectRoot, matches, now, options);
   }

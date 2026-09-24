@@ -197,6 +197,7 @@ export async function runManagedRememberByAgent(params: {
     });
   }
 
+  const deliveryId = params.config.getMemoryHookDeliveryId?.();
   const memoryPrompt = await buildCleanMemorySystemPrompt(
     params.projectRoot,
     params.scope,
@@ -269,10 +270,20 @@ export async function runManagedRememberByAgent(params: {
     // the agent could write to before surfacing the error.
     await Promise.all([
       ...(params.scope !== 'user'
-        ? [rebuildManagedAutoMemoryIndex(params.projectRoot)]
+        ? [
+            rebuildManagedAutoMemoryIndex(
+              params.projectRoot,
+              ...(deliveryId === undefined ? [] : [deliveryId]),
+            ),
+          ]
         : []),
       ...(params.scope !== 'project'
-        ? [rebuildUserAutoMemoryIndex(params.projectRoot)]
+        ? [
+            rebuildUserAutoMemoryIndex(
+              params.projectRoot,
+              ...(deliveryId === undefined ? [] : [deliveryId]),
+            ),
+          ]
         : []),
     ]).catch((rebuildErr: unknown) => {
       debugLogger.error('Memory index rebuild failed:', rebuildErr);
@@ -312,17 +323,24 @@ export async function runManagedRememberByAgent(params: {
   const rebuildWrittenScopes = () =>
     Promise.all([
       writtenScopes.includes('project')
-        ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+        ? rebuildManagedAutoMemoryIndex(
+            params.projectRoot,
+            ...(deliveryId === undefined ? [] : [deliveryId]),
+          )
         : Promise.resolve(),
       writtenScopes.includes('user')
         ? params.scope === 'user'
-          ? rebuildUserAutoMemoryIndex(params.projectRoot)
-          : rebuildUserAutoMemoryIndex(params.projectRoot).catch(
-              (err: unknown) => {
-                // Automatic scope selection keeps user memory best-effort.
-                debugLogger.error('User memory index rebuild failed:', err);
-              },
+          ? rebuildUserAutoMemoryIndex(
+              params.projectRoot,
+              ...(deliveryId === undefined ? [] : [deliveryId]),
             )
+          : rebuildUserAutoMemoryIndex(
+              params.projectRoot,
+              ...(deliveryId === undefined ? [] : [deliveryId]),
+            ).catch((err: unknown) => {
+              // Automatic scope selection keeps user memory best-effort.
+              debugLogger.error('User memory index rebuild failed:', err);
+            })
         : Promise.resolve(),
     ]);
   if (escapeError !== undefined) {
