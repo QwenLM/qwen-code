@@ -9,12 +9,14 @@ adapters.
 
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
-intent, and fails ambiguous dispatch outcomes as `UNKNOWN`. A persisted
-`READY` binding is never reused by a new process without proof: a binding
-whose request carries a durable provisioner kind is adopted only after the
-provisioner observes the physical resource and the Broker re-attests the
-Runtime identity through the transport, while a legacy binding still fails
-closed with `runtime_reconciliation_required`; see
+intent, and fails ambiguous dispatch outcomes as `UNKNOWN`.
+`reconcileExecution` asks the original Runtime about an `UNKNOWN` execution
+and settles it only on that Runtime's terminal answer; it never replays the
+call. A persisted `READY` binding is never reused by a new process without
+proof: a binding whose request carries a durable provisioner kind is adopted
+only after the provisioner observes the physical resource and the Broker
+re-attests the Runtime identity through the transport, while a legacy binding
+still fails closed with `runtime_reconciliation_required`; see
 [Runtime binding reconciliation](../../../docs/design/2026-09-24-runtime-binding-reconciliation.md).
 
 The module ships one local process provider, `LocalProcessRuntimeProvisioner`,
