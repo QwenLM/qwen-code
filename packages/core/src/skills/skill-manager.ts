@@ -304,7 +304,7 @@ export class SkillManager {
 
   /** Whether missing entries in the current cache might be discovery failures. */
   hasDiscoveryErrors(): boolean {
-    return this.discoveryHasErrors || this.parseErrors.size > 0;
+    return this.discoveryHasErrors;
   }
 
   private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
@@ -448,7 +448,10 @@ export class SkillManager {
     debugLogger.info('Refreshing skills cache...');
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
-    this.discoveryHasErrors = false;
+    let discoveryHasErrors = false;
+    const onDiscoveryError = () => {
+      discoveryHasErrors = true;
+    };
 
     // Safe mode: only load bundled (system) skills
     const levels: SkillLevel[] = this.config.isSafeMode()
@@ -462,7 +465,10 @@ export class SkillManager {
     // bubble up to the level boundary.
     const settled = await Promise.allSettled(
       levels.map(async (level) => {
-        const levelSkills = await this.listSkillsAtLevel(level);
+        const levelSkills = await this.listSkillsAtLevel(
+          level,
+          onDiscoveryError,
+        );
         debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
         return [level, levelSkills] as const;
       }),
@@ -478,7 +484,7 @@ export class SkillManager {
         totalSkills += levelSkills.length;
       } else {
         errors.push(result.reason);
-        this.discoveryHasErrors = true;
+        onDiscoveryError();
         debugLogger.warn(
           `Failed to load ${levels[i]} level skills:`,
           result.reason,
@@ -486,6 +492,8 @@ export class SkillManager {
       }
     }
 
+    // Publish completeness with the cache produced by this scan.
+    this.discoveryHasErrors = discoveryHasErrors;
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`
@@ -994,7 +1002,10 @@ export class SkillManager {
    * @param level - Storage level to scan
    * @returns Array of skill configurations
    */
-  private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
+  private async listSkillsAtLevel(
+    level: SkillLevel,
+    onDiscoveryError?: () => void,
+  ): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
       return [];
@@ -1022,6 +1033,7 @@ export class SkillManager {
       const extensions = this.config.getActiveExtensions();
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
+        if (extension.skillsDiscoveryHasErrors) onDiscoveryError?.();
         extension.skills?.forEach((skill) => {
           // Extension skills bypass parseSkillContent / validateConfig, so a
           // non-number `priority` would silently sort at the bottom of the
@@ -1064,14 +1076,12 @@ export class SkillManager {
 
     if (level === 'bundled') {
       const bundledDir = this.bundledSkillsDir;
-      if (!fsSync.existsSync(bundledDir)) {
-        debugLogger.warn(
-          `Bundled skills directory not found: ${bundledDir}. This may indicate an incomplete installation.`,
-        );
-        return [];
-      }
       debugLogger.debug(`Loading bundled skills from: ${bundledDir}`);
-      const skills = await this.loadSkillsFromDir(bundledDir, 'bundled');
+      const skills = await this.loadSkillsFromDir(
+        bundledDir,
+        'bundled',
+        onDiscoveryError,
+      );
       debugLogger.debug(`Loaded ${skills.length} bundled skills`);
       return skills;
     }
@@ -1084,7 +1094,7 @@ export class SkillManager {
     const perDirSkills = await Promise.all(
       baseDirs.map((baseDir) => {
         debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
-        return this.loadSkillsFromDir(baseDir, level);
+        return this.loadSkillsFromDir(baseDir, level, onDiscoveryError);
       }),
     );
     const skills: SkillConfig[] = [];
@@ -1109,6 +1119,7 @@ export class SkillManager {
   async loadSkillsFromDir(
     baseDir: string,
     level: SkillLevel,
+    onDiscoveryError?: () => void,
   ): Promise<SkillConfig[]> {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
@@ -1161,7 +1172,7 @@ export class SkillManager {
                 check.reason === 'invalid' &&
                 !(isNodeError(check.error) && check.error.code === 'ENOENT')
               ) {
-                this.discoveryHasErrors = true;
+                onDiscoveryError?.();
               }
               if (check.reason === 'not-directory') {
                 debugLogger.warn(
@@ -1183,7 +1194,7 @@ export class SkillManager {
             return await this.parseSkillFileInternal(skillManifest, level);
           } catch (error) {
             if (!(isNodeError(error) && error.code === 'ENOENT')) {
-              this.discoveryHasErrors = true;
+              onDiscoveryError?.();
             }
             if (error instanceof SkillError) {
               debugLogger.error(
@@ -1202,7 +1213,11 @@ export class SkillManager {
       return loaded.filter((s): s is SkillConfig => s !== null);
     } catch (error) {
       if (!(isNodeError(error) && error.code === 'ENOENT')) {
-        this.discoveryHasErrors = true;
+        onDiscoveryError?.();
+      } else if (level === 'bundled') {
+        debugLogger.warn(
+          `Bundled skills directory not found: ${baseDir}. This may indicate an incomplete installation.`,
+        );
       }
       // Directory doesn't exist or can't be read
       const errorMessage =

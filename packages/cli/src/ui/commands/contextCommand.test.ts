@@ -697,14 +697,69 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(trackedBody),
       );
       expect(sumRows(data.breakdown)).toBe(100_000);
+      const text = formatContextUsageText(data);
+      expect(text).not.toContain('report-builder (body loaded)');
+      expect(text).not.toContain('report-builder (active)');
+      expect(text.match(/body loaded/g)).toHaveLength(1);
     });
 
-    it('keeps a tracked skill body out of messages for a backslash skill filePath', async () => {
-      // Windows and mixed-separator skill paths: core renders the tracked body
-      // with `path.dirname(filePath)`, so the skip key must be derived the same
-      // way. A `/`-only dirname leaves the whole path in `baseDir`, the
-      // re-rendered body no longer matches, and the body is billed under both
-      // `skills` and `messages`.
+    it.each([
+      { total: 0, suffix: '' },
+      { total: 100_000, suffix: '' },
+      { total: 0, suffix: '\nRestored invocation metadata.' },
+      { total: 100_000, suffix: '\nRestored invocation metadata.' },
+    ])(
+      'bills repeated copies of a tracked body (API total $total, suffix "$suffix")',
+      async ({ total, suffix }) => {
+        const emittedBody = trackedBody + suffix;
+        const trackedBodies = new Map([[trackedBody, 'report-builder']]);
+        const options = {
+          total,
+          tools: [
+            {
+              ...skillToolDouble,
+              getLoadedSkillContentNames: () => trackedBodies,
+            },
+          ],
+          declared: [skillToolSchema],
+          skillList: trackedSkillList,
+          history: [prelude, conversation[0]!, skillResponse(emittedBody)],
+        };
+        const once = await collectContextData(makeChatConfig(options), true);
+        const repeatedConfig = makeChatConfig({
+          ...options,
+          history: [...options.history, skillResponse(emittedBody)],
+        });
+        const repeated = await collectContextData(repeatedConfig, true);
+        const responseTokens = estimateContextTextTokens(
+          JSON.stringify({ name: 'skill', response: { output: emittedBody } }),
+        );
+
+        expect(once.breakdown.messages).toBe(total ? 100 : 0);
+        expect(repeated.breakdown.messages).toBe(
+          total ? 100 + responseTokens : 0,
+        );
+        expect(repeated.breakdown.skills).toBe(once.breakdown.skills);
+        expect(repeated.skills).toEqual(once.skills);
+        expect(repeated.totalTokens).toBe(total);
+        if (!total) {
+          expect(repeated.breakdown.freeSpace).toBe(
+            once.breakdown.freeSpace - responseTokens,
+          );
+        }
+        // Accounting must not consume the live tool's history tracking.
+        expect(await collectContextData(repeatedConfig, true)).toEqual(
+          repeated,
+        );
+        expect(trackedBodies).toEqual(
+          new Map([[trackedBody, 'report-builder']]),
+        );
+      },
+    );
+
+    it('attributes the emitted body with a backslash skill filePath', async () => {
+      // Attribution uses the body actually emitted by core, without rebuilding
+      // it from the current file path or content.
       const windowsFilePath = 'C:\\skills\\report-builder\\SKILL.md';
       const windowsBody = buildSkillLlmContent(
         path.dirname(windowsFilePath),
@@ -1270,6 +1325,15 @@ describe('collectContextData (contextCommand)', () => {
   });
 
   it('attributes all injected skill bodies after refresh, removal and disable', async () => {
+    const listingEntries = new Map(
+      ['edited', 'removed', 'disabled'].map((name) => [
+        name,
+        `<skill>\n<name>\n${name}\n</name>\n<description>\nSkill\n</description>\n</skill>`,
+      ]),
+    );
+    const listing = wrapSystemReminder(
+      `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${[...listingEntries.values()].join('\n')}\n</available_skills>`,
+    );
     const history = new Map([
       ['Earlier body retained in conversation.', 'edited'],
       ['New body injected after refresh.', 'edited'],
@@ -1308,6 +1372,7 @@ describe('collectContextData (contextCommand)', () => {
           getLastPromptTokenCount: () => 100_000,
           isLastPromptTokenCountEstimated: () => false,
           getHistory: () => [
+            { role: 'user', parts: [{ text: listing }] },
             { role: 'user', parts: [{ text: 'Current conversation.' }] },
             ...[...history.keys()].map((output) => ({
               role: 'user',
@@ -1330,7 +1395,9 @@ describe('collectContextData (contextCommand)', () => {
       0,
     );
     expect(data.breakdown.skills).toBe(
-      estimateContextTextTokens(JSON.stringify(tool.schema)) + bodyTokens,
+      estimateContextTextTokens(JSON.stringify(tool.schema)) +
+        estimateContextTextTokens(listing) +
+        bodyTokens,
     );
     expect(data.breakdown.messages).toBe(
       estimateContextTextTokens('Current conversation.'),
@@ -1342,9 +1409,16 @@ describe('collectContextData (contextCommand)', () => {
         estimateContextTextTokens('New body injected after refresh.'),
     });
     for (const name of ['removed', 'disabled']) {
-      expect(data.skills.find((skill) => skill.name === name)).toMatchObject({
-        loaded: true,
-      });
+      expect(data.skills.filter((skill) => skill.name === name)).toEqual([
+        {
+          name,
+          loaded: true,
+          tokens: estimateContextTextTokens(listingEntries.get(name)!),
+          bodyTokens: estimateContextTextTokens(
+            [...history].find(([, skillName]) => skillName === name)![0],
+          ),
+        },
+      ]);
     }
   });
 

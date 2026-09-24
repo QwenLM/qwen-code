@@ -282,7 +282,7 @@ function estimateFunctionResponseTokens(
 }
 
 /**
- * Whether a `skill` response carries a body that `skills` already bills
+ * Consume one `skill` response carrying a body that `skills` already bills
  * (`loadedBodiesTokens`). Membership is by body, not by tool name: the Skill
  * tool also returns raw command output for a same-named non-skill command
  * without tracking it — "the result is raw command text, not a skill body"
@@ -293,18 +293,21 @@ function estimateFunctionResponseTokens(
  * same two shapes when it restores tracking (`restoreLoadedSkillsFromHistory`):
  * the body verbatim, or the body with a suffix appended after a newline.
  */
-function isBilledSkillBody(
+function consumeBilledSkillBody(
   part: Part,
-  billedSkillBodies: ReadonlySet<string>,
+  billedSkillBodies: Set<string>,
 ): boolean {
   if (billedSkillBodies.size === 0) return false;
   const output = (
     part.functionResponse?.response as { output?: unknown } | undefined
   )?.output;
   if (typeof output !== 'string') return false;
-  if (billedSkillBodies.has(output)) return true;
+  if (billedSkillBodies.delete(output)) return true;
   for (const body of billedSkillBodies) {
-    if (output.startsWith(`${body}\n`)) return true;
+    if (output.startsWith(`${body}\n`)) {
+      billedSkillBodies.delete(body);
+      return true;
+    }
   }
   return false;
 }
@@ -330,6 +333,8 @@ function estimateConversationTokens(
   billing: ConversationBilling,
 ): number {
   let tokens = 0;
+  // The historical body map bills each distinct body once under skills.
+  const remainingSkillBodies = new Set(billing.billedSkillBodies);
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       if (typeof part.text === 'string') {
@@ -342,7 +347,7 @@ function estimateConversationTokens(
       } else if (part.functionResponse) {
         if (
           part.functionResponse.name === ToolNames.SKILL &&
-          isBilledSkillBody(part, billing.billedSkillBodies)
+          consumeBilledSkillBody(part, remainingSkillBodies)
         ) {
           continue;
         }
@@ -971,9 +976,8 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       lines.push('');
       lines.push('**Skills**');
       for (const skill of sortedSkills) {
-        const label = skill.loaded ? `${skill.name} (active)` : skill.name;
         lines.push(
-          fmtCategoryRow(label, skill.tokens, contextWindowSize, '  └ '),
+          fmtCategoryRow(skill.name, skill.tokens, contextWindowSize, '  └ '),
         );
         if (skill.loaded && skill.bodyTokens && skill.bodyTokens > 0) {
           lines.push(

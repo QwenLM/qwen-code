@@ -188,6 +188,8 @@ export interface Extension {
   resolvedSettings?: ResolvedExtensionSetting[];
   commands?: string[];
   skills?: SkillConfig[];
+  /** Runtime-only: missing skills may be discovery failures rather than removals. */
+  skillsDiscoveryHasErrors?: boolean;
   agents?: SubagentConfig[];
   /** Workflow scripts this extension ships, addressed as `<name>:<meta.name>`. */
   workflows?: ExtensionWorkflowDefinition[];
@@ -2004,9 +2006,15 @@ export class ExtensionManager {
       const config = extension.config;
       const effectiveExtensionPath = extension.path;
 
+      const onSkillsDiscoveryError = () => {
+        head.extension.skillsDiscoveryHasErrors = true;
+      };
       if (loadedManifest.format === 'agent-plugins-v1') {
         extension.commands = [];
-        extension.skills = await loadAgentPluginSkills(effectiveExtensionPath);
+        extension.skills = await loadAgentPluginSkills(
+          effectiveExtensionPath,
+          onSkillsDiscoveryError,
+        );
         extension.agents = [];
         // The Agent Plugins v1 schema defines no workflows.
         extension.workflows = [];
@@ -2021,6 +2029,7 @@ export class ExtensionManager {
           .filter((contextFilePath) => fs.existsSync(contextFilePath));
         extension.skills = await loadSkillsFromDir(
           `${effectiveExtensionPath}/skills`,
+          onSkillsDiscoveryError,
         );
         const agentExecutorRefusals = new Map<string, SubagentError>();
         extension.agents = await loadSubagentFromDir(

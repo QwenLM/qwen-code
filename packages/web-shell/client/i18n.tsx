@@ -1598,6 +1598,8 @@ const EN: Messages = {
   'attachment.loadingPreview': 'Loading preview...',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
+  'sideTask.commandsLoadingTimedOut':
+    'Command information is still unavailable. Your side-task prompt has been kept and will be checked when it loads.',
   'sideTask.promptFailed': 'Failed to send the side-task question',
   'sideTask.renameFailed': 'Failed to name side task',
   'turnOutputs.preview': 'Preview',
@@ -1895,6 +1897,7 @@ const EN: Messages = {
       : `${count} queued shell commands will not run.`;
   },
   'queue.queueFailed': 'Failed to queue message',
+  'queue.attachmentCleanupFailed': 'Failed to discard uploaded attachments',
   'queue.deleteFailed': 'Failed to move message out of queue',
   'queue.editFailed': 'Failed to edit queued message',
   'queue.insertFailed': 'Failed to insert queued message',
@@ -3924,6 +3927,7 @@ const EN: Messages = {
   'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
   'settings.models.credentialEnv': 'Key environment variable',
   'settings.models.add': '+ Add Model',
+  'settings.models.addDisabled': 'Adding models is disabled by the host.',
   'settings.models.setCurrent': 'Set current',
   'settings.models.current': 'Current',
   'settings.models.runtime': 'Runtime',
@@ -5536,6 +5540,8 @@ const ZH: Messages = {
   'attachment.loadingPreview': '正在加载预览...',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
+  'sideTask.commandsLoadingTimedOut':
+    '命令信息尚未就绪。侧任务提示词已保留，将在信息加载后重新检查。',
   'sideTask.promptFailed': '发送侧边任务问题失败',
   'sideTask.renameFailed': '侧边任务命名失败',
   'turnOutputs.preview': '预览',
@@ -5806,6 +5812,7 @@ const ZH: Messages = {
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
+  'queue.attachmentCleanupFailed': '清理已上传附件失败',
   'queue.deleteFailed': '移出队列失败',
   'queue.editFailed': '编辑排队消息失败',
   'queue.insertFailed': '插入排队消息失败',
@@ -7682,6 +7689,7 @@ const ZH: Messages = {
   'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
   'settings.models.credentialEnv': '密钥环境变量',
   'settings.models.add': '+ 增加模型',
+  'settings.models.addDisabled': '宿主已禁用添加模型。',
   'settings.models.setCurrent': '设为当前',
   'settings.models.current': '当前',
   'settings.models.runtime': '运行时',

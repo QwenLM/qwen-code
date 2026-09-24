@@ -1,3 +1,8 @@
+import {
+  isModelSetupCommand,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from './modelManagement';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -376,6 +381,7 @@ import {
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
+import { buildSessionWorkflowProjection } from './components/workflow/session-workflow-model';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -1174,6 +1180,8 @@ export type WebShellSlashCommandHandler = (
 export interface WebShellProps {
   /** Native settings-page presentation. Does not restrict commands or daemon access. */
   settings?: WebShellSettingsOptions;
+  /** Model add/delete interactions across WebShell. Not a backend permission policy. */
+  modelManagement?: WebShellModelManagementOptions;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -3160,6 +3168,7 @@ export function App({
   chatMaxWidth,
   sidebar,
   settings: settingsPresentation,
+  modelManagement,
   header,
   rightPanel,
   environmentPanel,
@@ -3211,6 +3220,9 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  const modelManagementPolicy = resolveModelManagement(modelManagement);
+  const modelManagementRef = useRef(modelManagementPolicy);
+  modelManagementRef.current = modelManagementPolicy;
   const navigation = useWebShellNavigation();
   const navigationRef = useRef(navigation);
   navigationRef.current = navigation;
@@ -5151,6 +5163,27 @@ export function App({
     },
     [],
   );
+  // A policy-refused initial prompt must die with the refusal: drop it from the
+  // live tabs AND the per-session bucket mirror, or switching away and back
+  // re-arms the toast and a later policy relaxation replays the command.
+  const handleSideTaskInitialPromptRefused = useCallback((tabId: string) => {
+    setArtifactPanelTabs((tabs) =>
+      tabs.map((tab) =>
+        tab.id === tabId && tab.kind === 'side_task'
+          ? { ...tab, initialPrompt: undefined }
+          : tab,
+      ),
+    );
+    for (const state of artifactPanelStateBySessionRef.current.values()) {
+      if (!state.tabs.some((tab) => tab.id === tabId)) continue;
+      state.tabs = state.tabs.map((tab) =>
+        tab.id === tabId && tab.kind === 'side_task'
+          ? { ...tab, initialPrompt: undefined }
+          : tab,
+      );
+      break;
+    }
+  }, []);
   const openSideTask = useCallback(
     (sideTask: SideTaskListItem) => {
       const parentSessionId = connection.sessionId;
@@ -9666,6 +9699,9 @@ export function App({
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
+  useEffect(() => {
+    if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
+  }, [modelManagementPolicy.allowAdd, showAuthDialog]);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
@@ -10330,6 +10366,18 @@ export function App({
     },
     [pushToast, t],
   );
+  const refuseModelSetup = useCallback(
+    (text: string) => {
+      if (
+        modelManagementRef.current.allowAdd ||
+        !isModelSetupCommand(text, connectionRef.current.commands)
+      )
+        return false;
+      pushToast('info', t('settings.models.addDisabled'));
+      return true;
+    },
+    [pushToast, t],
+  );
   const sendPrompt = useCallback(
     async (
       text: string,
@@ -10482,6 +10530,10 @@ export function App({
         restoreCancelledSubmitState();
         return;
       }
+      if (refuseModelSetup(preparedPrompt)) {
+        restoreCancelledSubmitState();
+        return;
+      }
       opts?.onPreparedSubmit?.({
         prompt: preparedPrompt,
         inputAnnotations: preparedInputAnnotations,
@@ -10510,6 +10562,10 @@ export function App({
       }
       if (!appMountedRef.current) return;
       if (!admissionSourceIsCurrent(allocatedSessionId)) {
+        restoreCancelledSubmitState();
+        return;
+      }
+      if (refuseModelSetup(preparedPrompt)) {
         restoreCancelledSubmitState();
         return;
       }
@@ -10662,6 +10718,7 @@ export function App({
       finishPromptPreparation,
       getComposerWorkspaceCwd,
       reportError,
+      refuseModelSetup,
       sessionCatalogController,
       sessionActions,
       sessionOwnerGuard,
@@ -10858,7 +10915,7 @@ export function App({
     // mcpDialogMessage survives closing the Plugins panel; MCP surfaces are
     // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
-    showAuthDialog ||
+    (modelManagementPolicy.allowAdd && showAuthDialog) ||
     showAddWorkspaceDialog ||
     scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
@@ -10945,6 +11002,10 @@ export function App({
     }
     let failed = failedPromptRef.current;
     if (!failed || failed.sessionId !== connectionRef.current.sessionId) {
+      updateFailedPrompt(null);
+      return;
+    }
+    if (refuseModelSetup(failed.text)) {
       updateFailedPrompt(null);
       return;
     }
@@ -11072,6 +11133,7 @@ export function App({
     reportError,
     restoreOrDeferCancelledRetry,
     retryOwnerIsCurrent,
+    refuseModelSetup,
     sendPrompt,
     store,
     t,
@@ -11101,6 +11163,11 @@ export function App({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   } = useQueuedPrompts({
+    getPromptDispatchError: (text) =>
+      !modelManagementRef.current.allowAdd &&
+      isModelSetupCommand(text, connectionRef.current.commands)
+        ? t('settings.models.addDisabled')
+        : undefined,
     connected,
     writeBlocked:
       sessionWriteBlocked ||
@@ -11745,6 +11812,27 @@ export function App({
         ? getAgentToolsForPlan(messages, floatingTodosState)
         : [],
     [floatingTodosState, messages, tasksDialogMessage],
+  );
+  // One projection per render for every session-workflow surface. The
+  // cockpit, the artifact-panel inspector and the graph embedded in the
+  // cockpit each used to derive their own copy of the same projection; they
+  // now share this one, which also carries the single task-execution index
+  // they all read from.
+  const sessionWorkflowProjection = useMemo(
+    () =>
+      sessionWorkflowEnabled
+        ? buildSessionWorkflowProjection(
+            sessionWorkflowTodos,
+            planAgentTools,
+            environmentAgentTasks,
+          )
+        : undefined,
+    [
+      environmentAgentTasks,
+      planAgentTools,
+      sessionWorkflowEnabled,
+      sessionWorkflowTodos,
+    ],
   );
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
@@ -15037,6 +15125,13 @@ export function App({
         pushToast('error', t('userMessage.editBusy'));
         return false;
       }
+      if (
+        !modelManagementRef.current.allowAdd &&
+        isModelSetupCommand(trimmed, connectionRef.current.commands)
+      ) {
+        pushToast('info', t('settings.models.addDisabled'));
+        return false;
+      }
       const sessionId = connectionRef.current.sessionId;
       if (
         unknownPromptAdmissionRef.current?.payloadAvailable &&
@@ -15459,9 +15554,19 @@ export function App({
       ) {
         return false;
       }
+      // The host's documented slash-command override runs first; only when
+      // it declines does the policy consume a model-setup command — still
+      // ahead of daemon dispatch through the hidden-command forward below.
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
+        return true;
+      }
+      if (
+        !modelManagementRef.current.allowAdd &&
+        isModelSetupCommand(text, connectionRef.current.commands)
+      ) {
+        pushToast('info', t('settings.models.addDisabled'));
         return true;
       }
       if (connectionRef.current.loadingTranscript) {
@@ -15959,6 +16064,10 @@ export function App({
             return true;
           }
           if (cmd === 'auth') {
+            if (!modelManagementRef.current.allowAdd) {
+              pushToast('info', t('settings.models.addDisabled'));
+              return true;
+            }
             // Take over only the surface this command owns: clearing an
             // unrelated settings-launched key would disarm its exclusion
             // force-close.
@@ -16067,6 +16176,7 @@ export function App({
               currentModeRef.current === 'plan',
             );
             const { prompt } = operation;
+            if (prompt && refuseModelSetup(prompt)) return true;
             if (prompt && commandBlocked) return blockCommand();
             if (!connectionRef.current.sessionId) {
               void setComposerMode(executionModeRef.current, operation.enabled);
@@ -16481,6 +16591,16 @@ export function App({
                 pushToast('error', t('btw.side.empty'));
                 return true;
               }
+              // Refuse before a session is provisioned; the panel's
+              // initial-prompt guard stays as the backstop for tabs created
+              // before a policy flip.
+              if (
+                !modelManagementRef.current.allowAdd &&
+                isModelSetupCommand(question, connectionRef.current.commands)
+              ) {
+                pushToast('info', t('settings.models.addDisabled'));
+                return true;
+              }
               createSideTask(question);
               return true;
             }
@@ -16735,6 +16855,7 @@ export function App({
     [
       offerCapacityRecovery,
       beginPromptPreparation,
+      refuseModelSetup,
       sendPrompt,
       sessionActions,
       sessionOwnerGuard,
@@ -16945,6 +17066,11 @@ export function App({
       const retryErrorIdentity = { block: currentRetryError };
       const retrySessionId = connectionRef.current.sessionId;
       const retryText = lastSubmittedPromptRef.current;
+      if (refuseModelSetup(retryText)) {
+        disarmSubmittedPromptRetry();
+        setShowRetryHint(false);
+        return;
+      }
       const retryImages = lastSubmittedImagesRef.current;
       const retryFiles = lastSubmittedFilesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
@@ -17094,11 +17220,13 @@ export function App({
     }
   }, [
     connected,
+    disarmSubmittedPromptRetry,
     pushToast,
     reportError,
     rearmFailedTurnErrorRetry,
     restoreOrDeferCancelledRetry,
     retryOwnerIsCurrent,
+    refuseModelSetup,
     sendPrompt,
     store,
     t,
@@ -17434,6 +17562,7 @@ export function App({
 
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
+      if (!modelManagementRef.current.allowDelete) return;
       const owner = sessionOwnerGuard.capture();
       const modelActionToken = ++modelActionTokenRef.current;
       setModelActionBusy(true);
@@ -17908,7 +18037,15 @@ export function App({
           !NON_WORKSPACE_BLOCKED_COMMANDS.has(command.name.toLowerCase()),
       )
       .filter(
-        (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
+        (command) =>
+          !hiddenCommands.has(normalizeHiddenCommand(command.name)) &&
+          (modelManagementPolicy.allowAdd ||
+            !(
+              command.name === 'auth' && command.source === 'builtin-command'
+            ) ||
+            additionalSlashCommands.some(
+              (entry) => entry.name === command.name,
+            )),
       )
       .map((command) => {
         const skillKey = skillDescriptionKey(command.name);
@@ -17921,6 +18058,7 @@ export function App({
       });
   }, [
     additionalSlashCommands,
+    modelManagementPolicy.allowAdd,
     connection.commands,
     connection.sessionId,
     connection.skills,
@@ -18540,6 +18678,7 @@ export function App({
     onCreateSideTaskSession: createSideTaskSession,
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,
+    onSideTaskInitialPromptRefused: handleSideTaskInitialPromptRefused,
     onNestedRightPanelOpen: handleTurnOutputOpen,
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,
@@ -18549,11 +18688,13 @@ export function App({
     onOpenWorkflowAgent: openEnvironmentAgent,
     onError: reportError,
     sessionWorkflowEnabled,
+    modelManagement,
     workflow: sessionWorkflowEnabled
       ? {
           todos: sessionWorkflowTodos,
           tools: planAgentTools,
           tasks: environmentAgentTasks,
+          projection: sessionWorkflowProjection,
           artifacts,
           selectedTodoId: selectedWorkflowTodoId,
           onSelectedTodoIdChange: setSelectedWorkflowTodoId,
@@ -18817,13 +18958,14 @@ export function App({
               }}
             />
           )}
-          {showAuthDialog && (
+          {modelManagementPolicy.allowAdd && showAuthDialog && (
             <DialogShell
               title={t('auth.title')}
               size="lg"
               onClose={handleCloseAuthDialog}
             >
               <AuthMessage
+                allowAdd={modelManagementPolicy.allowAdd}
                 onMessage={(text, type = 'status') => {
                   store.dispatch([
                     type === 'error'
@@ -19621,7 +19763,8 @@ export function App({
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
                         }
-                        modelManagement={{
+                        modelManagementSectionProps={{
+                          ...modelManagementPolicy,
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
                           onUpdateContextWindow: handleModelContextWindowUpdate,
@@ -19636,6 +19779,7 @@ export function App({
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
                           onAddModel: () => {
+                            if (!modelManagementRef.current.allowAdd) return;
                             if (
                               !isItemVisible(
                                 'builtin:model-management',
@@ -20073,6 +20217,7 @@ export function App({
                     todos={sessionWorkflowTodos}
                     tools={planAgentTools}
                     tasks={environmentAgentTasks}
+                    projection={sessionWorkflowProjection}
                     selectedTodoId={selectedWorkflowTodoId}
                     onSelectedTodoIdChange={setSelectedWorkflowTodoId}
                     onBackToChat={closeCockpit}
@@ -20111,6 +20256,7 @@ export function App({
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
+                        modelManagement={modelManagement}
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
                         onAssistantTurnSettled={onAssistantTurnSettled}
