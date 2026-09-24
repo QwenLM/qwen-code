@@ -26,7 +26,6 @@ import {
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildAvailableSkillsReminder,
-  buildSkillLlmContent,
   computeThresholds,
   getStartupContextLength,
   isMediaPolicyToolHiddenFromModel,
@@ -283,7 +282,7 @@ function estimateFunctionResponseTokens(
 }
 
 /**
- * Whether a `skill` response carries a body that `skills` already bills
+ * Consume one `skill` response carrying a body that `skills` already bills
  * (`loadedBodiesTokens`). Membership is by body, not by tool name: the Skill
  * tool also returns raw command output for a same-named non-skill command
  * without tracking it — "the result is raw command text, not a skill body"
@@ -294,18 +293,21 @@ function estimateFunctionResponseTokens(
  * same two shapes when it restores tracking (`restoreLoadedSkillsFromHistory`):
  * the body verbatim, or the body with a suffix appended after a newline.
  */
-function isBilledSkillBody(
+function consumeBilledSkillBody(
   part: Part,
-  billedSkillBodies: ReadonlySet<string>,
+  billedSkillBodies: Set<string>,
 ): boolean {
   if (billedSkillBodies.size === 0) return false;
   const output = (
     part.functionResponse?.response as { output?: unknown } | undefined
   )?.output;
   if (typeof output !== 'string') return false;
-  if (billedSkillBodies.has(output)) return true;
+  if (billedSkillBodies.delete(output)) return true;
   for (const body of billedSkillBodies) {
-    if (output.startsWith(`${body}\n`)) return true;
+    if (output.startsWith(`${body}\n`)) {
+      billedSkillBodies.delete(body);
+      return true;
+    }
   }
   return false;
 }
@@ -331,6 +333,8 @@ function estimateConversationTokens(
   billing: ConversationBilling,
 ): number {
   let tokens = 0;
+  // The historical body map bills each distinct body once under skills.
+  const remainingSkillBodies = new Set(billing.billedSkillBodies);
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       if (typeof part.text === 'string') {
@@ -343,7 +347,7 @@ function estimateConversationTokens(
       } else if (part.functionResponse) {
         if (
           part.functionResponse.name === ToolNames.SKILL &&
-          isBilledSkillBody(part, billing.billedSkillBodies)
+          consumeBilledSkillBody(part, remainingSkillBodies)
         ) {
           continue;
         }
@@ -471,12 +475,25 @@ export async function collectContextData(
     ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
     : 0;
 
-  const loadedSkillNames: ReadonlySet<string> =
-    skillTool && 'getLoadedSkillNames' in skillTool
+  const loadedContentNames: ReadonlyMap<string, string> =
+    skillTool && 'getLoadedSkillContentNames' in skillTool
       ? (
-          skillTool as { getLoadedSkillNames(): ReadonlySet<string> }
-        ).getLoadedSkillNames()
-      : new Set();
+          skillTool as {
+            getLoadedSkillContentNames(): ReadonlyMap<string, string>;
+          }
+        ).getLoadedSkillContentNames()
+      : new Map();
+  const bodyTokensByName = new Map<string, number>();
+  for (const [content, name] of loadedContentNames) {
+    bodyTokensByName.set(
+      name,
+      (bodyTokensByName.get(name) ?? 0) + estimateContextTextTokens(content),
+    );
+  }
+  const loadedBodiesTokens = [...bodyTokensByName.values()].reduce(
+    (sum, tokens) => sum + tokens,
+    0,
+  );
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
@@ -496,26 +513,12 @@ export async function collectContextData(
   }
   mergeSkillListing(skillListing, tailSkillListings.listing);
 
-  let loadedBodiesTokens = 0;
-  // The exact bodies `loadedBodiesTokens` bills below. `estimateConversationTokens`
-  // skips a `skill` response only when this set owns its body, so the skip and
-  // the billing can never disagree.
-  const billedSkillBodies = new Set<string>();
+  const billedSkillBodies = new Set(loadedContentNames.keys());
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
     const listingTokens =
       skillListing.byName.get(skill.name.toLowerCase())?.tokens ?? 0;
-    const isLoaded = loadedSkillNames.has(skill.name);
-    let bodyTokens: number | undefined;
-    if (isLoaded && skill.body) {
-      // Matches every core producer, which renders the body with
-      // `path.dirname` of the platform's own separator; a `/`-only suffix strip
-      // leaves a Windows path intact and bills the body twice.
-      const baseDir = skill.filePath ? path.dirname(skill.filePath) : '';
-      const body = buildSkillLlmContent(baseDir, skill.body);
-      bodyTokens = estimateContextTextTokens(body);
-      loadedBodiesTokens += bodyTokens;
-      billedSkillBodies.add(body);
-    }
+    const bodyTokens = bodyTokensByName.get(skill.name);
+    const isLoaded = bodyTokens !== undefined;
     return {
       name: skill.name,
       tokens: listingTokens,
@@ -524,13 +527,25 @@ export async function collectContextData(
     };
   });
 
+  const discoveredNames = new Set(skillConfigs.map((skill) => skill.name));
+  for (const [name, bodyTokens] of bodyTokensByName) {
+    if (!discoveredNames.has(name)) {
+      skills.push({
+        name,
+        tokens: skillListing.byName.get(name.toLowerCase())?.tokens ?? 0,
+        loaded: true,
+        bodyTokens,
+      });
+    }
+  }
+
   // The listing also carries model-invocable commands — a user's own
   // `.qwen/commands/*.toml`, extension saved workflows with `whenToUse` — which
   // `listSkills()` never returns, while their tokens are inside the measured
   // listing that `skillsTokens` bills. Give each one a row so the rows and the
   // category cover the same set. Rows never feed `skillsTokens`: Built-in tools
   // subtracts the Skill tool definition *because* `skills` carries it.
-  const rowedNames = new Set(skillConfigs.map((s) => s.name.toLowerCase()));
+  const rowedNames = new Set(skills.map((s) => s.name.toLowerCase()));
   for (const [key, entry] of skillListing.byName) {
     if (rowedNames.has(key)) continue;
     rowedNames.add(key);
@@ -770,8 +785,9 @@ export async function collectContextData(
     mcpTools: showDetails ? detailMcpTools : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
-      ? detailSkills.filter((skill) =>
-          enabledSkillNames.has(skill.name.toLowerCase()),
+      ? detailSkills.filter(
+          (skill) =>
+            skill.loaded || enabledSkillNames.has(skill.name.toLowerCase()),
         )
       : [],
     isEstimated,
@@ -960,9 +976,8 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       lines.push('');
       lines.push('**Skills**');
       for (const skill of sortedSkills) {
-        const label = skill.loaded ? `${skill.name} (active)` : skill.name;
         lines.push(
-          fmtCategoryRow(label, skill.tokens, contextWindowSize, '  └ '),
+          fmtCategoryRow(skill.name, skill.tokens, contextWindowSize, '  └ '),
         );
         if (skill.loaded && skill.bodyTokens && skill.bodyTokens > 0) {
           lines.push(

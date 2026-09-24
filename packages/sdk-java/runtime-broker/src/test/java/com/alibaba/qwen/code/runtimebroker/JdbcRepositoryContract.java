@@ -516,6 +516,28 @@ final class JdbcRepositoryContract {
                         ToolExecutionRecord.State.EXECUTING, false),
                 prefix + "-dispatcher-a",
                 executingClaim.getDispatchGeneration());
+        ToolExecutionRecord liveExecuting = second.findByExecutionCallId(
+                executingCreated.getExecutionCallId());
+        ToolExecutionRecord executingReclaim = first.claimDispatch(
+                executingCreated.getExecutionCallId(),
+                prefix + "-dispatcher-a", Duration.ofMinutes(45));
+        assertEquals(liveExecuting.getVersion(),
+                executingReclaim.getVersion());
+        assertEquals(liveExecuting.getDispatchLeaseUntil(),
+                executingReclaim.getDispatchLeaseUntil());
+        assertNull(second.claimDispatch(
+                executingCreated.getExecutionCallId(),
+                prefix + "-dispatcher-b", Duration.ofMinutes(30)));
+        ToolExecutionRecord stillExecuting = second.findByExecutionCallId(
+                executingCreated.getExecutionCallId());
+        assertEquals(ToolExecutionRecord.State.EXECUTING,
+                stillExecuting.getState());
+        assertEquals(liveExecuting.getVersion(),
+                stillExecuting.getVersion());
+        assertEquals(liveExecuting.getDispatchOwner(),
+                stillExecuting.getDispatchOwner());
+        assertEquals(liveExecuting.getDispatchLeaseUntil(),
+                stillExecuting.getDispatchLeaseUntil());
         expire(dataSource, "qwen_tool_execution",
                 "dispatch_lease_until", "execution_call_id",
                 executingCreated.getExecutionCallId());

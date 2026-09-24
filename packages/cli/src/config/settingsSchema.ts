@@ -4154,7 +4154,7 @@ const SETTINGS_SCHEMA = {
             default:
               'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
             description:
-              'Advanced override for the DashScope Realtime WebSocket endpoint.',
+              'Base URL of the DashScope Realtime service, such as https://dashscope.aliyuncs.com/compatible-mode/v1; a Realtime WebSocket URL is also accepted.',
             showInDialog: false,
           },
           voice: {
