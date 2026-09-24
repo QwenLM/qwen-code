@@ -270,9 +270,10 @@ export function startPostRenderPrefetches(
     runDeferredTask('telemetry_init', () => initializeTelemetry(config));
   }
 
-  const batchAutoCollect =
-    settings.merged.general?.batchAutoCollect ?? 'deliver';
-  if (config.isInteractive() && batchAutoCollect !== 'off') {
+  if (
+    config.isInteractive() &&
+    settings.merged.general?.batchAutoCollect !== false
+  ) {
     // Collects `/batch-api` tasks of this project as they finish (and any
     // that finished while no session was open). HTTP only, no model call;
     // results arrive as info notices through the update-notice channel,
@@ -289,7 +290,6 @@ export function startPostRenderPrefetches(
       ]);
       startBatchAutoCollect({
         projectRoot: config.getWorkingDir(),
-        mode: batchAutoCollect,
         notify: (message) =>
           updateEventEmitter.emit('update-info', { message }),
         resolveEndpoint: () =>

@@ -10,7 +10,6 @@
 // polls the provider over plain HTTP and runs the same `collectTask` the CLI
 // runs — no model call, so waiting costs nothing. Retries are never
 // automatic: they bill again, so the notice only says how.
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BatchEndpoint } from './batch.js';
@@ -25,16 +24,11 @@ import {
   type CollectSummary,
   type WorkflowApi,
 } from './batch-workflow.js';
-import { SETTLED_STATUSES, getBatchJob } from './batch-client.js';
 import { isInsideRoot } from './batch-docs.js';
-
-/** `deliver` collects and writes results; `notify` only says a task is ready. */
-export type BatchAutoCollectMode = 'deliver' | 'notify' | 'off';
 
 export interface BatchAutoCollectOptions {
   /** Project root of this session; only its tasks are collected. */
   projectRoot: string;
-  mode: BatchAutoCollectMode;
   /** Shows one line in the session (an info notice). */
   notify: (message: string) => void;
   /** Resolved on each pass that has a task due; throwing postpones polling
@@ -83,9 +77,6 @@ const isOpen = (task: BatchTask) =>
         !attempt.collected),
   );
 
-const endpointKey = (ep: BatchEndpoint) =>
-  `${ep.baseUrl} ${crypto.createHash('sha256').update(ep.apiKey).digest('hex').slice(0, 12)}`;
-
 const list = (names: string[]) =>
   names.slice(0, MAX_LISTED).join(', ') +
   (names.length > MAX_LISTED ? ` and ${names.length - MAX_LISTED} more` : '');
@@ -131,9 +122,6 @@ export function createBatchAutoCollector(
   const store = new BatchTaskStore(batchHomeDir(env));
   const nextPollAt = new Map<string, number>();
   const pollDelay = new Map<string, number>();
-  // Batches already announced in notify mode; a later retry's new batch
-  // is announced again.
-  const announced = new Set<string>();
   // One-time warnings: a submission that cannot be reconciled, and a
   // session that cannot reach the Batch API at all.
   const warnedAmbiguous = new Set<string>();
@@ -149,16 +137,6 @@ export function createBatchAutoCollector(
     nextPollAt.set(id, now() + delay);
   };
 
-  const openBatchIds = (task: BatchTask) =>
-    task.attempts
-      .filter(
-        (attempt) =>
-          attempt.submitState === 'created' &&
-          attempt.batchId !== undefined &&
-          !attempt.collected,
-      )
-      .map((attempt) => attempt.batchId as string);
-
   const warnIfAmbiguous = (taskId: string) => {
     if (warnedAmbiguous.has(taskId)) return;
     let task: BatchTask;
@@ -167,13 +145,7 @@ export function createBatchAutoCollector(
     } catch {
       return;
     }
-    // Notify mode takes no lock, so an `uploaded` attempt there may be a
-    // `run` still submitting; only a recorded lost answer (`unknown`) counts.
-    const lost =
-      options.mode === 'notify'
-        ? task.attempts.some((attempt) => attempt.submitState === 'unknown')
-        : task.attempts.some(isAmbiguous);
-    if (!lost) return;
+    if (!task.attempts.some(isAmbiguous)) return;
     warnedAmbiguous.add(taskId);
     options.notify(
       `Batch task ${taskId} has a submission that could not be matched to a provider batch — it may exist and be billing. ` +
@@ -182,30 +154,6 @@ export function createBatchAutoCollector(
   };
 
   const collectOne = async (ep: BatchEndpoint, task: BatchTask) => {
-    if (options.mode === 'notify') {
-      // Same refusal a collect would give: a batch is only visible to the
-      // account and region that created it.
-      const key = endpointKey(ep);
-      const pinned = task.endpoint
-        ? `${task.endpoint.baseUrl} ${task.endpoint.keyFingerprint}`
-        : key;
-      if (pinned !== key) {
-        throw new Error(
-          `task ${task.id} was submitted with another endpoint or key`,
-        );
-      }
-      for (const batchId of openBatchIds(task)) {
-        if (announced.has(batchId)) continue;
-        const job = await (options.api?.getBatch ?? getBatchJob)(ep, batchId);
-        if (SETTLED_STATUSES.has(job.status)) {
-          announced.add(batchId);
-          options.notify(
-            `Batch task ${task.id} has finished on the provider. Collect it with: qwen batch collect ${task.id}`,
-          );
-        }
-      }
-      return;
-    }
     let summary: CollectSummary | undefined;
     try {
       summary = await collectTask(
@@ -247,12 +195,7 @@ export function createBatchAutoCollector(
         (nextPollAt.get(task.id) ?? 0) <= now() &&
         // Already told the user to reconcile by hand; polling it would only
         // page through the provider's batch list every few minutes.
-        !warnedAmbiguous.has(task.id) &&
-        !(
-          options.mode === 'notify' &&
-          openBatchIds(task).every((batchId) => announced.has(batchId)) &&
-          !task.attempts.some(isAmbiguous)
-        ),
+        !warnedAmbiguous.has(task.id),
     );
     if (due.length > 0 && now() >= nextResolveAt) {
       let ep: BatchEndpoint | undefined;
@@ -311,7 +254,6 @@ export function createBatchAutoCollector(
 export function startBatchAutoCollect(
   options: BatchAutoCollectOptions,
 ): () => void {
-  if (options.mode === 'off') return () => {};
   const collector = createBatchAutoCollector(options);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;

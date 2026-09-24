@@ -11,7 +11,6 @@ import path from 'node:path';
 import {
   createBatchAutoCollector,
   describeCollect,
-  type BatchAutoCollectMode,
 } from './batch-auto-collect.js';
 import {
   runPlan,
@@ -146,12 +145,10 @@ function settle(h: Harness, output: string) {
 
 function collector(
   h: Harness,
-  mode: BatchAutoCollectMode = 'deliver',
   overrides: Partial<Parameters<typeof createBatchAutoCollector>[0]> = {},
 ) {
   return createBatchAutoCollector({
     projectRoot: h.root,
-    mode,
     notify: (message) => h.notices.push(message),
     resolveEndpoint: () => h.ep,
     env: h.env,
@@ -216,46 +213,11 @@ describe('batch auto-collect', () => {
     expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
   });
 
-  it('in notify mode says a batch is ready once, writes nothing, and announces a later retry', async () => {
-    const h = setup();
-    const taskId = await submit(h);
-    settle(h, `${outputLine('a#1', '# 甲')}\n`);
-    const ac = collector(h, 'notify');
-    await ac.tick();
-    const polls = h.api.getBatch.mock.calls.length;
-    h.clock.now += 10 * 60_000;
-    await ac.tick(); // already announced: no provider call
-    const ready = `Batch task ${taskId} has finished on the provider. Collect it with: qwen batch collect ${taskId}`;
-    expect(h.notices).toEqual([ready]);
-    expect(h.api.getBatch.mock.calls.length).toBe(polls);
-    expect(fs.existsSync(path.join(h.root, 'out'))).toBe(false);
-    const store = new BatchTaskStore(h.home);
-    expect(store.load(taskId).attempts[0].collected).toBeUndefined();
-
-    // A retry in the same session is a new batch and is announced again.
-    const task = store.load(taskId);
-    task.attempts.push({
-      attempt: 2,
-      itemIds: ['b'],
-      submitState: 'created',
-      batchId: 'batch-2',
-    });
-    store.save(task);
-    h.jobs.set('batch-2', {
-      id: 'batch-2',
-      status: 'completed',
-      created_at: 2,
-    });
-    h.clock.now += 10 * 60_000;
-    await ac.tick();
-    expect(h.notices).toEqual([ready, ready]);
-  });
-
   it('collects a task submitted from a subdirectory of the session root', async () => {
     const h = setup();
     await submit(h);
     settle(h, `${outputLine('a#1', '# 甲')}\n${outputLine('b#1', '# 乙')}\n`);
-    await collector(h, 'deliver', { projectRoot: path.dirname(h.root) }).tick();
+    await collector(h, { projectRoot: path.dirname(h.root) }).tick();
     expect(h.notices).toHaveLength(1);
   });
 
@@ -330,7 +292,7 @@ describe('batch auto-collect', () => {
     settle(h, `${outputLine('a#1', '# 甲')}\n`);
     const other = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-ac-other-'));
     try {
-      await collector(h, 'deliver', { projectRoot: other }).tick();
+      await collector(h, { projectRoot: other }).tick();
     } finally {
       fs.rmSync(other, { recursive: true, force: true });
     }
@@ -344,7 +306,7 @@ describe('batch auto-collect', () => {
     settle(h, `${outputLine('a#1', '# 甲')}\n${outputLine('b#1', '# 乙')}\n`);
     const log = vi.fn();
     let apiKey = 'other-key';
-    const ac = collector(h, 'deliver', {
+    const ac = collector(h, {
       resolveEndpoint: () => ({ ...h.ep, apiKey }),
       log,
     });
@@ -368,7 +330,7 @@ describe('batch auto-collect', () => {
     const resolveEndpoint = vi.fn(() => {
       throw new Error('qwen batch needs an API key');
     });
-    const ac = collector(h, 'deliver', { resolveEndpoint });
+    const ac = collector(h, { resolveEndpoint });
     await ac.tick();
     await ac.tick(); // same moment: not retried yet
     expect(resolveEndpoint).toHaveBeenCalledTimes(1);
@@ -386,7 +348,7 @@ describe('batch auto-collect', () => {
   it('does nothing when there is no open task', async () => {
     const h = setup();
     const resolveEndpoint = vi.fn(() => h.ep);
-    const delay = await collector(h, 'deliver', { resolveEndpoint }).tick();
+    const delay = await collector(h, { resolveEndpoint }).tick();
     expect(delay).toBe(60_000);
     expect(resolveEndpoint).not.toHaveBeenCalled();
   });

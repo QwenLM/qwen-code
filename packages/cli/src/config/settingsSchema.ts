@@ -564,19 +564,14 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
       },
       batchAutoCollect: {
-        type: 'enum',
+        type: 'boolean',
         label: 'Batch Auto Collect',
         category: 'General',
         requiresRestart: true,
-        default: 'deliver',
+        default: true,
         description:
-          'What an interactive session does with this project\'s /batch-api tasks: "deliver" collects each one when its batch finishes (also at startup) and writes the results, "notify" only says it is ready to collect, "off" does neither. Polls the provider over HTTP; never calls the model and never retries failed items.',
+          "Collect this project's /batch-api tasks in interactive sessions when their batch finishes (also at startup) and write the results. Polls the provider over HTTP; never calls the model and never retries failed items.",
         showInDialog: false,
-        options: [
-          { value: 'deliver', label: 'Collect and deliver' },
-          { value: 'notify', label: 'Notify only' },
-          { value: 'off', label: 'Off' },
-        ],
       },
       showSessionRecap: {
         type: 'boolean',

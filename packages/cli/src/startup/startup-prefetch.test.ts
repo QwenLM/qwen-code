@@ -731,7 +731,7 @@ describe('startupPrefetch', () => {
     expect(mockStartBackgroundHousekeeping).not.toHaveBeenCalled();
   });
 
-  it('starts batch auto-collect for interactive sessions, delivering by default', async () => {
+  it('starts batch auto-collect for interactive sessions by default', async () => {
     // Update check off: when it and auto-collect import the mocked update
     // emitter in the same tick, vitest hands one of them the real module.
     startPostRenderPrefetches(makeConfig(), makeSettings(false));
@@ -741,10 +741,9 @@ describe('startupPrefetch', () => {
     expect(mockStartBatchAutoCollect).toHaveBeenCalledTimes(1);
     const options = mockStartBatchAutoCollect.mock.calls[0][0] as {
       projectRoot: string;
-      mode: string;
       notify: (message: string) => void;
     };
-    expect(options).toMatchObject({ projectRoot: '/repo', mode: 'deliver' });
+    expect(options).toMatchObject({ projectRoot: '/repo' });
     expect(
       (
         options as unknown as { resolveEndpoint: () => unknown }
@@ -759,7 +758,7 @@ describe('startupPrefetch', () => {
 
   it('honors general.batchAutoCollect and skips non-interactive sessions', async () => {
     startPostRenderPrefetches(makeConfig(), {
-      merged: { general: { batchAutoCollect: 'off' } },
+      merged: { general: { batchAutoCollect: false } },
     } as LoadedSettings);
     startPostRenderPrefetches(
       makeConfig({ isInteractive: () => false } as Partial<Config>),
@@ -767,14 +766,6 @@ describe('startupPrefetch', () => {
     );
     await vi.dynamicImportSettled();
     expect(mockStartBatchAutoCollect).not.toHaveBeenCalled();
-
-    startPostRenderPrefetches(makeConfig(), {
-      merged: { general: { batchAutoCollect: 'notify' } },
-    } as LoadedSettings);
-    await vi.dynamicImportSettled();
-    expect(mockStartBatchAutoCollect).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: 'notify' }),
-    );
   });
 
   it('starts post-render prefetch only once per config', async () => {
