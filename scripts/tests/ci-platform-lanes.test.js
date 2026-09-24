@@ -104,9 +104,13 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
 
 it('keeps browser gates hosted independently of the shared Linux runner', () => {
   expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(20);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(20);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(20);
+  // 30, not 20: at 184 smoke tests plus ~7.5 min of setup, passing runs hit
+  // 20 flat (tests done at 20:07:49, cancelled 20:07:53; the last of 184
+  // still running at 02:04:58, cancelled 02:05:04). Sharding is the fix at
+  // the source once the suite keeps growing.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(30);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(30);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(30);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.

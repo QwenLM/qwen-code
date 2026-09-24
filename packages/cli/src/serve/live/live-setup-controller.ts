@@ -102,6 +102,9 @@ interface SettingsWrite {
   value: unknown;
 }
 
+const NATIVE_HOST_UNAVAILABLE =
+  'Qwen Live Host is not available on this daemon; Live Voice uses the Web Shell.';
+
 export class LiveSetupError extends Error {
   constructor(
     message: string,
@@ -195,7 +198,9 @@ export class LiveSetupController {
   constructor(private readonly deps: LiveSetupControllerDeps) {}
 
   async getStatus(): Promise<LiveSetupStatus> {
-    if (!this.installerScanned) {
+    // Without the native Host there is nothing to install, so do not even
+    // probe for an installed copy.
+    if (!this.installerScanned && this.deps.nativeHost !== false) {
       this.installerScanned = true;
       void this.deps.installer.refresh();
     }
@@ -266,7 +271,14 @@ export class LiveSetupController {
       })),
       nativeHost: this.deps.nativeHost !== false,
       shortcut: live.shortcut,
-      install: this.deps.installer.getStatus(),
+      install:
+        this.deps.nativeHost === false
+          ? {
+              state: 'error',
+              message: NATIVE_HOST_UNAVAILABLE,
+              retryable: false,
+            }
+          : this.deps.installer.getStatus(),
       live: this.deps.coordinator.getStatus(),
     };
   }
@@ -281,6 +293,7 @@ export class LiveSetupController {
   }
 
   async retryInstall(): Promise<LiveSetupStatus> {
+    this.assertNativeHost();
     if (!this.deps.getEnabled()) {
       throw new LiveSetupError(
         'Enable Live Voice before installing Qwen Live Host.',
@@ -293,6 +306,7 @@ export class LiveSetupController {
   }
 
   async launchHost(): Promise<LiveSetupStatus> {
+    this.assertNativeHost();
     if (!this.deps.getEnabled()) {
       throw new LiveSetupError(
         'Enable Live Voice before launching Qwen Live Host.',
@@ -302,6 +316,18 @@ export class LiveSetupController {
     }
     await this.deps.installer.launch();
     return await this.getStatus();
+  }
+
+  // The card hides the Host controls when `nativeHost` is false; the routes
+  // must refuse as well, or a direct call would still download and start it.
+  private assertNativeHost(): void {
+    if (this.deps.nativeHost === false) {
+      throw new LiveSetupError(
+        NATIVE_HOST_UNAVAILABLE,
+        'live_native_host_unavailable',
+        409,
+      );
+    }
   }
 
   private async applyUpdate(update: LiveSetupUpdate): Promise<LiveSetupStatus> {
