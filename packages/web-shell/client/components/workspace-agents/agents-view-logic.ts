@@ -156,6 +156,8 @@ export interface RunView {
   error?: string;
   /** Why this run exists, e.g. "assigned by you", "mentioned by alice". */
   trigger: string;
+  /** Queued runs of the same agent that start before this one. */
+  queueAhead?: number;
   startedAt?: number;
   endedAt?: number;
   /** The agent session this run took its turn in, once one is bound. */

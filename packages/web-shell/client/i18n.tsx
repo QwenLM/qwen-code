@@ -493,6 +493,7 @@ const EN: Messages = {
     `${v?.agent} is queued and starts when it is free`,
   'collab.run.hostOffline': (v) =>
     `${v?.agent} is waiting for its runtime to come back online`,
+  'collab.run.queuedBehind': (v) => `${v?.agent} is queued, ${v?.count} ahead`,
   'collab.run.starting': (v) => `Starting ${v?.agent}…`,
   'collab.run.resuming': (v) => `${v?.agent} is resuming its session…`,
   'collab.run.stopping': (v) => `Stopping ${v?.agent}…`,
@@ -4761,6 +4762,8 @@ const ZH: Messages = {
   'collab.run.queued': (v) => `${v?.agent} 排队中，空出来就开始`,
   'collab.run.hostOffline': (v) =>
     `${v?.agent} 所在的 Runtime 离线，回来后自动继续`,
+  'collab.run.queuedBehind': (v) =>
+    `${v?.agent} 排队中，前面还有 ${v?.count} 个`,
   'collab.run.starting': (v) => `正在唤起 ${v?.agent}…`,
   'collab.run.resuming': (v) => `${v?.agent} 正在继续原会话…`,
   'collab.run.stopping': (v) => `正在停止 ${v?.agent}…`,

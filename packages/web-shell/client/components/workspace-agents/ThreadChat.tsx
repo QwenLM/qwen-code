@@ -66,7 +66,9 @@ function describeLiveRun(
     return {
       text: hostOffline
         ? t('collab.run.hostOffline', { agent })
-        : t('collab.run.queued', { agent }),
+        : run.queueAhead
+          ? t('collab.run.queuedBehind', { agent, count: run.queueAhead })
+          : t('collab.run.queued', { agent }),
       stalled: false,
     };
   }

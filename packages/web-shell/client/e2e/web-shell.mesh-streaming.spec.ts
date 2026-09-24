@@ -264,6 +264,102 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await page.screenshot({ path: info.outputPath('02-completed.png') });
 });
 
+test('mesh shows a reply pushed over the live stream that no REST read carries', async ({
+  page,
+}, info) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: ['session_events', 'agent_collaboration_v1'] },
+  });
+  await installMockDaemon(page, scenario, {
+    baseURL: String(info.project.use.baseURL),
+  });
+  const pushed = 'Only the live stream carries this sentence.';
+  const thread: ThreadDetailView = {
+    id: 'mesh-sse-e2e',
+    title: 'Mesh live stream',
+    body: '',
+    status: 'in_progress',
+    reason: 'stream-worker is working',
+    posts: [],
+    runs: [
+      {
+        id: 'run-sse',
+        agentId: 'ag_stream',
+        agentName: 'stream-worker',
+        status: 'running',
+        closeAcknowledged: false,
+        trigger: 'mentioned by you',
+        startedAt: Date.now(),
+        progress: {
+          attempt: 1,
+          receivedAt: Date.now(),
+          activityAt: Date.now(),
+          stage: 'thinking',
+          detail: '',
+        },
+      },
+    ],
+    budget: { turnsUsed: 0, turnLimit: 12, tokensUsed: 0, tokenLimit: 10000 },
+  };
+  let detailServed!: () => void;
+  const detailRead = new Promise<void>((resolve) => {
+    detailServed = resolve;
+  });
+  await page.route('**/workspaces/*/agent/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.endsWith('/events')) {
+      // Hold the stream until the page has the thread, so the frame has
+      // somewhere to land; REST never returns `pushed`.
+      await detailRead;
+      const frame = {
+        type: 'progress',
+        threadId: thread.id,
+        runId: 'run-sse',
+        attempt: 1,
+        sessionId: 'session-sse',
+        stage: 'responding',
+        detail: '',
+        outputText: pushed,
+        thoughtText: '',
+        activityAt: Date.now(),
+      };
+      return route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: `event: progress\ndata: ${JSON.stringify(frame)}\n\n`,
+      });
+    }
+    if (pathname.endsWith('/agents'))
+      return route.fulfill({
+        json: {
+          agents: [
+            {
+              id: 'ag_stream',
+              name: 'stream-worker',
+              enabled: true,
+              status: 'working',
+              waiting: 0,
+            },
+          ],
+        },
+      });
+    if (pathname.endsWith(`/threads/${thread.id}`)) {
+      detailServed();
+      return route.fulfill({ json: thread });
+    }
+    if (pathname.endsWith('/threads'))
+      return route.fulfill({
+        json: {
+          threads: [{ ...thread, updatedAt: Date.now(), liveRunCount: 1 }],
+        },
+      });
+    return route.fulfill({ json: { targets: [] } });
+  });
+  await openChat(page, thread.id, scenario.workspaceCwd);
+  const transcript = page.locator('[data-web-shell-message-list]:visible');
+  await expect(transcript).toContainText(pushed);
+});
+
 test('mesh real Host streams into the browser @mesh-live', async ({
   page,
   request,

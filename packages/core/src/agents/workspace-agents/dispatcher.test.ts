@@ -20,6 +20,7 @@ import {
 } from './store.js';
 import {
   dispatchOnce,
+  queuedAhead,
   selectCandidates,
   type AgentBodyState,
   type AgentDispatchPort,
@@ -128,6 +129,43 @@ describe('threadPriorityRank', () => {
     expect(
       threadPriorityRank('critical' as (typeof THREAD_PRIORITY_ORDER)[number]),
     ).toBe(threadPriorityRank(DEFAULT_THREAD_PRIORITY));
+  });
+});
+
+describe('queuedAhead', () => {
+  it("counts the same agent's queued runs that start first", () => {
+    const urgent = threadFixture({
+      id: 'th_urgent',
+      rootThreadId: 'th_urgent',
+      priority: 'urgent',
+      runs: [run({ id: 'rn_urgent', queueSequence: 90 })],
+    });
+    const early = threadFixture({
+      id: 'th_early',
+      rootThreadId: 'th_early',
+      runs: [run({ id: 'rn_early', queueSequence: 10 })],
+    });
+    const mine = threadFixture({
+      id: 'th_mine',
+      rootThreadId: 'th_mine',
+      runs: [run({ id: 'rn_mine', queueSequence: 50 })],
+    });
+    const later = threadFixture({
+      id: 'th_later',
+      rootThreadId: 'th_later',
+      runs: [
+        run({ id: 'rn_later', queueSequence: 70 }),
+        run({ id: 'rn_bob', agentId: BOB.id, queueSequence: 1 }),
+        run({ id: 'rn_done', status: 'running', queueSequence: 2 }),
+      ],
+    });
+    const threads = [urgent, early, mine, later];
+
+    // Ahead: the urgent run and the earlier one. Not: a later run, another
+    // agent's run, or one already running.
+    expect(queuedAhead(threads, 'th_mine', 'rn_mine')).toBe(2);
+    expect(queuedAhead(threads, 'th_urgent', 'rn_urgent')).toBe(0);
+    expect(queuedAhead(threads, 'th_later', 'rn_done')).toBe(0);
   });
 });
 

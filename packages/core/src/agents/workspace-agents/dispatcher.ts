@@ -369,6 +369,38 @@ export async function rebookUndeliveredTriggersInTransaction(
  * disagree, and directory order would let one thread starve behind another
  * purely because of how its id sorts.
  */
+/**
+ * How many of the same agent's queued runs start before this one, in the
+ * order {@link selectCandidates} takes them: priority, then queue sequence.
+ * Zero for a run that is not queued.
+ */
+export function queuedAhead(
+  threads: readonly Thread[],
+  threadId: string,
+  runId: string,
+): number {
+  const thread = threads.find((candidate) => candidate.id === threadId);
+  const run = thread?.runs.find((candidate) => candidate.id === runId);
+  if (!thread || !run || run.status !== 'queued') return 0;
+  const rank = threadPriorityRank(thread.priority);
+  let ahead = 0;
+  for (const other of threads) {
+    const otherRank = threadPriorityRank(other.priority);
+    for (const candidate of other.runs) {
+      if (
+        candidate.status === 'queued' &&
+        candidate.agentId === run.agentId &&
+        candidate.id !== run.id &&
+        (otherRank < rank ||
+          (otherRank === rank && candidate.queueSequence < run.queueSequence))
+      ) {
+        ahead++;
+      }
+    }
+  }
+  return ahead;
+}
+
 export function selectCandidates(
   agents: readonly WorkspaceAgent[],
   threads: readonly Thread[],
