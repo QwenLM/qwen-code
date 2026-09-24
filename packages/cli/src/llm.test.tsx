@@ -2893,6 +2893,8 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       // subject here; the gate sits at configConstructionEnd, before it.
     }
     expect(mockAssertFullIcuAvailable).not.toHaveBeenCalled();
+  });
+
   it('hands the screen-reader flag to the renderer gate', async () => {
     await interactiveMainSetup(/* screenReader */ true);
     selectOpentui(false);
