@@ -1789,24 +1789,16 @@ function getToolRawOutput(
 }
 
 function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
-  // Active shell details can be an input preview, not command output.
-  if (
-    /^(shell|bash|run_shell_command|execute_command)$/i.test(
-      block.toolName ?? '',
-    ) &&
-    ['pending', 'in_progress', 'running'].includes(block.status) &&
-    block.rawInput !== undefined &&
-    block.rawOutput === undefined
-  ) {
-    return undefined;
-  }
-
   if (isAskUserQuestionBlock(block) && block.status === 'failed') {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
 
+  // `details` is the daemon's redacted JSON dump of the tool *input* whenever
+  // rawInput is present (see the SDK normalizer), so it is never a result:
+  // falling back to it renders the call's own arguments — `{}` for empty
+  // args — as the completed tool's output.
   if (!isCancelledStatus(block.status) || !block.details) {
-    return block.rawOutput ?? block.details;
+    return block.rawOutput;
   }
 
   if (

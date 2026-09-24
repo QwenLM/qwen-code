@@ -284,7 +284,7 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
-  it('keeps active shell input previews out of output while preserving actual content', () => {
+  it('keeps shell input previews out of output while preserving actual content', () => {
     const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
       toolName: 'run_shell_command',
       serverTimestamp: 500,
@@ -300,9 +300,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(getTool({ ...block, rawOutput: 'actual output' })?.rawOutput).toBe(
       'actual output',
     );
+    // `details` is a redacted dump of the input, so it must never surface as
+    // the result of a completed or failed call either.
+    expect(getTool({ ...block, status: 'completed' })?.rawOutput).toBe(
+      undefined,
+    );
     expect(
       getTool({ ...block, status: 'failed', details: 'Timed out' })?.rawOutput,
-    ).toBe('Timed out');
+    ).toBeUndefined();
   });
 
   it('does not treat a historical background launch as agent completion', () => {
@@ -4802,7 +4807,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tools?.[2]?.kind).toBeUndefined();
   });
 
-  it('getToolRawOutput fallback returns rawOutput ?? details for non-cancelled', () => {
+  it('does not fall back to input details as a non-cancelled tool result', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, {
         toolName: 'Read',
@@ -4813,7 +4818,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     const tool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    expect(tool?.rawOutput).toBe('some detail info');
+    expect(tool?.rawOutput).toBeUndefined();
   });
 
   it('does not use content text as generic raw output', () => {

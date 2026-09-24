@@ -182,8 +182,10 @@ export function extractDiff(tool: ACPToolCall): string {
 
   const previewPatch = tool.args?.patch;
   if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
-  const previewNewText = tool.args?.newText;
-  const previewOldText = tool.args?.oldText;
+  // `newText`/`oldText` come from the safe tool preview projection; the full
+  // projection carries the edit tool's real parameter names instead.
+  const previewNewText = tool.args?.newText ?? tool.args?.new_string;
+  const previewOldText = tool.args?.oldText ?? tool.args?.old_string;
   if (
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
