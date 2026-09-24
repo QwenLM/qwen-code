@@ -622,14 +622,15 @@ export class BackgroundTaskRegistry {
       const claimedForModel = this.getClaimedBackgroundSlotCount(model);
       if (claimedForModel >= perModelCap) {
         debugLogger.warn(
-          `Background agent per-model concurrency cap reached for ` +
-            `${JSON.stringify(model)}: ${claimedForModel}/${perModelCap}. ` +
-            `Refusing new background agent.`,
+          `Background per-model concurrency cap reached for ` +
+            `${JSON.stringify(model)}: ${claimedForModel}/${perModelCap} ` +
+            `(foreground sub-agent claims included). Refusing new background agent.`,
         );
         throw new Error(
-          `Cannot start background agent: maximum concurrent background agents ` +
-            `for model "${model}" (${perModelCap}) reached. Stop an existing ` +
-            `agent on that model first.`,
+          `Cannot start background agent: the concurrency cap ` +
+            `for model "${model}" (${perModelCap}) reached — a running ` +
+            `foreground sub-agent counts toward it. Wait for it to finish or ` +
+            `stop an agent on that model first.`,
         );
       }
     }

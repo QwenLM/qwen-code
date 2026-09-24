@@ -1170,9 +1170,10 @@ describe('BackgroundTaskRegistry', () => {
       expect(() =>
         registry.register(makeRegistration('bg-2', { model: 'weak-model' })),
       ).toThrow(
-        'Cannot start background agent: maximum concurrent background agents ' +
-          'for model "weak-model" (1) reached. Stop an existing agent on that ' +
-          'model first.',
+        'Cannot start background agent: the concurrency cap ' +
+          'for model "weak-model" (1) reached — a running foreground ' +
+          'sub-agent counts toward it. Wait for it to finish or stop an agent ' +
+          'on that model first.',
       );
       expect(registry.get('bg-2')).toBeUndefined();
 
