@@ -128,6 +128,7 @@ import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
+import { vonInstallCommand } from '../commands/von-install.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -925,7 +926,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
-    .command(sandboxCommand);
+    .command(sandboxCommand)
+    // Register `qwen von-install` (provision the /superfast decision backend)
+    .command(vonInstallCommand);
 
   // /review skill helpers (presubmit checks, cleanup). The module pulls in
   // every review subcommand, so it is only loaded when it can match.
@@ -2785,6 +2788,7 @@ export async function loadCliConfig(
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
+    superfast: bareMode || safeMode ? undefined : settings.superfast,
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
