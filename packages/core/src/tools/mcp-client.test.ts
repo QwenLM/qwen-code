@@ -896,7 +896,9 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         false,
       );
       await client.connect();
-      mockedClient.onerror?.(new Error('late response for a cancelled request'));
+      mockedClient.onerror?.(
+        new Error('late response for a cancelled request'),
+      );
 
       // `onerror` records DISCONNECTED, but that status is not proof the
       // session is dead: a cancelled request's late response reaches a
