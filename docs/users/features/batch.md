@@ -49,15 +49,19 @@ qwen batch run .qwen/batch/plans/<slug>.json
 # collect later with: qwen batch collect translate-docs-20260923103000
 ```
 
-`run` returns immediately. **You do not need to collect by hand**: while an
-interactive session is open in the project, Qwen Code checks the batch over
-HTTP (backing off from one to five minutes), collects it when it finishes,
-writes the results and posts one notice — what was delivered, what failed and
-the retry command. A task that finishes while no session is open is collected
-the next time you start `qwen` in that project. Nothing calls a model while
-you wait, and failed items are never retried automatically. Set
-`general.batchAutoCollect` to `false` to turn this off. Headless runs
-(`qwen -p`), `qwen serve` and IDE/ACP clients do not auto-collect.
+`run` returns immediately and **you do not need to collect by hand**. The
+agent starts `qwen batch collect <task-id> --wait` as a background task
+(visible in `/tasks`) and ends its turn, so you can keep working. That
+process polls the provider over HTTP — no model call while you wait — and when
+the batch finishes it writes the results and exits. The agent is then woken
+once: it tells you what was delivered, held or failed, and does any follow-up
+you asked for in the original request. Failed items are never retried
+automatically, since a retry bills again.
+
+If the session closes first, nothing is lost: an interactive session collects
+the project's finished tasks at startup and while it is open, and posts one
+notice. Set `general.batchAutoCollect` to `false` to turn that off. Headless
+runs (`qwen -p`), `qwen serve` and IDE/ACP clients do not auto-collect.
 
 The commands work from any directory, and inside a session with the `!`
 prefix (e.g. `!qwen batch collect <task-id>`) so no model turn is spent:
@@ -75,9 +79,9 @@ qwen batch clean <task-id>               # delete the local record (cancels noth
 `collect` reports each item as:
 
 - **delivered** — written to its target;
-- **held** — the source changed after submission, or the target already
-  exists with different content; resolve it and re-run `collect` (no new
-  request is made);
+- **held** — the source changed after submission (`retry` resubmits it
+  against the new source), or the target already exists with different
+  content (resolve it and re-run `collect`; no new request is made);
 - **failed** — truncated, empty, a tool call, or a provider error; `retry`
   resubmits these, truncated items only with a larger `--max-output-tokens`.
 

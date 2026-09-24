@@ -216,17 +216,19 @@ const collectWorkflowCommand: CommandModule = {
         demandOption: true,
       })
       .option('wait', {
-        describe: 'Poll until the batch settles (see --timeout)',
+        describe:
+          'Poll (over HTTP, holding no lock) until the batch settles, then collect',
         type: 'boolean',
         default: false,
       })
       .option('timeout', {
-        describe: 'Seconds to wait with --wait before giving up',
+        describe:
+          'Seconds to wait with --wait before giving up (default: none)',
         type: 'number',
-        default: 3600,
       })
       .check((argv) =>
-        Number.isFinite(argv['timeout']) && (argv['timeout'] as number) > 0
+        argv['timeout'] === undefined ||
+        (Number.isFinite(argv['timeout']) && (argv['timeout'] as number) > 0)
           ? true
           : '--timeout must be a positive number of seconds',
       ),
@@ -237,7 +239,7 @@ const collectWorkflowCommand: CommandModule = {
         argv['task-id'] as string,
         {
           wait: argv['wait'] as boolean,
-          timeoutSeconds: argv['timeout'] as number,
+          timeoutSeconds: argv['timeout'] as number | undefined,
         },
       );
     }),

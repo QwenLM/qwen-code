@@ -88,11 +88,13 @@ describe('bundled batch-api skill', () => {
     expect(body).toContain('"${QWEN_CODE_CLI:-qwen}" batch run');
   });
 
-  it('leaves collection to the session and never polls from the model', () => {
+  it('waits in a background shell, never polls from the model, never retries', () => {
     const { body } = loadBatchApiSkill();
 
+    expect(body).toContain('batch collect <task-id> --wait');
+    expect(body).toContain('is_background: true');
     expect(body).toContain('Do not poll or wait for the batch yourself');
+    expect(body).toContain('Never retry automatically');
     expect(body).toContain('collects the task automatically');
-    expect(body).toContain('Every retry is a new');
   });
 });

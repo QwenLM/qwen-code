@@ -39,8 +39,12 @@ of items.
   3. Prepare lightly: glob the files, read a 2–3 file sample, write the
      shared rules once.
   4. Write the plan to `.qwen/batch/plans/<slug>.json`.
-  5. Run `qwen batch run <plan>` and relay its output. Collection is
-     automatic.
+  5. Run `qwen batch run <plan>` and relay its output.
+  6. Start `qwen batch collect <task-id> --wait` as a background shell and
+     end the turn (§6).
+  7. When the waiter exits, the agent is notified once: it reports the
+     summary and does only the follow-up the user asked for. It never
+     retries (a retry bills again) and never redoes an item itself.
 - Every command runs as `"${QWEN_CODE_CLI:-qwen}" batch …`, so it reaches the
   CLI running the session.
 
@@ -162,54 +166,68 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
 - Product contract: **one source document → one complete target document**.
   The model returns content only; paths or commands in its output are data
   and are never executed.
-- Delivery checks structure only: non-empty, not truncated, no tool calls,
-  balanced markdown fences. Semantic quality is the user's acceptance call.
+- Delivery checks structure only: non-empty, not truncated
+  (`finish_reason`), no tool calls. Semantic quality is the user's acceptance
+  call.
 
 ## 5. Boundary behaviors
 
-| Case                                                                        | Behavior                                                                                  |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Source path escapes the project root (incl. via symlink)                    | Refused at assembly; nothing is uploaded                                                  |
-| Assembled line over 1 MB                                                    | Refused before upload; split the document                                                 |
-| Create returns a definite 4xx                                               | Orphan upload deleted, items `failed`, `retry` is safe                                    |
-| Create answer lost (5xx / dropped socket)                                   | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                 |
-| Reconcile finds 0 or 2+ candidates                                          | Report and stop; the provider list is the source of truth                                 |
-| Batch not settled at collect                                                | Report status; `--wait` polls with 10s → 60s backoff up to `--timeout`                    |
-| Result truncated / tool calls / empty                                       | Item `failed` with the reason; a truncated item needs a larger limit to retry             |
-| Result custom_id unknown or duplicated                                      | Ignored with a warning                                                                    |
-| Item missing from all result files                                          | `failed` ("no result line", or the provider's reason when the whole batch failed)         |
-| Source changed / target exists with other content / target symlinks outside | `held`; re-collect after resolving delivers from the local record, no new cost            |
-| After collect                                                               | Remote input/output/error files deleted; a failed deletion is retried by the next collect |
+| Case                                                       | Behavior                                                                                                          |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Source path escapes the project root (incl. via symlink)   | Refused at assembly; nothing is uploaded                                                                          |
+| Assembled line over 1 MB                                   | Refused before upload; split the document                                                                         |
+| Create returns a definite 4xx                              | Orphan upload deleted, items `failed`, `retry` is safe                                                            |
+| Create answer lost (5xx / dropped socket)                  | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                                         |
+| Reconcile finds 0 or 2+ candidates                         | Report and stop; the provider list is the source of truth                                                         |
+| Batch not settled at collect                               | Report status; `--wait` polls (no lock held) with 10s → 60s backoff until it settles or `--timeout`               |
+| Result truncated / tool calls / empty                      | Item `failed` with the reason; a truncated item needs a larger limit to retry                                     |
+| Result custom_id unknown or duplicated                     | Ignored with a warning                                                                                            |
+| Item missing from all result files                         | `failed` ("no result line", or the provider's reason when the whole batch failed)                                 |
+| Source changed since submission                            | `held`; `retry` resubmits it against the new source                                                               |
+| Target exists with other content / target symlinks outside | `held`; re-collect after resolving delivers from the local record, no new cost                                    |
+| After collect                                              | Remote input/output/error files deleted (404 counts as deleted); a failed deletion is retried by the next collect |
 
 Retry semantics:
 
-- Only `failed` items, as a new attempt with fresh custom ids, under the same
-  `maxCostUsd` gate.
+- Only `failed` items and items held because their source changed, as a new
+  attempt with fresh custom ids, under the same `maxCostUsd` gate.
 - Refused while a submission is `submit-unknown`, or an earlier batch is
   still running or settled but uncollected.
-- Held items are never retried: they need a user decision, not another
-  request.
+- Items held on a target conflict are never retried: they need a user
+  decision, not another request.
 
-## 6. Automatic collection (interactive sessions)
+## 6. Waiting and collection (interactive sessions)
 
-- Starts after first render. Scans the local records for this project's open
-  tasks, polls each over HTTP with a 1 → 5 minute backoff, and runs the same
-  `collectTask` when a batch settles.
-- The first pass at startup collects tasks that finished while no session was
-  open.
-- Results arrive as one info notice through the update-notice channel,
-  queued while a response streams.
-- Guarantees:
-  - No model call and no automatic retry; failed items only get the retry
-    command.
-  - Same safety as a manual collect: the same lock, idempotency and
-    no-overwrite delivery.
-  - What it cannot collect is said once: no usable Batch credentials, or a
-    submission with no matching provider batch. A task pinned to another
-    endpoint backs off until the session switches back.
-- `general.batchAutoCollect` (default `true`) turns it off.
-- Not covered: headless, `qwen serve`, ACP, web-shell — no model-free notice
-  channel there; use `qwen batch collect`.
+Waiting never runs the agent loop: HTTP polling does it, and the model is
+involved only once, when results are in.
+
+- **Background waiter (primary).** After `run`, the skill starts
+  `qwen batch collect <task-id> --wait` with the shell tool's
+  `is_background: true`. The process polls (10s → 60s), holds the task lock
+  only to collect, writes the targets, prints a summary and exits. The shell
+  registry then sends the model one `task-notification` with the output
+  tail, which wakes the agent for exactly one turn. It is visible in
+  `/tasks` and can be stopped there.
+- **Auto-collector (fallback).** Covers sessions that closed before the
+  batch settled, and batches submitted from outside the skill:
+  - Starts after first render. Scans the local records for this project's open
+    tasks, polls each over HTTP with a 1 → 5 minute backoff, and runs the same
+    `collectTask` when a batch settles.
+  - The first pass at startup collects tasks that finished while no session was
+    open.
+  - Results arrive as one info notice through the update-notice channel,
+    queued while a response streams.
+  - Guarantees:
+    - No model call and no automatic retry; failed items only get the retry
+      command.
+    - Same safety as a manual collect: the same lock, idempotency and
+      no-overwrite delivery.
+    - What it cannot collect is said once: no usable Batch credentials, or a
+      submission with no matching provider batch. A task pinned to another
+      endpoint backs off until the session switches back.
+  - `general.batchAutoCollect` (default `true`) turns it off.
+  - Not covered: headless, `qwen serve`, ACP, web-shell — no model-free notice
+    channel there; use `qwen batch collect`.
 
 ## 7. Non-goals
 

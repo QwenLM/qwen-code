@@ -134,34 +134,42 @@ Run exactly this with the shell tool:
 
 Then report to the user, verbatim from the command output: the task id, item
 count, the frozen model/thinking/output-limit line, the cost estimate, and
-any `[batch]` warning. The `collect later with` line is only the manual
-fallback: collection is automatic (§5). If the command fails, relay its error
-and stop. The single exception: when the error names a field of the plan
-file itself (an invalid id, a duplicate target, an unknown field), fix that
-field once and run again.
+any `[batch]` warning. If the command fails, relay its error and stop. The
+single exception: when the error names a field of the plan file itself (an
+invalid id, a duplicate target, an unknown field), fix that field once and
+run again.
 
-## 5. Collecting later
+## 5. Wait in the background, then report
 
-Do not poll or wait for the batch yourself — never run `collect --wait` or
-loop on status. Tell the user:
+Right after a successful `run`, start the waiter with the shell tool and
+`is_background: true`:
 
-- While this session stays open, Qwen Code collects the task automatically
-  when the batch finishes and posts a one-line notice: results written,
-  failures and how to retry. A task that finishes while no session is open
-  is collected the next time they start `qwen` in this project
-  (`general.batchAutoCollect: false` turns this off).
-- To check or collect by hand, everything below is a plain command that needs
-  no model: typed with the `!` prefix (for example
-  `!qwen batch collect <task-id>`) it runs without spending a model turn, and
-  it works from any directory.
-- Failed items can be resubmitted after the underlying problem is fixed:
-  `qwen batch retry <task-id>`. Items truncated at the output limit are
-  skipped unless a larger limit is given:
-  `qwen batch retry <task-id> --max-output-tokens <n>`. Every retry is a new
-  billed request.
-- Held results (source changed / target conflict) are delivered by re-running
-  `qwen batch collect <task-id>` after the conflict is resolved.
-- `qwen batch list`, `cancel <task-id>` and `clean <task-id>` are
-  described in `docs/users/features/batch.md`.
+```
+"${QWEN_CODE_CLI:-qwen}" batch collect <task-id> --wait
+```
+
+It polls the provider over HTTP — no model call while the batch queues and
+runs — and when the batch settles it collects, writes the target files and
+exits; you are then notified once with its output. Tell the user the task is
+submitted and that you will report when results arrive, then end your turn.
+Do not poll or wait for the batch yourself in the foreground, and never loop
+on status.
+
+When the waiter's notification arrives, read the summary at the end of its
+output and report it: which targets were delivered, which items are held or
+failed and why. Then do the follow-up the user asked for in their original
+request (for example, review the delivered files), and nothing else:
+
+- Never retry automatically — every retry is a new billed request. Offer
+  `qwen batch retry <task-id>` for failed items and for items held because
+  their source changed; truncated items need
+  `qwen batch retry <task-id> --max-output-tokens <n>`.
+- Never redo a failed item yourself in this session.
+- A target conflict (held: target exists) is resolved by the user; then
+  `qwen batch collect <task-id>` delivers it without a new request.
 - Estimates never include what this session spent preparing; do not
   describe the Batch estimate as the task's total cost or as a saving.
+
+If the session closes before the batch settles, nothing is lost: an
+interactive session collects the task automatically the next time `qwen`
+starts in this project (`general.batchAutoCollect: false` turns this off).
