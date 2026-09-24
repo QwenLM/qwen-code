@@ -1759,9 +1759,17 @@ function isMethodNotFound(error: unknown): boolean {
  * must still retire the connection.
  */
 function isBenignMcpMethodNotFound(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  // Legacy servers and gateways use more than HTTP 400 for this JSON-RPC
+  // response. Keep the accepted mappings explicit so authentication errors
+  // and unrelated server failures still retire the connection.
+  if (status !== undefined && ![400, 404, 405, 422, 501].includes(status)) {
+    return false;
+  }
+
   const code = (error as { code?: unknown } | null)?.code;
   if (code === -32601) return true;
-  if (getErrorStatus(error) !== 400) return false;
+  if (status === undefined) return false;
 
   const text = (error as { text?: unknown } | null)?.text;
   const message =

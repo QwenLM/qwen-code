@@ -135,15 +135,20 @@ function mockAppOnlyMcpServer(): void {
   } as unknown as GenAiLib.CallableTool);
 }
 
-function legacyOptionalMethodTransportError(): Error {
+function legacyOptionalMethodTransportError(
+  status = 400,
+  code = -32601,
+): Error {
+  const methodMessage =
+    code === -32601 ? 'Method not found' : 'Session not found';
   const responseBody = JSON.stringify({
     jsonrpc: '2.0',
-    error: { code: -32601, message: 'Method not found' },
+    error: { code, message: methodMessage },
     id: 1,
   });
   return Object.assign(
     new Error(`Error POSTing to endpoint: ${responseBody}`),
-    { status: 400, text: responseBody },
+    { status, text: responseBody },
   );
 }
 
@@ -880,42 +885,62 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
   });
 
   describe('McpClient', () => {
-    it('does not disconnect for a legacy HTTP -32601 optional-method response', async () => {
-      const mockedClient = {
-        connect: vi.fn(),
-        registerCapabilities: vi.fn(),
-        setRequestHandler: vi.fn(),
-        getInstructions: vi.fn(),
-        onerror: undefined as ((error: Error) => void) | undefined,
-      };
-      vi.mocked(ClientLib.Client).mockReturnValue(
-        mockedClient as unknown as ClientLib.Client,
-      );
-      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
-        {} as SdkClientStdioLib.StdioClientTransport,
-      );
+    it.each([400, 404, 405, 422, 501])(
+      'does not disconnect for a legacy HTTP -32601 optional-method response with status %i',
+      async (status) => {
+        const mockedClient = {
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          getInstructions: vi.fn(),
+          onerror: undefined as ((error: Error) => void) | undefined,
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+          {} as SdkClientStdioLib.StdioClientTransport,
+        );
 
-      const serverName = 'legacy-optional-method-server';
-      const client = new McpClient(
-        serverName,
-        { command: 'test-command' },
-        {} as ToolRegistry,
-        {} as PromptRegistry,
-        {
-          getDirectories: vi.fn().mockReturnValue([]),
-        } as unknown as WorkspaceContext,
-        false,
-      );
-      await client.connect();
+        const serverName = 'legacy-optional-method-server';
+        const client = new McpClient(
+          serverName,
+          { command: 'test-command' },
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          {
+            getDirectories: vi.fn().mockReturnValue([]),
+          } as unknown as WorkspaceContext,
+          false,
+        );
+        await client.connect();
 
-      mockedClient.onerror?.(legacyOptionalMethodTransportError());
+        mockedClient.onerror?.(legacyOptionalMethodTransportError(status));
 
-      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
-      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
-      removeMCPServerStatus(serverName);
-    });
+        expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+        expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+        removeMCPServerStatus(serverName);
+      },
+    );
 
-    it('still disconnects for unrelated transport errors', async () => {
+    it.each([
+      {
+        description: 'an unrelated transport error',
+        error: () => new Error('ECONNRESET'),
+      },
+      {
+        description: 'a JSON-RPC session-not-found response',
+        error: () => legacyOptionalMethodTransportError(400, -32001),
+      },
+      {
+        description: 'a method-not-found response with HTTP 401',
+        error: () => legacyOptionalMethodTransportError(401),
+      },
+      {
+        description: 'a method-not-found response with HTTP 403',
+        error: () => legacyOptionalMethodTransportError(403),
+      },
+    ])('still disconnects for $description', async ({ error }) => {
       const mockedClient = {
         connect: vi.fn(),
         registerCapabilities: vi.fn(),
@@ -943,7 +968,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       );
       await client.connect();
 
-      mockedClient.onerror?.(new Error('ECONNRESET'));
+      mockedClient.onerror?.(error());
 
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
@@ -1002,6 +1027,8 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      mockedClient.onerror?.(new Error('ECONNRESET'));
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
       removeMCPServerStatus(serverName);
     });
 
