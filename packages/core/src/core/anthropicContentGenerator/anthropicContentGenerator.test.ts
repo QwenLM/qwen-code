@@ -783,6 +783,88 @@ describe('AnthropicContentGenerator', () => {
         {}) as Record<string, string>;
     }
 
+    it('keeps Claude Opus 5.5 block-binding controls stable as tools change', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-5-5',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          model: 'claude-opus-5-5',
+          baseUrl: 'https://proxy.example.com',
+        },
+        mockConfig,
+      );
+      const tools = (description: string) => [
+        { functionDeclarations: [{ name: 'exec', description }] },
+      ];
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [{ role: 'user', parts: [{ text: 'search' }] }],
+        config: { tools: tools('initial tools') },
+      } as unknown as GenerateContentParameters);
+      let [request, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const firstTools = (request as { tools: unknown }).tools;
+      expect((request as { thinking: unknown }).thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      });
+      expect(options?.headers?.['anthropic-beta']).toContain(
+        'thinking-binding-controls-2026-08-01',
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user', parts: [{ text: 'search' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'planning\n\n', thought: true, thoughtSignature: 'sig' },
+              { functionCall: { id: 'call-1', name: 'exec', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-1',
+                  name: 'exec',
+                  response: { output: 'found' },
+                },
+              },
+            ],
+          },
+        ],
+        config: { tools: tools('updated tools') },
+      } as unknown as GenerateContentParameters);
+      [request, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect((request as { tools: unknown }).tools).not.toEqual(firstTools);
+      expect((request as { thinking: unknown }).thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      });
+      expect(options?.headers?.['anthropic-beta']).toContain(
+        'thinking-binding-controls-2026-08-01',
+      );
+      expect((request as { messages: unknown[] }).messages[1]).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.arrayContaining([
+            { type: 'thinking', thinking: 'planning\n\n', signature: 'sig' },
+          ]),
+        }),
+      );
+    });
+
     it('sends interleaved-thinking + effort beta when both are present in the body', async () => {
       const headers = await callOnce({
         ...baseConfig,

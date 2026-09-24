@@ -4698,6 +4698,45 @@ describe('LlmChat', async () => {
       });
     });
 
+    it.each(['planning\n\n', ''])(
+      'preserves signed thinking verbatim in history (%j)',
+      async (thinking) => {
+        const stream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: thinking, thought: true },
+                    { thought: true, thoughtSignature: 'signature' },
+                    { functionCall: { id: 'call-1', name: 'exec', args: {} } },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          stream,
+        );
+
+        const response = await chat.sendMessageStream(
+          'm1',
+          { message: 'h1' },
+          'p1',
+        );
+        for await (const _ of response);
+
+        expect(chat.getHistory()[1].parts![0]).toEqual({
+          text: thinking,
+          thought: true,
+          thoughtSignature: 'signature',
+        });
+      },
+    );
+
     it('should preserve each reasoning episode as its own Part, in order, with its own signature, when tool calls interleave with reasoning', async () => {
       // A turn can legitimately contain multiple distinct reasoning
       // episodes separated by tool calls (Anthropic interleaved thinking,
@@ -5236,7 +5275,7 @@ describe('LlmChat', async () => {
         const expectedParts = [
           ...summaries.map((text, index) => ({
             thought: true,
-            text: text.trim(),
+            text,
             thoughtSignature: signatures[index],
           })),
           toolPart,

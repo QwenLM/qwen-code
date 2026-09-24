@@ -221,7 +221,11 @@ type AnthropicThinkingParam =
       budget_tokens: number;
       display?: AnthropicThinkingDisplay;
     }
-  | { type: 'adaptive'; display?: AnthropicThinkingDisplay };
+  | {
+      type: 'adaptive';
+      display?: AnthropicThinkingDisplay;
+      block_binding?: { prefix_mismatch_behavior: 'drop_block' };
+    };
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
@@ -494,6 +498,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     if (anthropicRequest.thinking) {
       betas.push('interleaved-thinking-2025-05-14');
+      if (
+        anthropicRequest.thinking.type === 'adaptive' &&
+        anthropicRequest.thinking.block_binding
+      ) {
+        betas.push('thinking-binding-controls-2026-08-01');
+      }
     }
     if (anthropicRequest.output_config) {
       betas.push('effort-2025-11-24');
@@ -790,6 +800,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // 4.6+) compound this by consuming output budget on server-driven
     // thinking before any tool_use, making forced tool_choice essential.
     const toolChoice = this.resolveToolChoice(request, tools);
+
+    if (
+      thinking?.type === 'adaptive' &&
+      /^claude-opus-5-5(?:-|$)/i.test(this.contentGeneratorConfig.model)
+    ) {
+      thinking = {
+        ...thinking,
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      };
+    }
 
     return {
       model: this.contentGeneratorConfig.model,
