@@ -268,9 +268,9 @@ function runInRequestGoalContext<T>(
 const GATE_HEADROOM = 3000;
 
 /**
- * Caps failure-hook context appended to an already-bounded error body. Cut the
- * way `httpHookRunner` cuts oversized hook output, with a marker naming what
- * was dropped, and never between the halves of a surrogate pair.
+ * Caps failure-hook context appended to a tool's error message. Cut the way
+ * `httpHookRunner` cuts oversized hook output, with a marker naming what was
+ * dropped, and never between the halves of a surrogate pair.
  */
 function capFailureHookContext(context: string, limit: number): string {
   if (context.length <= limit) {
@@ -6915,9 +6915,14 @@ export class CoreToolScheduler {
             this.postToolUseFailureEndMeta,
           );
 
-          // Append additional context from hook if provided
+          // Append additional context from hook if provided, capped as on
+          // the returned-error path: this message reaches telemetry and the
+          // session record too.
           if (failureHookResult.additionalContext) {
-            exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
+            exceptionErrorMessage += `\n\n${capFailureHookContext(
+              failureHookResult.additionalContext,
+              this.config.getTruncateToolOutputThreshold(),
+            )}`;
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }

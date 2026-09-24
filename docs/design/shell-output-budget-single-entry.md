@@ -58,8 +58,8 @@ the text.
    budget and the no-I/O cap at the send boundary. The combined pass over
    appended metadata runs on the success path only, so failure-hook context
    appended to a timeout detail is bounded only by those two. On the ordinary
-   failure path that context is capped on its own at the tool-output
-   threshold, with a truncation marker.
+   failure path, and when the tool throws, that context is capped on its own
+   at the tool-output threshold, with a truncation marker.
 6. A failure message is only exempt while it _is_ the marked body.
 
 ## Design
@@ -102,7 +102,9 @@ The ordinary branch caps that context at the tool-output threshold, cut on a
 code-point boundary with a truncation marker, instead of running
 a combined pass: re-bounding the assembled string would truncate the producer's
 body again, and its `error.message` also reaches telemetry and the session
-record, which the batch budget does not bound. The timeout branch keeps
+record, which the batch budget does not bound. A tool that throws gets the same
+cap on the context appended to its exception message, for the same reason. The
+timeout branch keeps
 `error.message` to the operational summary and appends the context to the
 response part only, with no combined pass, so there the context is bounded only
 by the aggregate batch budget and the send-boundary cap. Aggregate batch

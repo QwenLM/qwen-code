@@ -14193,6 +14193,33 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(message).toBe(`${FAILURE_BODY}\n\n${hookContext}`);
   });
 
+  it('caps failure-hook context when the tool throws', async () => {
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUseFailure'
+            ? { hookSpecificOutput: { additionalContext: 'h'.repeat(200_000) } }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('real boom')),
+    });
+
+    const call = completedCalls[0] as CompletedToolCall;
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    expect(call.status).toBe('error');
+    expect(call.response.error?.message).toBe(
+      `real boom\n\n${'h'.repeat(kept)}\n... [truncated, ${200_000 - kept} more characters]`,
+    );
+  });
+
   it.each([ToolErrorType.EXECUTION_FAILED, ToolErrorType.EXECUTION_TIMEOUT])(
     'preserves %s execution when cancellation arrives during failure postprocessing',
     async (errorType) => {
