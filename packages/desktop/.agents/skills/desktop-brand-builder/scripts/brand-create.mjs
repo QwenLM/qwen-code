@@ -2,12 +2,12 @@
 /**
  * Brand creation script for the Tauri desktop shell.
  *
- * Patches packages/desktop-shell so a branded desktop app can be built from
+ * Patches packages/desktop so a branded desktop app can be built from
  * a minimal brand.json. Replaces the Electron-era brand-create.ts that was
  * removed together with packages/desktop.
  *
  * Usage:
- *   node brand-create.mjs --shell-root /path/to/packages/desktop-shell \
+ *   node brand-create.mjs --shell-root /path/to/packages/desktop \
  *     --config /path/to/brand.json
  *
  * Requires Node >= 18. No external dependencies.
@@ -26,7 +26,7 @@ import { extname, join, resolve } from 'node:path';
 
 const BRAND_ID_RE = /^[a-z][a-z0-9-]*$/;
 const USAGE =
-  'Usage: node brand-create.mjs --shell-root /path/to/packages/desktop-shell --config /path/to/brand.json';
+  'Usage: node brand-create.mjs --shell-root /path/to/packages/desktop --config /path/to/brand.json';
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -43,7 +43,7 @@ function shellRootFromArgs() {
   if (!value) fail(USAGE);
   const shellRoot = resolve(value);
   if (!existsSync(join(shellRoot, 'src-tauri', 'tauri.conf.json'))) {
-    fail(`desktop-shell package not found: ${shellRoot}`);
+    fail(`desktop package not found: ${shellRoot}`);
   }
   return shellRoot;
 }

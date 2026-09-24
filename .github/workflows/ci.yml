@@ -2277,10 +2277,13 @@ jobs:
       # classifier makes above. The two-tree `git diff BASE HEAD` this replaced
       # is not the PR's diff: it reports everything the base gained since the
       # branch point as a change on the PR's side. #8132 added
-      # packages/desktop-shell, so every branch older than it saw 78 phantom
-      # desktop-shell paths, ran this job, and failed in a checkout of
-      # refs/pull/N/head that has no such directory.
-      - name: 'Detect desktop-shell changes'
+      # packages/desktop-shell (since renamed to packages/desktop), so every
+      # branch older than it saw 78 phantom desktop paths, ran this job, and
+      # failed in a checkout of refs/pull/N/head that has no such directory.
+      # The Cargo.toml existence guard below is what keeps branches from
+      # either side of the rename green: a head without the new path simply
+      # has no crate to compile.
+      - name: 'Detect desktop changes'
         id: 'filter'
         env:
           GH_TOKEN: '${{ github.token }}'
@@ -2291,7 +2294,7 @@ jobs:
             # `previous_filename` too: renaming a file out of the crate changes
             # it, and only the old path says so.
             if files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)')"; then
-              if grep -Eq '^(packages/desktop-shell/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml|\.github/workflows/desktop-release\.yml)' <<<"${files}"; then
+              if grep -Eq '^(packages/desktop/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml|\.github/workflows/desktop-release\.yml)' <<<"${files}"; then
                 changed=true
               else
                 changed=false
@@ -2303,12 +2306,12 @@ jobs:
           # Whatever the filter decided, a tree without the crate cannot have
           # regressed it, and cargo has no manifest to run against — the job
           # would report a missing working directory as a failure of the PR.
-          if [[ "${changed}" == "true" && ! -f packages/desktop-shell/src-tauri/Cargo.toml ]]; then
-            echo "::notice::packages/desktop-shell/src-tauri is absent from this head; nothing to compile."
+          if [[ "${changed}" == "true" && ! -f packages/desktop/src-tauri/Cargo.toml ]]; then
+            echo "::notice::packages/desktop/src-tauri is absent from this head; nothing to compile."
             changed=false
           fi
           echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
-          echo "desktop-shell changed: ${changed}"
+          echo "desktop changed: ${changed}"
 
       # cargo test links the Tauri/wry webview, so the WebKit/GTK dev headers
       # must be present (mirrors the Linux build job in desktop-release.yml).
@@ -2329,14 +2332,14 @@ jobs:
       - uses: 'Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae' # v2
         if: "${{ steps.filter.outputs.changed == 'true' }}"
         with:
-          workspaces: 'packages/desktop-shell/src-tauri -> target'
+          workspaces: 'packages/desktop/src-tauri -> target'
 
       - name: 'Compile and test the desktop crate'
         if: "${{ steps.filter.outputs.changed == 'true' }}"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'cargo test --manifest-path src-tauri/Cargo.toml'
 
       - name: 'Run desktop release tests'
         if: "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'node scripts/test-release.js'
