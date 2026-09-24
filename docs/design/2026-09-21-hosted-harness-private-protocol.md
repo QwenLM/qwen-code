@@ -4,7 +4,7 @@
 
 ## Status
 
-This document defines the implemented protocol foundation. Activating it in a `qwen serve` deployment, advertising it through `/capabilities`, and connecting it to the Java Runtime Broker remain follow-up work.
+This document defines the implemented protocol foundation and its Java client (`HostedHarnessClient` in the `qwen` Java SDK). Activating the protocol in a `qwen serve` deployment, advertising it through `/capabilities`, and connecting it to the Java Runtime Broker remain follow-up work.
 
 ## Problem
 
@@ -60,6 +60,10 @@ The boot ID is a process-generation fence, not an authentication secret or publi
 ## Integration boundary
 
 This foundation exports contract creation, digest validation, and an Express request handler. It deliberately has no production caller in this change. The next Hosted Harness profile change must create the contract once before the listener accepts traffic, reuse the same object for bootstrap and steady-state capabilities, and mount the handler after bearer authentication only for private session routes. Ordinary `qwen serve` deployments must remain unchanged.
+
+## Java client
+
+The `qwen` Java SDK ships `HostedHarnessClient` for this protocol. Construction performs capability negotiation, validates the advertised capability digest against the configured deployment digest, and pins the process boot ID; every later request then carries the protocol and boot-ID fencing automatically, and a `hosted_harness_generation_mismatch` surfaces as a non-retryable conflict rather than a retry. Sessions are created, loaded, heartbeated, prompted, streamed, and cancelled through typed request objects, turn submissions carry a precomputed payload digest, and event streams reuse the daemon SSE reader with replay cursors. `HostedHarnessClientTest` drives the client against a stub HTTP server for negotiation, fencing, streaming, and error mapping; `ManagedHostedRuntimeE2ETest`, gated on `QWEN_MANAGED_HOSTED_E2E_BASE_URL`, exercises a real hosted profile.
 
 ## Validation
 
