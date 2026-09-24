@@ -1203,6 +1203,37 @@ describe('history replay page', () => {
         .filter(Boolean);
     }
 
+    it('retains resolved wrapper names when a cursor remaps colliding timing ids', async () => {
+      const result = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [toolTelemetry()],
+          replay: {
+            v: 1,
+            pendingToolCalls: [
+              {
+                callId: 'call-1:2',
+                rawCallId: 'call-1',
+                toolName: 'tool_call',
+                resolvedToolName: 'read_file',
+                sourceRecordId: 'tool-call-record',
+              },
+            ],
+            cumulativeUsage: createReplayCumulativeUsage(),
+          },
+        }),
+        finalizeDangling: false,
+        encodeCursor: vi.fn(),
+      });
+      expect(timingsOf(result.updates)).toEqual([
+        expect.objectContaining({
+          callId: 'call-1:2',
+          toolName: 'read_file',
+          durationMs: 16,
+        }),
+      ]);
+    });
+
     it('surfaces request and tool timing on a forward page', async () => {
       const result = await replayTranscriptRecordPage({
         sessionId: SESSION_ID,

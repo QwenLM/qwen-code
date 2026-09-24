@@ -139,6 +139,9 @@ function parseTranscriptReplayState(
             {
               callId: pending.callId,
               toolName: pending.toolName,
+              ...(pending.resolvedToolName
+                ? { resolvedToolName: pending.resolvedToolName }
+                : {}),
               recordId: pending.sourceRecordId,
               ...(pending.sourceTimestamp
                 ? { timestamp: pending.sourceTimestamp }

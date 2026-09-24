@@ -210,6 +210,7 @@ import {
   listenerMaxConnections,
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
+  pushChannelRestoreIssues,
   toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
   type DaemonPerfSnapshot,
@@ -220,6 +221,7 @@ import { DaemonMetricsRing } from './daemon-metrics-ring.js';
 import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
+  ChannelStartupAttemptFailure,
   ChannelWorkerSupervisor,
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
@@ -241,6 +243,11 @@ import {
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
 import { channelSelectionNames } from './channel-selection.js';
+import {
+  createChannelRestoreFailures,
+  type ChannelRestoreFailure,
+  type ChannelRestoreFailureInput,
+} from './channel-restore-failures.js';
 import {
   resolveChannelWorkspaceGroups,
   type ChannelWorkspaceGroup,
@@ -2608,6 +2615,7 @@ function createBootstrapServeApp(input: {
     ChannelWorkerSupervisor['snapshot']
   >;
   getChannelWorkerSnapshots: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures: () => readonly ChannelRestoreFailure[];
   onHealthServed?: () => void;
 }): Application {
   const {
@@ -2626,6 +2634,7 @@ function createBootstrapServeApp(input: {
     getRuntimeError,
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
+    getChannelRestoreFailures,
     onHealthServed,
   } = input;
   const app = express();
@@ -2745,6 +2754,10 @@ function createBootstrapServeApp(input: {
         };
     const daemonLogStatus = daemonLog.getStatus();
     const issues: DaemonStatusIssue[] = [issue];
+    // Boot restore records are written before the runtime app exists, and
+    // this route never waits for it, so this is the only response that can
+    // carry them during the cold window.
+    pushChannelRestoreIssues(issues, getChannelRestoreFailures());
     if (daemonLogStatus.health === 'degraded') {
       issues.push({
         code: 'daemon_log_degraded',
@@ -4106,6 +4119,35 @@ async function runQwenServeImpl(
   // is re-materialized, and repeating the restore there would undo an operator
   // who stopped one of those channels in between.
   const lateRestoredWorkspaces = new Set<string>();
+  // Every workspace that listed each boot name in its own `serve.channels`, so
+  // a name the boot restore drops is reported against the workspaces that
+  // asked for it.
+  let bootChannelClaimants: ReadonlyMap<string, readonly string[]> = new Map();
+  // `serve.channels` names this daemon did not bring up, for the workspace
+  // channel list and daemon status: a name that failed to restore never joins
+  // the committed selection, so neither would otherwise see it.
+  //
+  // A record retires by itself once the state it describes is no longer true,
+  // rather than on an event: the name can be committed later by another
+  // workspace's restore, and the workspace can be disposed while its own
+  // restore is still queued on the channel-control lane, so there is no one
+  // event to hook. An unavailable registry means the daemon is still coming
+  // up, which is not evidence that a workspace has gone.
+  const channelRestoreFailures = createChannelRestoreFailures({
+    isStale: (failure) => {
+      if (
+        channelWorkerManager?.committedChannelNames().includes(failure.channel)
+      ) {
+        return true;
+      }
+      const registry = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+        'workspaceRegistry'
+      ] as WorkspaceRegistry | undefined;
+      return registry
+        ? !registry.getByWorkspaceCwd(failure.workspaceCwd)
+        : false;
+    },
+  });
   // Whether an operator stopped channel hosting through `DELETE
   // /workspace/channel`. The manager cannot say so on its own: one created by
   // a read — listing channels creates it — and one whose hosting was stopped
@@ -4224,6 +4266,7 @@ async function runQwenServeImpl(
         }
         channelOwnerHints = new Map(bootChannelOwnerHints);
         channelStartupTolerantNames = restored.tolerantNames;
+        bootChannelClaimants = restored.claimants;
         channelRuntime = await ensureChannelRuntime();
         daemonLog.info('restoring channels from workspace serve.channels', {
           channels: channelSelectionNames(opts.channelSelection),
@@ -4746,7 +4789,48 @@ async function runQwenServeImpl(
     // Cleared after the commit, not before: a selection that fails leaves
     // hosting exactly as stopped as it was.
     channelHostingStoppedByOperator = false;
+    // The operator chose the whole selection; what the restores did before it
+    // is no longer the state anyone needs to act on.
+    channelRestoreFailures.clearAll();
     return result;
+  };
+  // What a failed late restore left unhosted. A name the worker itself
+  // reported gets its own error; every other requested name was rolled back
+  // with it (or never started) and carries the restore's error. A name that
+  // is committed anyway — hosted before this restore — did not fail.
+  // The adapter's own error for each channel a failed startup reported, by
+  // channel name. Read structurally: the manager module is loaded lazily, and
+  // these run for errors raised before it exists too.
+  const channelStartupMessages = (err: unknown): Map<string, string> => {
+    const startupFailures = (err as { startupFailures?: unknown } | null)
+      ?.startupFailures;
+    // Keyed by channel alone. The failures belong to one startup attempt, and
+    // the supervisor stamps each with the workspace whose settings define the
+    // channel — which is not the workspace that listed it when a workspace
+    // lists a name another one configures, so matching on that would throw
+    // away exactly the adapter error this record exists to carry.
+    return new Map(
+      (Array.isArray(startupFailures)
+        ? (startupFailures as ChannelStartupAttemptFailure[])
+        : []
+      ).map((failure) => [failure.channel, failure.message] as const),
+    );
+  };
+  const lateRestoreFailures = (
+    workspaceCwd: string,
+    requested: readonly string[],
+    err: unknown,
+  ): ChannelRestoreFailureInput[] => {
+    const committed = new Set(channelWorkerManager?.committedChannelNames());
+    const reported = channelStartupMessages(err);
+    const message = err instanceof Error ? err.message : String(err);
+    return requested
+      .filter((channel) => !committed.has(channel))
+      .map((channel) => ({
+        workspaceCwd,
+        channel,
+        message: reported.get(channel) ?? message,
+      }));
   };
   // The same entry checks as `setChannelWorkerSelection`, for a change that
   // adds names instead of replacing the selection: the manager computes the
@@ -4779,7 +4863,13 @@ async function runQwenServeImpl(
     const result = await manager.stopSelection();
     // Only a stop that stopped something is a decision to remember; an
     // idempotent `DELETE` against hosting that was never on is not.
-    if (result.changed) channelHostingStoppedByOperator = true;
+    // Both lines read the same result: a stop that stopped nothing is not an
+    // operator decision to remember, and not one that supersedes what the
+    // restores reported either.
+    if (result.changed) {
+      channelHostingStoppedByOperator = true;
+      channelRestoreFailures.clearAll();
+    }
     return result;
   };
   const reloadChannelWorker = async (): Promise<ChannelWorkerSnapshot> => {
@@ -7695,6 +7785,11 @@ async function runQwenServeImpl(
               null,
               { workspaceCwd },
             );
+            // Shutting down is not a restore failure to report.
+            if (channelControlDraining) return;
+            channelRestoreFailures.record(
+              lateRestoreFailures(workspaceCwd, requested, err),
+            );
           })
           .finally(() => {
             writeChannelWorkerPidfile();
@@ -7995,6 +8090,7 @@ async function runQwenServeImpl(
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
           manager: await ensureChannelWorkerManager(),
+          restoreFailures: channelRestoreFailures,
         });
       })();
       channelManagementServices.set(targetRuntime, pending);
@@ -8087,6 +8183,7 @@ async function runQwenServeImpl(
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
+      getChannelRestoreFailures: () => channelRestoreFailures.list(),
       getChannelWorkerControl,
       isChannelControlDraining: () => channelControlDraining,
       isChannelControlInitializing: () =>
@@ -8505,6 +8602,7 @@ async function runQwenServeImpl(
     getRuntimeError: () => runtimeStartupError,
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
+    getChannelRestoreFailures: () => channelRestoreFailures.list(),
     onHealthServed: deferRuntimeUntilFirstHealth
       ? () => startRuntimeAfterHealth?.()
       : undefined,
@@ -9555,6 +9653,29 @@ async function runQwenServeImpl(
               throw error;
             }
             closeServerAfterChannelWorkerStartupFailure = false;
+            // Recorded before the names are discarded on the next line. This
+            // branch keeps the daemon serving without the channels it was
+            // configured to host, which is the shape a single-workspace
+            // daemon fails in, so leaving it to the log alone is the gap this
+            // record exists to close. An `all` selection carries no names to
+            // attribute and stays log-only.
+            if (opts.channelSelection?.mode === 'names') {
+              const reported = channelStartupMessages(error);
+              const message =
+                error instanceof Error ? error.message : String(error);
+              channelRestoreFailures.record(
+                opts.channelSelection.names.flatMap((channel) => {
+                  const owners = bootChannelClaimants.get(channel) ?? [
+                    boundWorkspace,
+                  ];
+                  return owners.map((workspaceCwd) => ({
+                    workspaceCwd,
+                    channel,
+                    message: reported.get(channel) ?? message,
+                  }));
+                }),
+              );
+            }
             opts.channelSelection = undefined;
             reportConfiguredChannelStartupFailure(error);
             try {
@@ -10138,6 +10259,15 @@ async function runQwenServeImpl(
               code: skip.code,
               channel: skip.channel,
             });
+            channelRestoreFailures.record(
+              (bootChannelClaimants.get(skip.channel) ?? []).map(
+                (workspaceCwd) => ({
+                  workspaceCwd,
+                  channel: skip.channel,
+                  message: skip.message,
+                }),
+              ),
+            );
           }
           if (resolved.skipped.length > 0) {
             // The committed selection has to name exactly what the groups

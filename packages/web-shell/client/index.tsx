@@ -321,6 +321,7 @@ export type {
   WebShellSettingsOptions,
 } from './settings';
 
+export type { WebShellModelManagementOptions } from './modelManagement';
 export type {
   WebShellMessageNavigationRequest,
   WebShellMessageNavigationResult,

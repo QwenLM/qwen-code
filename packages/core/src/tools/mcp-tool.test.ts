@@ -297,6 +297,9 @@ describe('DiscoveredMCPTool', () => {
   });
 
   describe('execute', () => {
+    // A PNG signature and IHDR tag: sniffs as PNG, yet is too short to decode.
+    const PNG_HEADER = 'iVBORw0KGgoAAAANSUhEUg==';
+
     it('should call mcpTool.callTool with correct parameters and format display output', async () => {
       const params = { param: 'testValue' };
       const mockToolSuccessResultObject = {
@@ -760,6 +763,8 @@ describe('DiscoveredMCPTool', () => {
       const toolResult = await invocation.execute(new AbortController().signal);
 
       const parts = toolResult.llmContent as Part[];
+      // The envelope names the mime the model receives, not the server's.
+      expect(parts[0]!.text).toContain('mime-type: image/jpeg]');
       const inline = parts[1]!.inlineData!;
       expect(inline.mimeType).toBe('image/jpeg');
       const bounded = await sharp(
@@ -786,8 +791,8 @@ describe('DiscoveredMCPTool', () => {
             name: serverToolName,
             response: {
               content: [
-                { type: 'image', data: 'first', mimeType: 'image/png' },
-                { type: 'image', data: 'second', mimeType: 'image/png' },
+                { type: 'image', data: PNG_HEADER, mimeType: 'image/png' },
+                { type: 'image', data: PNG_HEADER, mimeType: 'image/png' },
               ],
             },
           },
@@ -860,7 +865,7 @@ describe('DiscoveredMCPTool', () => {
               name: serverToolName,
               response: {
                 content: [
-                  { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+                  { type: 'image', mimeType: 'image/png', data: PNG_HEADER },
                 ],
               },
             },
@@ -890,7 +895,7 @@ describe('DiscoveredMCPTool', () => {
           {
             text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
           },
-          { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+          { inlineData: { mimeType: 'image/png', data: PNG_HEADER } },
         ]);
       });
 
@@ -922,6 +927,41 @@ describe('DiscoveredMCPTool', () => {
 
         expect(loadOmniMediaReader).not.toHaveBeenCalled();
       });
+
+      it('leaves audio to omni but still withholds a non-media blob', async () => {
+        // The funnel only takes image, audio and video parts; anything else
+        // stays inline whatever the delivery mode, so it keeps the limit.
+        shrinkClamp();
+        mockCallTool.mockResolvedValue([
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                content: [
+                  { type: 'audio', mimeType: 'audio/wav', data: 'AAAA' },
+                  {
+                    type: 'resource',
+                    resource: { uri: 'file:///backup.zip', blob: 'AAAA' },
+                  },
+                ],
+              },
+            },
+          },
+        ] as Part[]);
+        const { config } = omniStub(true);
+
+        const result = await toolWith(config)
+          .build({ param: 'mixed' })
+          .execute(new AbortController().signal);
+
+        const parts = result.llmContent as Part[];
+        expect(parts[1]).toEqual({
+          inlineData: { mimeType: 'audio/wav', data: 'AAAA' },
+        });
+        expect(parts[3]!.text).toContain(
+          '[Media omitted: application/octet-stream',
+        );
+      });
     });
 
     it('never sends a non-image inline part to the renderer', async () => {
@@ -944,11 +984,9 @@ describe('DiscoveredMCPTool', () => {
       expect(bound).not.toHaveBeenCalled();
     });
 
-    it('forwards oversized non-image inline media instead of a placeholder', async () => {
-      // Bounding is image-only by design: replacing an oversized audio block
-      // with text drops bytes nothing else can supply, so both skip paths leave
-      // non-image media exactly as the server sent it. Pin that boundary — a
-      // clamp re-added on either path keeps every other case green.
+    it('withholds oversized audio at the inline limit', async () => {
+      // Audio is never resized, but it is still re-sent on every turn, so it
+      // gets the same inline limit as images, as `read_file` applies.
       vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
       const bound = vi.spyOn(imageView, 'boundImageBuffer');
       mockCallTool.mockResolvedValue([
@@ -967,17 +1005,15 @@ describe('DiscoveredMCPTool', () => {
         .execute(new AbortController().signal);
 
       expect(bound).not.toHaveBeenCalled();
-      expect(result.llmContent).toEqual([
-        {
-          text: `[Tool '${serverToolName}' provided the following audio data with mime-type: audio/wav]`,
-        },
-        { inlineData: { mimeType: 'audio/wav', data: 'AAAA' } },
-      ]);
+      const parts = result.llmContent as Part[];
+      expect(parts[0]!.text).toContain('audio data with mime-type: audio/wav]');
+      expect(parts[1]!.text).toContain('[Media omitted: audio/wav');
+      expect(parts[1]!.text).toContain('smaller or lower-resolution');
     });
 
-    it('forwards an oversized untyped resource blob untouched', async () => {
-      // Bounding keys on the declared image mime; an unlabelled blob is not
-      // decoded or clamped.
+    it('withholds an oversized untyped non-image blob without decoding it', async () => {
+      // The bytes are not an image, so the renderer never sees them; the
+      // inline limit still applies.
       vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
       const bound = vi.spyOn(imageView, 'boundImageBuffer');
       mockCallTool.mockResolvedValue([
@@ -1001,14 +1037,10 @@ describe('DiscoveredMCPTool', () => {
         .execute(new AbortController().signal);
 
       expect(bound).not.toHaveBeenCalled();
-      expect(result.llmContent).toEqual([
-        {
-          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: application/octet-stream]`,
-        },
-        {
-          inlineData: { mimeType: 'application/octet-stream', data: 'AAAA' },
-        },
-      ]);
+      const parts = result.llmContent as Part[];
+      expect(parts[1]!.text).toContain(
+        '[Media omitted: application/octet-stream',
+      );
     });
 
     it('warns with the server and tool when the renderer is unavailable', async () => {
@@ -1024,7 +1056,9 @@ describe('DiscoveredMCPTool', () => {
           functionResponse: {
             name: serverToolName,
             response: {
-              content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+              content: [
+                { type: 'image', mimeType: 'image/png', data: PNG_HEADER },
+              ],
             },
           },
         },
@@ -1057,7 +1091,7 @@ describe('DiscoveredMCPTool', () => {
               name: serverToolName,
               response: {
                 content: [
-                  { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+                  { type: 'image', mimeType: 'image/png', data: PNG_HEADER },
                 ],
               },
             },
@@ -1152,6 +1186,7 @@ describe('DiscoveredMCPTool', () => {
       expect(Buffer.from(inline.data!, 'base64').length).toBeLessThan(
         1024 * 1024,
       );
+      expect(parts[0]!.text).toContain('mime-type: image/jpeg]');
     });
 
     it('forwards an image the renderer cannot bound unchanged', async () => {
@@ -1166,6 +1201,7 @@ describe('DiscoveredMCPTool', () => {
         .gif()
         .toBuffer();
       const data = animated.toString('base64');
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
       mockCallTool.mockResolvedValue([
         {
           functionResponse: {
@@ -1185,6 +1221,46 @@ describe('DiscoveredMCPTool', () => {
         mimeType: 'image/gif',
         data,
       });
+      // The renderer cannot output GIF, so it is not asked to decode one.
+      expect(bound).not.toHaveBeenCalled();
+    });
+
+    it('labels an in-budget image a resource block does not type', async () => {
+      // MCP makes a resource's mime optional. Left as
+      // application/octet-stream, the converters drop the image as
+      // unsupported media, so the sniffed mime is adopted, bytes unchanged.
+      const small = await sharp({
+        create: { width: 200, height: 100, channels: 3, background: '#204080' },
+      })
+        .png()
+        .toBuffer();
+      const blob = small.toString('base64');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'resource',
+                  resource: { uri: 'file:///icon.png', blob },
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'icon' })
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: image/png]`,
+        },
+        { inlineData: { mimeType: 'image/png', data: blob } },
+      ]);
     });
 
     const oversizedPngBase64 = async () =>
@@ -1200,6 +1276,33 @@ describe('DiscoveredMCPTool', () => {
           .png()
           .toBuffer()
       ).toString('base64');
+
+    it('bounds an oversized image whose mime label is wrong', async () => {
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'image',
+                  data: await oversizedPngBase64(),
+                  mimeType: 'IMAGE/PNG',
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Part[];
+      expect(parts[0]!.text).toContain('mime-type: image/jpeg]');
+      expect(parts[1]!.inlineData!.mimeType).toBe('image/jpeg');
+    });
 
     it('bounds an oversized image returned with an MCP tool error', async () => {
       mockCallTool.mockResolvedValue([
@@ -1279,7 +1382,9 @@ describe('DiscoveredMCPTool', () => {
           functionResponse: {
             name: serverToolName,
             response: {
-              content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+              content: [
+                { type: 'image', mimeType: 'image/png', data: PNG_HEADER },
+              ],
             },
           },
         },

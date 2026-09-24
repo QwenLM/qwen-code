@@ -24,6 +24,7 @@ import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
 import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
+import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 
 interface ReadingAnchor {
@@ -79,6 +80,15 @@ export const TranscriptViewport = forwardRef<
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
+  const openTurnCalls = useOpenTurnCalls();
+  const openViewportTurnCalls = useCallback(
+    (turnId: string) => {
+      const recordId = viewport.blocks?.find((block) => block.id === turnId)
+        ?.sourceRecordIds?.[0];
+      openTurnCalls?.(turnId, recordId);
+    },
+    [openTurnCalls, viewport.blocks],
+  );
   const {
     historical,
     loading,
@@ -508,55 +518,61 @@ export const TranscriptViewport = forwardRef<
               )}
             </div>
           )}
-          <MessageList
-            {...props}
-            key={viewport.viewKey}
-            ref={list}
-            messages={viewport.messages}
-            mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
-            timelineAction={globalNavigation ? undefined : props.timelineAction}
-            hideSessionTimeline={
-              historical || globalNavigation || props.hideSessionTimeline
-            }
-            {...(viewport.historical
-              ? {
-                  frozenViewport: true,
-                  hasOlderHistory: false,
-                  onLoadOlderHistory: undefined,
-                  historyCapacityReached: false,
-                  historyPaginationError: false,
-                  loadingOlderHistory: false,
-                  onCanScrollToBottomChange: undefined,
-                  firstTurnMetrics: undefined,
-                  sessionKey: viewport.viewKey,
-                  pendingApproval: null,
-                  loadingTranscript: false,
-                  catchingUp: false,
-                  isResponding: false,
-                  transcriptActivity: undefined,
-                  onReloadTranscript: undefined,
-                  transcriptReloadPaused: true,
-                  onEditUserMessage: undefined,
-                  onSubmitUserMessageEdit: undefined,
-                  onShowContextDetail: undefined,
-                  onBranchSession: undefined,
-                  onRetryClick: undefined,
-                  onRetryFailedPrompt: undefined,
-                  showRetryHint: false,
-                  failedPromptMessageId: undefined,
-                  tailContent: undefined,
-                  welcomeHeader: undefined,
-                  activeTurnStartedAt: undefined,
-                  turnFileChanges: undefined,
-                  sourceEntries: undefined,
-                  sourceSessionId: undefined,
-                  onSourceOpen: undefined,
-                  turnArtifacts: undefined,
-                  turnScheduledTasks: undefined,
-                  generateContent: undefined,
-                }
-              : {})}
-          />
+          <TurnCallsProvider
+            onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
+          >
+            <MessageList
+              {...props}
+              key={viewport.viewKey}
+              ref={list}
+              messages={viewport.messages}
+              mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
+              timelineAction={
+                globalNavigation ? undefined : props.timelineAction
+              }
+              hideSessionTimeline={
+                historical || globalNavigation || props.hideSessionTimeline
+              }
+              {...(viewport.historical
+                ? {
+                    frozenViewport: true,
+                    hasOlderHistory: false,
+                    onLoadOlderHistory: undefined,
+                    historyCapacityReached: false,
+                    historyPaginationError: false,
+                    loadingOlderHistory: false,
+                    onCanScrollToBottomChange: undefined,
+                    firstTurnMetrics: undefined,
+                    sessionKey: viewport.viewKey,
+                    pendingApproval: null,
+                    loadingTranscript: false,
+                    catchingUp: false,
+                    isResponding: false,
+                    transcriptActivity: undefined,
+                    onReloadTranscript: undefined,
+                    transcriptReloadPaused: true,
+                    onEditUserMessage: undefined,
+                    onSubmitUserMessageEdit: undefined,
+                    onShowContextDetail: undefined,
+                    onBranchSession: undefined,
+                    onRetryClick: undefined,
+                    onRetryFailedPrompt: undefined,
+                    showRetryHint: false,
+                    failedPromptMessageId: undefined,
+                    tailContent: undefined,
+                    welcomeHeader: undefined,
+                    activeTurnStartedAt: undefined,
+                    turnFileChanges: undefined,
+                    sourceEntries: undefined,
+                    sourceSessionId: undefined,
+                    onSourceOpen: undefined,
+                    turnArtifacts: undefined,
+                    turnScheduledTasks: undefined,
+                    generateContent: undefined,
+                  }
+                : {})}
+            />
+          </TurnCallsProvider>
           {historical && !onCanScrollToBottomChange && (
             <Button
               className="absolute bottom-3 left-1/2 -translate-x-1/2"

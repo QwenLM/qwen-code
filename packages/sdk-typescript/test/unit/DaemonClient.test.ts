@@ -10372,6 +10372,40 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it('reads complete turn calls through encoded workspace REST without pagination', async () => {
+      const body = {
+        v: 1,
+        sessionId: 'session/1',
+        turnId: 'record 1',
+        events: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn(async () => {
+        throw new Error('must use REST');
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: {
+          type: 'acp-http',
+          supportsReplay: true,
+          connected: true,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        },
+      });
+      await expect(
+        client
+          .workspaceById('workspace/id')
+          .getSessionToolCalls('session/1', 'record 1'),
+      ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/workspace%2Fid/session/session%2F1/tool-calls?turnId=record+1',
+      );
+    });
+
     it('workspace turn-index paging forces direct REST transport', async () => {
       const body = {
         v: 1 as const,

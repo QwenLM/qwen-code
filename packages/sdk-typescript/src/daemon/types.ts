@@ -1662,6 +1662,14 @@ export interface DaemonSessionTranscriptPage {
   hasOlder?: boolean;
 }
 
+/** Complete persisted tool replay for one navigation turn; agents are summaries. */
+export interface DaemonSessionToolCalls {
+  v: 1;
+  sessionId: string;
+  turnId: string;
+  events: DaemonEvent[];
+}
+
 export interface DaemonSessionTurnIndexPageOptions {
   snapshot?: string;
   start?: number;

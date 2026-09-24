@@ -476,6 +476,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes tool-call reads to a stable workspace route and decoded session', () => {
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq('GET', '/workspaces/ws/session/session%2F1/tool-calls'),
+      ),
+    ).toEqual({
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: 'session/1',
+    });
+  });
+
   it('attributes workspace session-info reads to the shared session-info route', () => {
     const mw = daemonTelemetryMiddleware(() => '/ws');
     const res = mockRes(200);

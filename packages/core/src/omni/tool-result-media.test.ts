@@ -18,6 +18,7 @@ import nodePath from 'node:path';
 import nodeFs from 'node:fs/promises';
 import sharp from 'sharp';
 import type { Part } from '@google/genai';
+import * as imageView from '../utils/image-view.js';
 import type { Config } from '../config/config.js';
 
 const deliverMock = vi.hoisted(() => vi.fn());
@@ -835,6 +836,40 @@ describe('processToolResultOmniMedia', () => {
     expect(Buffer.from(kept.inlineData!.data!, 'base64').length).toBeLessThan(
       1024 * 1024,
     );
+  });
+
+  it('holds a declined audio part to the inline ceiling', async () => {
+    // The producer skipped its inline clamp because this funnel takes the
+    // bytes over; a part it declines must get that limit here instead.
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const wav = Buffer.concat([
+      Buffer.from('RIFF\0\0\0\0WAVE', 'latin1'),
+      Buffer.alloc(64),
+    ]);
+    const result = await processToolResultOmniMedia(
+      [inlinePart('audio/wav', wav)],
+      cfg({ audio: false }),
+      signal,
+    );
+    expect(deliverMock).not.toHaveBeenCalled();
+    expect(result[0]!.text).toContain('[Media omitted: audio/wav');
+  });
+
+  it('does not send a declined GIF to the renderer', async () => {
+    const bound = vi.spyOn(imageView, 'boundImageBuffer');
+    const gif = Buffer.concat([
+      Buffer.from('GIF89a', 'latin1'),
+      Buffer.alloc(64),
+    ]);
+    const parts = [inlinePart('image/gif', gif)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: false }),
+      signal,
+    );
+    expect(bound).not.toHaveBeenCalled();
+    expect(result).toBe(parts);
+    bound.mockRestore();
   });
 
   it('propagates an abort instead of degrading the part to inline', async () => {
