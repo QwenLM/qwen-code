@@ -136,7 +136,8 @@ export async function runClaudeHostTurn(input: {
     });
     const plan = selectPeerModeId(
       'plan',
-      session.modes?.availableModes.map((mode) => mode.id) ?? [],
+      session.modes?.availableModes.map((mode: { id: string }) => mode.id) ??
+        [],
     );
     if (!plan) {
       throw new Error(
