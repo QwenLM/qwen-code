@@ -1186,11 +1186,12 @@ describe('standalone release packaging', () => {
     );
 
     // The list tracks the root package.json optionalDependencies, so a newly
-    // pinned platform package (e.g. linux-arm64) is staged automatically.
+    // pinned platform package is staged automatically.
     expect(readNodePtyPackageSpecs()).toEqual([
       '@lydell/node-pty@1.2.0-beta.10',
       '@lydell/node-pty-darwin-arm64@1.2.0-beta.10',
       '@lydell/node-pty-darwin-x64@1.2.0-beta.10',
+      '@lydell/node-pty-linux-arm64@1.2.0-beta.10',
       '@lydell/node-pty-linux-x64@1.2.0-beta.10',
       '@lydell/node-pty-win32-arm64@1.2.0-beta.10',
       '@lydell/node-pty-win32-x64@1.2.0-beta.10',
@@ -2853,6 +2854,9 @@ describe('standalone release packaging', () => {
     );
     expect(releaseWorkflow).toContain(
       'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
+    );
+    expect(releaseWorkflow).toContain(
+      'QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD',
     );
     expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
