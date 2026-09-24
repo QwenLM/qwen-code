@@ -300,17 +300,18 @@
   position: relative;
   display: inline-flex;
   max-width: min(44ch, 100%);
-  min-height: 20px;
+  min-height: 28px;
   align-items: center;
   margin: 0 0.25ch;
+  padding-right: 8px;
   border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--secondary);
+  border-radius: 8px;
+  background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 12px;
   line-height: 1.2;
-  vertical-align: baseline;
+  vertical-align: middle;
 }
 
 .messageTagTooltip {
@@ -351,11 +352,10 @@
   cursor: pointer;
 }
 
-.messageTagClickable:where(.fileTag):hover {
+.messageTagClickable:hover {
   border-color: color-mix(in srgb, var(--border), var(--foreground) 20%);
 }
 
-.messageTagClickable:not(.fileTag):hover,
 .messageTagClickable:focus-visible {
   border-color: var(--chat-editor-accent-color, var(--foreground));
   outline: none;
@@ -363,10 +363,11 @@
 
 .messageTagIcon {
   display: block;
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
-  margin-left: 7px;
+  margin-left: 8px;
+  color: var(--muted-foreground);
   background: currentColor;
   mask: var(--user-message-tag-icon-url) center / contain no-repeat;
   -webkit-mask: var(--user-message-tag-icon-url) center / contain no-repeat;
@@ -486,15 +487,6 @@
 .chatFileChipPreviewable:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
-}
-
-.fileTag {
-  vertical-align: middle;
-  background: var(--background);
-  min-height: 28px;
-  padding-right: 8px;
-  border-radius: 8px;
-  font-family: var(--font-sans, system-ui, sans-serif);
 }
 
 .fileTagIcon {

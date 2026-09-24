@@ -15,6 +15,20 @@ import {
   type UseLiveBrowserHostResult,
 } from './useLiveBrowserHost';
 
+// The capture pipeline itself (video element, canvas, JPEG ladder) is covered
+// in screen-share.test.ts; here only what crosses the Host socket matters.
+const shareHandle = {
+  label: 'Terminal',
+  stop: vi.fn(),
+  grab: vi.fn(),
+};
+const canShare = vi.fn(() => true);
+const startShare = vi.fn();
+vi.mock('./screen-share', () => ({
+  canShareScreen: () => canShare(),
+  startScreenShare: (onEnded: () => void) => startShare(onEnded),
+}));
+
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -175,6 +189,8 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let host: UseLiveBrowserHostResult | undefined;
 let token: string | undefined;
+/** The `onended` the hook handed to the share, i.e. the browser's own stop. */
+let shareEnded: (() => void) | undefined;
 
 function TestHost() {
   host = useLiveBrowserHost({
@@ -232,6 +248,21 @@ beforeEach(() => {
     getTracks: () => [track],
     getAudioTracks: () => [track],
   });
+  canShare.mockReset();
+  canShare.mockReturnValue(true);
+  shareHandle.stop.mockReset();
+  shareHandle.grab.mockReset();
+  shareHandle.grab.mockResolvedValue({
+    image: 'ZmFrZS1qcGVn',
+    width: 1920,
+    height: 1080,
+  });
+  startShare.mockReset();
+  startShare.mockImplementation((onEnded: () => void) => {
+    shareEnded = onEnded;
+    return Promise.resolve(shareHandle);
+  });
+  shareEnded = undefined;
   MockWebSocket.instances = [];
   MockAudioContext.instances = [];
   MockAudioContext.processor = undefined;
@@ -285,7 +316,7 @@ describe('useLiveBrowserHost', () => {
       bundleId: 'com.alibaba.qwen-code.web-shell',
       instanceNonce: expect.any(String),
       permissions: { microphone: 'granted' },
-      selfChecks: { audioInput: true, audioOutput: true },
+      selfChecks: { audioInput: true, audioOutput: true, screenShare: true },
     });
     expect(host!.phase).toBe('connected');
     expect(onStatus).toHaveBeenCalledWith(status('idle'));
@@ -296,6 +327,196 @@ describe('useLiveBrowserHost', () => {
     expect(MockAudioContext.instances.map((c) => c.sampleRate)).toEqual([
       16_000, 24_000,
     ]);
+  });
+
+  it('answers a screen request with one frame from the shared screen', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-1',
+        epoch: 0,
+        source: 'screen',
+      });
+    });
+
+    expect(shareHandle.grab).toHaveBeenCalledOnce();
+    expect(ws.text().at(-1)).toEqual({
+      type: 'host.visual_capture_result',
+      requestId: 'req-1',
+      success: true,
+      source: 'screen',
+      image: 'ZmFrZS1qcGVn',
+      width: 1920,
+      height: 1080,
+      appName: 'Shared screen',
+      windowTitle: 'Terminal',
+      accessibilityText: '',
+    });
+    expect(host!.screenShare.lastLookAt).toBeTypeOf('number');
+  });
+
+  it('answers at once when nothing is shared, and says so in the dialog', async () => {
+    await render();
+    const ws = await connected();
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-2',
+        epoch: 0,
+        source: 'screen',
+      });
+    });
+
+    // A silent drop would leave the daemon waiting out its Appshot timeout
+    // while the model has nothing to tell the user.
+    expect(ws.text().at(-1)).toEqual({
+      type: 'host.visual_capture_result',
+      requestId: 'req-2',
+      success: false,
+      error: 'The user is not sharing a screen.',
+    });
+    expect(host!.screenShare.requestedWhileIdle).toBe(true);
+    expect(host!.screenShare.lastLookAt).toBeUndefined();
+  });
+
+  it('refuses to read the screen for a call that has moved on', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-stale',
+        epoch: 7,
+        source: 'screen',
+      });
+    });
+
+    expect(ws.text().at(-1)).toMatchObject({
+      requestId: 'req-stale',
+      success: false,
+    });
+    // The daemon would discard the result anyway, but only after the frame
+    // had left the machine.
+    expect(shareHandle.grab).not.toHaveBeenCalled();
+  });
+
+  it('refuses a source it cannot be', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-3',
+        epoch: 0,
+        source: 'camera',
+      });
+    });
+
+    expect(ws.text().at(-1)).toMatchObject({
+      requestId: 'req-3',
+      success: false,
+      error: 'This Host can only share a screen.',
+    });
+    expect(shareHandle.grab).not.toHaveBeenCalled();
+  });
+
+  it('reports a capture that failed instead of going quiet', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+    shareHandle.grab.mockRejectedValue(
+      new Error('The screen was too detailed to send.'),
+    );
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-4',
+        epoch: 0,
+        source: 'screen',
+      });
+    });
+
+    expect(ws.text().at(-1)).toMatchObject({
+      requestId: 'req-4',
+      success: false,
+      error: 'The screen was too detailed to send.',
+    });
+  });
+
+  it('follows the browser\u2019s own stop-sharing control', async () => {
+    await render();
+    await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+    expect(host!.screenShare.sharing).toBe(true);
+
+    await act(async () => {
+      shareEnded?.();
+    });
+
+    expect(host!.screenShare.sharing).toBe(false);
+    expect(host!.screenShare.label).toBeUndefined();
+  });
+
+  it('treats a dismissed picker as a choice, not an error', async () => {
+    await render();
+    await connected();
+    startShare.mockRejectedValue(
+      new DOMException('Permission denied', 'NotAllowedError'),
+    );
+
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    expect(host!.screenShare.sharing).toBe(false);
+    expect(host!.screenShare.errorMessage).toBeUndefined();
+  });
+
+  it('ends the share when the Host connection goes', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.serverClose(4010, 'Qwen Live Host took over.');
+    });
+
+    // No page keeps a screen open that nothing can look at.
+    expect(shareHandle.stop).toHaveBeenCalled();
+    expect(host!.screenShare.sharing).toBe(false);
+  });
+
+  it('never offers the share where getDisplayMedia is missing', async () => {
+    canShare.mockReturnValue(false);
+    await render();
+    const ws = await connected();
+
+    expect(host!.screenShare.supported).toBe(false);
+    expect(
+      (ws.text()[0]['selfChecks'] as Record<string, unknown>)['screenShare'],
+    ).toBe(false);
   });
 
   it('asks for the lease back only when told to take over', async () => {

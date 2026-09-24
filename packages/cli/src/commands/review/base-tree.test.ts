@@ -51,8 +51,18 @@ import {
   clearReviewWorktreeLease,
   createReviewWorktreeLease,
   recordReviewWorktreeLeaseMergeBase,
+  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
 import type { BuildTestReport } from './build-test.js';
+
+// Every test here drives real git through spawnSync/execFileSync, so the
+// worker's event loop does not turn for the whole file (~2 min on a hosted
+// runner). vitest's worker->main `onTaskUpdate` RPC times out after 60s and
+// the run exits 1 with every test green. Yielding between tests bounds each
+// stall to one test. The timer is captured at load so fake timers cannot
+// intercept it (same fix as scripts/tests/test-setup.ts).
+const realSetImmediate = setImmediate;
+beforeEach(() => new Promise<void>((resolve) => realSetImmediate(resolve)));
 
 // Set from exactly the cases that need it: `rmSync` fails for the paths the
 // predicate names — a stale build lock that will not delete. Mode bits cannot
@@ -119,6 +129,7 @@ describe('runBaseTree', () => {
   let worktree: string;
   let baseSha: string;
   let headSha: string;
+  let home: string;
 
   const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -187,7 +198,11 @@ describe('runBaseTree', () => {
     writeLease();
   };
 
-  beforeEach(() => init());
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+    vi.stubEnv('QWEN_HOME', home);
+    init();
+  });
 
   /**
    * The lease fetch-pr holds for the whole review, at the host-side path —
@@ -232,10 +247,7 @@ describe('runBaseTree', () => {
    * sibling shard was mid-A/B in — with one `utimes`.
    */
   const nextRun = (): void => {
-    rmSync(
-      join(repo, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      { force: true },
-    );
+    rmSync(reviewLeasePath(repo, 'pr-1'), { force: true });
     writeLease('prompt-next');
   };
 
@@ -331,14 +343,28 @@ describe('runBaseTree', () => {
    * Run `fn` with `dir` as HOME — the way a throwaway GLOBAL git config
    * reaches the spawns under test: `GIT_CONFIG_GLOBAL` would not survive
    * `sanitizedGitEnv`, by design.
+   *
+   * That is the production side. An ambient `GIT_CONFIG_GLOBAL` — the release
+   * workspace exports one pointing at an empty file — still outranks
+   * `$HOME/.gitconfig` for the ordinary spawns these cases make themselves, so
+   * the driver they set up here never runs and their own premise goes red. It
+   * is therefore dropped for the duration and put back afterwards; what the
+   * measurement reads is unchanged, `sanitizedGitEnv` strips it either way.
    */
   const withHome = <T>(dir: string, fn: () => T): T => {
     const saved = process.env['HOME'];
+    const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
     process.env['HOME'] = dir;
+    delete process.env['GIT_CONFIG_GLOBAL'];
     try {
       return fn();
     } finally {
       process.env['HOME'] = saved;
+      if (savedGlobal === undefined) {
+        delete process.env['GIT_CONFIG_GLOBAL'];
+      } else {
+        process.env['GIT_CONFIG_GLOBAL'] = savedGlobal;
+      }
     }
   };
 
@@ -353,7 +379,11 @@ describe('runBaseTree', () => {
     writeFileSync(config, readFileSync(config, 'utf8') + lines);
   };
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
 
   itWhereContainmentExists(
     'reports BUSY and leaves the tree standing when a tree THIS RUN built fails a reuse check (tracked dirt)',
@@ -1517,7 +1547,7 @@ describe('runBaseTree', () => {
       // builds, certifies and pins — on exactly the rounds where the capture
       // could not record one. The whole of the original hole, on a branch
       // that merely looked like an edge case.
-      rmSync(join(repo, '.qwen', 'review-leases'), {
+      rmSync(dirname(reviewLeasePath(repo, 'pr-1')), {
         recursive: true,
         force: true,
       });
@@ -2515,6 +2545,35 @@ describe('runBaseTree', () => {
     },
     15_000,
   );
+
+  it('drops an ambient GIT_CONFIG_GLOBAL inside withHome, and puts it back', () => {
+    // The two GLOBAL-config cases above only go red where the runner exports an
+    // ambient `GIT_CONFIG_GLOBAL`: the release workspace points one at an empty
+    // file, and that outranks `$HOME/.gitconfig` for the ordinary spawns the
+    // cases make themselves. Pin the helper's own contract so it holds in every
+    // environment — inside `withHome` the throwaway HOME is the global config.
+    const home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+    writeFileSync(join(home, '.gitconfig'), '[user]\n\tname = throwaway\n');
+    const ambient = join(home, 'ambient-gitconfig');
+    writeFileSync(ambient, '');
+    const saved = process.env['GIT_CONFIG_GLOBAL'];
+    process.env['GIT_CONFIG_GLOBAL'] = ambient;
+    try {
+      withHome(home, () => {
+        expect(process.env['GIT_CONFIG_GLOBAL']).toBeUndefined();
+        expect(git(home, 'config', '--global', '--get', 'user.name')).toBe(
+          'throwaway',
+        );
+      });
+      expect(process.env['GIT_CONFIG_GLOBAL']).toBe(ambient);
+    } finally {
+      if (saved === undefined) {
+        delete process.env['GIT_CONFIG_GLOBAL'];
+      } else {
+        process.env['GIT_CONFIG_GLOBAL'] = saved;
+      }
+    }
+  });
 
   itWhereContainmentExists(
     'does not refuse over a dangling include git itself skips (R5-6)',
@@ -3933,4 +3992,20 @@ describe('runBaseTree', () => {
       rmSync(foreign, { recursive: true, force: true });
     }
   });
+});
+
+// Pins the yield at the top of this file: without it the loop never reaches
+// the check phase between these two tests, so the flag never flips. Armed
+// with the same captured setImmediate the yield uses — immediates run FIFO,
+// so the armed one fires before the yield's own.
+let yieldObserved = false;
+
+it('arms a flag from a real macrotask callback', () => {
+  realSetImmediate(() => {
+    yieldObserved = true;
+  });
+});
+
+it('observes the event loop turned between tests', () => {
+  expect(yieldObserved).toBe(true);
 });
