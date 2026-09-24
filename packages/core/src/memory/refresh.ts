@@ -116,7 +116,7 @@ export function didWriteProjectContextFile(
 async function rebuildWrittenMemoryIndexes(
   candidates: readonly MemoryWriteCandidate[],
   projectRoot: string,
-  options?: Pick<RefreshMemoryAfterWriteOptions, 'logContext'>,
+  options?: RefreshMemoryAfterWriteOptions,
 ): Promise<void> {
   let wroteProjectMemory = false;
   let wroteUserMemory = false;
