@@ -1061,28 +1061,107 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
-    it('rejects an allowlist containing only the authenticated GitHub account', async () => {
+    it('normalizes per-group allowedUsers to lowercase for the group sender gate', async () => {
       const config = makeConfig({
-        senderPolicy: 'allowlist',
-        allowedUsers: ['TEST-BOT', 'test-bot'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['Alice'] } },
       });
       channel = new TestableGithubChannel('test-github', config, makeBridge());
       mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
 
-      try {
-        await expect(channel.connect()).rejects.toThrow(
-          'allowlist only contains the authenticated GitHub account "test-bot"',
-        );
-      } finally {
-        channel.disconnect();
-      }
-      expect(config.allowedUsers).toEqual(['test-bot', 'test-bot']);
+      const groupGate = (
+        channel as unknown as {
+          senderGateFor(target: { isGroup: boolean; chatId: string }): {
+            isAllowed: (senderId: string) => boolean;
+          };
+        }
+      ).senderGateFor({ isGroup: true, chatId: 'owner/repo' });
+      expect(groupGate.isAllowed('alice')).toBe(true);
+      expect(groupGate.isAllowed('bob')).toBe(false);
+      expect(config.groups['*']?.allowedUsers).toEqual(['alice']);
+      channel.disconnect();
     });
+
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+
+      expect(config.operators).toEqual(['alice']);
+      channel.disconnect();
+    });
+
+    it('ignores a bot-only private allowlist for repository access', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          privatePolicy: 'allowlist',
+          senderPolicy: 'allowlist',
+          allowedUsers: ['TEST-BOT'],
+        }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      await expect(channel.connect()).resolves.toBeUndefined();
+      channel.disconnect();
+    });
+
+    it.each(['*', 'owner/restricted'])(
+      'warns about bot-only group %s without blocking another repository',
+      async (restrictedGroup) => {
+        const config = makeConfig({
+          groupPolicy: 'allowlist',
+          groups: {
+            [restrictedGroup]: {
+              senders: 'allowlist',
+              allowedUsers: ['TEST-BOT', 'test-bot'],
+            },
+            'owner/repo': { senders: 'open' },
+          },
+        });
+        channel = new TestableGithubChannel(
+          'test-github',
+          config,
+          makeBridge(),
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await expect(channel.connect()).resolves.toBeUndefined();
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `warning: GitHub group "${restrictedGroup}" allowlist only contains the authenticated GitHub account "test-bot"`,
+            ),
+          );
+          channel.usePreflight = true;
+          await channel.handleInbound({
+            channelName: 'test-github',
+            senderId: 'alice',
+            senderName: 'Alice',
+            chatId: 'owner/repo',
+            text: 'review this',
+            isGroup: true,
+            isMentioned: true,
+            isReplyToBot: false,
+          });
+          expect(channel.inboundEnvelopes).toHaveLength(1);
+        } finally {
+          channel.disconnect();
+          stderr.mockRestore();
+        }
+        expect(config.groups[restrictedGroup]?.allowedUsers).toEqual([
+          'test-bot',
+          'test-bot',
+        ]);
+      },
+    );
 
     it('warns when the authenticated GitHub account is part of a mixed allowlist', async () => {
       const config = makeConfig({
-        senderPolicy: 'allowlist',
-        allowedUsers: ['TEST-BOT', 'operator'],
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['TEST-BOT', 'operator'] },
+        },
       });
       channel = new TestableGithubChannel('test-github', config, makeBridge());
       mockOctokit.paginate.mockResolvedValue([]);
@@ -1091,7 +1170,7 @@ describe('GithubChannel', () => {
       try {
         await channel.connect();
         expect(stderr).toHaveBeenCalledWith(
-          '[Channel:test-github] warning: authenticated GitHub account "test-bot" is allowlisted but cannot trigger this channel; use a separate operator account.\n',
+          '[Channel:test-github] warning: authenticated GitHub account "test-bot" is allowlisted in group "*" but cannot trigger this channel; use a separate operator account.\n',
         );
       } finally {
         channel.disconnect();
@@ -1778,10 +1857,10 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toContain('allowed comment');
     });
 
-    it('excludes comments from disallowed senders when aggregating', async () => {
+    it('excludes comments outside the group member allowlist when aggregating', async () => {
       await initWithoutLoop({
-        senderPolicy: 'allowlist',
-        allowedUsers: ['alice'],
+        privatePolicy: 'disabled',
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
       });
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1805,9 +1884,9 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).not.toContain('not allowed');
     });
 
-    it('dispatches directed follow-ups from approved pairing users without a mention', async () => {
+    it('aggregates all group members independently of private pairing', async () => {
       await initWithoutLoop({
-        senderPolicy: 'pairing',
+        privatePolicy: 'pairing',
         allowedUsers: ['alice'],
       });
       channel.usePreflight = true;
@@ -1830,7 +1909,12 @@ describe('GithubChannel', () => {
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]!.text).toBe('please take a look');
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '@alice: please take a look',
+      );
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '@bob: unapproved follow-up',
+      );
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
@@ -3554,7 +3638,9 @@ describe('GithubChannel', () => {
     it('does not suppress first-contact body when mention is from a disallowed sender', async () => {
       channel = new TestableGithubChannel(
         'test-github',
-        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['bob'] }),
+        makeConfig({
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['bob'] } },
+        }),
         makeBridge(),
       );
       mockOctokit.paginate.mockResolvedValueOnce([]);

@@ -57,7 +57,13 @@ const sdkMocks = vi.hoisted(() => ({
       snapshots: Array<{ turnIndex: number; promptId: string }>;
     }>
   >(async () => ({ snapshots: [] })),
-  rewindSession: vi.fn(async () => ({})),
+  rewindSession: vi.fn<
+    (
+      sessionId: string,
+      promptId: string,
+      opts?: { clientId?: string; rewindFiles?: boolean },
+    ) => Promise<unknown>
+  >(async () => ({})),
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
@@ -1654,6 +1660,15 @@ describe('EmbeddedApp message edit rewind', () => {
       'session-1',
       'prompt-3',
       expect.objectContaining({ rewindFiles: false }),
+    );
+    // The rewind must be unattributed: the daemon only accepts the client id
+    // it registered for the session at create/load (`client_<uuid>`), which a
+    // raw DaemonClient never learns — the host's own `vscode-<uuid>` is not
+    // registered, and passing it makes the daemon reject the rewind with 400
+    // `invalid_client_id`, surfacing as the localized "Failed to edit the
+    // message" toast on every edit attempt.
+    expect(sdkMocks.rewindSession.mock.lastCall?.[2]).not.toHaveProperty(
+      'clientId',
     );
   });
 

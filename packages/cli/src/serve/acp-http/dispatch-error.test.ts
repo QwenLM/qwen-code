@@ -9,6 +9,7 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
 import {
   AcpChildCapacityExceededError,
   BridgeChannelQuarantinedError,
@@ -21,19 +22,26 @@ import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
 describe('capacity RPC errors', () => {
-  it('carries an explicit HTTP status and machine reason', () => {
-    const error = new AcpChildCapacityExceededError(6, 6);
-    expect(toRpcError(error)).toEqual({
-      code: RPC.INTERNAL_ERROR,
-      message: error.message,
-      data: {
-        httpStatus: 503,
-        errorKind: error.code,
-        maxConcurrentChildren: 6,
-        committedAcpChildren: 6,
-      },
-    });
-  });
+  it.each([false, true])(
+    'carries capacity through runtime wrapper=%s',
+    (wrapped) => {
+      const error = new AcpChildCapacityExceededError(6, 6);
+      expect(
+        toRpcError(
+          wrapped ? new WorkspaceRuntimeInitializationError(error) : error,
+        ),
+      ).toEqual({
+        code: RPC.INTERNAL_ERROR,
+        message: error.message,
+        data: {
+          httpStatus: 503,
+          errorKind: error.code,
+          maxConcurrentChildren: 6,
+          committedAcpChildren: 6,
+        },
+      });
+    },
+  );
   it('preserves standalone rollback classification with nested capacity', () => {
     const capacity = {
       code: 'acp_child_capacity_exhausted' as const,
@@ -99,6 +107,21 @@ describe('toRpcError', () => {
       code: RPC.INVALID_PARAMS,
       message: source.message,
       data: { errorKind, httpStatus: 409 },
+    });
+  });
+
+  // Nothing started, and the daemon is not at fault for it: the write that
+  // keeps a second runner off this journal did not land. Retryable.
+  it('answers workflow_not_recorded as unavailable, with its message', () => {
+    const source = RequestError.invalidParams(
+      { errorKind: 'workflow_not_recorded' },
+      'Could not record that workflow run wf_1234abcd is running again',
+    );
+
+    expect(toRpcError(source)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: source.message,
+      data: { errorKind: 'workflow_not_recorded', httpStatus: 503 },
     });
   });
 

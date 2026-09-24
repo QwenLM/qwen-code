@@ -49,7 +49,11 @@ import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import {
+  runWithAgentConfiguredToolAllowlist,
+  runWithAgentContext,
+  runWithAgentDisallowedTools,
+} from '../../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -859,6 +863,29 @@ describe('AgentTool', () => {
     );
   });
 
+  it.each<Partial<AgentParams>>([
+    { isolation: 'worktree' },
+    { working_dir: '/another/workspace' },
+    { name: 'teammate' },
+  ])(
+    'rejects unsupported sandbox agent entry %j before execution',
+    async (overrides) => {
+      config.getShellExecutionSandbox = vi.fn().mockReturnValue({});
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Sandbox agent',
+        prompt: 'inspect the project',
+        subagent_type: 'file-search',
+        ...overrides,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.llmContent).toContain('same-workspace in-process agents');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    },
+  );
+
   describe('initialization', () => {
     it('should initialize with correct name and properties', () => {
       expect(agentTool.name).toBe('agent');
@@ -920,7 +947,12 @@ describe('AgentTool', () => {
       expect(interactiveTool.description).toContain('When to fork');
       expect(interactiveTool.description).toContain("Don't peek");
       expect(interactiveTool.description).toContain("Don't race");
-      expect(interactiveTool.description).toContain('Writing a fork prompt');
+      // Fork facts that shape the call stay here. How to *write* a fork
+      // prompt moved to the bundled `agent-delegation` skill; which half
+      // lives where is pinned in that skill's own SKILL.test.ts (#12054).
+      expect(interactiveTool.description).toContain(
+        "Don't set `model` on a fork",
+      );
       expect(interactiveTool.description).toContain(
         'result arrives through a completion notification',
       );
@@ -931,7 +963,7 @@ describe('AgentTool', () => {
         "won't need the result back",
       );
       expect(interactiveTool.description).toContain(
-        'forks inherit all or the selected recent window',
+        'Forks inherit the full parent conversation by default',
       );
     });
 
@@ -946,15 +978,20 @@ describe('AgentTool', () => {
       expect(nonInteractiveTool.description).toContain('When to fork');
       expect(nonInteractiveTool.description).toContain("Don't peek");
       expect(nonInteractiveTool.description).toContain("Don't race");
-      expect(nonInteractiveTool.description).toContain('Writing a fork prompt');
-      expect(nonInteractiveTool.description).toContain('Writing the prompt');
+      expect(nonInteractiveTool.description).toContain(
+        'Pass a short `name` (one or two words, lowercase)',
+      );
+      // Prompt-writing craft is reached through the bundled
+      // `agent-delegation` skill rather than sent every turn; this stub Config
+      // has no skill manager, so the reference is inlined here. Both shapes
+      // are pinned in that skill's SKILL.test.ts (#12054).
       expect(nonInteractiveTool.description).toContain(
         'Never delegate understanding',
       );
       // Forks are now available in headless sessions too, so the fork
       // inheritance guidance is present regardless of interactivity.
       expect(nonInteractiveTool.description).toContain(
-        'forks inherit all or the selected recent window',
+        'Forks inherit the full parent conversation by default',
       );
     });
 
@@ -969,7 +1006,9 @@ describe('AgentTool', () => {
       expect(tool.description).toContain('When to fork');
       expect(tool.description).toContain("Don't peek");
       expect(tool.description).toContain("Don't race");
-      expect(tool.description).toContain('Writing a fork prompt');
+      expect(tool.description).toContain(
+        'Choose a fork when the task needs substantial context',
+      );
     });
 
     it('states the background-agent discipline outside the fork section', async () => {
@@ -5217,6 +5256,342 @@ describe('AgentTool', () => {
         'task_prompt',
         expect.stringContaining(JSON.stringify([ToolNames.READ_FILE])),
       );
+    });
+
+    it('keeps registered deferred tools executable through the inherited bridge', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_SEARCH,
+          description: 'Review a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_CALL,
+          description: 'Invoke a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        ToolNames.WEB_FETCH,
+        'mcp__docs__search',
+        ToolNames.ASK_USER_QUESTION,
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'inspect deferred sources',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+      });
+      await invocation.execute();
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.tools).toStrictEqual([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+      expect(toolConfig?.executionAllowedTools).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        ToolNames.WEB_FETCH,
+        'mcp__docs__search',
+      ]);
+    });
+
+    it('keeps both bridge tools when fork_tools grants a deferred target', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_SEARCH,
+          description: 'Review a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_CALL,
+          description: 'Invoke a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        'mcp__docs__search',
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'inspect deferred sources',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: ['mcp__docs__search'],
+      });
+      await invocation.execute();
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual([
+        'mcp__docs__search',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+    });
+
+    it("keeps the parent subagent's disallowedTools out of the fork execution allowlist", async () => {
+      // R24-1: the fork's execution allowlist unions the parent's declared
+      // tools with the live registry. A tool the parent's own disallowedTools
+      // blocklist removed from its declarations (prepareTools) stays
+      // registered, so the union would re-admit it — and the bridge decouples
+      // execution from declaration, making the bypass callable. The blocklist
+      // must survive one level down. Mutation check: dropping the
+      // keepOffParentBlocklist filter in createForkSubagent turns this red.
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        'mcp__slack__post_message',
+        ToolNames.WRITE_FILE,
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork inside a slack-blocked parent',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+      });
+      await runWithAgentDisallowedTools(['mcp__slack'], () =>
+        invocation.execute(),
+      );
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+      ]);
+      expect(toolConfig?.executionAllowedTools).not.toContain(
+        'mcp__slack__post_message',
+      );
+      // The fork's own invocation-level re-check enforces the blocklist too,
+      // covering wildcard fork_tools patterns an exact-name filter misses.
+      expect(toolConfig?.disallowedTools).toEqual(['mcp__slack']);
+    });
+
+    it("persists the fork's disallowedTools blocklist in the agent meta sidecar", async () => {
+      // R29-1: the launch path keeps the parent's disallowedTools blocklist
+      // next to a wildcard fork_tools allowlist, but the resume path rebuilds
+      // the fork's toolConfig from the persisted meta alone — a sidecar that
+      // drops the blocklist lets a backgrounded fork resume past it and reach
+      // the very tool the blocklist excluded. Mutation check: dropping the
+      // disallowedTools spread in the writeAgentMeta call turns this red.
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        'mcp__slack__post_message',
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork inside a slack-blocked parent',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: ['mcp__*'],
+        run_in_background: true,
+      });
+      await runWithAgentDisallowedTools(['mcp__slack'], () =>
+        invocation.execute(),
+      );
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual(['mcp__*']);
+      expect(toolConfig?.disallowedTools).toEqual(['mcp__slack']);
+      const writtenMeta = writeMetaSpy.mock.calls[0]?.[1];
+      expect(writtenMeta).toMatchObject({
+        executionAllowedTools: ['mcp__*'],
+        disallowedTools: ['mcp__slack'],
+      });
+      writeMetaSpy.mockRestore();
+    });
+
+    it("keeps the parent subagent's configured allowlist around the fork execution surface", async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_SEARCH,
+          description: 'Search deferred tools',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_CALL,
+          description: 'Call a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        ToolNames.WRITE_FILE,
+        'mcp__slack__post_message',
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork inside an explicitly restricted parent',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+      });
+      await runWithAgentConfiguredToolAllowlist(
+        [
+          ToolNames.READ_FILE,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+          'missing_tool',
+          'mcp__slack',
+        ],
+        () => invocation.execute(),
+      );
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+      expect(toolConfig?.executionAllowedTools).not.toContain(
+        ToolNames.WRITE_FILE,
+      );
+      expect(toolConfig?.executionAllowedTools).not.toContain(
+        'mcp__slack__post_message',
+      );
+    });
+
+    it('preserves fork_tools deny-all inside a configured parent allowlist', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_SEARCH,
+          description: 'Search deferred tools',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.TOOL_CALL,
+          description: 'Call a deferred tool',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'deny all tools',
+        prompt: 'reason without tools',
+        subagent_type: 'fork',
+        fork_tools: [],
+      });
+      await runWithAgentConfiguredToolAllowlist(
+        [ToolNames.READ_FILE, ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+        () => invocation.execute(),
+      );
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual([]);
     });
 
     it('preserves display_image in the fork declarations but denies its execution', async () => {

@@ -824,10 +824,17 @@ export async function evaluateAutoMode(
         ? normalizeMonitorCommand(input.ctx.command).safetyCommand
         : input.ctx.command;
     const userPrompt = extractLastUserPrompt(input.messages) ?? '';
+    // `ctx.cwd` is only set when the call passes `directory`; otherwise the
+    // shell runs in the session's target dir, which is also where
+    // `ShellToolInvocation` registers session commits. Passing `undefined`
+    // through lands on `process.cwd()` inside `isAmendOfSessionCommit`'s
+    // `git rev-parse` — in a process hosting several sessions (ACP, daemon)
+    // or several worktrees that is a different repo, so one repo's registry
+    // could exempt an amend happening in another.
     const destructiveResult = isDestructiveCommand(
       command,
       userPrompt,
-      input.ctx.cwd,
+      input.ctx.cwd ?? input.config.getTargetDir?.(),
     );
     if (destructiveResult?.blocked) {
       return {
