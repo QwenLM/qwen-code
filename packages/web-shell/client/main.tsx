@@ -321,6 +321,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onLanguageResolved: handleLanguageResolved,
                 onBrandResolved: handleBrandResolved,
                 sidebar: { enabled: true, showLive: true },
+                showToolCalls: true,
                 className: macosOverlayTitlebar
                   ? MACOS_TITLEBAR_CLASS
                   : undefined,
