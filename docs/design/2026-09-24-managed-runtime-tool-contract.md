@@ -94,10 +94,26 @@ paths.
 `packages/cli` (54 tests) and `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`
 in `packages/sdk-java/runtime-broker` (6 tests) both pass.
 
+### 4.1 Java transport
+
+`HttpRuntimeTransport` implements the three operations against the shared
+fixtures. The reference map supplied by the caller carries the identity four
+plus `toolName` and `input`; anything else is rejected client-side, and a
+request larger than the route's 256 KiB limit never leaves the process.
+Responses are read with the route's 1 MiB bound and parsed strictly: closed
+field sets, protocol version 2, a state from the contract enum, a result only
+with `settled`, and a non-negative integer `lastSequence`. `execute` requires
+`settled` and returns the result map; `status` and `cancel` return the full
+closed map. Failure statuses map to the shared classifications, with 5xx
+retryable and everything else terminal. The fixture-driven tests replay the
+shared success and `unknown` answers over a real HTTP server and pin the
+rejection of unsettled executes, resultless settlements, results on
+`unknown`, unknown states, and oversized inputs; `mvn test` in
+`packages/sdk-java/runtime-broker` passes 122 tests.
+
 ## 5. Follow-up work
 
 - Mount the real worker handlers for the three routes (execute extraction).
-- Implement `execute`, `status`, and `cancel` in `HttpRuntimeTransport`.
 - The `UNKNOWN` execution reconciler consumes `status` (tracked on #12380).
 - Whether a cancel of an execution the Runtime reports as still running sends
   the physical cancel is deliberately deferred.

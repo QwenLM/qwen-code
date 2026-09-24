@@ -17,20 +17,34 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Attestation half of the preview Managed Runtime HTTP adapter.
+ * HTTP client for the private Managed Runtime v2 routes.
  *
- * <p>Prepare, execute, cancel, and release stay on the later transport slice.
- * This slice talks only to the merged attestation route.
+ * <p>Attestation plus the tool operations execute, status, and cancel, keyed
+ * by the original call reference. Prepare, acquire, control, and release stay
+ * on a later transport slice.
  */
 public final class HttpRuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
+    static final int TOOL_REQUEST_LIMIT_BYTES = 256 * 1024;
+    static final int TOOL_RESULT_LIMIT_BYTES = 1024 * 1024;
     static final String PATH = "/internal/managed-runtime/v2/attest";
+    static final String EXECUTE_PATH = "/internal/managed-runtime/v2/execute";
+    static final String STATUS_PATH = "/internal/managed-runtime/v2/status";
+    static final String CANCEL_PATH = "/internal/managed-runtime/v2/cancel";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Set<String> RESPONSE_FIELDS = Set.of(
             "protocolVersion", "runtimeInstanceId", "runtimeIncarnation",
             "leaseId", "epoch", "provisionRequestId", "tenantId",
             "workspaceId", "workspaceGeneration", "workspaceCwd",
             "capabilityDigest", "isolationClass");
+    private static final Set<String> REFERENCE_FIELDS = Set.of(
+            "sessionId", "promptId", "callId", "argsDigest");
+    private static final Set<String> TOOL_RESPONSE_FIELDS = Set.of(
+            "protocolVersion", "state", "result", "lastSequence");
+    private static final Set<String> TOOL_STATES = Set.of("prepared",
+            "executing", "cancel_requested", "settled", "unknown");
+    private static final Set<String> EXECUTION_STATUSES = Set.of(
+            "not_started", "success", "error", "cancelled");
 
     private final HttpClient client;
     private final Duration requestTimeout;
@@ -117,28 +131,197 @@ public final class HttpRuntimeTransport {
         return returned;
     }
 
-    public CompletionStage<Void> execute(RuntimeLease lease,
+    /**
+     * Runs one tool call to settlement. The reference carries the identity
+     * four plus {@code toolName} and {@code input}; nothing else may ride
+     * along. Returns the settled result map.
+     */
+    public CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {
-        Map<String, Object> body = sessionBody(session);
-        body.put("reference", reference);
-        return post(lease, "/internal/managed-runtime/v2/execute", body)
-                .thenApply(ignored -> null);
-    }
-
-    private Map<String, Object> sessionBody(RuntimeSession session) {
-        RuntimeScope scope = session.getScope();
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException(
+                    "lease and session are required");
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
-        body.put("tenantId", scope.getTenantId());
-        body.put("workspaceId", scope.getWorkspaceId());
-        body.put("workspaceCwd", scope.getCanonicalCwd());
-        body.put("sessionId", session.getRuntimeSessionId());
-        body.put("turnKind", session.getTurnKind());
-        return body;
+        body.put("reference", referenceIdentity(reference));
+        body.put("toolName", referenceString(reference, "toolName"));
+        body.put("input", referenceInput(reference));
+        byte[] encoded = encodeToolRequest(body);
+        return post(lease, EXECUTE_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> {
+                    Map<String, Object> response = parseToolResponse(bytes,
+                            "execute");
+                    if (!"settled".equals(response.get("state"))) {
+                        throw protocol("Managed Runtime execute did not "
+                                + "settle.");
+                    }
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> result =
+                            (Map<String, Object>) response.get("result");
+                    return result;
+                });
+    }
+
+    /**
+     * Read-only lookup of one call by its original reference. An
+     * {@code unknown} state is a valid answer and never evidence that the
+     * call did not run.
+     */
+    public CompletionStage<Map<String, Object>> status(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException(
+                    "lease and session are required");
+        }
+        if (afterSequence < 0) {
+            throw new IllegalArgumentException(
+                    "afterSequence must be non-negative");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 2);
+        body.put("reference", referenceIdentity(reference));
+        body.put("afterSequence", afterSequence);
+        byte[] encoded = encodeToolRequest(body);
+        return post(lease, STATUS_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseToolResponse(bytes, "status"));
+    }
+
+    /** Asks the Runtime to cancel one call by its original reference. */
+    public CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException(
+                    "lease and session are required");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 2);
+        body.put("reference", referenceIdentity(reference));
+        byte[] encoded = encodeToolRequest(body);
+        return post(lease, CANCEL_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseToolResponse(bytes, "cancel"));
+    }
+
+    private static Map<String, Object> referenceIdentity(
+            Map<String, Object> reference) {
+        if (reference == null) {
+            throw new IllegalArgumentException("reference is required");
+        }
+        Map<String, Object> identity = new LinkedHashMap<>();
+        for (String field : List.of("sessionId", "promptId", "callId",
+                "argsDigest")) {
+            identity.put(field, referenceString(reference, field));
+        }
+        return Map.copyOf(identity);
+    }
+
+    private static String referenceString(Map<String, Object> reference,
+            String field) {
+        Object value = reference.get(field);
+        if (!(value instanceof String text) || text.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "reference " + field + " is required");
+        }
+        return text;
+    }
+
+    private static Object referenceInput(Map<String, Object> reference) {
+        Object input = reference.get("input");
+        if (!(input instanceof Map)) {
+            throw new IllegalArgumentException("reference input is required");
+        }
+        return input;
+    }
+
+    private static byte[] encodeToolRequest(Map<String, Object> body) {
+        byte[] encoded = JsonCodec.encode(body);
+        if (encoded.length > TOOL_REQUEST_LIMIT_BYTES) {
+            throw new IllegalArgumentException(
+                    "Managed Runtime tool request exceeds 256 KiB.");
+        }
+        return encoded;
+    }
+
+    private static Map<String, Object> parseToolResponse(byte[] bytes,
+            String operation) {
+        Map<String, Object> fields;
+        try {
+            fields = JsonCodec.parseObject(bytes,
+                    "Managed Runtime " + operation);
+        } catch (RuntimeBrokerException exception) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        if (!TOOL_RESPONSE_FIELDS.containsAll(fields.keySet())) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        requireProtocol(fields);
+        Object rawState = fields.get("state");
+        if (!(rawState instanceof String state)
+                || !TOOL_STATES.contains(state)) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        Object result = fields.get("result");
+        if ("settled".equals(state)) {
+            if (result == null) {
+                throw protocol("Managed Runtime " + operation
+                        + " settled without a result.");
+            }
+            requireResult(result, operation);
+        } else if (result != null) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        Object lastSequence = fields.get("lastSequence");
+        if (lastSequence != null && (!(lastSequence instanceof Number number)
+                || number.longValue() < 0
+                || number.doubleValue() != number.longValue())) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        return fields;
+    }
+
+    private static void requireResult(Object result, String operation) {
+        if (!(result instanceof Map<?, ?> resultMap)) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        Object status = resultMap.get("executionStatus");
+        if (!(status instanceof String)
+                || !EXECUTION_STATUSES.contains(status)) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        if (!(resultMap.get("responseParts") instanceof List)) {
+            throw protocol("Managed Runtime " + operation
+                    + " response is invalid.");
+        }
+        Object error = resultMap.get("error");
+        if (error != null) {
+            if (!(error instanceof Map<?, ?> errorMap)
+                    || !(errorMap.get("message") instanceof String)) {
+                throw protocol("Managed Runtime " + operation
+                        + " response is invalid.");
+            }
+            Object type = errorMap.get("type");
+            if (type != null && !(type instanceof String)) {
+                throw protocol("Managed Runtime " + operation
+                        + " response is invalid.");
+            }
+        }
     }
 
     private CompletionStage<byte[]> post(RuntimeLease lease, String path,
             Map<String, Object> body) {
+        return post(lease, path, JsonCodec.encode(body), BODY_LIMIT_BYTES);
+    }
+
+    private CompletionStage<byte[]> post(RuntimeLease lease, String path,
+            byte[] encoded, int responseLimit) {
         HttpRequest httpRequest = HttpRequest.newBuilder(
                 lease.getEndpoint().resolve(path))
                 .timeout(requestTimeout)
@@ -148,13 +331,12 @@ public final class HttpRuntimeTransport {
                 .header("X-Qwen-Managed-Lease-Id", lease.getLeaseId())
                 .header("X-Qwen-Managed-Lease-Epoch",
                         Long.toString(lease.getEpoch()))
-                .POST(HttpRequest.BodyPublishers.ofByteArray(
-                        JsonCodec.encode(body)))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(encoded))
                 .build();
         CompletableFuture<byte[]> result = new CompletableFuture<>();
         CompletableFuture<HttpResponse<BoundedBody>> exchange = client
                 .sendAsync(httpRequest,
-                        info -> new BoundedBodySubscriber(BODY_LIMIT_BYTES));
+                        info -> new BoundedBodySubscriber(responseLimit));
         exchange.whenComplete((response, error) -> {
             if (error != null) {
                 result.completeExceptionally(unavailable(unwrap(error)));

@@ -54,9 +54,12 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts`（54 个测试），在 `packages/sdk-java/runtime-broker` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`（6 个测试），均通过。
 
+### 4.1 Java transport
+
+`HttpRuntimeTransport` 按共享 fixtures 实现三个操作。调用方提供的 reference map 携带身份四元组外加 `toolName` 与 `input`；其他任何键在客户端即被拒绝，超过路由 256 KiB 上限的请求根本不会发出。响应按路由的 1 MiB 上限读取并严格解析：封闭字段集、协议版本 2、状态必须属于契约枚举、`result` 仅随 `settled` 出现、`lastSequence` 为非负整数。`execute` 要求 `settled` 并返回 result map；`status` 与 `cancel` 返回完整封闭 map。失败状态映射到共享分类，5xx 可重试、其余终态。fixture 驱动的测试在真实 HTTP 服务器上回放共享的 success 与 `unknown` 应答，并固定以下拒绝行为：未结算的 execute、无 result 的结算、`unknown` 携带 result、未知状态、超大输入；在 `packages/sdk-java/runtime-broker` 运行 `mvn test` 通过 122 个测试。
+
 ## 5. 后续工作
 
 - 为三个路由挂载真实的 worker 处理器（execute 提取）。
-- 在 `HttpRuntimeTransport` 实现 `execute`、`status`、`cancel`。
 - `UNKNOWN` 执行对账器消费 `status`（在 #12380 跟踪）。
 - 对 Runtime 报告仍在运行的执行是否发送物理取消，有意推迟。
