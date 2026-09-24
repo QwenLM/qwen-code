@@ -47,6 +47,8 @@ vi.mock('../../utils/atomicFileWrite.js', async (importOriginal) => {
 import { Storage } from '../../config/storage.js';
 import {
   allocateRunSequence,
+  claimAgentHostSession,
+  releaseAgentHostSession,
   getAgentsFilePath,
   getThreadPath,
   getWorkspaceFilePath,
@@ -64,6 +66,7 @@ import {
   writeThread,
 } from './store.js';
 import { postMessage, postMessageInTransaction } from './thread-actions.js';
+import { issueA2AGrant } from './a2a-grants.js';
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
@@ -608,5 +611,40 @@ describe('retiring an agent', () => {
       'not_found',
     );
     expect(await readWorkspaceAgents(PROJECT_ROOT)).toHaveLength(1);
+  });
+});
+
+describe('releasing the agent host session', () => {
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'agent-release-test-'),
+    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  it('drops only the claim and keeps the A2A grants', async () => {
+    await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: ALICE.id,
+      scope: 'analysis',
+    });
+    await claimAgentHostSession(PROJECT_ROOT, 'session-1');
+
+    await expect(
+      releaseAgentHostSession(PROJECT_ROOT, 'session-1'),
+    ).resolves.toBe(true);
+
+    const workspace = await readAgentWorkspace(PROJECT_ROOT);
+    expect(workspace.hostSessionId).toBeUndefined();
+    expect(workspace.callerGrants?.map((grant) => grant.callerId)).toEqual([
+      'share_1',
+    ]);
   });
 });

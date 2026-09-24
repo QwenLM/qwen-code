@@ -1377,15 +1377,11 @@ export async function releaseAgentHostSession(
   return withWorkspaceLock(projectRoot, async () => {
     const workspace = await ensureMigratedUnlocked(projectRoot);
     if (workspace.hostSessionId !== expectedSessionId) return false;
-    await atomicWriteJSON(
-      getWorkspaceFilePath(projectRoot),
-      {
-        schemaVersion: workspace.schemaVersion,
-        workspaceId: workspace.workspaceId,
-        nextRunSequence: workspace.nextRunSequence,
-      },
-      { noFollow: true },
-    );
+    // Only the claim goes; A2A grants and anything else the record holds stay.
+    const { hostSessionId: _released, ...rest } = workspace;
+    await atomicWriteJSON(getWorkspaceFilePath(projectRoot), rest, {
+      noFollow: true,
+    });
     return true;
   });
 }

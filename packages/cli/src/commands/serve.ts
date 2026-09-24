@@ -926,7 +926,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const serveOptions = {
-        agentHostWorker: Boolean(argv['agent-host-server']),
+        // A joined runtime is a worker too: it runs work for the coordinator
+        // and must not also host its own collaboration routes.
+        agentHostWorker: Boolean(argv['agent-host-server'] || argv['join']),
         port: argv.port,
         hostname: argv.hostname,
         token: argv.token,
