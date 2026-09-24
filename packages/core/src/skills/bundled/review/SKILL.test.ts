@@ -1224,6 +1224,13 @@ describe('bundled review skill', () => {
       '**`fix-delta --since` states its scope on stderr, every run**',
     );
     expect(step).toContain('`HEAD moved between the two moments`');
+    // …relayed with what it actually means: the hunks still compare the
+    // working tree, so a committed edit IS in them.
+    expect(step).toContain('so a committed edit is in them');
+    // Several auditor lines for one id share that finding's single note.
+    expect(step).toContain(
+      'joined with `; `, after any note the fix round already wrote',
+    );
     expect(step).toContain(
       'Repeat those lines under the **Fix audit** heading',
     );
@@ -1254,8 +1261,15 @@ describe('bundled review skill', () => {
     expect(step).toContain(
       '**On a FILE target no sweep ever reaches the plan**',
     );
+    expect(step).toContain("**run the audit on this path in Step 6B's order**");
+    // The file-target path's order and inputs: snapshot BEFORE the first
+    // edit, and the REBUILT artifact as --findings, never the saved one.
+    expect(step).toContain('look **before the first edit**');
     expect(step).toContain(
-      '**run the audit on this path exactly as Step 6B does**',
+      'and **that rebuilt artifact** as `--findings`, never the saved artifact itself',
+    );
+    expect(step).toContain(
+      '`agent-prompt --role fix-audit … --hunks … --batch`, `emit-workflow --batch`',
     );
     expect(step).toContain(
       'Fix audit: not run — file-review plan removed at Step 9',

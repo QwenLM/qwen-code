@@ -22,6 +22,13 @@ export interface TimelineSpan {
   error: boolean;
 }
 
+/**
+ * How the axis treats time in which nothing ran. `active` cuts it out, so the
+ * strip answers where the running time went; `clock` keeps it, so the strip
+ * answers when things ran and how long the run waited between them.
+ */
+export type TimelineMode = 'active' | 'clock';
+
 export interface TimelineTurnMark {
   turnIndex: number;
   at: number;
@@ -31,11 +38,21 @@ export interface TimelineModel {
   /** Ascending by start, then lane, then row key. */
   spans: TimelineSpan[];
   turnMarks: TimelineTurnMark[];
+  mode: TimelineMode;
   /**
-   * Length of the domain. Idle gaps are cut out, so this is the time during
-   * which at least one request or tool was running — not wall-clock time.
+   * Length of the domain. In `active` mode idle gaps are cut out, so this is
+   * the time during which at least one request or tool was running. In
+   * `clock` mode it runs from the first drawn span's start to the last one's
+   * end — which is the loaded window's span, not the session's age.
    */
   total: number;
+  /**
+   * Time during which at least one drawn span was running. Equal to `total` in
+   * `active` mode.
+   */
+  activeMs: number;
+  /** Epoch ms of domain 0: the earliest recorded start among drawn spans. */
+  originMs: number;
   /**
    * Rows with a recorded duration but no recorded start — tool calls from a
    * session written before tools recorded one. Not drawn, never estimated.
@@ -85,7 +102,8 @@ function toRawSpan(row: TrajectoryRow): RawSpan | 'dropped' | undefined {
 
 /**
  * Project the rows that recorded both a start and a duration onto one time
- * axis, with the idle stretches between them cut out.
+ * axis — with the idle stretches between them cut out (`active`, the default)
+ * or left in (`clock`).
  *
  * Only measured values are drawn. A row without a start is left off rather
  * than placed next to its neighbours: a bar in the wrong place reads as a fact.
@@ -93,7 +111,9 @@ function toRawSpan(row: TrajectoryRow): RawSpan | 'dropped' | undefined {
  */
 export function buildTimeline(
   trajectory: Trajectory,
+  options: { mode?: TimelineMode } = {},
 ): TimelineModel | undefined {
+  const mode = options.mode ?? 'active';
   const raw: RawSpan[] = [];
   let droppedRows = 0;
   for (const row of trajectory.rows) {
@@ -111,15 +131,21 @@ export function buildTimeline(
   );
 
   // Walk in start order, tracking the furthest end seen. A span that starts
-  // after it opens an idle gap, and every later span shifts left by the total
-  // gap so far. Overlapping and parallel spans open no gap, so they are never
-  // shifted twice.
+  // after it opens an idle gap. In `active` mode every later span shifts left
+  // by the total gap so far; overlapping and parallel spans open no gap, so
+  // they are never shifted twice. In `clock` mode nothing shifts past the
+  // origin, and the gaps are only summed to say how much of the run was idle.
+  const originMs = raw[0]!.start;
   const spans: TimelineSpan[] = [];
-  let coveredUntil = raw[0]!.start;
-  let removed = raw[0]!.start;
+  let coveredUntil = originMs;
+  let removed = originMs;
+  let idleMs = 0;
   let total = 0;
   for (const span of raw) {
-    if (span.start > coveredUntil) removed += span.start - coveredUntil;
+    if (span.start > coveredUntil) {
+      idleMs += span.start - coveredUntil;
+      if (mode === 'active') removed += span.start - coveredUntil;
+    }
     const end = span.start + span.durationMs;
     coveredUntil = Math.max(coveredUntil, end);
     const start = span.start - removed;
@@ -148,5 +174,13 @@ export function buildTimeline(
       turnMarks.push({ turnIndex: turn.index, at });
   }
 
-  return { spans, turnMarks, total, droppedRows };
+  return {
+    spans,
+    turnMarks,
+    mode,
+    total,
+    activeMs: mode === 'active' ? total : Math.max(0, total - idleMs),
+    originMs,
+    droppedRows,
+  };
 }

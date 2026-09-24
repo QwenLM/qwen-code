@@ -404,7 +404,8 @@ function getDescriptionFromArgs(
     return description;
   }
   if (args.file_path) {
-    if (args.description) return String(args.description);
+    const description = getStringArg(args, 'description');
+    if (description) return description;
     return pathForDisplay(String(args.file_path), workspaceCwd);
   }
   if (args.url) {
@@ -422,8 +423,7 @@ function getDescriptionFromArgs(
     const candidate = args.path || args.directory || '';
     return pathForDisplay(String(candidate), workspaceCwd);
   }
-  if (args.description) return String(args.description);
-  return '';
+  return getStringArg(args, 'description');
 }
 
 function getStringArg(

@@ -7,7 +7,7 @@ use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, zoom_after, SettingsStore, DEFAULT_ZOOM};
 use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,6 +36,9 @@ static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+// Managed deployments pin the app version and apply updates themselves; this
+// is their hard off-switch for the startup update check (#12575).
+const DISABLE_UPDATES_ENV: &str = "QWEN_DESKTOP_DISABLE_UPDATES";
 // The webview engines expose no zoom UI, and the daemon-served Web Shell has
 // no zoom setting of its own, so the shortcuts are captured in the page and
 // handed to the shell, which owns and persists the factor. Tauri's own
@@ -823,8 +826,16 @@ fn is_same_origin(url: &Url, origin: &Url) -> bool {
         && url.port_or_known_default() == origin.port_or_known_default()
 }
 
+fn updates_disabled() -> bool {
+    updates_disabled_value(std::env::var_os(DISABLE_UPDATES_ENV).as_deref())
+}
+
+fn updates_disabled_value(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
+
 fn check_updates_silently(app: AppHandle) {
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) || updates_disabled() {
         return;
     }
     tauri::async_runtime::spawn(async move {
@@ -906,9 +917,9 @@ mod tests {
     use super::{
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
         ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
-        is_same_origin, origin_of, BOOTSTRAP_URL,
+        is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
     };
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::PathBuf;
     #[cfg(target_os = "macos")]
@@ -1059,6 +1070,14 @@ mod tests {
         assert!(!home.join("Documents").exists());
         fs::remove_dir_all(home).expect("cleanup home");
         fs::remove_dir_all(custom).expect("cleanup override");
+    }
+
+    #[test]
+    fn disables_updates_only_on_explicit_opt_out() {
+        assert!(!updates_disabled_value(None));
+        assert!(!updates_disabled_value(Some(OsStr::new(""))));
+        assert!(!updates_disabled_value(Some(OsStr::new("0"))));
+        assert!(updates_disabled_value(Some(OsStr::new("1"))));
     }
 
     #[test]
