@@ -223,21 +223,36 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                     }
                     if (requested.getState()
-                                    == ToolExecutionRecord.State.DISPATCHING
-                            || (requested.getState()
-                                            == ToolExecutionRecord.State
-                                                    .CANCEL_REQUESTED
-                                    && !requested.hasLiveDispatchAt(
-                                            clock.instant())
-                                    && !invocations.contains(executionId))) {
-                        // Fence only a claim nothing here is running; an
-                        // invocation still running in this process gets the
-                        // physical cancel below.
+                            == ToolExecutionRecord.State.DISPATCHING) {
                         beginDispatch(context, requested);
                         ToolExecutionRecord latest = executionRepository
                                 .findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(
                                 latest == null ? requested : latest);
+                    }
+                    if (requested.getState()
+                                    == ToolExecutionRecord.State
+                                            .CANCEL_REQUESTED
+                            && !invocations.contains(executionId)) {
+                        // Fence a lapsed claim nothing here is running. A
+                        // claim the repository still holds live falls
+                        // through to the physical cancel, as does an
+                        // invocation still running in this process.
+                        ToolExecutionRecord fenced;
+                        try {
+                            fenced = fenceLapsedClaim(requested);
+                        } catch (RuntimeException exception) {
+                            throw unavailable(
+                                    "runtime_execution_cancel_failed",
+                                    "Runtime execution cancellation failed",
+                                    exception);
+                        }
+                        if (fenced == null || fenced.getState()
+                                != ToolExecutionRecord.State
+                                        .CANCEL_REQUESTED) {
+                            return CompletableFuture.completedFuture(
+                                    fenced == null ? requested : fenced);
+                        }
                     }
                     if (requested.getState()
                                     != ToolExecutionRecord.State
@@ -796,6 +811,33 @@ public final class RuntimeBrokerService implements AutoCloseable {
             current = executionRepository.findByExecutionCallId(
                     executionCallId);
         }
+        fenceLapsedClaim(current);
+    }
+
+    /**
+     * Once a claim has lapsed, no compare-and-set can settle the record or
+     * mark it UNKNOWN; the takeover fence in {@code claimDispatch} can still
+     * mark it UNKNOWN. {@code claimDispatch} judges the lease by the
+     * repository's clock and never writes over a live claim, whoever holds
+     * it. A DISPATCHING record is left alone, since claiming it would hold a
+     * dispatch nothing here is running.
+     */
+    private ToolExecutionRecord fenceLapsedClaim(ToolExecutionRecord current) {
+        if (current == null
+                || (current.getState() != ToolExecutionRecord.State.EXECUTING
+                        && current.getState()
+                                != ToolExecutionRecord.State
+                                        .CANCEL_REQUESTED)) {
+            return current;
+        }
+        // Only this broker's own live claim comes back; a settled or fenced
+        // record, or another broker's live claim, yields null and is read
+        // again.
+        ToolExecutionRecord claimed = executionRepository.claimDispatch(
+                current.getExecutionCallId(), brokerOwnerId,
+                dispatchLeaseDuration);
+        return claimed != null ? claimed : executionRepository
+                .findByExecutionCallId(current.getExecutionCallId());
     }
 
     private ToolExecutionRecord requestCancel(
@@ -842,18 +884,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     "Runtime cancellation returned an invalid result",
                     exception);
         } catch (RuntimeBrokerException exception) {
-            ToolExecutionRecord latest = executionRepository
-                    .findByExecutionCallId(requested.getExecutionCallId());
             if (!"runtime_execution_state_conflict".equals(
-                    exception.getCode()) || latest == null
-                    || latest.hasLiveDispatchAt(clock.instant())) {
+                    exception.getCode())) {
                 throw exception;
             }
             // The Runtime settled the call after this claim lapsed; fence it
-            // for reconciliation instead of reporting a state conflict.
-            executionRepository.claimDispatch(
-                    requested.getExecutionCallId(), brokerOwnerId,
-                    dispatchLeaseDuration);
+            // for reconciliation instead of reporting a state conflict. The
+            // conflict stands only while the repository still holds the
+            // claim live; a record another writer settled is returned.
+            ToolExecutionRecord latest = fenceLapsedClaim(
+                    executionRepository.findByExecutionCallId(
+                            requested.getExecutionCallId()));
+            if (latest == null || (!latest.isSettled()
+                    && latest.getState()
+                            != ToolExecutionRecord.State.UNKNOWN)) {
+                throw exception;
+            }
         }
     }
 
@@ -1020,12 +1066,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private boolean shouldDriveDispatch(ToolExecutionRecord record) {
+        // The repository judges the lease: claimDispatch leaves a live claim
+        // alone and fences a lapsed EXECUTING or CANCEL_REQUESTED record.
         return !record.isSettled()
-                && record.getState() != ToolExecutionRecord.State.UNKNOWN
-                && (record.getState() == ToolExecutionRecord.State.PREPARED
-                        || record.getState()
-                                == ToolExecutionRecord.State.DISPATCHING
-                        || !record.hasLiveDispatchAt(clock.instant()));
+                && record.getState() != ToolExecutionRecord.State.UNKNOWN;
     }
 
     private static Map<String, Object> immutableMap(Object value,
