@@ -66,6 +66,12 @@ describe('session startup configuration', () => {
     ).toEqual({ modelServiceId: 'gpt-5.4(openai)' });
   });
 
+  it('rejects a modelServiceId containing control characters', () => {
+    expect(() =>
+      parseSessionStartupConfig({ modelServiceId: 'qwen\nmax' }),
+    ).toThrowError(expect.objectContaining({ code: 'invalid_startup_config' }));
+  });
+
   it('preserves omission and rejects mixed selectors and attach scope', () => {
     expect(
       parseSessionStartupConfig(undefined, { modelServiceId: 'legacy' }),

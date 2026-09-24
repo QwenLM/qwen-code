@@ -2082,11 +2082,13 @@ export async function buildAvailableCommandsSnapshot(
 // the primary model. Every other `switchModel` throw is a daemon-side
 // fault (auth refresh, credential, I/O) and must stay an internal error.
 // Message-keyed because core throws plain Errors; a reworded message
-// degrades to internal error, never to a false refusal.
+// degrades to internal error, never to a false refusal. `[\s\S]`, not
+// `.`: a model id can carry a newline, which `.` refuses to match — that
+// would degrade a definite caller-caused refusal into an internal error.
 function isCallerCausedModelRefusal(error: Error): boolean {
   return (
-    /^Model '.+' not found for authType '.+'$/.test(error.message) ||
-    /^(?:Image|Voice|Realtime)-only model '.+' cannot be used as the primary model$/.test(
+    /^Model '[\s\S]+' not found for authType '[\s\S]+'$/.test(error.message) ||
+    /^(?:Image|Voice|Realtime)-only model '[\s\S]+' cannot be used as the primary model$/.test(
       error.message,
     )
   );

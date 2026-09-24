@@ -295,7 +295,10 @@ deliberately not propagated as an HTTP error. On a **fresh create** that carries
 `modelServiceId` — which step 2's body does not — the `200` body also carries
 `modelApplied`, `false` when the switch was rejected, and that is the
 deterministic one to act on rather than an event on a bounded ring. A create
-carrying neither `modelServiceId` nor `startupConfig` has no `modelApplied` key at all.
+carrying neither `modelServiceId` nor `startupConfig` has no `modelApplied` key
+of its own — one that coalesced with an in-flight spawn reports the spawn
+owner's `modelApplied`, which is why the attach signal to act on stays
+`model_switch_failed`.
 
 To confirm a startup selection instead of using legacy best-effort switching,
 preflight `session_startup_config` and send `startupConfig: { modelServiceId,

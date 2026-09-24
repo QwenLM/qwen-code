@@ -8086,6 +8086,7 @@ describe('Session', () => {
 
     it.each([
       "Model 'qwen-typo' not found for authType 'openai'",
+      "Model 'qwen\ntypo' not found for authType 'openai'",
       "Image-only model 'qwen-image' cannot be used as the primary model",
       "Voice-only model 'qwen-voice' cannot be used as the primary model",
       "Realtime-only model 'qwen-realtime' cannot be used as the primary model",

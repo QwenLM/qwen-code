@@ -84,6 +84,9 @@ export function parseSessionStartupConfig(
     typeof config.modelServiceId !== 'string' ||
     !config.modelServiceId.trim() ||
     config.modelServiceId.length > MAX_CRON_TASK_ROUTING_ID_LENGTH ||
+    // Control characters survive the trim and length checks and would
+    // ride into core's refusal messages; refuse them at the boundary.
+    /\p{Cc}/u.test(config.modelServiceId) ||
     (config.reasoningEffort !== undefined &&
       !isReasoningSelection(config.reasoningEffort)) ||
     request.modelServiceId !== undefined ||
