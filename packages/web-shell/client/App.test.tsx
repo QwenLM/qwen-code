@@ -31270,6 +31270,50 @@ describe('App session callbacks', () => {
     expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
   });
 
+  it('lands in the no-workspace area after deleting the current standalone session', async () => {
+    // #12619: an attached standalone session carries no connection cwd, so
+    // the sidebar/picker delete call sites substitute the primary workspace
+    // cwd for the missing one. The post-delete landing must stay in the
+    // no-workspace area instead of following that fallback into the primary
+    // workspace.
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="delete-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+    expect(
+      testState.latestChatEditorProps?.selectedWorkspaceCwd,
+    ).toBeUndefined();
+    expect(onSessionIdChange).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'standalone' },
+    );
+  });
+
   it("keeps the deleted current session's workspace for the next chat", async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {

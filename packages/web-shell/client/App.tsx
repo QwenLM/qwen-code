@@ -13609,21 +13609,35 @@ export function App({
   const handleCurrentSessionRemoved = useCallback(
     async (removed: { sessionId: string; workspaceCwd: string }) => {
       const current = connectionRef.current;
-      const currentWorkspaceCwd =
-        current.workspaceCwd ||
-        lockedWorkspaceCwd ||
-        workspacesRef.current.find((entry) => entry.primary)?.cwd;
-      if (
-        current.sessionId !== removed.sessionId ||
-        (currentWorkspaceCwd && currentWorkspaceCwd !== removed.workspaceCwd)
-      ) {
+      // A current session in the no-workspace area (standalone) carries no
+      // cwd of its own; the call sites substitute the primary workspace cwd
+      // for a missing one, which must not pull the post-delete landing into
+      // that workspace (#12619).
+      const removedWorkspaceCwd =
+        current.sessionContext?.kind === 'standalone'
+          ? ''
+          : removed.workspaceCwd;
+      if (current.sessionId !== removed.sessionId) return;
+      if (removedWorkspaceCwd) {
+        const currentWorkspaceCwd =
+          current.workspaceCwd ||
+          lockedWorkspaceCwd ||
+          workspacesRef.current.find((entry) => entry.primary)?.cwd;
+        if (currentWorkspaceCwd && currentWorkspaceCwd !== removedWorkspaceCwd)
+          return;
+      } else if (current.workspaceCwd || lockedWorkspaceCwd) {
+        // The client moved into a workspace after the delete started.
         return;
       }
       const cleared = await createNewSession(
-        {
-          kind: 'workspace',
-          cwd: removed.workspaceCwd,
-        },
+        removedWorkspaceCwd
+          ? {
+              kind: 'workspace',
+              cwd: removedWorkspaceCwd,
+            }
+          : // No-workspace landing: a fresh standalone draft where the daemon
+            // supports one, mirroring the Session Overview delete (#12619).
+            { kind: 'global' },
         {
           keepView: true,
           keepPanel: true,
@@ -13634,9 +13648,15 @@ export function App({
         latest.workspaceCwd ||
         lockedWorkspaceCwd ||
         workspacesRef.current.find((entry) => entry.primary)?.cwd;
+      const landingMatches = removedWorkspaceCwd
+        ? !latestWorkspaceCwd || latestWorkspaceCwd === removedWorkspaceCwd
+        : // The no-workspace landing only counts while the client stays
+          // cwd-less; the primary fallback is a display default, not where
+          // the deleted session lived.
+          !(latest.workspaceCwd || lockedWorkspaceCwd);
       if (
         cleared &&
-        (!latestWorkspaceCwd || latestWorkspaceCwd === removed.workspaceCwd) &&
+        landingMatches &&
         (latest.sessionId === removed.sessionId ||
           latest.sessionId === undefined)
       ) {

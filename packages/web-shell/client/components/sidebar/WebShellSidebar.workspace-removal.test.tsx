@@ -2498,6 +2498,16 @@ describe('WebShellSidebar workspace removal', () => {
     ).toBe(false);
 
     expect(active.archiveSession).not.toHaveBeenCalled();
+
+    // Delete is the inverse of archive for the current row: enabled while
+    // idle, and clicking it opens the confirmation dialog (#12619).
+    await act(async () => {
+      click(remove!);
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain('Delete Session');
+    // Opening the confirmation must not delete anything by itself.
+    expect(active.deleteSession).not.toHaveBeenCalled();
   });
 
   it('deduplicates pending no-cwd primary renames and clears the busy identity afterward', async () => {
