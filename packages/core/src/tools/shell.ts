@@ -24,6 +24,7 @@ import type {
   ToolConfirmationPayload,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { registerSessionCommit } from '../permissions/destructive-commands.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -2874,6 +2875,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       !this.config.getShellExecutionSandbox?.() &&
       commitCtx.attributableInCwd
     ) {
+      // Before attribution: `attachCommitAttribution` returns early on the
+      // `gitCoAuthor.commit` toggle, but the amend exemption must not depend
+      // on it, and an attribution failure must not cost the registration.
+      await this.trackSessionCommit(cwd, preHead);
+
       // `git commit --amend` rewrites HEAD in place, so the standard
       // parent-vs-postHead diff (`${postHead}~1..${postHead}`) would
       // span the entire amended commit (the amended commit's parent
@@ -4178,6 +4184,111 @@ export class ShellToolInvocation extends BaseToolInvocation<
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Record HEAD in the session registry (`permissions/destructive-commands.ts`)
+   * when a `git commit` put it there, so a later `git commit --amend` of it is
+   * exempt from the Auto-mode destructive-command block.
+   *
+   * The criterion is "the newest HEAD reflog entry is a `commit` verb, and
+   * HEAD moved". Exit code is too strict (`git commit -m x && npm test` can
+   * land the commit and then fail). HEAD movement alone is too loose, and
+   * fail-open: in `git pull && git commit -m x` with nothing staged, the pull
+   * fast-forwards onto somebody else's commit and the commit then exits
+   * non-zero — and because `gitCommitContext` does not treat
+   * `pull`/`checkout`/`merge` as cwd-shifting and the call site has no
+   * exit-code gate, that chain really does reach here. A movement-only test
+   * would register a human's SHA, trading the deterministic Layer-0 block for
+   * the classifier.
+   *
+   * Where the reflog cannot answer at all (`core.logAllRefUpdates` off, reflog
+   * expired, git missing) nothing registers and the amend stays blocked, so
+   * that branch costs a blocked amend and never a lifted one.
+   *
+   * The reflog read does *not* establish that this command's own `git commit`
+   * created HEAD, and no local read can: `preHead` is taken before the spawn
+   * and the reflog after the whole command, so a commit another process lands
+   * in the same repository inside that window is the newest `commit:` entry
+   * and registers instead — degrading the next amend's deterministic Layer-0
+   * block to the L5.3 classifier, and costing the agent its own exemption,
+   * since the foreign entry is the newest one. Binding an entry to this child
+   * needs a signal not derivable from reflog shape, and the cheap candidate is
+   * unsound: a chain-level `GIT_REFLOG_ACTION` stamp rewrites the action of
+   * every reflog-writing git call in the single `/bin/bash -c` child, so a
+   * trailing `checkout` would write a `commit:` verb too. Per-invocation
+   * stamping means changing how the executor spawns. Tracked in #12523.
+   *
+   * No multi-commit guard, unlike {@link attachCommitAttribution}, which has
+   * to *partition* per-file contribution and so bails. In `commit a &&
+   * commit b` HEAD is `b`, created by this command, so registering it is
+   * sound and `a` stays blocked.
+   */
+  private async trackSessionCommit(
+    cwd: string,
+    preHead: string | null,
+  ): Promise<void> {
+    const head = await this.getGitHeadOrigin(cwd);
+    // Neither condition subsumes the other: `createdByCommit` rejects a HEAD
+    // something else relocated, and the `preHead` comparison rejects a commit
+    // that never moved HEAD (nothing staged), which would otherwise
+    // re-register the pre-existing HEAD.
+    if (head !== null && head.createdByCommit && head.sha !== preHead) {
+      registerSessionCommit(head.sha);
+    } else if (head === null) {
+      // Failing closed is the intent; failing closed *invisibly* is not. The
+      // only other output of this path is a block reason asserting the
+      // commit was not the agent's, and nothing else separates "the reflog
+      // could not answer" (reflogs off, expired, probe timed out) from a
+      // genuine attribution failure. Same shape as the attribution refusal
+      // in `attachCommitAttribution`.
+      debugLogger.warn(
+        `Session commit not registered in ${cwd}: the HEAD reflog could not answer, so a later amend stays blocked.`,
+      );
+    }
+  }
+
+  /**
+   * Read HEAD and the reflog action that last moved it in one subprocess.
+   *
+   * `--no-show-signature` is required, not cosmetic: with
+   * `log.showSignature=true` git prints the signature verdict ahead of the
+   * formatted output, shifting both fields and making an agent's own signed
+   * commit look uncommitted. Inert when nothing is signed.
+   *
+   * Returns `null` when git cannot answer (not a repo, no HEAD, reflog off or
+   * expired, git missing) so every caller fails closed.
+   */
+  private async getGitHeadOrigin(
+    cwd: string,
+  ): Promise<{ sha: string; createdByCommit: boolean } | null> {
+    return new Promise((resolve) => {
+      const child = childProcess.execFile(
+        'git',
+        ['log', '-g', '-1', '--no-show-signature', '--format=%H%n%gs', 'HEAD'],
+        { cwd, timeout: 2000, windowsHide: true },
+        (error, stdout) => {
+          if (error) {
+            resolve(null);
+            return;
+          }
+          const [sha, subject] = String(stdout).split('\n');
+          if (!sha || !subject) {
+            resolve(null);
+            return;
+          }
+          // Reflog verbs are not localised by git. `\b` admits `commit:`,
+          // `commit (initial|amend|merge):` and excludes every other verb.
+          resolve({
+            sha: sha.trim(),
+            createdByCommit: /^commit\b/.test(subject),
+          });
+        },
+      );
+      // Suppress unhandled-error events from the child stream (e.g. ENOENT
+      // when git is missing); the callback still receives the error.
+      child.on('error', () => {});
+    });
   }
 
   /**

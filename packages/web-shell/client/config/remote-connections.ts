@@ -97,7 +97,7 @@ function clearRemoteConnectionAddStep(): void {
   const url = new URL(window.location.href);
   if (!url.searchParams.has(ADD_FLOW_PARAM)) return;
   url.searchParams.delete(ADD_FLOW_PARAM);
-  window.history.replaceState(null, '', url);
+  window.history.replaceState(window.history.state, '', url);
 }
 
 export function startRemoteConnectionAdd(
@@ -186,5 +186,5 @@ export function clearInitialConnectionsSettingsCategory(): void {
   const url = new URL(window.location.href);
   if (url.searchParams.get(SETTINGS_PARAM) !== CONNECTIONS_SETTINGS) return;
   url.searchParams.delete(SETTINGS_PARAM);
-  window.history.replaceState(null, '', url);
+  window.history.replaceState(window.history.state, '', url);
 }

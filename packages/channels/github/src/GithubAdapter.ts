@@ -607,24 +607,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       u.toLowerCase(),
     );
     this.config.allowedUsers = allowed;
+    this.gate.replaceAllowedUsers(allowed);
+    lowercaseGroupAllowedUsers(this.config.groups);
     const botUsername = this.botUsername?.toLowerCase();
-    if (
-      this.config.senderPolicy === 'allowlist' &&
-      botUsername &&
-      allowed.includes(botUsername)
-    ) {
-      if (allowed.every((user) => user === botUsername)) {
-        throw new Error(
-          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.`,
+    for (const [groupId, group] of Object.entries(this.config.groups)) {
+      const defaults = this.config.groups['*'];
+      if ((group.senders ?? defaults?.senders ?? 'open') !== 'allowlist') {
+        continue;
+      }
+      const groupUsers = group.allowedUsers ?? defaults?.allowedUsers ?? [];
+      if (!botUsername || !groupUsers.includes(botUsername)) continue;
+      if (groupUsers.every((user) => user === botUsername)) {
+        process.stderr.write(
+          `[Channel:${this.name}] warning: GitHub group "${groupId}" allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this group because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.\n`,
         );
+        continue;
       }
       process.stderr.write(
-        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted but cannot trigger this channel; use a separate operator account.\n`,
+        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted in group "${groupId}" but cannot trigger this channel; use a separate operator account.\n`,
       );
     }
-    this.gate.replaceAllowedUsers(allowed);
-    // Per-group speaker lists are matched against the same lowercased login.
-    lowercaseGroupAllowedUsers(this.config.groups);
     if (this.config.operators) {
       this.config.operators = this.config.operators.map((u) => u.toLowerCase());
     }
@@ -1451,10 +1453,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
-    if (
-      this.config.senderPolicy === 'pairing' ||
-      this.config.groupPolicy === 'pairing'
-    ) {
+    if (this.config.groupPolicy === 'pairing') {
       await this.processCommentLane(ctx, false, true);
       return;
     }

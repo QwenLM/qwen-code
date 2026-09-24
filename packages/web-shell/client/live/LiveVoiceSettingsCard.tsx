@@ -39,6 +39,12 @@ import {
   type UseLiveVoiceSetupResult,
 } from './useLiveVoiceSetup';
 
+// The Select value for "type another id". Stored model ids are trimmed, so
+// none can start with a space.
+const CUSTOM_MODEL = ' custom';
+
+const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+
 function RequirementBadge({
   state,
 }: {
@@ -84,7 +90,24 @@ export function LiveVoiceSettingsCard({
   // as well; the modelError alert carries the remediation on its own.
   const keyEditable =
     status !== undefined && !keyFromRoute && !status.modelError;
-  const modelChoices = status ? liveModelOptions(status) : undefined;
+  // Absent `models` marks a daemon that predates selectable models, which
+  // refuses a model update, so the model stays read-only there.
+  const modelChoices =
+    status?.models !== undefined ? liveModelOptions(status) : undefined;
+  const savedModel = status?.model ?? '';
+  const [model, setModel] = useState(savedModel);
+  const [customModel, setCustomModel] = useState(false);
+  useEffect(() => {
+    setModel(savedModel);
+    setCustomModel(false);
+  }, [savedModel]);
+  // Absent on daemons that predate a configurable endpoint; empty while the
+  // default is in use.
+  const savedEndpoint = status?.endpoint;
+  const [endpointDraft, setEndpointDraft] = useState(savedEndpoint ?? '');
+  useEffect(() => {
+    setEndpointDraft(savedEndpoint ?? '');
+  }, [savedEndpoint]);
   const savedVoice = status?.voice ?? '';
   // Absent on daemons that predate selectable voices; an update there is
   // refused with empty_live_setup_update, so the control stays read-only.
@@ -112,12 +135,41 @@ export function LiveVoiceSettingsCard({
     }
   };
 
-  // Changing either one while Live Voice is on makes the daemon open a
-  // validation session first, so a wrong id or voice fails here, not mid-call.
-  const saveModel = async (model: string) => {
-    if (!status || model === modelChoices?.selected) return;
+  // Changing any of these while Live Voice is on makes the daemon open a
+  // validation session first, so a wrong id, voice or endpoint fails here,
+  // not mid-call.
+  const saveModel = async (value: string) => {
+    const next = value.trim();
+    if (!status || !next || next === savedModel) return;
     try {
-      await setup.update({ model });
+      await setup.update({ model: next });
+    } catch {
+      // The hook exposes the sanitized daemon error in the card.
+    }
+  };
+
+  const chooseModel = (value: string) => {
+    if (value === CUSTOM_MODEL) {
+      setCustomModel(true);
+      return;
+    }
+    setCustomModel(false);
+    void saveModel(value);
+  };
+
+  // A key typed for the new endpoint goes in the same request: validating
+  // the new endpoint with the old key, or the new key against the old
+  // endpoint, would fail for a key bound to one region or domain.
+  const saveEndpoint = async () => {
+    const endpoint = endpointDraft.trim();
+    if (savedEndpoint === undefined || endpoint === savedEndpoint) return;
+    const key = apiKey.trim();
+    try {
+      await setup.update({
+        endpoint,
+        ...(key ? { apiKey: { operation: 'replace', value: key } } : {}),
+      });
+      if (key) setApiKey('');
     } catch {
       // The hook exposes the sanitized daemon error in the card.
     }
@@ -205,6 +257,69 @@ export function LiveVoiceSettingsCard({
       <Separator />
 
       <div className="grid gap-4 lg:grid-cols-2">
+        {savedEndpoint !== undefined ? (
+          <div className="space-y-2" data-live-endpoint>
+            <label
+              htmlFor="live-realtime-endpoint"
+              className="text-sm font-medium"
+            >
+              {t('settings.liveSetup.endpoint')}
+            </label>
+            {keyFromRoute ? (
+              <>
+                <p className="break-all text-sm" id="live-realtime-endpoint">
+                  {savedEndpoint}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.liveSetup.endpointFromRoute')}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    id="live-realtime-endpoint"
+                    autoComplete="off"
+                    value={endpointDraft}
+                    disabled={setup.mutating || !keyEditable}
+                    placeholder={DEFAULT_BASE_URL}
+                    onChange={(event) => setEndpointDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void saveEndpoint();
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    data-live-endpoint-save
+                    disabled={
+                      endpointDraft.trim() === savedEndpoint ||
+                      setup.mutating ||
+                      !keyEditable
+                    }
+                    onClick={() => void saveEndpoint()}
+                  >
+                    {t('settings.liveSetup.save')}
+                  </Button>
+                </div>
+                {status?.endpointError ? (
+                  <p
+                    className="text-xs text-destructive"
+                    role="alert"
+                    data-live-endpoint-error
+                  >
+                    {status.endpointError}
+                  </p>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.liveSetup.endpointHint')}
+                </p>
+              </>
+            )}
+          </div>
+        ) : null}
+
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-3">
             <label htmlFor="live-realtime-key" className="text-sm font-medium">
@@ -287,11 +402,11 @@ export function LiveVoiceSettingsCard({
           <label htmlFor="live-realtime-model" className="text-sm font-medium">
             {t('settings.liveSetup.model')}
           </label>
-          {modelChoices && modelChoices.options.length > 1 ? (
+          {modelChoices ? (
             <Select
-              value={modelChoices.selected}
+              value={customModel ? CUSTOM_MODEL : modelChoices.selected}
               disabled={setup.mutating}
-              onValueChange={(value) => void saveModel(value)}
+              onValueChange={chooseModel}
             >
               <SelectTrigger id="live-realtime-model" className="w-full">
                 <SelectValue />
@@ -302,6 +417,9 @@ export function LiveVoiceSettingsCard({
                     {option.label}
                   </SelectItem>
                 ))}
+                <SelectItem value={CUSTOM_MODEL}>
+                  {t('settings.liveSetup.modelCustom')}
+                </SelectItem>
               </SelectContent>
             </Select>
           ) : (
@@ -309,14 +427,39 @@ export function LiveVoiceSettingsCard({
               {status?.model ?? 'qwen3.5-omni-plus-realtime'}
             </p>
           )}
+          {customModel ? (
+            <div className="flex gap-2">
+              <Input
+                autoComplete="off"
+                aria-label={t('settings.liveSetup.model')}
+                data-live-model-input
+                value={model}
+                disabled={setup.mutating}
+                onChange={(event) => setModel(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void saveModel(model);
+                }}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-live-model-save
+                disabled={
+                  !model.trim() || model.trim() === savedModel || setup.mutating
+                }
+                onClick={() => void saveModel(model)}
+              >
+                {t('settings.liveSetup.save')}
+              </Button>
+            </div>
+          ) : null}
           {status?.modelError ? (
             <p className="text-xs text-destructive" role="alert">
               {status.modelError}
             </p>
           ) : null}
-          {status &&
-          status.models !== undefined &&
-          status.models.length === 0 ? (
+          {modelChoices ? (
             <p className="text-xs text-muted-foreground">
               {t('settings.liveSetup.modelHint')}
             </p>
