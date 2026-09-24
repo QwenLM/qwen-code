@@ -63,7 +63,10 @@ export function snapshotReplayableEmbeddedResources(
   const nativeIndexes = new Set(nativeResourceIndexes);
   for (const [index, block] of prompt.entries()) {
     if (
+      !block ||
       block.type !== 'resource' ||
+      !block.resource ||
+      typeof block.resource !== 'object' ||
       !('text' in block.resource) ||
       typeof block.resource.text !== 'string'
     ) {
@@ -103,7 +106,12 @@ export function readDaemonNativeResourceIndexes(
     );
     const matchingIndexes = new Map<string, number[]>();
     for (const [index, block] of prompt.entries()) {
-      if (block.type !== 'resource' || !nativeUris.has(block.resource.uri))
+      if (
+        !block ||
+        block.type !== 'resource' ||
+        !block.resource ||
+        !nativeUris.has(block.resource.uri)
+      )
         continue;
       const indexes = matchingIndexes.get(block.resource.uri) ?? [];
       indexes.push(index);
@@ -130,6 +138,7 @@ export function readDaemonNativeResourceIndexes(
     const block = prompt[index];
     if (
       block?.type !== 'resource' ||
+      !block.resource ||
       !references?.some(
         (reference) =>
           reference.type === 'resource' &&

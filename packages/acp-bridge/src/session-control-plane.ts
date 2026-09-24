@@ -10038,7 +10038,9 @@ export function createSessionControlPlane(
                 const directBlocks = new Set(dispatchBlocks);
                 const nativeResourceIndexes = resolvedPrompt.flatMap(
                   (block, index) =>
-                    block.type === 'resource' && !directBlocks.has(block)
+                    block != null &&
+                    block.type === 'resource' &&
+                    !directBlocks.has(block)
                       ? [index]
                       : [],
                 );
