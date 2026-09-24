@@ -334,6 +334,7 @@ describe('useLlmStream', () => {
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
+    mockLogMessage.mockReset().mockResolvedValue(undefined);
 
     // Mock return value for useReactToolScheduler
     mockScheduleToolCalls = vi.fn();
@@ -13204,7 +13205,7 @@ describe('useLlmStream', () => {
       });
     });
 
-    it('keeps slash command dispatch idle before the command action runs', async () => {
+    it('keeps slash command dispatch idle without hiding the responding state', async () => {
       let releaseLog!: () => void;
       mockLogMessage.mockImplementationOnce(
         () =>
@@ -13215,7 +13216,7 @@ describe('useLlmStream', () => {
       mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
       const hook = renderTestHook([], undefined, undefined, undefined, {
         logMessage: mockLogMessage,
-      } as unknown as Logger);
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
 
       let submitPromise!: Promise<void>;
       await act(async () => {
@@ -13223,13 +13224,46 @@ describe('useLlmStream', () => {
         await Promise.resolve();
       });
       await waitFor(() => expect(mockLogMessage).toHaveBeenCalled());
-      expect(hook.result.current.streamingState).toBe(StreamingState.Idle);
+      expect(hook.result.current.streamingState).toBe(
+        StreamingState.Responding,
+      );
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
 
       await act(async () => {
         releaseLog();
         await submitPromise;
       });
       expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+
+      let releaseStream!: () => void;
+      mockSendMessageStream.mockImplementationOnce(() =>
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Content,
+            value: 'Follow-up response',
+          };
+          await new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+        })(),
+      );
+      let followUpPromise!: Promise<void>;
+      await act(async () => {
+        followUpPromise = hook.result.current.submitQuery('follow-up request');
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      expect(hook.result.current.streamingState).toBe(
+        StreamingState.Responding,
+      );
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+      await act(async () => {
+        releaseStream();
+        await followUpPromise;
+      });
+      expect(hook.result.current.streamingState).toBe(StreamingState.Idle);
     });
 
     it('should call Gemini with prompt content when slash command returns a `submit_prompt` action', async () => {
@@ -18107,6 +18141,7 @@ describe('useLlmStream', () => {
   describe('Concurrent Execution Prevention', () => {
     it('should handle /btw as a UI-only command while a main response is in progress', async () => {
       const btwQuery = '/btw quick side question';
+      let releaseLog!: () => void;
       let resolveFirstCall!: () => void;
 
       const firstCallPromise = new Promise<void>((resolve) => {
@@ -18129,7 +18164,9 @@ describe('useLlmStream', () => {
         return false;
       });
 
-      const { result } = renderTestHook();
+      const { result } = renderTestHook([], undefined, undefined, undefined, {
+        logMessage: mockLogMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
 
       let mainRequest!: Promise<void>;
       await act(async () => {
@@ -18142,15 +18179,34 @@ describe('useLlmStream', () => {
           expect(result.current.streamingState).toBe(StreamingState.Responding);
         });
 
+        mockLogMessage.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseLog = resolve;
+            }),
+        );
+        let btwRequest!: Promise<void>;
         await act(async () => {
-          await result.current.submitQuery(btwQuery);
+          btwRequest = result.current.submitQuery(btwQuery);
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(mockLogMessage).toHaveBeenCalled());
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(result.current.localCommandDispatchIsIdle).toBe(false);
+        await act(async () => {
+          releaseLog();
+          await btwRequest;
         });
 
         expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(result.current.localCommandDispatchIsIdle).toBe(false);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
-        resolveFirstCall();
-        await mainRequest;
+        await act(async () => {
+          resolveFirstCall();
+          await mainRequest;
+        });
       }
     });
 

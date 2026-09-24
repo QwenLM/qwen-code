@@ -2980,6 +2980,59 @@ describe('AppContainer State Management', () => {
       expect(mockQueueMessage).not.toHaveBeenCalled();
     });
 
+    it('queues a second slash command while a submission lease is held', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const goalQueueRef = mockedUseLlmStream.mock.lastCall?.at(-1) as
+        | {
+            current: {
+              submissionInFlightRef: { current: boolean };
+            };
+          }
+        | undefined;
+      expect(goalQueueRef?.current.submissionInFlightRef).toBeDefined();
+      goalQueueRef!.current.submissionInFlightRef.current = true;
+
+      capturedUIActions.handleFinalSubmit('/help', {
+        submittedPrompt: '/help',
+      });
+
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+      expect(mockQueueMessage).toHaveBeenCalledWith('/help', false, '/help');
+    });
+
     it('injects a recovered-agent reminder into the next ordinary prompt once', () => {
       const mockQueueMessage = vi.fn();
       vi.spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')

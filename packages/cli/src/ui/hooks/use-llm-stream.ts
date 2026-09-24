@@ -875,7 +875,8 @@ export const useLlmStream = (
 
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
-  const [localCommandInFlight, setLocalCommandInFlight] = useState(false);
+  const [localCommandDispatchStartedIdle, setLocalCommandDispatchStartedIdle] =
+    useState(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
   // A continuation may be admitted while an earlier submission is finalizing.
@@ -1305,8 +1306,7 @@ export const useLlmStream = (
       return StreamingState.WaitingForConfirmation;
     }
     if (
-      (isResponding &&
-        (!localCommandInFlight || activeModelStreamsRef.current > 0)) ||
+      isResponding ||
       toolCalls.some(
         (tc) =>
           tc.status === 'executing' ||
@@ -1322,7 +1322,7 @@ export const useLlmStream = (
       return StreamingState.Responding;
     }
     return StreamingState.Idle;
-  }, [isResponding, localCommandInFlight, toolCalls]);
+  }, [isResponding, toolCalls]);
 
   useEffect(() => {
     if (
@@ -3656,7 +3656,9 @@ export const useLlmStream = (
         typeof query === 'string' &&
         isSlashCommand(query.trim());
       if (isLocalSlashCommand) {
-        setLocalCommandInFlight(true);
+        setLocalCommandDispatchStartedIdle(
+          streamingState === StreamingState.Idle,
+        );
       }
 
       // A thrown stream can leave partial assistant runs in the dynamic
@@ -3830,7 +3832,7 @@ export const useLlmStream = (
           throw error;
         } finally {
           if (isLocalSlashCommand) {
-            setLocalCommandInFlight(false);
+            setLocalCommandDispatchStartedIdle(false);
           }
         }
         const { queryToSend, shouldProceed, scheduledToolCallId } =
@@ -6754,6 +6756,8 @@ export const useLlmStream = (
 
   return {
     streamingState,
+    localCommandDispatchIsIdle:
+      localCommandDispatchStartedIdle && activeModelStreamsRef.current === 0,
     submitQuery,
     initError,
     pendingHistoryItems,
