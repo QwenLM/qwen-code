@@ -1140,6 +1140,11 @@ function fail(message) {
 
 export {
   TARGET_CLIPBOARD_PACKAGE,
+  // Exported so a test can hold the target map and the manifest's pins
+  // together: the release build now fails on a missing prebuild, so a target
+  // mapped to an unpinned package name would abort the whole archive step
+  // instead of degrading one archive.
+  TARGET_PREBUILD_DIR,
   TARGETS,
   standaloneArchiveName,
   writeSha256Sums,

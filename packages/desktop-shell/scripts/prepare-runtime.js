@@ -305,8 +305,10 @@ function stageNodePty(desktopTarget) {
 
 // The exact versions declared by the checkout the release job installed
 // (QWEN_CODE_ROOT). The source's frozen install already verifies these pins
-// against its lockfile. Returns null when the repo pins none of them, which is
-// how an unsupported target degrades instead of inventing a version.
+// against its lockfile. Returns null when the source root's
+// optionalDependencies is missing one of them; desktopTarget() has already
+// rejected every target the map does not cover, so a null here is a dropped
+// pin, never an unknown target.
 function nodePtyPackageSpecs(packageNames) {
   const rootPackage = JSON.parse(
     fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'),
