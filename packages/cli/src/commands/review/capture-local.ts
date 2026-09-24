@@ -18,7 +18,6 @@
 
 import type { CommandModule } from 'yargs';
 import {
-  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -386,7 +385,7 @@ function anchorRefusalReason(
     // not read.
     return `the capture SKIPPED ${skippedCount} file(s) whose content cannot be certified`;
   }
-  if (!cache) return 'the cache is missing or unreadable';
+  if (!cache) return MISSING_CACHE;
   if (!certifierMatchesRound(cache.lastModelId, model)) {
     // `display()`: the model id is a string out of the model-written cache
     // file — printed raw, a crafted value forges warning lines or emits
@@ -458,32 +457,66 @@ function anchorRefusalReason(
   return null;
 }
 
+const MISSING_CACHE = 'the cache is missing or unreadable';
+
+/**
+ * Whether `bytes` is a cache `cache-commit` promoted as the findings ledger
+ * alone: a JSON object naming its target and carrying none of the anchor.
+ */
+function isLedgerOnlyCache(bytes: Buffer | null): boolean {
+  if (bytes === null) return false;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return false;
+  }
+  const c = raw as Record<string, unknown>;
+  return (
+    typeof c['target'] === 'string' &&
+    !('files' in c) &&
+    !('headSha' in c) &&
+    !('stateId' in c) &&
+    // Not an old hand-written PR-shaped template, which names a certifier.
+    !('lastModelId' in c) &&
+    !('lastCommitSha' in c)
+  );
+}
+
 /**
  * The cache file `--cache` names: the path itself, or — when it names a
  * directory — the same spelling `cachePathFor` writes (`<dir>/<target>.json`
  * for the whole tree, `<dir>/file-<target>-<digest>.json` for a file
- * review). Null when a directory holds no cache for this target, which
- * every caller already treats as "no anchor".
+ * review). Always a FILE: this value is the plan's published `cachePath`,
+ * and Step 8 hands it to `cache-commit --out`, whose target binding reads
+ * the basename. A file that does not exist yet reads as "no anchor".
  */
 function resolveCachePath(
   given: string,
   target: string,
   source: string | undefined,
-): string | null {
-  let isDir = false;
+): string {
+  let isDir: boolean;
   try {
     isDir = statSync(given).isDirectory();
   } catch {
-    // Missing is not a directory; `readLocalCache` reports it as unreadable.
-    return given;
+    // Missing. A `.json` name is the caller's cache FILE before its first
+    // round. Anything else is the directory the skill passes
+    // (`.qwen/review-cache`) before any round created it — a fresh clone, a
+    // CI checkout. Returning it unchanged published the DIRECTORY as
+    // `cachePath`, `cache-commit` refused it as a cross-target promotion,
+    // and nothing on the primary path ever created the directory: every
+    // later round full-reviewed with no findings ledger, permanently (R26-2).
+    isDir = !/\.json$/i.test(given);
   }
-  if (!isDir) return given;
   // The SAME spelling `cachePathFor` writes. A resolver and a writer that
   // disagree leave the round reporting "the cache is missing or unreadable"
   // over a cache sitting right there — and for a file review they DID, since
   // the namespace split moved the write and left this probe on the old name.
-  const candidate = join(given, basename(cachePathFor(target, source)));
-  return existsSync(candidate) ? candidate : null;
+  return isDir ? join(given, basename(cachePathFor(target, source))) : given;
 }
 
 /**
@@ -710,11 +743,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // and each passed the other's gate. That is the identity-channel class
     // the PR flow closed by moving the comparison into the command; a local
     // round is the same contract ("an anchor is honoured only under the model
-    // whose clean verdict certified it"). Never empty here: the candidate
-    // is withheld outright when the runtime published nothing, because
-    // `cache-commit` refuses an anchor certified by nobody and the plan's
-    // absent field is what routes Step 8 to its documented fallback.
-    lastModelId: roundModelId,
+    // whose clean verdict certified it"). Never empty: when the runtime
+    // published nothing the key is OMITTED, and `cache-commit` promotes such
+    // a candidate as the findings ledger alone, with no anchor state. It is
+    // not withheld — a local or file round posts no marker, so this
+    // candidate is the ONLY write path its findings ledger has, and a
+    // withheld one made the next round re-file every open Critical.
+    ...(roundModelId !== '' ? { lastModelId: roundModelId } : {}),
     // What this round could SEE. A later round that sees less cannot certify
     // this one's state: with `--no-untracked` (or a `.gitignore` entry added
     // between rounds) the untracked block never runs and records no `skipped`
@@ -821,13 +856,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     treeHeldStill &&
     invisible !== null &&
     invisible.length === 0 &&
-    vanishedPresent.length === 0 &&
-    // An anchor certified by nobody: the gate reads an empty identity as a
-    // mismatch and `cache-commit` refuses it, so announcing this candidate
-    // would send Step 8 into a refusal with no branch — the round's
-    // findings ledger lost with it — where the absent field routes it to
-    // the documented fallback.
-    roundModelId !== '';
+    vanishedPresent.length === 0;
   if (candidateWritten) {
     // Guarded as a whole, like the PR flow's candidate write and for the
     // reason that one states: a convenience artefact must never take the
@@ -849,6 +878,14 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         noFollow: true,
       });
       cacheCandidatePath = candidatePath;
+      if (roundModelId === '') {
+        writeStderrLine(
+          'The runtime published no model identity — the cache candidate ' +
+            "carries no certifier, so Step 8 persists this round's findings " +
+            'ledger without an anchor and the next round reviews in full. ' +
+            'The review itself is unaffected.',
+        );
+      }
     } catch (err) {
       // Said out loud, and the field stays absent: Step 8 branches on its
       // presence, so a silent drop would send it promoting an earlier
@@ -881,18 +918,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       );
     } else if (invisible === null || invisible.length > 0) {
       writeStderrLine(invisibleCandidateRefusal(invisible));
-    } else if (vanishedPresent.length > 0) {
+    } else {
       writeStderrLine(
         `The cache candidate is withheld: ${vanishedPresent.length} cached ` +
           `path(s) dropped out of this capture while still on disk, so the ` +
           `candidate would record their absence as reviewed state. The ` +
           `review itself proceeds in full.`,
-      );
-    } else {
-      writeStderrLine(
-        'The runtime published no model identity — the cache candidate is ' +
-          'withheld: an anchor certified by nobody is refused at promotion. ' +
-          'The review itself is unaffected.',
       );
     }
   }
@@ -934,7 +965,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // Passing the directory ends the guessing: one deriver, and a caller
     // that knows only where caches live. A file path still works unchanged.
     const cache = cacheEarly;
-    const refusal = anchorRefusalReason(
+    const reason = anchorRefusalReason(
       cache,
       roundModelIdFrom(process.env),
       headSha,
@@ -945,6 +976,14 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       args.untracked !== false,
       vanishedPresent,
     );
+    // A ledger-only cache — promoted from a candidate with no identity — is
+    // unanchored by design, and "missing or unreadable" is a line the skill
+    // relays to the user while it reads that very file's findings.
+    const refusal =
+      reason === MISSING_CACHE && isLedgerOnlyCache(cacheEarlyBytes)
+        ? 'the cache holds the findings ledger only (its round recorded no ' +
+          'model identity, so no anchor)'
+        : reason;
     if (refusal !== null) {
       writeStderrLine(
         `Incremental anchor not used — ${refusal}. Running the full local review.`,
@@ -1534,6 +1573,8 @@ export const captureLocalCommand: CommandModule = {
           'DIRECTORY holding it (`.qwen/review-cache`), in which case this ' +
           "command resolves this target's cache file — the same spelling " +
           'the plan publishes as `cachePath` — from the target IT derives. ' +
+          'A path that does not exist yet is read as that directory unless ' +
+          'it ends in `.json`. ' +
           'Prefer the directory for a file review: the target is ' +
           "this command's to compute, and a caller that predicts the name " +
           'gets it wrong for any non-canonical spelling. When the anchor ' +

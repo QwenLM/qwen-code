@@ -67,9 +67,9 @@ function write(rel: string, content: string): void {
 let savedIdentity: string | undefined;
 
 beforeEach(() => {
-  // A candidate is written only under a published identity (an anchor
-  // certified by nobody is withheld), so the fixtures publish one; `capture`
-  // overrides it per test through its `model` argument.
+  // A candidate anchors only under a published identity (without one it
+  // promotes as the findings ledger alone), so the fixtures publish one;
+  // `capture` overrides it per test through its `model` argument.
   savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
   process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
@@ -724,6 +724,58 @@ describe('capture-local — promotion through the REAL cache-commit', () => {
       model: 'model-a',
     });
     expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
+  });
+
+  it('bootstraps on a checkout with no .qwen/review-cache yet (R26-2)', () => {
+    // Step 1 passes the DIRECTORY on every high round, including the first
+    // one on a fresh clone, where it does not exist. The plan published it
+    // unchanged as `cachePath`, `cache-commit --out <that directory>` was
+    // refused as a cross-target promotion, and nothing ever created it — so
+    // no round on that checkout ever persisted an anchor or a ledger.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+    const cacheDir = join(repo, '.qwen/review-cache');
+    for (const file of [undefined, 'src/foo.ts']) {
+      rmSync(cacheDir, { recursive: true, force: true });
+      const first = capture({ file, cache: cacheDir, model: 'model-a' });
+      expect(first['cachePath']).toMatch(/\.json$/);
+      const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+      writeFileSync(
+        ledgerPath,
+        JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
+      );
+      (cacheCommitCommand.handler as (argv: unknown) => void)({
+        candidate: first.cacheCandidatePath,
+        ledger: ledgerPath,
+        out: first['cachePath'],
+        stateId: first['cacheCandidateStateId'],
+      });
+      stderrLines.length = 0;
+      const second = capture({ file, cache: cacheDir, model: 'model-a' });
+      // Nothing moved since the promotion: the anchor holds and scopes the
+      // round to an empty delta instead of full-reviewing.
+      expect(stderrLines.join('\n')).not.toContain(
+        'Incremental anchor not used',
+      );
+      expect(second.incremental?.scope?.deltaFiles).toEqual([]);
+    }
+    // A ledger-only cache (a round with no identity) is named as such, not
+    // as "missing or unreadable" — the skill relays that line to the user.
+    writeFileSync(
+      join(cacheDir, 'local.json'),
+      JSON.stringify({ v: 1, target: 'local', round: 1, findings: [] }),
+    );
+    stderrLines.length = 0;
+    capture({ cache: cacheDir, model: 'model-a' });
+    expect(stderrLines.join('\n')).toContain(
+      'the cache holds the findings ledger only',
+    );
+    // A caller-named cache FILE that does not exist yet stays that file —
+    // only a non-`.json` name is read as the directory.
+    const named = join(repo, 'caches', 'local.json');
+    expect(capture({ cache: named, model: 'model-a' })['cachePath']).toBe(
+      named,
+    );
   });
 });
 

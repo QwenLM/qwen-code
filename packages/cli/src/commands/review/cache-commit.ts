@@ -95,6 +95,16 @@ function candidateFieldsOf(candidate: Record<string, unknown>): string[] {
 }
 
 /**
+ * What an UNCERTIFIED candidate — one whose capture ran under a runtime that
+ * published no identity — may carry into the cache: the names of the subject
+ * the ledger is about, and nothing that anchors. An allowlist on purpose,
+ * where the certified merge is a deny list: there a forgotten field is anchor
+ * state lost (a full round), here it would be anchor state written with no
+ * certifier, which a reader that does not re-check the identity would honour.
+ */
+const SUBJECT_FIELDS = ['v', 'target', 'source'] as const;
+
+/**
  * Where, if anywhere, `value` carries a control character: every string at
  * any depth, map KEYS included — a verdicts map is keyed by file paths, and
  * git permits almost any byte in one. Null when clean; otherwise the dotted
@@ -134,12 +144,26 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // configurations exposing one model name share. The captures record what the
   // runtime published instead, provider-qualified, so the string that gets
   // compared is the one that tells those two apart.
+  //
+  // ABSENT is a different state from empty, and it is not refused: a capture
+  // under a runtime that published no identity writes its candidate without
+  // the key, and the round's findings ledger still has to persist — a local
+  // or file round has no posted marker to carry it, so refusing here lost
+  // round N's open Criticals and round N+1 re-filed them under fresh ids.
+  // Such a candidate promotes the LEDGER only (`SUBJECT_FIELDS`): no
+  // certifier, no anchor. Empty or non-string stays a refusal, because no
+  // capture writes it — it is a malformed or hand-edited candidate.
+  const certified = Object.hasOwn(candidate, 'lastModelId');
   const candidateModel = candidate['lastModelId'];
-  if (typeof candidateModel !== 'string' || candidateModel === '') {
+  if (
+    certified &&
+    (typeof candidateModel !== 'string' || candidateModel === '')
+  ) {
     throw new Error(
-      'cache-commit: the candidate must carry a non-empty `lastModelId` — ' +
-        'the incremental anchor is a same-model contract, and the capture is ' +
-        'what records who certified it.',
+      'cache-commit: the candidate carries an empty or non-string ' +
+        '`lastModelId` — the incremental anchor is a same-model contract, and ' +
+        'the capture is what records who certified it (a capture with no ' +
+        'identity omits the key).',
     );
   }
   // Bind the promotion to its target: `pr-7`'s candidate committed to
@@ -253,7 +277,10 @@ function runCacheCommit(args: CacheCommitArgs): void {
   for (const key of LEDGER_FIELDS) {
     if (key in ledger) merged[key] = ledger[key];
   }
-  for (const key of candidateFieldsOf(candidate)) {
+  const carried = certified
+    ? candidateFieldsOf(candidate)
+    : SUBJECT_FIELDS.filter((key) => Object.hasOwn(candidate, key));
+  for (const key of carried) {
     // Candidate fields LAST: the anchor must win any collision (see header).
     merged[key] = candidate[key];
   }
@@ -295,7 +322,14 @@ function runCacheCommit(args: CacheCommitArgs): void {
   atomicWriteFileSync(args.out, `${JSON.stringify(merged, null, 2)}\n`, {
     noFollow: true,
   });
-  writeStdoutLine(`Committed review cache to ${inertText(args.out)}`);
+  writeStdoutLine(
+    `Committed review cache to ${inertText(args.out)}` +
+      (certified
+        ? ''
+        : ' — the findings ledger only: the capture recorded no model ' +
+          'identity, so no anchor was written and the next round reviews ' +
+          'in full'),
+  );
 }
 
 export const cacheCommitCommand: CommandModule = {

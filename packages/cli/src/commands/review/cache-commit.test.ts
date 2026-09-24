@@ -64,7 +64,7 @@ function seed(candidate: unknown, ledger: unknown): Record<string, string> {
   // Every real candidate carries the identity that certified the round — both
   // captures record it — so a fixture that omits it is testing something else
   // and gets the default. A test about the field itself passes its own (or
-  // `null` to leave it out).
+  // `undefined`, which JSON drops, to leave the key out).
   const withModel =
     candidate !== null &&
     typeof candidate === 'object' &&
@@ -167,15 +167,6 @@ describe('cache-commit', () => {
       { round: 1 },
     );
     expect(() => run(argv)).toThrow(/carries control/);
-    expect(existsSync(argv['out'])).toBe(false);
-  });
-
-  it('refuses a CANDIDATE without lastModelId — the capture records who certified', () => {
-    // Not the ledger: a ledger value is one the orchestrator typed, and the
-    // only token it can type is the bare `{{model}}`, which two providers
-    // exposing one model name share.
-    const argv = seed({ v: 1, target: 'pr-7', lastModelId: '' }, { round: 1 });
-    expect(() => run(argv)).toThrow(/lastModelId/);
     expect(existsSync(argv['out'])).toBe(false);
   });
 
@@ -403,10 +394,64 @@ describe('cache-commit', () => {
     },
   );
 
-  it('refuses an EMPTY lastModelId, not just a missing one', () => {
-    const argv = seed({ v: 1, target: 'pr-7', lastModelId: '' }, {});
-    expect(() => run(argv)).toThrow(/lastModelId/);
-    expect(existsSync(argv['out'])).toBe(false);
+  it('refuses an EMPTY or non-string lastModelId — no capture writes one', () => {
+    for (const bad of ['', 7, null]) {
+      const argv = seed({ v: 1, target: 'pr-7', lastModelId: bad }, {});
+      expect(() => run(argv)).toThrow(/empty or non-string `lastModelId`/);
+      expect(existsSync(argv['out'])).toBe(false);
+    }
+  });
+
+  it('promotes the LEDGER alone from a candidate with no identity (R24-1)', () => {
+    // A capture under a runtime that published no identity omits the key.
+    // A local or file round posts no marker, so this promotion is the ONLY
+    // place its findings ledger survives: refusing it made round N+1 re-file
+    // round N's open Criticals under fresh ids. What must NOT survive is the
+    // anchor — no certifier, no `files`/`headSha`/`stateId` for a reader that
+    // does not re-check the identity to honour.
+    const argv = seed(
+      {
+        v: 1,
+        target: 'local',
+        headSha: 'h',
+        files: { 'a.ts': '100644:abc' },
+        stateId: 's',
+        untracked: true,
+        lastModelId: undefined,
+      },
+      {
+        round: 2,
+        verdict: 'Request changes',
+        findingsCount: 1,
+        findings: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      },
+    );
+    argv['out'] = join(dir, 'cache/local.json');
+    run({ ...argv, stateId: 's' });
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['findings']).toEqual([
+      { id: 'R1-1', severity: 'Critical', status: 'open' },
+    ]);
+    expect(cache['round']).toBe(2);
+    expect(cache['target']).toBe('local');
+    expect(Object.keys(cache).sort()).toEqual(
+      [
+        'findings',
+        'findingsCount',
+        'lastReviewDate',
+        'round',
+        'target',
+        'v',
+        'verdict',
+      ].sort(),
+    );
+    expect(stdoutLines.join('\n')).toContain('the findings ledger only');
+    // Still bound to THIS round's candidate: an uncertified promotion is no
+    // licence to skip the concurrency check.
+    expect(() => run({ ...argv, stateId: 'other' })).toThrow(/stateId/);
   });
 
   it('carries a candidate field nobody enumerated — the recurring bug', () => {
@@ -528,15 +573,30 @@ describe('cache-commit', () => {
     expect(existsSync(argv['out'])).toBe(true);
   });
 
-  it('refuses a candidate with NO lastModelId key at all — not only an empty one', () => {
+  it('writes NO anchor from a candidate with no lastModelId key, whatever the ledger says', () => {
     // `seed()` injects a default into every keyless fixture, so this one
-    // writes the file itself: a hand-edited candidate, or one from a capture
-    // that predates the field, must be refused rather than promoted with
-    // the merge deleting the identity.
+    // writes the file itself. A keyless candidate — a runtime that published
+    // no identity, or a capture that predates the field — promotes the
+    // ledger alone (R24-1). The bare token a ledger could carry must not
+    // stand in for the missing certifier, and the anchor must not travel
+    // without one: a reader that skips the identity check would honour it.
     const argv = seed({ v: 1, target: 'pr-7' }, { round: 1 });
-    writeFileSync(argv['candidate'], JSON.stringify({ v: 1, target: 'pr-7' }));
-    expect(() => run(argv)).toThrow(/lastModelId/);
-    expect(existsSync(argv['out'])).toBe(false);
+    writeFileSync(
+      argv['candidate'],
+      JSON.stringify({ v: 1, target: 'pr-7', lastCommitSha: 'sha' }),
+    );
+    writeFileSync(
+      argv['ledger'],
+      JSON.stringify({ round: 1, lastModelId: 'bare-name' }),
+    );
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect('lastModelId' in cache).toBe(false);
+    expect('lastCommitSha' in cache).toBe(false);
+    expect(cache['round']).toBe(1);
   });
 
   it('reads the model off the CANDIDATE, never the ledger', () => {

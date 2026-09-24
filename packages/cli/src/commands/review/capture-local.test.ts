@@ -257,12 +257,12 @@ describe('capture-local (command boundary)', () => {
     },
   );
 
-  it('withholds the cache candidate when the runtime published no identity', () => {
-    // An empty identity never compares equal — the gate reads it as a
-    // mismatch and `cache-commit` refuses it — so a candidate carrying it
-    // could only send Step 8 into a refusal with no branch, losing the
-    // round's ledger with it. Withheld at the source, the absent field
-    // routes the round to the documented fallback instead.
+  it('writes the cache candidate WITHOUT an identity when the runtime published none (R24-1)', () => {
+    // A local round posts no marker, so the candidate is the only write path
+    // its findings ledger has. Withheld, round N+1 saw no ledger and re-filed
+    // round N's open Criticals under fresh ids. Written with the key OMITTED
+    // (never `''`, which `cache-commit` refuses), it promotes as the ledger
+    // alone and anchors nothing.
     process.env['QWEN_CODE_MODEL_IDENTITY'] = '';
     const savedModel = process.env['QWEN_CODE_MODEL'];
     process.env['QWEN_CODE_MODEL'] = '';
@@ -273,12 +273,15 @@ describe('capture-local (command boundary)', () => {
         readFileSync(join(dir, 'plan.json'), 'utf8'),
       ) as Record<string, unknown>;
       expect(plan['diffPath']).toBeTruthy();
-      expect('cacheCandidatePath' in plan).toBe(false);
-      expect(
-        existsSync(
+      expect(plan['cacheCandidatePath']).toBeTruthy();
+      expect(typeof plan['cacheCandidateStateId']).toBe('string');
+      const candidate = JSON.parse(
+        readFileSync(
           join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
         ),
-      ).toBe(false);
+      ) as Record<string, unknown>;
+      expect('lastModelId' in candidate).toBe(false);
       expect(errs.join('\n')).toContain('published no model identity');
     } finally {
       if (savedModel === undefined) delete process.env['QWEN_CODE_MODEL'];
