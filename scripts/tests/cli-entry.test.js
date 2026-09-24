@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const { spawnSyncMock, existsSyncMock, homedirMock, tmpdirMock } = vi.hoisted(
   () => ({
@@ -37,6 +38,7 @@ const normalizePath = (path) => String(path).replaceAll('\\', '/');
 
 describe('scripts/cli-entry.js production entry', () => {
   const originalArgv = process.argv;
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
   let exitSpy;
 
   beforeEach(() => {
@@ -44,15 +46,17 @@ describe('scripts/cli-entry.js production entry', () => {
     vi.clearAllMocks();
     homedirMock.mockReturnValue('/home/test-user');
     tmpdirMock.mockReturnValue('/tmp');
-    // A non-fast-path command, so the entry takes the spawnSync branch (mocked)
-    // instead of importing the real dist/cli.js in-process.
+    // A non-fast-path command on Windows, so the entry takes the spawnSync
+    // branch (mocked) instead of importing the real dist/cli.js in-process.
     process.argv = ['node', 'scripts/cli-entry.js', 'review', 'check'];
+    Object.defineProperty(process, 'platform', { value: 'win32' });
     // The entry exits after its child returns; the import must survive that.
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
     process.argv = originalArgv;
+    Object.defineProperty(process, 'platform', originalPlatform);
     exitSpy.mockRestore();
   });
 
@@ -221,5 +225,57 @@ describe('scripts/cli-entry.js production entry', () => {
       if (inheritedHome === undefined) delete process.env.QWEN_HOME;
       else process.env.QWEN_HOME = inheritedHome;
     }
+  });
+
+  describe('outside Windows', () => {
+    const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url));
+
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      vi.doMock(cliPath, () => ({}));
+    });
+
+    afterEach(() => {
+      vi.doUnmock(cliPath);
+    });
+
+    it('runs the CLI in this process with gc exposed', async () => {
+      await import('../cli-entry.js?in-process');
+
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+      expect(process.argv.slice(1)).toEqual([cliPath, 'review', 'check']);
+      expect(typeof globalThis.gc).toBe('function');
+    });
+
+    it('relaunches through the launcher when the CLI exits after an update', async () => {
+      const exitListeners = process.listeners('exit');
+      process.env.QWEN_CODE_LAUNCHER_PATH = '/opt/qwen-standalone/bin/qwen';
+      existsSyncMock.mockImplementation(
+        (p) => normalizePath(p) === '/opt/qwen-standalone/bin/qwen',
+      );
+      try {
+        await import('../cli-entry.js?in-process-update');
+        const hook = process
+          .listeners('exit')
+          .find((l) => !exitListeners.includes(l));
+
+        hook(0);
+        expect(spawnSyncMock).not.toHaveBeenCalled();
+
+        hook(44);
+        expect(spawnSyncMock).toHaveBeenCalledWith(
+          '/opt/qwen-standalone/bin/qwen',
+          [],
+          expect.objectContaining({
+            env: expect.objectContaining({
+              QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(['review', 'check']),
+            }),
+          }),
+        );
+        process.removeListener('exit', hook);
+      } finally {
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      }
+    });
   });
 });

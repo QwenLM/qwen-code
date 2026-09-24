@@ -251,6 +251,7 @@ const mainBuild = esbuild.build({
   metafile: true,
   write: true,
   keepNames: true,
+  minifyWhitespace: true,
 });
 
 // fzf index worker — runs in its own worker_threads worker that

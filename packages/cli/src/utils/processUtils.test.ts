@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import {
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
@@ -12,6 +12,7 @@ import {
   relaunchApp,
   relaunchForUpdate,
   requestUpdateOnExit,
+  superviseInProcess,
 } from './processUtils.js';
 import * as cleanup from './cleanup.js';
 
@@ -54,5 +55,41 @@ describe('processUtils', () => {
     process.send = undefined;
 
     expect(requestUpdateOnExit()).toBe(false);
+  });
+
+  // Last: superviseInProcess switches module state for the rest of the file.
+  describe('without a supervising parent', () => {
+    const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
+    const execve = vi.fn();
+    const originalExecve = process.execve;
+
+    beforeAll(() => {
+      superviseInProcess(onUpdateRelaunch);
+    });
+
+    beforeEach(() => {
+      process.execve = execve as unknown as typeof process.execve;
+    });
+
+    afterEach(() => {
+      process.execve = originalExecve;
+    });
+
+    it('re-execs this process in place after cleanup', async () => {
+      await relaunchApp();
+      expect(runExitCleanup).toHaveBeenCalledTimes(1);
+      expect(execve).toHaveBeenCalledWith(process.execPath, [
+        process.execPath,
+        ...process.execArgv,
+        ...process.argv.slice(1),
+      ]);
+    });
+
+    it('runs the update here and exits with its code', async () => {
+      await relaunchForUpdate();
+      expect(runExitCleanup).toHaveBeenCalledTimes(1);
+      expect(onUpdateRelaunch).toHaveBeenCalledWith(true);
+      expect(processExit).toHaveBeenCalledWith(44);
+    });
   });
 });

@@ -23,16 +23,53 @@ export const HOST_UPDATE_RELAUNCH_ENV_VAR = 'QWEN_CODE_HOST_UPDATE_RELAUNCH';
 
 export const UPDATE_ON_EXIT_MESSAGE = 'qwen-code:update-on-exit';
 
+type UpdateRelaunchHandler = (
+  relaunchOnFailure: boolean,
+) => Promise<number> | number;
+
+let inProcessUpdateRelaunch: UpdateRelaunchHandler | undefined;
+let supervisedInProcess = false;
+
+/**
+ * Marks this process as running without a supervising parent: restarts
+ * re-exec this process in place and updates run here instead of in a parent.
+ */
+export function superviseInProcess(onUpdateRelaunch: UpdateRelaunchHandler) {
+  supervisedInProcess = true;
+  inProcessUpdateRelaunch = onUpdateRelaunch;
+}
+
 /**
  * Exits the process with a special code to signal that the parent process should relaunch it.
  */
 export async function relaunchApp(): Promise<void> {
   await runExitCleanup();
+  // Read loosely: some workspaces' @types/node predate process.execve.
+  const proc = process as typeof process & {
+    execve?: (file: string, args: string[]) => never;
+  };
+  if (supervisedInProcess && proc.execve) {
+    // The bin launcher may have exposed gc at runtime rather than via argv.
+    const gcArgs =
+      typeof globalThis.gc === 'function' &&
+      !process.execArgv.includes('--expose-gc')
+        ? ['--expose-gc']
+        : [];
+    proc.execve(process.execPath, [
+      process.execPath,
+      ...process.execArgv,
+      ...gcArgs,
+      ...process.argv.slice(1),
+    ]);
+  }
   process.exit(RELAUNCH_EXIT_CODE);
 }
 
 export async function relaunchForUpdate(): Promise<void> {
   await runExitCleanup();
+  if (inProcessUpdateRelaunch) {
+    process.exit(await inProcessUpdateRelaunch(true));
+  }
   process.exit(UPDATE_RELAUNCH_EXIT_CODE);
 }
 

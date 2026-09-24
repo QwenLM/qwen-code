@@ -308,18 +308,22 @@ if (isInProcessFastPath()) {
 } else {
   const { spawnSync } = await import('node:child_process');
   const UPDATE_COMPLETE_EXIT_CODE = 44;
-  const launcherNames =
-    process.platform === 'win32' ? ['qwen.cmd', 'qwen.exe', 'qwen'] : ['qwen'];
   const entryPath = resolve(process.argv[1]);
-  const entryRootLength = parse(entryPath).root.length;
-  const launcherFromEnv = standaloneShim;
   delete process.env['QWEN_CODE_LAUNCHER_PID'];
-  const launcherCandidates = process.env['PATH']
-    ?.split(delimiter)
-    .flatMap((dir) => launcherNames.map((name) => join(dir, name)))
-    .filter((candidate) => existsSync(candidate));
-  const launcher =
-    launcherFromEnv && existsSync(launcherFromEnv)
+  const launchEnv = { ...process.env };
+
+  const findLauncher = () => {
+    const launcherNames =
+      process.platform === 'win32'
+        ? ['qwen.cmd', 'qwen.exe', 'qwen']
+        : ['qwen'];
+    const entryRootLength = parse(entryPath).root.length;
+    const launcherFromEnv = standaloneShim;
+    const launcherCandidates = process.env['PATH']
+      ?.split(delimiter)
+      .flatMap((dir) => launcherNames.map((name) => join(dir, name)))
+      .filter((candidate) => existsSync(candidate));
+    return launcherFromEnv && existsSync(launcherFromEnv)
       ? launcherFromEnv
       : launcherCandidates
           ?.map((candidate) => {
@@ -347,21 +351,10 @@ if (isInProcessFastPath()) {
           })
           .filter(({ score }) => score > entryRootLength)
           .sort((a, b) => b.score - a.score)[0]?.candidate;
-  const env = {
-    ...process.env,
-    QWEN_CODE_LAUNCHER_PID: String(process.pid),
   };
-  const result = spawnSync(
-    process.execPath,
-    ['--expose-gc', cliPath, ...cliArgs],
-    { stdio: 'inherit', env },
-  );
 
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-  } else if (result.status !== UPDATE_COMPLETE_EXIT_CODE) {
-    process.exit(result.status ?? 1);
-  } else {
+  const relaunchAfterUpdate = () => {
+    const launcher = findLauncher();
     if (!launcher) {
       process.stderr.write(
         'Update successful! The new version will be used on your next run.\n',
@@ -369,7 +362,7 @@ if (isInProcessFastPath()) {
       process.exit(0);
     }
     const relaunchEnv = {
-      ...process.env,
+      ...launchEnv,
       QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(cliArgs),
       QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
     };
@@ -392,6 +385,39 @@ if (isInProcessFastPath()) {
       process.kill(process.pid, relaunchResult.signal);
     } else {
       process.exit(relaunchResult.status ?? 1);
+    }
+  };
+
+  if (process.platform !== 'win32') {
+    // Running the CLI in this process instead of a child saves a Node boot and
+    // the idle launcher's memory for the whole session. The memory-pressure
+    // monitor's global.gc() comes from the runtime flag instead of argv.
+    const [{ setFlagsFromString }, { runInNewContext }] = await Promise.all([
+      import('node:v8'),
+      import('node:vm'),
+    ]);
+    setFlagsFromString('--expose-gc');
+    globalThis.gc ??= runInNewContext('gc');
+    process.on('exit', (code) => {
+      if (code === UPDATE_COMPLETE_EXIT_CODE) relaunchAfterUpdate();
+    });
+    process.argv.splice(1, Infinity, cliPath, ...cliArgs);
+    await import(pathToFileURL(cliPath).href);
+  } else {
+    const result = spawnSync(
+      process.execPath,
+      ['--expose-gc', cliPath, ...cliArgs],
+      {
+        stdio: 'inherit',
+        env: { ...process.env, QWEN_CODE_LAUNCHER_PID: String(process.pid) },
+      },
+    );
+    if (result.signal) {
+      process.kill(process.pid, result.signal);
+    } else if (result.status !== UPDATE_COMPLETE_EXIT_CODE) {
+      process.exit(result.status ?? 1);
+    } else {
+      relaunchAfterUpdate();
     }
   }
 }
