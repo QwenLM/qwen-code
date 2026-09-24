@@ -133,7 +133,7 @@ export function buildReattachParts(
       text: reattachContextText(recent.map((img) => img.id)),
       partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
-    ...recent.map(storedImageToPart),
+    ...recent.flatMap(labeledReattachParts),
   ];
 }
 
@@ -153,8 +153,9 @@ export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
 /**
  * Number of trailing parts of the last content that belong to the reattach
  * region, or 0 when the request ends without one. Each reattach part (one
- * text marker + N inline images) converts to exactly one OpenAI content
- * block, so this equals the trailing reattach block count on the wire.
+ * text marker, then a text label and an inline image per replayed image)
+ * converts to exactly one OpenAI content block, so this equals the
+ * trailing reattach block count on the wire.
  */
 export function trailingReattachPartCount(contents: ContentListUnion): number {
   const last = Array.isArray(contents) ? contents.at(-1) : undefined;
@@ -238,7 +239,7 @@ export function prepareImagePayloadsForRequest(
     {
       text: reattachContextText([...reattachById.keys()]),
     },
-    ...[...reattachById.values()].map(storedImageToPart),
+    ...[...reattachById.values()].flatMap(labeledReattachParts),
   ];
 
   const last = transformed.at(-1);
@@ -371,8 +372,24 @@ function imageReferenceText(stored: StoredImagePayload): string {
 function reattachContextText(ids: readonly string[]): string {
   return (
     'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
-    ids.map((id) => `Image #${id}`).join(', ')
+    ids.map((id) => `Image #${id}`).join(', ') +
+    '. Each one is labeled with its id below.'
   );
+}
+
+// A lone id list above N unlabeled images cannot be mapped back to them, so
+// a one-image turn followed by several replays reads as "the old images are
+// the new ones" (#12544). Label every replayed image with its id. The label
+// deliberately makes no claim about which turn an image belongs to: this
+// module cannot tell where the current turn starts, and a wrong claim in
+// either direction misleads the model more than the header's caveat does.
+function labeledReattachParts(stored: StoredImagePayload): Part[] {
+  return [
+    {
+      text: `Image #${stored.id}: replayed snapshot from earlier in this session, may be OUTDATED`,
+    },
+    storedImageToPart(stored),
+  ];
 }
 
 function safeImageMimeType(mimeType: string): string {

@@ -215,7 +215,7 @@ function renderPanel(
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
     onThemeChange: (theme: 'dark' | 'light') => void;
-    modelManagement: ModelManagementProps;
+    modelManagementSectionProps: ModelManagementProps;
     initialCategory: string;
     presentation: WebShellSettingsOptions;
     connections: ReactNode;
@@ -233,7 +233,7 @@ function renderPanel(
         onSubDialog={overrides.onSubDialog ?? noop}
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
-        modelManagement={overrides.modelManagement}
+        modelManagementSectionProps={overrides.modelManagementSectionProps}
         connections={overrides.connections}
       />
     </I18nProvider>,
@@ -740,7 +740,7 @@ describe('SettingsMessage user-scope editing', () => {
       Promise.resolve({} as DaemonSettingUpdateResult),
     );
     const container = renderPanel(makeState([subDialogSetting()], setValue), {
-      modelManagement: makeModelManagement(),
+      modelManagementSectionProps: makeModelManagement(),
     });
 
     // Model is the only category, so it's active — the management block shows.
@@ -753,11 +753,11 @@ describe('SettingsMessage user-scope editing', () => {
     expect(block?.parentElement?.className).toContain('mt-4');
   });
   it('keeps the model list and selection when ordinary Model fields are excluded', () => {
-    const modelManagement = makeModelManagement();
-    modelManagement.currentModelId = 'other';
-    modelManagement.providers[0]!.models[0]!.isCurrent = false;
+    const modelManagementSectionProps = makeModelManagement();
+    modelManagementSectionProps.currentModelId = 'other';
+    modelManagementSectionProps.providers[0]!.models[0]!.isCurrent = false;
     const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
-      modelManagement,
+      modelManagementSectionProps,
       presentation: { excludeItems: ['setting:fast-model'] },
     });
     expect(container.textContent).not.toContain('Fast Model');
@@ -768,14 +768,14 @@ describe('SettingsMessage user-scope editing', () => {
     );
     expect(modelButton).toBeTruthy();
     act(() => modelButton!.click());
-    expect(modelManagement.onSelectModel).toHaveBeenCalledWith(
+    expect(modelManagementSectionProps.onSelectModel).toHaveBeenCalledWith(
       'gpt-4o(openai)',
     );
   });
 
   it('excludes the model block without hiding ordinary Model settings', () => {
     const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
-      modelManagement: makeModelManagement(),
+      modelManagementSectionProps: makeModelManagement(),
       presentation: { excludeItems: ['builtin:model-management'] },
     });
     expect(container.textContent).toContain('Fast Model');
@@ -825,7 +825,7 @@ describe('SettingsMessage user-scope editing', () => {
 
   it('shows an empty state when every available item is excluded', () => {
     const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
-      modelManagement: makeModelManagement(),
+      modelManagementSectionProps: makeModelManagement(),
       presentation: { excludeItems: WEB_SHELL_SETTING_ITEM_IDS },
     });
     expect(container.querySelectorAll('nav button')).toHaveLength(0);
@@ -849,7 +849,7 @@ describe('SettingsMessage user-scope editing', () => {
     expect(baseline.textContent).toContain('Test Flag');
     const container = renderPanel(state, {
       initialCategory: 'General',
-      modelManagement: makeModelManagement(),
+      modelManagementSectionProps: makeModelManagement(),
       presentation: { includeItems: ['setting:fast-model'] },
     });
     const check = () => {
@@ -881,7 +881,7 @@ describe('SettingsMessage user-scope editing', () => {
       const container = renderPanel(
         makeState([boolSetting(), subDialogSetting()], vi.fn()),
         {
-          modelManagement: makeModelManagement(),
+          modelManagementSectionProps: makeModelManagement(),
           presentation,
         },
       );
@@ -933,7 +933,7 @@ describe('SettingsMessage user-scope editing', () => {
 
   it('preserves default content and counts for an empty exclusion list', () => {
     const state = makeState([subDialogSetting()], vi.fn());
-    const options = { modelManagement: makeModelManagement() };
+    const options = { modelManagementSectionProps: makeModelManagement() };
     const baseline = renderPanel(state, options);
     const empty = renderPanel(state, {
       ...options,
@@ -948,7 +948,7 @@ describe('SettingsMessage user-scope editing', () => {
   it('keeps a model-only category when descriptors are absent', () => {
     const container = renderPanel(makeState([], vi.fn()), {
       initialCategory: 'Model',
-      modelManagement: makeModelManagement(),
+      modelManagementSectionProps: makeModelManagement(),
     });
     const block = container.querySelector('[data-testid="model-management"]');
     expect(block).toBeTruthy();
@@ -971,7 +971,7 @@ describe('SettingsMessage user-scope editing', () => {
       setValue: vi.fn(),
     };
     const container = renderPanel(state, {
-      modelManagement: makeModelManagement(),
+      modelManagementSectionProps: makeModelManagement(),
     });
     const navLabels = Array.from(container.querySelectorAll('nav button')).map(
       (button) => button.textContent,
@@ -991,7 +991,7 @@ describe('SettingsMessage user-scope editing', () => {
     };
     const container = renderPanel(
       makeState([subDialogSetting(), modelFallbacksSetting], vi.fn()),
-      { modelManagement: makeModelManagement() },
+      { modelManagementSectionProps: makeModelManagement() },
     );
     const modelNav = Array.from(container.querySelectorAll('nav button')).find(
       (button) => button.textContent?.includes('Model'),
@@ -1003,7 +1003,10 @@ describe('SettingsMessage user-scope editing', () => {
   it('confines the model-management block to the Model category', () => {
     const container = renderPanel(
       makeState([boolSetting(), subDialogSetting()], vi.fn()),
-      { modelManagement: makeModelManagement(), initialCategory: 'Model' },
+      {
+        modelManagementSectionProps: makeModelManagement(),
+        initialCategory: 'Model',
+      },
     );
     expect(
       container.querySelector('[data-testid="model-management"]'),
@@ -1053,7 +1056,7 @@ describe('SettingsMessage user-scope editing', () => {
         syncLanguage: vi.fn(),
       };
       const container = renderPanel(makeState([], vi.fn(), liveSetup(false)), {
-        modelManagement: makeModelManagement(),
+        modelManagementSectionProps: makeModelManagement(),
         presentation: { excludeItems: [id as WebShellSettingItemId] },
       });
       const navText = container.querySelector('nav')?.textContent ?? '';

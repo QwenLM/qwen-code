@@ -91,6 +91,18 @@ describe('clampInlineMediaPart', () => {
     expect(clampInlineMediaPart(part, 1000)).toBe(part);
   });
 
+  it('names the default limit and remedy at the call sites that override neither', () => {
+    // Most callers take the default remedy; the tool-result sites override it.
+    const part = {
+      inlineData: { mimeType: 'image/png', data: 'A'.repeat(2000) },
+    };
+    const result = clampInlineMediaPart(part, 1000);
+    expect(result.text).toContain('inline limit.');
+    expect(result.text).toContain(
+      'Ask the user to resize/compress it, or reference it via an @file path so it can be read from disk.',
+    );
+  });
+
   it('sanitizes the mime type in the placeholder to prevent injection', () => {
     const part = {
       inlineData: {
