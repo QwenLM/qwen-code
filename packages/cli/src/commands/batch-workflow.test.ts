@@ -144,6 +144,7 @@ function setup(planOverrides: Record<string, unknown> = {}): Harness {
       job.status = 'cancelled';
       return job;
     }),
+    probe: vi.fn(async () => undefined),
   };
   const out: string[] = [];
   const err: string[] = [];
@@ -1210,5 +1211,50 @@ describe('review fixes', () => {
     expect(task.attempts[1].itemIds).toEqual(['a']);
     expect(task.items[0]).toMatchObject({ state: 'submitted', lastAttempt: 2 });
     expect(task.items[0].sourceChanged).toBeUndefined();
+  });
+
+  it('refuses to retry, and bills nothing, while another process holds the task lock', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${JSON.stringify({ custom_id: 'a#1', response: { status_code: 500, body: {} } })}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    fs.writeFileSync(
+      path.join(path.dirname(h.store.fileOf(taskId)), 'lock'),
+      `${process.pid}\n${os.hostname()}\nx\n`,
+    );
+    await expect(retryTask(h.deps, taskId)).rejects.toThrow(
+      /in use by another/,
+    );
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps remote files and fails nothing when no result line can be matched', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('zzz#1', 'a format we could not map')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await expect(collectTask(h.deps, taskId)).rejects.toThrow(
+      /none of the result lines matched/,
+    );
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual([
+      'submitted',
+      'submitted',
+    ]);
+    expect(task.attempts[0].collected).toBeFalsy();
+    expect(task.attempts[0].outputPath).toBeUndefined();
+    expect(h.api.deleteFile).not.toHaveBeenCalled();
+  });
+
+  it('treats a create answer without a batch id as ambiguous', async () => {
+    const h = (harness = setup());
+    h.api.createBatch.mockImplementationOnce(async () => ({}) as BatchJob);
+    await runPlan(h.deps, h.planPath);
+    const task = h.store.load(taskIdOf(h));
+    expect(task.attempts[0].submitState).toBe('unknown');
+    expect(task.attempts[0].batchId).toBeUndefined();
   });
 });

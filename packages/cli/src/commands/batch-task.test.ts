@@ -31,6 +31,21 @@ const validPlan = {
 };
 
 describe('validatePlan', () => {
+  it('refuses targets inside tool configuration directories', () => {
+    for (const target of [
+      '.github/workflows/x.yml',
+      './.git/hooks/pre-commit',
+      '.Qwen/settings.json',
+    ]) {
+      expect(() =>
+        validatePlan(
+          { ...validPlan, items: [{ ...validPlan.items[0], target }] },
+          'plan.json',
+        ),
+      ).toThrow(/not allowed for batch delivery/);
+    }
+  });
+
   it('accepts a valid plan and defaults nothing away', () => {
     const plan = validatePlan(validPlan, 'plan.json');
     expect(plan.items).toHaveLength(2);
@@ -134,6 +149,20 @@ describe('BatchTaskStore', () => {
     const second = store.create(plan, root, 'qwen-plus');
     expect(second.id).not.toBe(first.id);
     expect(store.load(first.id).id).toBe(first.id);
+  });
+
+  it('re-reads a task record only when it changed, given a cache', () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const cache = new Map();
+    const first = store.list(cache)[0];
+    expect(store.list(cache)[0]).toBe(first);
+    task.status = 'running';
+    store.save(task);
+    expect(store.list(cache)[0].status).toBe('running');
   });
 
   it('refuses to load a task from a future schema version', () => {

@@ -120,6 +120,7 @@ export function createBatchAutoCollector(
   const log = options.log ?? (() => {});
   const env = options.env ?? process.env;
   const store = new BatchTaskStore(batchHomeDir(env));
+  const records = new Map<string, { stamp: string; task: BatchTask }>();
   const nextPollAt = new Map<string, number>();
   const pollDelay = new Map<string, number>();
   // One-time warnings: a submission that cannot be reconciled, and a
@@ -181,7 +182,7 @@ export function createBatchAutoCollector(
     let tasks: BatchTask[];
     try {
       tasks = store
-        .list()
+        .list(records)
         .filter(
           (task) =>
             isOpen(task) && belongsTo(options.projectRoot, task.projectRoot),
@@ -251,16 +252,12 @@ export function createBatchAutoCollector(
 }
 
 /**
- * Start the collector on unref'd timers: first pass immediately (startup
- * catch-up), then as `tick` asks. Never keeps the process alive and never
- * throws into the caller.
+ * Start the collector for the life of the process on unref'd timers: first
+ * pass immediately (startup catch-up), then as `tick` asks. Never keeps the
+ * process alive and never throws into the caller.
  */
-export function startBatchAutoCollect(
-  options: BatchAutoCollectOptions,
-): () => void {
+export function startBatchAutoCollect(options: BatchAutoCollectOptions): void {
   const collector = createBatchAutoCollector(options);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let stopped = false;
   const run = async () => {
     let delay = IDLE_SCAN_MS;
     try {
@@ -268,13 +265,7 @@ export function startBatchAutoCollect(
     } catch (error) {
       options.log?.(`batch auto-collect: ${String(error)}`);
     }
-    if (stopped) return;
-    timer = setTimeout(() => void run(), delay);
-    timer.unref?.();
+    setTimeout(() => void run(), delay).unref?.();
   };
   void run();
-  return () => {
-    stopped = true;
-    if (timer) clearTimeout(timer);
-  };
 }

@@ -111,6 +111,8 @@ output files are deleted.
   includes what your session spent preparing the plan.
 - `clean` refuses while a batch may still be running or holds uncollected
   results, unless you pass `--force`.
+- Targets may not be inside `.git/`, `.github/`, `.husky/` or `.qwen/`:
+  results are written hours after you approved the plan.
 
 Design: [`docs/design/2026-09-23-batch-api-design.md`](../../design/2026-09-23-batch-api-design.md).
 An offline end-to-end check (fake Batch API, real built CLI) lives in

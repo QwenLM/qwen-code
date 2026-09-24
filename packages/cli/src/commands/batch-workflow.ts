@@ -85,7 +85,7 @@ export interface WorkflowApi {
   deleteFile(ep: BatchEndpoint, fileId: string): Promise<void>;
   cancelBatch(ep: BatchEndpoint, id: string): Promise<BatchJob>;
   /** Cheapest authenticated call that proves the Batch route exists. */
-  probe?(ep: BatchEndpoint): Promise<void>;
+  probe(ep: BatchEndpoint): Promise<void>;
 }
 
 const liveApi: WorkflowApi = {
@@ -341,6 +341,11 @@ async function submitAttempt(
       uploaded.id,
       task.completionWindow,
     );
+    // An accepted create whose body names no batch (a proxy page, a dialect
+    // difference) is as ambiguous as a lost answer: reconcile, never guess.
+    if (typeof job?.id !== 'string' || !job.id) {
+      throw new Error('the create response carried no batch id');
+    }
     attempt.batchId = job.id;
     attempt.submitState = 'created';
     attempt.submittedAt = new Date().toISOString();
@@ -822,6 +827,27 @@ async function collectLocked(
         item.lastError = `provider reported failure: ${JSON.stringify(line.error ?? line).slice(0, 300)}`;
       }
     }
+    // The provider reports finished requests, yet not one line of the result
+    // files maps to this attempt: we could not read what was produced (a
+    // corrupt download, a format we do not parse). Failing every item would
+    // invite a paid retry and cleanup would delete the only good copy, so
+    // keep the remote files, drop the local copies for a fresh download and
+    // stop here.
+    if (
+      job &&
+      (attempt.outputPath || attempt.errorPath) &&
+      seen.size === 0 &&
+      (job.request_counts?.completed ?? 0) > 0
+    ) {
+      attempt.outputPath = undefined;
+      attempt.errorPath = undefined;
+      store.save(task);
+      throw new Error(
+        `none of the result lines matched this attempt although the provider reports ` +
+          `${job.request_counts?.completed} finished request(s); remote files were kept and ` +
+          `nothing was marked failed — collect again, or inspect the batch in the provider console`,
+      );
+    }
     for (const itemId of attempt.itemIds) {
       const item = itemById.get(itemId);
       if (item && item.state === 'submitted' && ownedBy(item, attempt)) {
@@ -1081,7 +1107,7 @@ async function retryLocked(
  */
 export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
   const api = deps.api ?? liveApi;
-  await api.probe?.(deps.ep);
+  await api.probe(deps.ep);
   const request = freezeRequest(deps.ep.generationConfig);
   const frozenLimit = request.params['max_tokens'];
   deps.out(

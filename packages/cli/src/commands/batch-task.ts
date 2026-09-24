@@ -68,6 +68,10 @@ export const batchPlanSchema = z
 
 export type BatchPlan = z.infer<typeof batchPlanSchema>;
 
+// Delivery happens hours after the plan was approved, with nobody watching,
+// so targets never land where a new file configures tools or runs code.
+const PROTECTED_TARGET_DIRS = new Set(['.git', '.github', '.husky', '.qwen']);
+
 export function validatePlan(raw: unknown, file: string): BatchPlan {
   const parsed = batchPlanSchema.safeParse(raw);
   if (!parsed.success) {
@@ -91,6 +95,12 @@ export function validatePlan(raw: unknown, file: string): BatchPlan {
       );
     }
     targetOf.set(item.target, item.id);
+    const top = path.normalize(item.target).split(/[\\/]/)[0].toLowerCase();
+    if (PROTECTED_TARGET_DIRS.has(top)) {
+      throw new Error(
+        `${file}: item "${item.id}" writes into ${top}/, which is not allowed for batch delivery`,
+      );
+    }
   }
   return plan;
 }
@@ -410,14 +420,30 @@ export class BatchTaskStore {
     renameWithRetry(tmp, file);
   }
 
-  list(): BatchTask[] {
+  /**
+   * Every readable task, newest first. With `cache`, a task file whose mtime
+   * and size are unchanged is not re-read — the session's auto-collector
+   * scans every minute, and most records are long settled.
+   */
+  list(cache?: Map<string, { stamp: string; task: BatchTask }>): BatchTask[] {
     const root = path.join(this.homeDir, 'tasks');
     if (!fs.existsSync(root)) return [];
     const tasks: BatchTask[] = [];
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       try {
-        tasks.push(this.load(entry.name));
+        if (!cache) {
+          tasks.push(this.load(entry.name));
+          continue;
+        }
+        const stat = fs.statSync(this.fileOf(entry.name));
+        const stamp = `${stat.mtimeMs}:${stat.size}`;
+        let hit = cache.get(entry.name);
+        if (hit?.stamp !== stamp) {
+          hit = { stamp, task: this.load(entry.name) };
+          cache.set(entry.name, hit);
+        }
+        tasks.push(hit.task);
       } catch {
         // A task another version cannot read must not hide the rest.
       }

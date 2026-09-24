@@ -106,6 +106,7 @@ function setup(): Harness {
     cancelBatch: vi.fn(async () => {
       throw new Error('unused');
     }),
+    probe: vi.fn(async () => undefined),
   };
   const h: Harness = {
     root,
@@ -211,6 +212,23 @@ describe('batch auto-collect', () => {
       new RegExp(`1 failed .*qwen batch retry ${taskId}`),
     );
     expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+  });
+
+  it('backs off 1 → 2 → 4 → 5 → 5 minutes between polls of a running batch', async () => {
+    const h = setup();
+    await submit(h); // batch-1 stays in_progress
+    const ac = collector(h);
+    const start = h.clock.now;
+    const pollMinutes: number[] = [];
+    h.api.getBatch.mockImplementation(async (_ep: unknown, id: string) => {
+      pollMinutes.push((h.clock.now - start) / 60_000);
+      return h.jobs.get(id) as BatchJob;
+    });
+    for (let minute = 0; minute <= 17; minute++) {
+      h.clock.now = start + minute * 60_000;
+      await ac.tick();
+    }
+    expect(pollMinutes).toEqual([0, 1, 3, 7, 12, 17]);
   });
 
   it('collects a task submitted from a subdirectory of the session root', async () => {

@@ -109,8 +109,9 @@ Rules:
   becomes part of the provider-side `custom_id`.
 - Paths are relative to the current working directory. Every `target` must
   be unique and must not overwrite an existing file — pick fresh output
-  paths. Results that arrive to a changed source or an occupied target are
-  held, not written.
+  paths, outside `.git/`, `.github/`, `.husky/` and `.qwen/` (refused). Results
+  that arrive to a changed source or an occupied target are held, not
+  written.
 - Optional fields: `completionWindow` (default `24h`, max `14d`),
   `maxOutputTokens` (set it when outputs can be long — a truncated item can
   only be retried with a larger limit), `expectedOutputTokensPerItem`

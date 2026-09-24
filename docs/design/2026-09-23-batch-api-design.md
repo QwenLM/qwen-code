@@ -158,6 +158,9 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   - item ids match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`, since they ride inside
     the custom_id;
   - ids and targets are unique;
+  - targets never start inside `.git/`, `.github/`, `.husky/` or `.qwen/`:
+    delivery runs hours after approval with nobody watching, so it must not
+    create files that configure tools or run code;
   - unknown fields fail loudly, so an agent's typo cannot silently change
     behavior.
 - `kind` is a literal; a new kind gets a new schema version.
@@ -183,6 +186,8 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
 | Result truncated / tool calls / empty                      | Item `failed` with the reason; a truncated item needs a larger limit to retry                                     |
 | Result custom_id unknown or duplicated                     | Ignored with a warning                                                                                            |
 | Item missing from all result files                         | `failed` ("no result line", or the provider's reason when the whole batch failed)                                 |
+| Result files present, but no line maps to the attempt      | Nothing marked failed, remote files kept, local copies dropped for a fresh download; collect reports it           |
+| Create accepted, but its body names no batch id            | `submit-unknown`, reconciled like a lost answer                                                                   |
 | Source changed since submission                            | `held`; `retry` resubmits it against the new source                                                               |
 | Target exists with other content / target symlinks outside | `held`; re-collect after resolving delivers from the local record, no new cost                                    |
 | After collect                                              | Remote input/output/error files deleted (404 counts as deleted); a failed deletion is retried by the next collect |
