@@ -48,6 +48,12 @@ export function addTableRules(service: TurndownLike): void {
   service.addRule('tableRow', {
     filter: 'tr',
     replacement: (content: string, node: HTMLElement) => {
+      // A row whose only children are things like a hidden input is not blank
+      // to Turndown, but it has no cells to write, and padding it would be
+      // output the grid budget never counted.
+      if (cellsOf(node).length === 0) {
+        return '';
+      }
       const grid = gridFor(node);
       const row = `|${content}${' |'.repeat(grid.after.get(node) ?? 0)}`;
       if (node !== grid.header) {
@@ -66,20 +72,36 @@ export function addTableRules(service: TurndownLike): void {
     replacement: (content: string) => content,
   });
 
+  // The parser moves a caption written after the rows, or between two row
+  // groups, to that place in the table, where its text would run into a row
+  // or split the table in two. A browser still draws it above the table, so
+  // that is where it is written.
   service.addRule('tableCaption', {
     filter: 'caption',
-    replacement: (content: string) =>
-      content.trim() ? `${content.trim()}\n\n` : '',
+    replacement: (content: string, node: HTMLElement) => {
+      const table = tableOf(node);
+      const text = content.trim();
+      if (table && text) {
+        const earlier = captions.get(table);
+        captions.set(table, earlier ? `${earlier}\n\n${text}` : text);
+      }
+      return '';
+    },
   });
 
   service.addRule('table', {
     filter: 'table',
     // A row with no cells is blank to Turndown, which writes it as a blank
     // line instead of calling the row rule, and a blank line ends the table.
-    replacement: (content: string) =>
-      `\n\n${content.trim().replace(/^(\|.*)\n\s*\n(?=\|)/gm, '$1\n')}\n\n`,
+    replacement: (content: string, node: HTMLElement) => {
+      const caption = captions.get(node);
+      const rows = content.trim().replace(/^(\|.*)\n\s*\n(?=\|)/gm, '$1\n');
+      return `\n\n${caption ? `${caption}\n\n` : ''}${rows}\n\n`;
+    },
   });
 }
+
+const captions = new WeakMap<Element, string>();
 
 function cellText(content: string): string {
   // Turndown writes a <br> as two spaces and a newline; the whole break folds
@@ -228,13 +250,10 @@ function layOut(
     };
     for (const cell of cells[rowIndex]) {
       before.set(cell, free());
+      // A rowspan ends with its row group, as in a browser.
+      const rowsLeft = groupEnds[rowIndex] - rowIndex;
       const across = spanOf(cell, 'colspan', 1, MAX_COLSPAN);
-      const down = spanOf(
-        cell,
-        'rowspan',
-        groupEnds[rowIndex] - rowIndex,
-        rows.length - rowIndex,
-      );
+      const down = spanOf(cell, 'rowspan', rowsLeft, rowsLeft);
       if (taken.size + across * down > budget) {
         return null;
       }

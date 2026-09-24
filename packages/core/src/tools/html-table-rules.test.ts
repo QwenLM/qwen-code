@@ -128,6 +128,23 @@ describe('addTableRules', () => {
     );
   });
 
+  it('writes a caption the parser moved past the rows above the table', () => {
+    // Written after the rows, the caption ran into the last row; written
+    // between two row groups, it split the table in two.
+    const after =
+      '<table><tr><th>A</th></tr><tr><td>1</td></tr><caption>Prices</caption></table>';
+    const between =
+      '<table><thead><tr><th>A</th></tr></thead><caption>Prices</caption>' +
+      '<tbody><tr><td>1</td></tr></tbody></table>';
+
+    expect(service(true).turndown(after)).toBe(
+      'Prices\n\n| A |\n| --- |\n| 1 |',
+    );
+    expect(service(true).turndown(between)).toBe(
+      'Prices\n\n| A |\n| --- |\n| 1 |',
+    );
+  });
+
   it('pads the columns a colspan covers', () => {
     // One cell for three columns left the row two cells short of the header.
     const html =
@@ -191,6 +208,20 @@ describe('addTableRules', () => {
       ['---', '---'],
       ['1', '2'],
       ['3', '4'],
+    ]);
+  });
+
+  it('ends a rowspan with its row group', () => {
+    // A browser does not carry a thead cell down into the body, so the body
+    // row keeps its first column.
+    const html =
+      '<table><thead><tr><th rowspan="2">Product</th><th>Price</th></tr></thead>' +
+      '<tbody><tr><td>Cable</td><td>9 EUR</td></tr></tbody></table>';
+
+    expect(tableRows(service(true).turndown(html))).toEqual([
+      ['Product', 'Price'],
+      ['---', '---'],
+      ['Cable', '9 EUR'],
     ]);
   });
 
@@ -315,6 +346,29 @@ describe('addTableRules', () => {
     expect(service(true).turndown(html)).toBe(
       '| A | B |\n| --- | --- |\n| 1 | 2 |',
     );
+  });
+
+  it('writes no row for a row that has no cells but is not blank', () => {
+    // A hidden input or a script keeps a row from being blank to Turndown.
+    // Written, it was an empty data row, padded to the full width of the grid
+    // outside the budget: 400 of them under a wide row came to 6.5 MB.
+    const html =
+      '<table><tr><td>a</td><td>b</td></tr>' +
+      '<tr><input type="hidden" name="k" value="v"></tr>' +
+      '<tr><script>x()</script></tr>' +
+      '<tr><td>1</td><td>2</td></tr></table>';
+
+    expect(service(true).turndown(html)).toBe(
+      '| a | b |\n| --- | --- |\n| 1 | 2 |',
+    );
+
+    const wide = `<tr>${'<td colspan="8">c</td>'.repeat(100)}</tr>`;
+    const ghosts = '<tr><script></script></tr>'.repeat(400);
+    const markdown = service(true).turndown(
+      `<table>${wide}${ghosts}${wide}</table>`,
+    );
+
+    expect(markdown.split('\n')).toHaveLength(3);
   });
 
   it('puts the delimiter under the first row that has cells', () => {
