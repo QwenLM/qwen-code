@@ -128,6 +128,40 @@ describe('operator execution sandbox policy', () => {
     expect(minimal.tools?.discoveryCommand).toBeUndefined();
     expect(minimal.hooks).toBeUndefined();
   });
+  it.each([
+    [
+      'privacy.usageStatisticsEnabled',
+      { privacy: { usageStatisticsEnabled: false } },
+    ],
+    [
+      'legacy top-level usageStatisticsEnabled',
+      { usageStatisticsEnabled: false },
+    ],
+  ])('bare mode keeps a usage-statistics opt-out from %s', (_shape, value) => {
+    write(user, value);
+    const minimal = createMinimalSettings().merged;
+    expect(minimal.privacy?.usageStatisticsEnabled).toBe(false);
+    // Only the privacy choice survives; confinement stays unset.
+    expect(minimal.tools?.executionSandbox).toBeUndefined();
+  });
+  it('bare mode resolves usage statistics with normal scope precedence', () => {
+    write(defaults, { privacy: { usageStatisticsEnabled: false } });
+    write(user, { privacy: { usageStatisticsEnabled: true } });
+    write(system, { privacy: { usageStatisticsEnabled: false } });
+    expect(createMinimalSettings().merged.privacy?.usageStatisticsEnabled).toBe(
+      false,
+    );
+    write(system, {});
+    expect(createMinimalSettings().merged.privacy?.usageStatisticsEnabled).toBe(
+      true,
+    );
+  });
+  it('bare mode leaves usage statistics unset when no scope configures it', () => {
+    write(user, { privacy: { usageStatisticsEnabled: 'no' } });
+    expect(
+      createMinimalSettings().merged.privacy?.usageStatisticsEnabled,
+    ).toBeUndefined();
+  });
   it('does not migrate or repair project files on the host under confinement', () => {
     write(user, { tools: { executionSandbox: restricted } });
     const project = path.join(workspace, '.qwen', 'settings.json');

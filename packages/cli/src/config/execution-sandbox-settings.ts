@@ -60,6 +60,12 @@ type SandboxSettingsInput = {
   tools?: { executionSandbox?: unknown; sandbox?: unknown };
 };
 
+type OperatorSettingsScope = SandboxSettingsInput & {
+  privacy?: { usageStatisticsEnabled?: unknown };
+  /** Pre-v2 location, migrated to `privacy.*` by a normal settings load. */
+  usageStatisticsEnabled?: unknown;
+};
+
 export function selectOperatorExecutionSandbox(
   ...scopes: SandboxSettingsInput[]
 ): ExecutionSandboxSettings | undefined {
@@ -73,8 +79,37 @@ export function selectOperatorExecutionSandbox(
 
 /** Bare mode still honors operator confinement without loading project/env data. */
 export function readOperatorSandboxSettings(): SandboxSettingsInput {
+  return sandboxSettingsFromScopes(readOperatorSettingsScopes());
+}
+
+/**
+ * The operator settings bare mode keeps: sandbox confinement, plus the
+ * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on.
+ * Scopes resolve like a normal load (system over user over system defaults).
+ */
+export function readBareModeOperatorSettings(): SandboxSettingsInput & {
+  privacy?: { usageStatisticsEnabled: boolean };
+} {
+  const scopes = readOperatorSettingsScopes();
+  const usageStatisticsEnabled = scopes.reduce<boolean | undefined>(
+    (current, scope) => {
+      const value =
+        scope.privacy?.usageStatisticsEnabled ?? scope.usageStatisticsEnabled;
+      return typeof value === 'boolean' ? value : current;
+    },
+    undefined,
+  );
+  return {
+    ...sandboxSettingsFromScopes(scopes),
+    ...(usageStatisticsEnabled === undefined
+      ? {}
+      : { privacy: { usageStatisticsEnabled } }),
+  };
+}
+
+function readOperatorSettingsScopes(): OperatorSettingsScope[] {
   const userSettingsPath = path.join(getGlobalQwenDirLite(), 'settings.json');
-  const scopes = [
+  return [
     getSystemDefaultsPath(),
     userSettingsPath,
     getSystemSettingsPath(),
@@ -96,7 +131,7 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error('Expected a settings object.');
       }
-      return parsed as SandboxSettingsInput;
+      return parsed as OperatorSettingsScope;
     } catch (error) {
       let backupPath: string | undefined;
       if (file === userSettingsPath) {
@@ -112,6 +147,11 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
       );
     }
   });
+}
+
+function sandboxSettingsFromScopes(
+  scopes: SandboxSettingsInput[],
+): SandboxSettingsInput {
   const executionSandbox = selectOperatorExecutionSandbox(...scopes);
   const sandbox = scopes.reduce<unknown>(
     (current, scope) => scope.tools?.sandbox ?? current,
