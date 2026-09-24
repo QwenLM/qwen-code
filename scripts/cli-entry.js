@@ -388,6 +388,19 @@ if (isInProcessFastPath()) {
     }
   };
 
+  // A fresh Node image (the spawned or relaunched CLI) reaches the cache only
+  // through NODE_COMPILE_CACHE; enabling it here also resolves the default
+  // directory and honours NODE_DISABLE_COMPILE_CACHE. Like the serve fast
+  // path, the value then reaches tool subprocesses too.
+  const { default: module } = await import('node:module');
+  const compileCache = module.enableCompileCache?.();
+  const compileCacheEnv =
+    !process.env['NODE_COMPILE_CACHE'] &&
+    compileCache?.status === module.constants?.compileCacheStatus?.ENABLED &&
+    compileCache?.directory
+      ? { NODE_COMPILE_CACHE: compileCache.directory }
+      : {};
+
   if (process.platform !== 'win32') {
     // Running the CLI in this process instead of a child saves a Node boot and
     // the idle launcher's memory for the whole session. The memory-pressure
@@ -401,6 +414,7 @@ if (isInProcessFastPath()) {
     process.on('exit', (code) => {
       if (code === UPDATE_COMPLETE_EXIT_CODE) relaunchAfterUpdate();
     });
+    Object.assign(process.env, compileCacheEnv);
     process.argv.splice(1, Infinity, cliPath, ...cliArgs);
     await import(pathToFileURL(cliPath).href);
   } else {
@@ -409,7 +423,11 @@ if (isInProcessFastPath()) {
       ['--expose-gc', cliPath, ...cliArgs],
       {
         stdio: 'inherit',
-        env: { ...process.env, QWEN_CODE_LAUNCHER_PID: String(process.pid) },
+        env: {
+          ...process.env,
+          ...compileCacheEnv,
+          QWEN_CODE_LAUNCHER_PID: String(process.pid),
+        },
       },
     );
     if (result.signal) {
