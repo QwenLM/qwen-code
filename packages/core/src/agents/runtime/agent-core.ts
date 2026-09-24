@@ -1707,10 +1707,17 @@ export class AgentCore {
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
       allowed.has(ToolNames.EXEC)
     ) {
+      // A configured list that mentions MCP narrows MCP names through the
+      // raw-identity match in isToolExecutionAllowed; expanding them in here
+      // would short-circuit that narrowing via `includes`.
+      const mentionsMcp = [...allowed].some((name) => name.startsWith('mcp__'));
       for (const toolName of this.runtimeContext
         .getToolRegistry()
         .getAllToolNames()) {
-        if (getToolExposure(toolName) === 'code-mode-callable') {
+        if (
+          getToolExposure(toolName) === 'code-mode-callable' &&
+          !(mentionsMcp && toolName.startsWith('mcp__'))
+        ) {
           allowed.add(toolName);
         }
       }

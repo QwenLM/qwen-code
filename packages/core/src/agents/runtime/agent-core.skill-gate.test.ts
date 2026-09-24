@@ -568,6 +568,54 @@ describe('AgentCore skill-gate inputs', () => {
       ).toEqual(['mcp__github__read_file']);
     });
 
+    it('honors MCP patterns from the tools list alone in the CodeModeOnly nested binding set', async () => {
+      // CodeModeOnly widens a configured exec grant into every
+      // code-mode-callable registry name; that expansion must not swallow
+      // the MCP names the configured list narrows by pattern.
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeModeOnly });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      const readTool = new MockTool({ name: 'mcp__github__read_file' });
+      Object.assign(readTool, {
+        serverName: 'github',
+        serverToolName: 'read_file',
+      });
+      const createTool = new MockTool({ name: 'mcp__github__create_issue' });
+      Object.assign(createTool, {
+        serverName: 'github',
+        serverToolName: 'create_issue',
+      });
+      const chargeTool = new MockTool({ name: 'mcp__payments__charge' });
+      Object.assign(chargeTool, {
+        serverName: 'payments',
+        serverToolName: 'charge',
+      });
+      registry.registerTool(readTool);
+      registry.registerTool(createTool);
+      registry.registerTool(chargeTool);
+      const core = new AgentCore(
+        'mcp-pattern-tools-only-code-mode-only',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        {
+          tools: [ToolNames.EXEC, 'mcp__github__read_*'],
+        },
+      );
+
+      await core.prepareTools();
+
+      expect(
+        (
+          core as unknown as {
+            codeModeAllowedToolNames?: readonly string[];
+          }
+        ).codeModeAllowedToolNames,
+      ).toEqual(['mcp__github__read_file']);
+    });
+
     it('honors an exact MCP tool name in the hybrid nested binding set', async () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
       const registry = new ToolRegistry(config);
