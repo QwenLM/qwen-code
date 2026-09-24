@@ -318,6 +318,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     == RuntimeSessionRecord.State.RELEASED) {
                 return true;
             }
+            RuntimeBindingRecord binding = bindingRepository.findById(
+                    record.getBindingId());
+            if (record.getState() == RuntimeSessionRecord.State.READY
+                    && binding != null
+                    && binding.getState() == RuntimeBindingRecord.State.LOST
+                    && binding.getGeneration()
+                            == record.getRuntimeGeneration()
+                    && !executionRepository.hasActiveByRuntimeSession(
+                            runtimeSessionId)) {
+                RuntimeSessionRecord releasing = sessionRepository
+                        .compareAndSet(record, record.withState(
+                                RuntimeSessionRecord.State.RELEASING,
+                                clock.instant()));
+                if (releasing != null) {
+                    finishSessionRelease(releasing);
+                    return true;
+                }
+            }
             throw unavailable("runtime_reconciliation_required",
                     "Runtime Session is not active in this Broker process");
         });

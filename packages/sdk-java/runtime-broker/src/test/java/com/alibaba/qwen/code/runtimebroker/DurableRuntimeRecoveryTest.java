@@ -464,6 +464,36 @@ class DurableRuntimeRecoveryTest {
             assertEquals(RuntimeBindingRecord.State.LOST,
                     blocked.getState());
             assertEquals(0, recovered.ensures.get());
+
+            ToolExecutionRecord active = executions.findOrCreate(
+                    ToolExecutionRecord.prepared("execution", "key",
+                            blocked.getBindingId(), blocked.getGeneration(),
+                            "harness", "active-session", "prompt", "call",
+                            "digest", Map.of("sessionId", "active-session",
+                                    "promptId", "prompt", "callId", "call",
+                                    "argsDigest", "digest")));
+            Exception pinned = assertThrows(Exception.class,
+                    () -> service.release("harness", "active-session")
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+            assertEquals("runtime_reconciliation_required",
+                    brokerFailure(pinned).getCode());
+            executions.requestCancel(active.getExecutionCallId(),
+                    active.getVersion());
+
+            assertTrue(service.release("harness", "active-session")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    sessions.findById(SCOPE, "active-session").getState());
+
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            RuntimeBindingRecord replacement = bindings.findActive(
+                    request(recovered));
+            assertEquals(2, replacement.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    replacement.getState());
+            assertEquals(1, recovered.ensures.get());
         }
     }
 

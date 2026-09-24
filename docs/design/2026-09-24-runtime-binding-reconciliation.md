@@ -153,6 +153,11 @@ generation through the normal provisioning path — only while
 the lost generation. While anything is still active the caller gets
 `runtime_broker_runtime_lost` and the binding stays `LOST`.
 
+An explicit `release` can settle a same-generation `READY` session locally
+when its binding is `LOST` and it has no active execution. The Runtime is
+proven gone, so no transport call is possible; an active execution continues
+to pin the session and the lost generation.
+
 `RECOVERY_BLOCKED` never transitions on its own; it requires an operator,
 matching the rule that an ambiguous Runtime is never retried away.
 
@@ -166,13 +171,14 @@ every outcome.
 
 ## 4. Validation
 
-`mvn test` in `packages/sdk-java/runtime-broker`: 123 tests, including the new
-`DurableRuntimeRecoveryTest` (11 cases: gated reconcile-and-adopt, unknown
+`mvn test` in `packages/sdk-java/runtime-broker`: 124 tests, including the new
+`DurableRuntimeRecoveryTest` (12 cases: gated reconcile-and-adopt, unknown
 never replaces, timeout releases the claim and resumes, in-flight reconcile
 bounded by the deadline, late attestation fenced, initial-provision mismatch
-blocks, conflict keeps the last trusted handle, non-retryable ensure failure
-stops, a late ensure result cannot overwrite a new owner, loss re-creates a
-generation only when idle, loss stays blocked with an active session).
+blocks, non-retryable attestation failure blocks recovery, conflict keeps the
+last trusted handle, non-retryable ensure failure stops, a late ensure result
+cannot overwrite a new owner, loss re-creates a generation only when idle,
+and loss stays pinned until an active session can be safely released).
 `JdbcRepositoryContract` now round-trips the seed, handle, attestation
 generation and reconciliation time on H2, asserts the seed and the legacy
 lease token are stored encrypted, and covers `releaseOperation` handoff.

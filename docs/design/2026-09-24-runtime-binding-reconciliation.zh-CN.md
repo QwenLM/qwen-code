@@ -72,6 +72,8 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 `LOST` 记录保持活跃，因此既有会话与执行仍指向已丢失的代数，而不会漂移到替代 Runtime。下一次 `warm`/`acquire` 只在 `countActiveByBinding` 与新增的 `ToolExecutionRepository.hasActiveByBinding` 都确认没有引用时才回收槽位——`LOST` 转 `RELEASED`，再经正常 provision 路径创建新代数。只要仍有活跃引用，调用方得到 `runtime_broker_runtime_lost`，绑定保持 `LOST`。
 
+显式 `release` 可以在 binding 为 `LOST` 且没有活跃 execution 时，本地结算同代 `READY` Session。Runtime 已被证明不存在，因此无法调用 transport；活跃 execution 仍会钉住 Session 与已丢失代数。
+
 `RECOVERY_BLOCKED` 从不自行迁移；它需要运维介入，与"状态不明的 Runtime 绝不被重试掉"的规则一致。
 
 ### 3.6 认领释放
@@ -80,7 +82,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 ## 4. 验证
 
-在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：123 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 11 例（受门控的对账-接管、unknown 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、迟到的 ensure 结果不能覆盖新 owner、丢失仅在空闲时创建新代数、有活跃会话时丢失保持阻塞）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储，并覆盖 `releaseOperation` 移交。`mvn checkstyle:check` 通过。
+在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：124 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 12 例（受门控的对账-接管、unknown 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、不可重试 attestation 失败会阻塞恢复、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、迟到的 ensure 结果不能覆盖新 owner、丢失仅在空闲时创建新代数、有活跃会话时丢失保持阻塞直至可以安全释放）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储，并覆盖 `releaseOperation` 移交。`mvn checkstyle:check` 通过。
 
 ## 5. 后续工作
 
