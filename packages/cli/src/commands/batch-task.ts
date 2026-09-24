@@ -165,7 +165,6 @@ export interface TaskAttempt {
     /** Result lines that carried no usage: the totals are a lower bound. */
     missing?: number;
   };
-  remoteCleaned?: boolean;
   /** Output limit this attempt ran with when a retry raised it. */
   maxOutputTokens?: number;
   /** Terminal provider status and job-level errors, recorded at collect. */
@@ -290,10 +289,6 @@ export class BatchTaskStore {
    * budget gate) so it does not linger in `list`. */
   remove(id: string): void {
     fs.rmSync(this.dirOf(id), { recursive: true, force: true });
-  }
-
-  exists(id: string): boolean {
-    return fs.existsSync(this.fileOf(id));
   }
 
   /**

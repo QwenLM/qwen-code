@@ -225,11 +225,6 @@ const collectWorkflowCommand: CommandModule = {
         type: 'number',
         default: 3600,
       })
-      .option('keep-remote', {
-        describe: 'Keep the uploaded input/output files on the provider',
-        type: 'boolean',
-        default: false,
-      })
       .check((argv) =>
         Number.isFinite(argv['timeout']) && (argv['timeout'] as number) > 0
           ? true
@@ -243,7 +238,6 @@ const collectWorkflowCommand: CommandModule = {
         {
           wait: argv['wait'] as boolean,
           timeoutSeconds: argv['timeout'] as number,
-          keepRemote: argv['keep-remote'] as boolean,
         },
       );
     }),

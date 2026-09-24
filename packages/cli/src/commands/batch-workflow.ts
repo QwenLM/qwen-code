@@ -514,7 +514,6 @@ async function reconcileUnknownAttempt(
 interface CollectOptions {
   wait?: boolean;
   timeoutSeconds?: number;
-  keepRemote?: boolean;
 }
 
 /** Undefined when the line carries no usable usage — never a silent zero. */
@@ -815,10 +814,11 @@ async function collectLocked(
     refreshTaskStatus(task);
     store.save(task);
 
-    if (job && !options.keepRemote && !attempt.remoteCleaned) {
+    if (job) {
       // Results are safely local now; uploaded files otherwise live on the
-      // provider until somebody deletes them. Failure here must not fail
-      // the collection — the report below stays truthful either way.
+      // provider until somebody deletes them. A failed deletion leaves the
+      // attempt uncollected, so the next collect re-fetches the settled batch
+      // and retries instead of leaking the files; it never fails the collect.
       let failed = 0;
       for (const fileId of [
         job.input_file_id,
@@ -835,16 +835,8 @@ async function collectLocked(
           );
         }
       }
-      // Cleanup counts only when every deletion landed; otherwise the
-      // attempt stays uncollected below, so the next collect re-fetches the
-      // settled batch and retries instead of leaking the files forever.
-      attempt.remoteCleaned = failed === 0;
-    }
-    if (job) {
-      // `collect --keep-remote` opts out of cleanup entirely.
       if (firstHarvest) settledNow += 1;
-      attempt.collected =
-        options.keepRemote === true || attempt.remoteCleaned === true;
+      attempt.collected = failed === 0;
       store.save(task);
     }
   };
@@ -1140,15 +1132,6 @@ export async function cleanTask(
       for (const attempt of open) {
         deps.err(
           `[batch] warning: ${attempt.batchId ?? `attempt ${attempt.attempt}`} was not cancelled; it may still run and bill.`,
-        );
-      }
-      const leftRemote = task.attempts.filter(
-        (attempt) => attempt.collected && !attempt.remoteCleaned,
-      );
-      if (leftRemote.length > 0) {
-        deps.err(
-          `[batch] note: remote input/output files of ${leftRemote.map((attempt) => attempt.batchId).join(', ')} ` +
-            `were kept (--keep-remote) and are not deleted by clean.`,
         );
       }
       store.remove(taskId);

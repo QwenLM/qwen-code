@@ -496,9 +496,8 @@ describe('collectTask', () => {
     await collectTask(h.deps, taskId);
     let task = h.store.load(taskId);
     expect(task.items.every((item) => item.state === 'delivered')).toBe(true);
-    // A failed deletion is not "cleaned", and the attempt is not collected:
-    // marking both anyway would leak the remote files forever.
-    expect(task.attempts[0].remoteCleaned).toBe(false);
+    // A failed deletion leaves the attempt uncollected: marking it anyway
+    // would leak the remote files forever.
     expect(task.attempts[0].collected).toBe(false);
     expect(h.err.join('\n')).toMatch(/could not delete remote file file-in-1/);
 
@@ -506,7 +505,6 @@ describe('collectTask', () => {
     const downloads = h.api.downloadFile.mock.calls.length;
     const summary = await collectTask(h.deps, taskId);
     task = h.store.load(taskId);
-    expect(task.attempts[0].remoteCleaned).toBe(true);
     expect(task.attempts[0].collected).toBe(true);
     // The settled batch was re-fetched to retry cleanup, but results were
     // not re-downloaded or re-announced.
@@ -1011,9 +1009,9 @@ describe('cleanTask', () => {
     await runPlan(h.deps, h.planPath);
     const taskId = taskIdOf(h);
     await expect(cleanTask(h.deps, taskId)).rejects.toThrow(/batch-1/);
-    expect(h.store.exists(taskId)).toBe(true);
+    expect(fs.existsSync(h.store.fileOf(taskId))).toBe(true);
     await cleanTask(h.deps, taskId, { force: true });
-    expect(h.store.exists(taskId)).toBe(false);
+    expect(fs.existsSync(h.store.fileOf(taskId))).toBe(false);
     expect(h.err.join('\n')).toMatch(/batch-1 was not cancelled/);
     expect(h.api.cancelBatch).not.toHaveBeenCalled();
   });
