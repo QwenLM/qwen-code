@@ -248,7 +248,18 @@ describe('classifyResult', () => {
       custom_id: 'a#1',
       response: { status_code: 200, body: okBody('# Intro\n') },
     });
-    expect(verdict).toEqual({ kind: 'ok', content: '# Intro' });
+    expect(verdict).toEqual({ kind: 'ok', content: '# Intro\n' });
+  });
+
+  it('delivers the completion verbatim, including meaningful whitespace', () => {
+    // An indented Markdown code block loses its indent under trim(), and the
+    // trailing newline is part of the generated file.
+    const doc = '# Intro\n\n    indented code line\n';
+    const verdict = classifyResult({
+      custom_id: 'a#1',
+      response: { status_code: 200, body: okBody(doc) },
+    });
+    expect(verdict).toEqual({ kind: 'ok', content: doc });
   });
 
   it('rejects a non-200 request status', () => {
@@ -418,6 +429,26 @@ describe('deliverResult', () => {
       expect(outcome.kind).toBe('held');
       if (outcome.kind === 'held') expect(outcome.reason).toMatch(/outside/);
       expect(fs.existsSync(path.join(outside, 'out.md'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('holds without creating directories outside a symlinked parent', () => {
+    // `linked/new/` does not exist yet: containment must be proven at the
+    // nearest existing ancestor before mkdir creates anything outside.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-outside-'));
+    try {
+      fs.symlinkSync(outside, path.join(root, 'linked'));
+      const outcome = deliverResult(
+        item({ target: 'linked/new/out.md' }),
+        content,
+        root,
+        sourceHash,
+      );
+      expect(outcome.kind).toBe('held');
+      if (outcome.kind === 'held') expect(outcome.reason).toMatch(/outside/);
+      expect(fs.existsSync(path.join(outside, 'new'))).toBe(false);
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }

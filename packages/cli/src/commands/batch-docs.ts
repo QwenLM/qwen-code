@@ -333,7 +333,10 @@ export function classifyResult(line: OutputLine): ResultVerdict {
   if (typeof message.content !== 'string' || !message.content.trim()) {
     return { kind: 'failed', reason: 'empty completion content' };
   }
-  const content = message.content.trim();
+  // Deliver exactly what the model returned: leading whitespace and the
+  // trailing newline can be meaningful (an indented code block), so trim()
+  // only guards emptiness, never edits the document.
+  const content = message.content;
   // A truncated markdown transform most visibly breaks fence pairing; it is
   // a cheap structural signal, not a quality claim.
   if ((content.match(/```/g)?.length ?? 0) % 2 !== 0) {
@@ -392,10 +395,26 @@ export function deliverResult(
     }
   }
   const parent = path.dirname(targetPath);
-  fs.mkdirSync(parent, { recursive: true });
-  // Symlink escape: the parent chain must really live under the project.
-  const realParent = fs.realpathSync(parent);
   const realRoot = fs.realpathSync(projectRoot);
+  // Containment must be proven before anything is created: with a symlink
+  // in the existing chain (linked -> /outside), a recursive mkdir would
+  // otherwise create the missing tail outside the project first.
+  let ancestor = parent;
+  while (!fs.existsSync(ancestor)) {
+    const up = path.dirname(ancestor);
+    if (up === ancestor) break;
+    ancestor = up;
+  }
+  if (!isInsideRoot(realRoot, fs.realpathSync(ancestor))) {
+    return {
+      kind: 'held',
+      reason: `target directory "${item.target}" resolves outside the project root`,
+    };
+  }
+  fs.mkdirSync(parent, { recursive: true });
+  // Revalidate the created parent: the chain must really live under the
+  // project at delivery time, not just before the mkdir.
+  const realParent = fs.realpathSync(parent);
   if (!isInsideRoot(realRoot, realParent)) {
     return {
       kind: 'held',

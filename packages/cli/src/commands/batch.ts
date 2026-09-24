@@ -7,8 +7,8 @@
 // File for 'qwen batch' — submit, inspect, fetch, and cancel DashScope Batch
 // API jobs. Batch runs at half the realtime price with a >=24h completion
 // window, so it is a fan-out tool for many independent single-turn requests,
-// not a path for the agent loop. Rationale and probe results:
-// docs/plans/2026-09-14-batch-api-feasibility.md
+// not a path for the agent loop. Rationale and measurements:
+// docs/design/2026-09-23-agent-prepared-batch-api.md
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -441,6 +441,14 @@ export async function fetchBatch(
   outDir: string,
   remove: boolean,
 ): Promise<{ job: BatchJob; written: string[] }> {
+  // The argv id becomes a URL segment and a filename verbatim: a value with
+  // path separators (../../report) would write outside outDir, and the
+  // download's final rename would replace whatever lives there.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
+    throw new Error(
+      `invalid batch id "${id}": expected a single id component (letters, digits, dot, dash, underscore)`,
+    );
+  }
   const job = await getBatch(ep, id);
   if (!SETTLED.has(job.status)) {
     throw new Error(
@@ -773,11 +781,10 @@ const listWorkflowCommand: CommandModule = {
   command: 'list',
   describe: 'List all recorded workflow tasks with their project',
   builder: (yargs) => yargs,
-  handler: (argv) =>
+  // Local only: no endpoint or credentials needed.
+  handler: () =>
     run(async () => {
-      await listTasks(
-        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
-      );
+      await listTasks({ env: process.env, out: writeStdoutLine });
     }),
 };
 

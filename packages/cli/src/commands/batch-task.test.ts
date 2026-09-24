@@ -318,6 +318,25 @@ describe('refreshTaskStatus', () => {
     expect(task.status).toBe('submit-unknown');
   });
 
+  it('surfaces an ambiguous submission over partial progress', () => {
+    // A retry whose create answer was lost starts from failed/delivered
+    // item states; the list must still say reconcile-first, not "partial".
+    const task = baseTask();
+    task.items[0].state = 'failed';
+    task.attempts.push({
+      attempt: 1,
+      itemIds: ['intro'],
+      submitState: 'created',
+    });
+    task.attempts.push({
+      attempt: 2,
+      itemIds: ['intro'],
+      submitState: 'unknown',
+    });
+    refreshTaskStatus(task);
+    expect(task.status).toBe('submit-unknown');
+  });
+
   it('treats an attempt stuck in uploaded as ambiguous too', () => {
     // A process that died with the create request in flight leaves the
     // attempt `uploaded`; the batch may exist, so it must be reconciled.

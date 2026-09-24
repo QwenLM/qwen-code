@@ -432,6 +432,14 @@ export function refreshTaskStatus(task: BatchTask): void {
     task.status = 'done';
     return;
   }
+  const last = task.attempts[task.attempts.length - 1];
+  // An ambiguous latest attempt outranks partial progress: its create may
+  // exist and be billing, so the list must say reconcile-first rather than
+  // "some items failed".
+  if (last && isAmbiguous(last)) {
+    task.status = 'submit-unknown';
+    return;
+  }
   if (
     task.attempts.length > 0 &&
     states.some((state) => state !== 'pending' && state !== 'submitted')
@@ -439,10 +447,7 @@ export function refreshTaskStatus(task: BatchTask): void {
     task.status = 'partial';
     return;
   }
-  const last = task.attempts[task.attempts.length - 1];
-  if (last && isAmbiguous(last)) {
-    task.status = 'submit-unknown';
-  } else if (last?.submitState === 'created') {
+  if (last?.submitState === 'created') {
     task.status = 'running';
   }
 }

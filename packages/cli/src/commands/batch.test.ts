@@ -600,6 +600,18 @@ describe('submitBatch / fetchBatch', () => {
     expect(fs.existsSync(path.join(dir, 'b.output.jsonl.part'))).toBe(false);
   });
 
+  it('refuses a batch id that is not a safe filename component', async () => {
+    // The id becomes `<id>.output.jsonl` under outDir and a URL segment:
+    // separators or dots-only prefixes would write outside the directory.
+    await expect(fetchBatch(ep, '../escape', dir, false)).rejects.toThrow(
+      /invalid batch id/,
+    );
+    await expect(fetchBatch(ep, 'a/b', dir, false)).rejects.toThrow(
+      /invalid batch id/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('still reports a successful fetch when a remote delete fails', async () => {
     // The results are already on disk; a failed DELETE must not abort the
     // command before the written paths reach the user.

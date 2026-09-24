@@ -444,6 +444,26 @@ describe('collectTask', () => {
     expect(task.items.every((item) => item.state === 'delivered')).toBe(true);
   });
 
+  it('waits when a completed batch omits request_counts and has no result file', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    const taskId = taskIdOf(h);
+    const job = h.jobs.get('batch-1') as BatchJob;
+    job.status = 'completed';
+    // A provider that omits the counts proves nothing about results:
+    // failing every item here would invite a paid retry of billed work.
+    delete job.request_counts;
+
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual([
+      'submitted',
+      'submitted',
+    ]);
+    expect(task.attempts[0].collected).toBeUndefined();
+    expect(h.out.join('\n')).toMatch(/result file is not available yet/);
+  });
+
   it('still reports what it delivered when another batch of the task fails to collect', async () => {
     const h = (harness = setup());
     await runAndSettle(h, {
@@ -523,6 +543,39 @@ describe('collectTask', () => {
     expect(
       fs.readFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'utf8'),
     ).toBe('# B\n\nBeta.');
+  });
+
+  it('retries remote cleanup on the next collect when a deletion fails', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    h.api.deleteFile.mockRejectedValueOnce(new Error('provider down'));
+    await collectTask(h.deps, taskId);
+    let task = h.store.load(taskId);
+    expect(task.items.every((item) => item.state === 'delivered')).toBe(true);
+    // A failed deletion is not "cleaned", and the attempt is not collected:
+    // marking both anyway would leak the remote files forever.
+    expect(task.attempts[0].remoteCleaned).toBe(false);
+    expect(task.attempts[0].collected).toBe(false);
+    expect(h.err.join('\n')).toMatch(/could not delete remote file file-in-1/);
+
+    const polls = h.api.getBatch.mock.calls.length;
+    const downloads = h.api.downloadFile.mock.calls.length;
+    const summary = await collectTask(h.deps, taskId);
+    task = h.store.load(taskId);
+    expect(task.attempts[0].remoteCleaned).toBe(true);
+    expect(task.attempts[0].collected).toBe(true);
+    // The settled batch was re-fetched to retry cleanup, but results were
+    // not re-downloaded or re-announced.
+    expect(h.api.getBatch.mock.calls.length).toBe(polls + 1);
+    expect(h.api.downloadFile.mock.calls.length).toBe(downloads);
+    expect(summary.settled).toBe(0);
+    expect(summary.delivered).toEqual([]);
+    expect(
+      h.api.deleteFile.mock.calls.map((call: unknown[]) => call[1]),
+    ).toEqual(['file-in-1', 'file-out-1', 'file-in-1', 'file-out-1']);
   });
 
   it('marks per-item failures from bad statuses, the error file, and missing lines', async () => {
@@ -778,6 +831,27 @@ describe('collectTask', () => {
     expect(h.sleeps).toEqual([10_000, 20_000]);
     expect(fs.existsSync(path.join(h.root, 'docs', 'en', 'a.md'))).toBe(true);
   });
+
+  it('caps each backoff sleep at the remaining --timeout budget', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    let fakeNow = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow);
+    h.deps.sleep = async (ms) => {
+      h.sleeps.push(ms);
+      fakeNow += ms;
+    };
+    try {
+      await expect(
+        collectTask(h.deps, taskIdOf(h), { wait: true, timeoutSeconds: 15 }),
+      ).rejects.toThrow(/still in_progress after the --wait timeout/);
+    } finally {
+      nowSpy.mockRestore();
+    }
+    // 10s then 20s of backoff, but only 15s of budget: the second sleep is
+    // capped at the remaining 5s instead of overshooting the deadline.
+    expect(h.sleeps).toEqual([10_000, 5_000]);
+  });
 });
 
 describe('retryTask', () => {
@@ -849,6 +923,29 @@ describe('retryTask', () => {
     await expect(retryTask(h.deps, taskId)).rejects.toThrow(
       /cannot be enforced/,
     );
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+  });
+
+  it('gates the retry on the real assembly, not the run-time average', async () => {
+    const h = (harness = setup({ maxCostUsd: 0.01 }));
+    h.deps.env = {
+      ...h.deps.env,
+      QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
+      QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD: '6',
+    };
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${JSON.stringify({ custom_id: 'b#1', response: { status_code: 500, body: {} } })}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    // b's source grows massively after the run: the stale per-item average
+    // in task.estimate stays tiny, but the request actually being submitted
+    // is what the budget must judge.
+    fs.writeFileSync(
+      path.join(h.root, 'docs', 'zh', 'b.md'),
+      'y'.repeat(30000),
+    );
+    await expect(retryTask(h.deps, taskId)).rejects.toThrow(/exceeds the plan/);
     expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
   });
 

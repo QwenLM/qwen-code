@@ -677,7 +677,9 @@ async function waitForSettled(
       );
     }
     deps.out(`waiting: ${batchId} is ${job.status} …`);
-    await sleep(delay);
+    // Cap the nap at the remaining deadline: --timeout is a hard ceiling on
+    // the whole collect, not a per-iteration suggestion.
+    await sleep(Math.min(delay, deadline - Date.now()));
     delay = Math.min(delay * 2, 60_000);
   }
 }
@@ -754,6 +756,10 @@ async function collectLocked(
     // deliveries without asking the provider about a batch it may have
     // forgotten by now.
     let job: BatchJob | undefined;
+    // finalStatus is recorded at the first harvest; a later collect that
+    // only retries remote cleanup must not re-announce the batch as newly
+    // settled (auto-collect would repeat the notice every pass).
+    const firstHarvest = attempt.finalStatus === undefined;
     if (!attempt.collected) {
       job = await api.getBatch(deps.ep, batchId);
       if (!SETTLED_STATUSES.has(job.status)) {
@@ -769,12 +775,14 @@ async function collectLocked(
     }
 
     // Settled but its result file not published yet: collecting now would
-    // fail every item as "no result line" and invite a paid retry.
+    // fail every item as "no result line" and invite a paid retry. A
+    // provider that omits request_counts is treated as "results expected"
+    // (fail closed): defer the collection rather than condemn the items.
     if (
       job?.status === 'completed' &&
       !job.output_file_id &&
       !job.error_file_id &&
-      (job.request_counts?.completed ?? 0) > 0
+      job.request_counts?.completed !== 0
     ) {
       deps.out(
         `${batchId} is completed but its result file is not available yet; collect again shortly.`,
@@ -930,6 +938,7 @@ async function collectLocked(
       // Results are safely local now; uploaded files otherwise live on the
       // provider until somebody deletes them. Failure here must not fail
       // the collection — the report below stays truthful either way.
+      let failed = 0;
       for (const fileId of [
         job.input_file_id,
         job.output_file_id,
@@ -939,16 +948,22 @@ async function collectLocked(
         try {
           await api.deleteFile(deps.ep, fileId);
         } catch (error) {
+          failed += 1;
           deps.err(
             `[batch] warning: could not delete remote file ${fileId}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
       }
-      attempt.remoteCleaned = true;
+      // Cleanup counts only when every deletion landed; otherwise the
+      // attempt stays uncollected below, so the next collect re-fetches the
+      // settled batch and retries instead of leaking the files forever.
+      attempt.remoteCleaned = failed === 0;
     }
     if (job) {
-      attempt.collected = true;
-      settledNow += 1;
+      // `collect --keep-remote` opts out of cleanup entirely.
+      if (firstHarvest) settledNow += 1;
+      attempt.collected =
+        options.keepRemote === true || attempt.remoteCleaned === true;
       store.save(task);
     }
   };
@@ -1139,24 +1154,24 @@ async function retryLocked(
     ...(newLimit === undefined ? {} : { maxOutputTokens: newLimit }),
   };
   task.attempts.push(attempt);
-  const perItem = task.estimate
-    ? {
-        input: task.estimate.inputTokens / task.items.length,
-        output: task.estimate.outputTokens / task.items.length,
-      }
-    : { input: 0, output: 0 };
-  const cost = costLine(
-    Math.round(perItem.input * retryItems.length),
-    Math.round(perItem.output * retryItems.length),
-    deps.env,
+  // The budget must bind what is actually submitted: assemble the real
+  // retry requests (sources are re-read now) instead of extrapolating from
+  // the original run's per-item average, which undercounts a retry whose
+  // failed items are the large ones — or whose sources grew since `run`.
+  const assembly = assembleAttempt(
+    task,
+    attemptNumber,
+    attempt.itemIds,
+    attempt.maxOutputTokens,
   );
+  const cost = costLine(assembly.inputTokens, assembly.outputTokens, deps.env);
   // The plan's budget binds every submission, not just the first.
   enforceBudget(task.plan, cost);
   deps.out(
     `retrying ${retryItems.length} item(s) as attempt ${attemptNumber}` +
       `${newLimit === undefined ? '' : ` with max output ${newLimit} tokens`}: ${cost.text}`,
   );
-  const job = await submitAttempt(deps, task, attempt, store);
+  const job = await submitAttempt(deps, task, attempt, store, assembly);
   await reportEarlyRejection(deps, task.id, job);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
 }
@@ -1189,7 +1204,10 @@ export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
   );
 }
 
-export async function listTasks(deps: WorkflowDeps): Promise<void> {
+/** Local only: reads the task store; no endpoint or credentials needed. */
+export async function listTasks(
+  deps: Pick<WorkflowDeps, 'env' | 'out'>,
+): Promise<void> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
   const tasks = store.list();
   if (tasks.length === 0) {
