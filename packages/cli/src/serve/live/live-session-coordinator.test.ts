@@ -1642,6 +1642,46 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.realtime.close).toHaveBeenCalledOnce();
   });
 
+  it('clears provider checking when a call stops during preparation', async () => {
+    let finishPreparation: (() => void) | undefined;
+    buildRealtimeStartupContext.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finishPreparation = () =>
+            resolve('<startup_context>ready</startup_context>');
+        }),
+    );
+    const harness = makeHarness();
+    const initialCalls = buildRealtimeStartupContext.mock.calls.length;
+    const starting = harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    await waitFor(() =>
+      expect(buildRealtimeStartupContext.mock.calls.length).toBe(
+        initialCalls + 1,
+      ),
+    );
+    expect(harness.host.setProviderReachability).toHaveBeenLastCalledWith({
+      state: 'checking',
+    });
+
+    await harness.coordinator.stop({ epoch: 1, callId: 'call-1' });
+    expect(harness.host.setProviderReachability).toHaveBeenLastCalledWith(
+      undefined,
+    );
+    finishPreparation?.();
+    await starting;
+
+    await harness.coordinator.start({
+      epoch: 2,
+      callId: 'call-2',
+      mode: 'new',
+    });
+    expect(harness.host.setCallState).toHaveBeenCalledWith(2, 'listening');
+  });
+
   it('finishes stopping when clearing the Live session marker never settles', async () => {
     const harness = makeHarness({ gracefulStopDrainMs: 5 });
     await harness.coordinator.start({

@@ -1228,6 +1228,7 @@ export class LiveSessionCoordinator {
       return context.stopCompletion;
     }
     context.stopping = true;
+    this.options.host.setProviderReachability(undefined);
     for (const abort of context.turnAborts) abort.abort();
     this.stopScreenFeed(context);
     closeLiveAudioCapture(context.diagnosticInputCapture, 'call_stopping');
@@ -2194,6 +2195,7 @@ export class LiveSessionCoordinator {
     const context = this.active;
     if (!context) return;
     context.stopping = true;
+    this.options.host.setProviderReachability(undefined);
     for (const abort of context.turnAborts) abort.abort();
     this.stopScreenFeed(context);
     await this.closeContext(context);
