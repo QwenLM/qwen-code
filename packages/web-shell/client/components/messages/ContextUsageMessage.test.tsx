@@ -150,6 +150,27 @@ describe('ContextUsageMessage', () => {
     expect(render(makeStatus(0, true)).textContent).not.toContain('Messages');
   });
 
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the daemon payload, so an older client
+    // omits it. Absent and `false` are the same state — not loaded — so the
+    // pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 2, loaded: false };
+    const big = { name: 'big-skill', tokens: 5 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const status = makeStatus(60, false);
+      status.usage.showDetails = true;
+      status.usage.skills = skills;
+      const text = render(status).textContent ?? '';
+      expect(text).toContain('big-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
+  });
+
   it('separates remaining capacity from free space and clamps exhausted capacity', () => {
     const container = render(makeStatus(60, false));
     expect(container.querySelector('[class*="total"]')?.textContent).toBe(
