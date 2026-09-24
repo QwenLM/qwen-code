@@ -77,6 +77,7 @@ import { insightCommand } from '../ui/commands/insightCommand.js';
 import { learnCommand } from '../ui/commands/learn-command.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import { lspCommand } from '../ui/commands/lspCommand.js';
+import { superfastCommand } from '../ui/commands/superfast-command.js';
 import { updateCommand } from '../ui/commands/update-command.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
@@ -185,6 +186,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       settingsCommand,
       vimCommand,
       updateCommand,
+      superfastCommand,
       voiceCommand,
       setupGithubCommand,
       terminalSetupCommand,

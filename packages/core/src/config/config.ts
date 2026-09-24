@@ -154,6 +154,11 @@ import {
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
 import { clearSessionCommits } from '../permissions/destructive-commands.js';
+import {
+  resolveGateSettings,
+  type DecisionGateSettings,
+  type SuperfastSettingsInput,
+} from '../superfast/decision-gate.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -1078,6 +1083,12 @@ export interface ConfigParameters {
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
+  /**
+   * Optional Superfast System One decision gate. Off by default; when enabled
+   * a small local decision model classifies each turn in a single forward
+   * pass. Fails open to normal behaviour whenever it is unsure or absent.
+   */
+  superfast?: SuperfastSettingsInput;
   /**
    * Optional host policy evaluated with final tool arguments immediately
    * before execution. A configured guard fails closed.
@@ -2693,6 +2704,7 @@ export class Config {
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
   private readonly permissionsAutoMode: AutoModeSettings;
+  private readonly superfastSettings: DecisionGateSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -3164,6 +3176,7 @@ export class Config {
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
+    this.superfastSettings = resolveGateSettings(params.superfast);
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
@@ -8243,6 +8256,15 @@ export class Config {
    */
   getAutoModeSettings(): AutoModeSettings {
     return this.permissionsAutoMode;
+  }
+
+  /**
+   * Resolved Superfast decision-gate settings (merged with defaults). Off
+   * unless `superfast.enabled` is set. The gate fails open whenever it is
+   * disabled, unreachable, or unsure.
+   */
+  getSuperfastSettings(): DecisionGateSettings {
+    return this.superfastSettings;
   }
 
   /**

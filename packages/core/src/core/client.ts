@@ -20,6 +20,8 @@ import process from 'node:process';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { classifyTurn } from '../superfast/decision-gate.js';
+import { partListUnionToString } from './llm-request.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
@@ -3051,6 +3053,38 @@ export class LlmClient {
     });
   }
 
+  /**
+   * Superfast shadow pass. When the gate is enabled, ask the local System One
+   * model to classify the turn and log the recommendation. Deliberately
+   * fire-and-forget: the promise is not awaited and every failure is swallowed,
+   * so this can never add latency to, or break, the real turn. Acting on the
+   * route (skipping work) is a later phase once the model is validated.
+   */
+  private runSuperfastShadow(request: PartListUnion): void {
+    const settings = this.config.getSuperfastSettings();
+    if (!settings.enabled) return;
+
+    let text: string;
+    try {
+      text = partListUnionToString(request);
+    } catch {
+      return;
+    }
+    if (!text || !text.trim()) return;
+
+    void classifyTurn(text, settings)
+      .then((decision) => {
+        if (decision) {
+          debugLogger.debug(
+            `superfast shadow route=${decision.route} latencyMs=${decision.latencyMs}`,
+          );
+        }
+      })
+      .catch(() => {
+        // Fail open: a gate error must never surface to the turn.
+      });
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     callerSignal: AbortSignal,
@@ -3059,6 +3093,13 @@ export class LlmClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    // Superfast decision gate (shadow mode). When enabled, classify this turn
+    // with the local System One model in the background. Fire-and-forget: it
+    // never blocks or alters the turn and fails open on any error, so with the
+    // feature off (the default) this is a no-op.
+    if (messageType === SendMessageType.UserQuery) {
+      this.runSuperfastShadow(request);
+    }
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Retry ||
