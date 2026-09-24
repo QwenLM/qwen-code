@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -84,6 +85,8 @@ export function useAgentChatEntry({
       enabled && cwd ? createThreadsHttpApi(baseUrl, token, cwd) : undefined,
     [enabled, cwd, baseUrl, token],
   );
+  // Names known so far, so a typed @query can be claimed without waiting.
+  const agentNames = useRef<string[]>([]);
   const [pending, setPending] = useState(false);
   const busy = useRef(false);
   const retry = useRef<
@@ -99,11 +102,23 @@ export function useAgentChatEntry({
       return cached.agents;
     const agents = api.listAgents().then((result) => result.agents);
     roster.current = { api, at: Date.now(), agents };
+    void agents.then(
+      (list) => {
+        agentNames.current = list
+          .filter((agent) => agent.enabled && !agent.retiredAt)
+          .map((agent) => agent.name.toLowerCase());
+      },
+      () => {},
+    );
     agents.catch(() => {
       if (roster.current?.agents === agents) roster.current = undefined;
     });
     return agents;
   }, [api]);
+  // Load the roster up front so the first typed @name already resolves.
+  useEffect(() => {
+    listAgents().catch(() => {});
+  }, [listAgents]);
   const providers = useMemo<WebShellAtProvider[]>(
     () =>
       api
@@ -111,6 +126,12 @@ export function useAgentChatEntry({
             {
               id: 'workspace-collaborators',
               label: t('collab.mention.provider'),
+              claimsTypedQuery: (query) => {
+                const lower = query.toLowerCase();
+                return agentNames.current.some((name) =>
+                  name.startsWith(lower),
+                );
+              },
               search: async ({ query }) => [
                 ...(await listAgents())
                   .filter(

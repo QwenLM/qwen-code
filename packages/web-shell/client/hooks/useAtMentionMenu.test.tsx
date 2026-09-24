@@ -1000,6 +1000,69 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('lets a custom provider claim a typed query before the file fallback', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [],
+      truncated: false,
+    });
+    const search = vi
+      .fn()
+      .mockResolvedValue([
+        { id: 'ag_1', label: 'reviewer', insertText: '@reviewer ' },
+      ]);
+    mount({
+      actions: { listDirectory },
+      providers: [
+        {
+          id: 'people',
+          label: 'People',
+          search,
+          claimsTypedQuery: (query) => 'reviewer'.startsWith(query),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@rev')));
+    await runDebounce();
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'rev' }),
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'people',
+      query: 'rev',
+    });
+  });
+
+  it('falls back to files when no custom provider claims the typed query', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [],
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      providers: [
+        {
+          id: 'people',
+          label: 'People',
+          search: vi.fn().mockResolvedValue([]),
+          claimsTypedQuery: (query) => 'reviewer'.startsWith(query),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@src/')));
+    await runDebounce();
+    expect(latest!.state).toMatchObject({ selectedProviderId: 'files' });
+  });
+
   it('searches matching files across the workspace', async () => {
     vi.useFakeTimers();
     const listDirectory = vi.fn();
