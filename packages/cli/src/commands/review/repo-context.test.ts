@@ -43,35 +43,55 @@ import {
 
 // Lets a test pose as a volume whose 64-bit file ids exceed the JS
 // safe-integer range (NTFS — #12574). While armed, each DISTINCT file (by
-// real dev/ino) is assigned a sequential id on top of 2^60, so any two
-// distinct ids land in the SAME double-rounding bucket (double spacing at
-// 2^60 is 256) while staying exact as bigints. The pose is reported as a
-// bigint when the caller asks for `{ bigint: true }`, and as the rounded
-// double a number-backed `Stats` would carry — so a comparator that stats
-// without the flag sees two distinct files as one (fail-open), and the
+// real dev/ino) is assigned a sequential id on top of 2^60. Double spacing
+// at 2^60 is 256 with round-half-even, so the ids share ONE double-rounding
+// bucket only while the offset stays <= 128: 2^60+128 still rounds to 2^60,
+// 2^60+129 does not. The helper throws past that bound instead of handing
+// out ids that quietly stop colliding, and every armed test asserts the
+// collision it depends on. Ids stay exact as bigints; the pose is reported
+// as a bigint when the caller asks for `{ bigint: true }`, and as the
+// rounded double a number-backed `Stats` would carry — so a comparator that
+// stats without the flag sees two distinct files as one (fail-open), and the
 // guard under test only fires if it asked for the exact id.
 const bigInodeVolume = vi.hoisted(() => ({
   armed: false,
   ids: new Map<string, bigint>(),
   next: 1n,
+  maxOffset: 128n,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  // Forward the stat options through (precedent:
-  // review/lib/same-file.test.ts): production stats with `{ bigint: true }`,
-  // and a mock that dropped the options bag would hand back a number-backed
-  // `Stats` — posing the unsafe-rounding case even when the code under test
-  // asked for the exact id, and letting the bigint cases below pass without
-  // exercising the path they name.
+  // Forward EVERY stat option through — the in-tree precedent for the shape
+  // is commands/review/lib/stale-bundle.test.ts:54-64, `(p, ...rest) =>
+  // real.statSync(p, ...rest)`; commands/review/lib/same-file.test.ts:44-51
+  // takes no options argument and forwards none. `bigint` is resolved from
+  // the caller's own bag and re-applied LAST so the pose below knows which
+  // flavour to hand back, and no other option may be dropped. Dropping the
+  // bag entirely does not let the bigint cases pass unexercised — it fails
+  // 34 of the file's 54 tests loudly, and leaves `mtimeNs` `undefined`, so
+  // `Number(undefined - undefined) > 1e6` is false and the mtime disjunct of
+  // both guards goes dead. Keeping only `bigint` (the shape this replaces)
+  // is green today and silently discards everything else, e.g.
+  // `throwIfNoEntry: false` — an established pattern in this package
+  // (config/settings-cache.ts:81), where an absent file must read as
+  // `undefined` rather than throw ENOENT, so the failure would present as a
+  // production bug rather than a mock artifact. The `it` below pins the
+  // forwarding; no production caller passes a second option yet, so nothing
+  // else does.
   const statSync = ((filePath: string, options?: { bigint?: boolean }) => {
     const bigint = options?.bigint === true;
-    const stats = actual.statSync(String(filePath), { bigint });
+    const stats = actual.statSync(String(filePath), { ...options, bigint });
     if (bigInodeVolume.armed) {
       const real = actual.statSync(String(filePath), { bigint: true });
       const key = `${real.dev}:${real.ino}`;
       let pose = bigInodeVolume.ids.get(key);
       if (pose === undefined) {
+        if (bigInodeVolume.next > bigInodeVolume.maxOffset) {
+          throw new Error(
+            'bigInodeVolume: poses left the 2^60 double-rounding bucket',
+          );
+        }
         pose = 2n ** 60n + bigInodeVolume.next++;
         bigInodeVolume.ids.set(key, pose);
       }
@@ -95,6 +115,26 @@ function disarmBigInodeVolume(): void {
   bigInodeVolume.ids.clear();
   bigInodeVolume.next = 1n;
 }
+
+it('the statSync mock forwards every option, not just `bigint`', () => {
+  // Pins the forwarding the mock's own comment claims. `throwIfNoEntry:
+  // false` is an established pattern in this package; a mock that rebuilt the
+  // options bag from `bigint` alone dropped it, so an absent file threw
+  // ENOENT instead of reading as `undefined` — a failure that presents as a
+  // production bug rather than a mock artifact. The same rebuild also left
+  // `mtimeNs` undefined, killing the mtime disjunct of both plan guards.
+  const root = mkdtempSync(join(tmpdir(), 'repo-context-mock-'));
+  try {
+    expect(
+      statSync(join(root, 'no-such-file.json'), { throwIfNoEntry: false }),
+    ).toBeUndefined();
+    const present = join(root, 'present.json');
+    writeFileSync(present, '{}');
+    expect(typeof statSync(present, { bigint: true }).ino).toBe('bigint');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const tempRoots: string[] = [];
 
@@ -1453,6 +1493,19 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
         mkdirSync(worktree, { recursive: true });
         const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
         const before = statSync(planPath);
+        // Pin the pose itself, on two DISTINCT files (the helper dedupes by
+        // real dev/ino, so stat'ing one path twice yields one id). Without
+        // this both #12574 witnesses can pass while exercising nothing: with
+        // the mock inert, or a pose base below 2^53, the racer's rename still
+        // produces genuinely distinct ids, the guard fires for the wrong
+        // reason, and reverting `{ bigint: true }` in production ships green.
+        const posedScratch = join(root, 'pose-probe.json');
+        writeFileSync(posedScratch, '{}');
+        const posedPlan = statSync(planPath, { bigint: true });
+        const posedOther = statSync(posedScratch, { bigint: true });
+        expect(posedPlan.ino).not.toBe(posedOther.ino);
+        expect(Number(posedPlan.ino)).toBe(Number(posedOther.ino));
+        rmSync(posedScratch);
         const racer: RepositoryContextProvider = {
           provide() {
             // Replace the FILE (new inode in the same double bucket), then
@@ -1543,8 +1596,18 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
 
       if (hasSubMs) {
+        // 10us, not the ledger's 1ms rail. Measured over 400 samples of this
+        // fixture: the nanosecond restore round-trips it with drift exactly
+        // 0, while a millisecond-truncating one — `Number(anchor.mtimeMs) /
+        // 1000`, the one-token "simplification" that reads as equivalent now
+        // that `anchor` is a `BigIntStats` whose `mtimeMs` truncates toward
+        // zero — drifts 0.4568ms, the fixture's whole sub-ms fraction. At the
+        // 1ms rail both pass, the run epoch moves on every content-changing
+        // enrichment, and that eats 46% of the tolerance the resume ledger
+        // fences on. 10us separates them ~46x and stays inside the 1ms check
+        // production itself applies (repo-context.ts:534).
         expect(Math.abs(statSync(planPath).mtimeMs - mtimeBefore)).toBeLessThan(
-          1,
+          0.01,
         );
       }
       // The consequence that actually matters, asserted end to end rather
@@ -1552,8 +1615,9 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       // before this command ran is still THIS run's. Honest scope note: with
       // the ledger fence tolerating 1ms, a `Date`-based restore (which loses
       // strictly less than 1ms) would ALSO pass this assertion — the fence's
-      // tolerance is what makes that regression benign, and this test pins
-      // the end-to-end visibility, not the float restore itself.
+      // tolerance is what makes that regression benign, so what pins the
+      // end-to-end visibility is this assertion, and what pins the float
+      // restore itself is the tightened `hasSubMs` bound above.
       expect(priorSessionIds(planPath, { QWEN_CODE_SESSION_ID: 'S1' })).toEqual(
         ['S0'],
       );
@@ -1592,9 +1656,20 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
     const anchor = statSync(plan, { bigint: true });
     commitPlanPreservingEpoch(plan, '{"new":true}', anchor);
     expect(readFileSync(plan, 'utf8')).toBe('{"new":true}');
+    // Reference the nanosecond field the way production verifies this same
+    // restore (repo-context.ts:534), not `anchor.mtimeMs`: that bigint
+    // millisecond field TRUNCATES toward zero, and `utimesSync`'s double-
+    // seconds conversion lands this `Date` fixture up to a millisecond BELOW
+    // its own whole-ms value — measured over 400 distinct `Date` anchors, 194
+    // kept an ns remainder above 0.9ms. Against the truncating reference a
+    // PERFECT restore therefore read as much as 1.000244ms of apparent error,
+    // i.e. the old `<= 1` bound was not merely tight, it was crossable by a
+    // correct implementation. Against `mtimeNs` the same restore reads at most
+    // 0.000244ms, while a millisecond-truncating restore reads 1.000000ms, so
+    // this 10us bound separates them instead of passing both.
     expect(
-      Math.abs(statSync(plan).mtimeMs - Number(anchor.mtimeMs)),
-    ).toBeLessThanOrEqual(1);
+      Math.abs(statSync(plan).mtimeMs - Number(anchor.mtimeNs) / 1e6),
+    ).toBeLessThan(0.01);
     expect(readdirSync(root).filter((n) => n.includes('enrich-tmp'))).toEqual(
       [],
     );
@@ -1647,6 +1722,11 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
       const anchor = statSync(plan, { bigint: true });
       const imposter = join(root, 'imposter.json');
       writeFileSync(imposter, '{"captured":"by-another-run"}');
+      // Pin the pose on the exact pair this fence compares (see the
+      // runRepoContext witness for why an unpinned pose is not a witness).
+      const posedImposter = statSync(imposter, { bigint: true });
+      expect(anchor.ino).not.toBe(posedImposter.ino);
+      expect(Number(anchor.ino)).toBe(Number(posedImposter.ino));
       renameSync(imposter, plan);
       // Forge the anchor's mtime onto the imposter: only the inode
       // disjunct can catch the swap, and both ids are in one bucket.
