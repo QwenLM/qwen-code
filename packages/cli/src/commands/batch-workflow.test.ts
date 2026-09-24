@@ -879,9 +879,9 @@ describe('retryTask', () => {
     });
     const taskId = taskIdOf(h);
     await collectTask(h.deps, taskId);
-    // b's source grows massively after the run: the stale per-item average
-    // in task.estimate stays tiny, but the request actually being submitted
-    // is what the budget must judge.
+    // b's source grows massively after the run: the run's per-item average
+    // stays tiny, but the request actually being submitted is what the
+    // budget must judge.
     fs.writeFileSync(
       path.join(h.root, 'docs', 'zh', 'b.md'),
       'y'.repeat(30000),
@@ -1002,38 +1002,6 @@ describe('usage and cost reporting', () => {
     expect(h.out.join('\n')).toMatch(
       /INCOMPLETE: 1 request\(s\) reported no usage/,
     );
-  });
-
-  it('records the price source and states the break-even cache-hit rate', async () => {
-    const h = (harness = setup({ expectedOutputTokensPerItem: 1 }));
-    h.deps.env = {
-      ...h.deps.env,
-      QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
-      QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD: '6',
-      QWEN_BATCH_PRICE_SOURCE: 'pricing page, checked 2026-09-22',
-    };
-    await runPlan(h.deps, h.planPath);
-    const text = h.out.join('\n');
-    expect(text).toMatch(/prices: pricing page, checked 2026-09-22/);
-    // Input-dominated: Batch loses once realtime would cache most input.
-    expect(text).toMatch(
-      /only if realtime would hit the cache for less than \d+% of input/,
-    );
-    expect(text).toMatch(/preparation .*\(not measured\)/);
-    expect(h.store.load(taskIdOf(h)).estimate?.priceSource).toBe(
-      'pricing page, checked 2026-09-22',
-    );
-  });
-
-  it('says so when the price source is not recorded', async () => {
-    const h = (harness = setup());
-    h.deps.env = {
-      ...h.deps.env,
-      QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
-      QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD: '6',
-    };
-    await runPlan(h.deps, h.planPath);
-    expect(h.out.join('\n')).toMatch(/source not recorded/);
   });
 });
 

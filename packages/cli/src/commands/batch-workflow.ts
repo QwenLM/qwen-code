@@ -61,15 +61,8 @@ import {
 // supplies unit prices — a hardcoded table would go stale against the
 // provider's pricing page.
 const BATCH_PRICE_FACTOR = 0.5;
-// DashScope bills an implicit-cache hit at 20% of the input list price
-// (docs/users/features/batch.md). Only used to say at which realtime cache
-// hit rate Batch stops being cheaper — never to claim an actual saving.
-const REALTIME_CACHED_INPUT_FACTOR = 0.2;
 const ENV_PRICE_INPUT = 'QWEN_BATCH_INPUT_PRICE_PER_1M_USD';
 const ENV_PRICE_OUTPUT = 'QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD';
-// Free text naming where the prices came from (page URL, date checked);
-// recorded with the task so an old estimate can be judged later.
-const ENV_PRICE_SOURCE = 'QWEN_BATCH_PRICE_SOURCE';
 
 export interface WorkflowApi {
   uploadJsonl(
@@ -211,41 +204,15 @@ function costLine(
         `for a monetary estimate (Batch bills successful requests at 50% of realtime list)`,
     };
   }
-  const inputList = (inputTokens * inputPrice) / 1_000_000;
-  const outputList = (outputTokens * outputPrice) / 1_000_000;
-  const costUsd = (inputList + outputList) * BATCH_PRICE_FACTOR;
-  const source = env[ENV_PRICE_SOURCE]?.trim();
+  const costUsd =
+    ((inputTokens * inputPrice + outputTokens * outputPrice) / 1_000_000) *
+    BATCH_PRICE_FACTOR;
   return {
     text:
       `${tokens}; estimated Batch cost ≈ $${costUsd.toFixed(4)} ` +
-      `(prices: ${source || `source not recorded — set ${ENV_PRICE_SOURCE}`}; estimate only — the provider bill is authoritative). ` +
-      breakEvenText(inputList, outputList),
+      `(estimate only — the provider bill is authoritative; excludes the preparation spent in this session)`,
     costUsd,
   };
-}
-
-/**
- * Batch saves `0.5·(I+O) − (1−r)·h·I` against realtime generation of the
- * same requests, where h is the realtime cache-hit rate — unknown here, so
- * report the h at which the saving reaches zero instead of a saving.
- * Preparation in the interactive session is not measured and not included.
- */
-function breakEvenText(inputList: number, outputList: number): string {
-  const unmeasured =
-    'Excludes the preparation spent in the interactive session (not measured).';
-  if (inputList <= 0) {
-    return `Cheaper than realtime generation at any cache-hit rate. ${unmeasured}`;
-  }
-  const breakEven =
-    ((1 - BATCH_PRICE_FACTOR) * (inputList + outputList)) /
-    ((1 - REALTIME_CACHED_INPUT_FACTOR) * inputList);
-  if (breakEven >= 1) {
-    return `Generation is cheaper than realtime at any cache-hit rate. ${unmeasured}`;
-  }
-  return (
-    `Generation is cheaper than realtime only if realtime would hit the cache for less than ` +
-    `${Math.floor(breakEven * 100)}% of input (implicit-cache price assumed at ${REALTIME_CACHED_INPUT_FACTOR * 100}% of list). ${unmeasured}`
-  );
 }
 
 function enforceBudget(plan: BatchPlan, cost: { costUsd?: number }): void {
@@ -465,15 +432,6 @@ export async function runPlan(
     store.remove(task.id);
     throw error;
   }
-  task.estimate = {
-    inputTokens: assembly.inputTokens,
-    outputTokens: assembly.outputTokens,
-    inputPricePer1MUsd: unitPrice(deps.env, ENV_PRICE_INPUT),
-    outputPricePer1MUsd: unitPrice(deps.env, ENV_PRICE_OUTPUT),
-    ...(deps.env[ENV_PRICE_SOURCE]?.trim()
-      ? { priceSource: deps.env[ENV_PRICE_SOURCE]?.trim() }
-      : {}),
-  };
   store.save(task);
 
   deps.out(

@@ -202,14 +202,6 @@ export interface BatchTask {
   request?: FrozenRequest;
   items: TaskItem[];
   attempts: TaskAttempt[];
-  estimate?: {
-    inputTokens: number;
-    outputTokens: number;
-    inputPricePer1MUsd?: number;
-    outputPricePer1MUsd?: number;
-    /** Where the operator's prices came from (URL, date), as given. */
-    priceSource?: string;
-  };
 }
 
 export const customIdOf = (itemId: string, attempt: number) =>
