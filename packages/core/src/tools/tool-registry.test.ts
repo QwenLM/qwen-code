@@ -29,7 +29,10 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import { ToolErrorType } from './tool-error.js';
-import { generateLegacyMcpToolName } from '../utils/tool-name-utils.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeMcpToolName,
+} from '../utils/tool-name-utils.js';
 
 vi.mock('node:fs');
 
@@ -371,10 +374,14 @@ describe('ToolRegistry', () => {
       expect(registry.getPermissionAliases('read_file')).toBeUndefined();
     });
 
-    it('disables an MCP tool whose disabledTools entry uses the exact raw spelling', () => {
+    it('disables an MCP tool whose disabledTools entry uses the legacy spelling', () => {
+      // The legacy reduction is the spelling `isToolDisabled`'s surviving
+      // `normalizeMcpToolName(entry) === name` arm cannot reach, so only the
+      // alias channel can disable this tool.
+      const legacyName = generateLegacyMcpToolName('mcp__foo:bar__a.b');
       const disabledConfig = new Config({
         ...baseConfigParams,
-        disabledTools: ['mcp__foo:bar__a.b'],
+        disabledTools: [legacyName],
       });
       const registry = new ToolRegistry(disabledConfig);
       const mcpTool = new DiscoveredMCPTool(
@@ -385,7 +392,8 @@ describe('ToolRegistry', () => {
         {},
       );
 
-      expect(mcpTool.name).not.toBe('mcp__foo:bar__a.b');
+      expect(mcpTool.name).not.toBe(legacyName);
+      expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
       registry.registerTool(mcpTool);
       expect(registry.getTool(mcpTool.name)).toBeUndefined();
     });

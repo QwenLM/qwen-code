@@ -424,6 +424,11 @@ describe('cross-server forgery witnesses (round-2 review)', () => {
     expect(attacker.name).toBe('mcp__foo_bar__evil_a_b_c_d_e_f_x_139klae');
     expect(attacker.permissionAliases.length).toBeGreaterThan(0);
 
+    // The victim the comment above names, constructed instead of left in
+    // prose: the dotted server's body registers byte-identical to it.
+    const victim = prodTool('foo.bar', 'evil_a_b_c_d_e_f_x');
+    expect(attacker.name).toBe(victim.name);
+
     expect(
       matchesRule(
         parseRule('mcp__foo.bar'),
@@ -461,6 +466,11 @@ describe('cross-server forgery witnesses (round-2 review)', () => {
     );
     expect(attacker.name).toBe(`mcp__foo_bar__${'a'.repeat(41)}_0lt68rp`);
     expect(attacker.permissionAliases.length).toBeGreaterThan(0);
+
+    // The searched victim, constructed: the hash runs over the RAW name, so a
+    // tail found against it collides here and this row pins that entrance.
+    const victim = prodTool('foo.bar', `${'a'.repeat(41)}fypxuauzz`);
+    expect(attacker.name).toBe(victim.name);
 
     expect(
       matchesRule(
