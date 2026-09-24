@@ -9,6 +9,7 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
@@ -23,7 +24,6 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import type { WorkspaceRegistrationStore } from '../workspace-registration-store.js';
-import { workspaceRegistrationId } from '../workspace-registration-store.js';
 
 interface RegisterCapabilitiesRoutesDeps {
   qwenCodeVersion?: string;
@@ -153,8 +153,14 @@ export function registerCapabilitiesRoutes(
           : {}),
       },
       workspaces: entries.map((entry) => {
-        const pinnedAt =
-          pinnedAts?.[workspaceRegistrationId(entry.workspaceCwd)];
+        // Resolve pin state from any of the entry's registration IDs.
+        let pinnedAt: string | undefined;
+        for (const regId of entry.registrationIds) {
+          if (pinnedAts?.[regId] !== undefined) {
+            pinnedAt = pinnedAts[regId];
+            break;
+          }
+        }
         return {
           id: entry.workspaceId,
           cwd: entry.workspaceCwd,

@@ -1981,7 +1981,6 @@ export function registerWorkspaceManagementRoutes(
             isPinned: pinnedAt !== undefined,
             ...(pinnedAt !== undefined ? { pinnedAt } : {}),
           });
-          operationFinished();
           return;
         }
         writeStderrLine(
