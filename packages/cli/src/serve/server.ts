@@ -1941,6 +1941,7 @@ export function createServeApp(
     onStart: (call) => liveSessionCoordinator.start(call),
     onStop: (call) => liveSessionCoordinator.stop(call),
     onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
+    onScreenFeed: (message) => liveSessionCoordinator.handleScreenFeed(message),
   });
   const publishLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
     const updateDiscovery = (
