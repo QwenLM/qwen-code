@@ -110,7 +110,8 @@ export function getNestedProperty(
 
 /**
  * Get the effective value for a setting, considering inheritance from higher scopes
- * Always returns a value (never undefined) - falls back to default if not set anywhere
+ * Returns the value if set, falling back to the default from the schema.
+ * Returns undefined when the key is unknown to the schema or has no default.
  */
 export function getEffectiveValue(
   key: string,
@@ -275,11 +276,13 @@ export function validateSettingValue(
  * runtime import cycle.
  */
 export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
+  { section: 'serve', key: 'tokenQr' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

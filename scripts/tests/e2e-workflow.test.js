@@ -372,7 +372,7 @@ describe('e2e workflow', () => {
       );
       expect(pack.run).toContain('.github/scripts/e2e-build-pack.sh');
       // The same "the install must not build" premise as on the legs: without
-      // it npm ci runs prepare (a full build and bundle) and the explicit
+      // it the install runs prepare (a full build and bundle) and the explicit
       // build steps below then do it a second time on the critical path.
       const install = build.steps.find(
         (step) => step.name === 'Install dependencies',
@@ -407,7 +407,7 @@ describe('e2e workflow', () => {
 
     it('keeps the web-shell regression job building during its install', () => {
       // That job has no build step of its own: its tree comes solely from
-      // the prepare script that npm ci runs, so it must not carry the skip
+      // the prepare script that the install runs, so it must not carry the skip
       // the artifact-fed legs carry.
       const install = yml.jobs['web-shell-browser-regression'].steps.find(
         (step) => step.name === 'Install dependencies',
@@ -446,6 +446,177 @@ describe('e2e workflow', () => {
       // The image builds inside Docker from the checkout, so it is not part
       // of the archive; the leg still prepares it under the host locks.
       expect(e2eRunScript).toContain('npm run build:sandbox');
+    });
+  });
+
+  describe('install retry', () => {
+    // Run 34700339334 died at the build job's bare `npm ci` before any test
+    // ran — the same install reproduces clean at that commit, so the failure
+    // was a transient the tree could not explain — and every leg behind
+    // `needs: [build]` went down with it. repo-hygiene.yml and
+    // qwen-autofix.yml already wrap their installs in this exact bounded
+    // retry; a regression to a bare unretried install is silent until the next
+    // transient reddens a main run, so pin the shape on every install step.
+    const installSteps = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
+      (job.steps ?? [])
+        .filter((step) => step.name === 'Install dependencies')
+        .map((step) => [jobName, step]),
+    );
+
+    it('wraps every Install dependencies step in the bounded retry', () => {
+      // Six jobs install: the build, the three artifact-fed legs, the
+      // nightly legs, and the web-shell browser gate. A new job adding a
+      // bare install must fail here, not in a main-branch run.
+      expect(installSteps.map(([jobName]) => jobName).sort()).toEqual([
+        'build',
+        'e2e-interactive-opentui',
+        'e2e-test-linux',
+        'e2e-test-macos',
+        'isolated-nightly',
+        'web-shell-browser-regression',
+      ]);
+      // Fragment pins, not a byte-exact body: a formatting-only rewrite or
+      // a post-install line appended after `done` must stay green (the repo
+      // pins this same recipe in qwen-autofix.yml by fragment), while
+      // dropping the loop, the backoff, or the failure exit still reddens.
+      for (const [jobName, step] of installSteps) {
+        expect(step.run, jobName).toContain('for attempt in 1 2 3; do');
+        expect(step.run, jobName).toContain(
+          'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+        );
+        expect(step.run, jobName).toContain('exit 1');
+        expect(step.run, jobName).toContain('sleep $((attempt * 15))');
+        expect(step.run, jobName).toContain('break');
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" == "3" ]]; then',
+        );
+        expect(step.run, jobName).toContain(
+          'if [[ "${attempt}" != "1" ]]; then',
+        );
+        // The ::warning:: keeps an absorbed install transient countable even
+        // though the recovered job concludes green — the same rule the
+        // upload-artifact retry's announce step follows. Deleting the echo
+        // from any one copy must red this loop.
+        expect(step.run, jobName).toContain(
+          'echo "::warning::corepack pnpm install',
+        );
+        // The defect under test is a bare `corepack pnpm install` line outside the loop.
+        expect(step.run, jobName).not.toMatch(/^\s*corepack pnpm install/m);
+      }
+    });
+
+    // Fail closed on the mention, not on a recognised spelling: the ways
+    // shell can write one command cannot be enumerated against a regex. The
+    // previous pair exempted a whole body for carrying any retry loop — a
+    // trailing bare install rode the exemption — and saw only installs
+    // opening their line, so `cd … && pnpm install` and `time pnpm install` were
+    // invisible. The exemption is keyed on the line's shape, never the
+    // step's name: a name key pardons the six pinned bodies wholesale, so a
+    // bare install appended after `done` would ride the step's identity
+    // with its body never read. Require every executable line mentioning
+    // `pnpm install` to open with one of the two retry-loop lines pinned above,
+    // so an unrecognised shape reddens the suite for a human to judge
+    // instead of passing silently. Full-line `#` comments never execute, so
+    // a body quoting the recipe in prose is excluded rather than flagged.
+    const retriedInstallLines = [
+      'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+      'echo "::warning::corepack pnpm install',
+    ];
+    const findUnretriedInstalls = (jobs) =>
+      Object.entries(jobs).flatMap(([jobName, job]) =>
+        (job.steps ?? [])
+          .filter(
+            (step) =>
+              typeof step.run === 'string' &&
+              step.run
+                .split('\n')
+                .filter((line) => !line.trimStart().startsWith('#'))
+                .some(
+                  (line) =>
+                    line.includes('pnpm install') &&
+                    !retriedInstallLines.some((ok) =>
+                      line.trimStart().startsWith(ok),
+                    ),
+                ),
+          )
+          .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
+      );
+
+    it('retries every pnpm install run body, whatever the step is named', () => {
+      // The name-keyed collection above misses an install hiding under any
+      // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
+      // 'Install dependencies and build' — so scan the command itself.
+      expect(findUnretriedInstalls(yml.jobs)).toEqual([]);
+    });
+
+    it('flags an unretried install however shell spells it', () => {
+      // Each synthetic body slipped the old regex pair — the loop exempting
+      // a trailing bare install was the filed escape; the rest never open
+      // their install line. The real bodies ride along under their own keys
+      // to pin that the allowlist recognises exactly the two retried lines,
+      // and `build` is overridden by a copy carrying a bare install appended
+      // after `done` — the shape a name-keyed exemption pardons unread. A
+      // comment-only mention stays unflagged because it never executes.
+      const jobs = {
+        ...Object.fromEntries(
+          installSteps.map(([jobName, step]) => [jobName, { steps: [step] }]),
+        ),
+        build: {
+          steps: [
+            {
+              name: 'Install dependencies',
+              run: [
+                'for attempt in 1 2 3; do',
+                '  if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+                '    if [[ "${attempt}" != "1" ]]; then',
+                '      echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s)"',
+                '    fi',
+                '    break',
+                '  fi',
+                '  if [[ "${attempt}" == "3" ]]; then',
+                '    exit 1',
+                '  fi',
+                '  sleep $((attempt * 15))',
+                'done',
+                'cd integration-tests && pnpm install',
+              ].join('\n'),
+            },
+          ],
+        },
+        synthetic: {
+          steps: [
+            {
+              name: 'Install dependencies and build',
+              run: [
+                'for attempt in 1 2 3; do',
+                '  npx playwright install --with-deps chromium && break',
+                'done',
+                'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
+              ].join('\n'),
+            },
+            {
+              name: 'Install integration dependencies',
+              run: 'cd integration-tests && pnpm install',
+            },
+            { name: 'Time the install', run: 'time pnpm install' },
+            {
+              name: 'Retry the install once',
+              run: 'for attempt in 1; do pnpm install --prefer-offline; done',
+            },
+            {
+              name: 'Mention the recipe',
+              run: '# pnpm install is retried elsewhere\necho done',
+            },
+          ],
+        },
+      };
+      expect(findUnretriedInstalls(jobs)).toEqual([
+        'build/Install dependencies',
+        'synthetic/Install dependencies and build',
+        'synthetic/Install integration dependencies',
+        'synthetic/Time the install',
+        'synthetic/Retry the install once',
+      ]);
     });
   });
 

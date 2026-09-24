@@ -397,13 +397,13 @@ export function toolCardDescription(rawName: string, args?: string): string {
 }
 
 export function userMessageMeta(): { glyph: string; color: string } {
-  // UserMessage → PrefixedTextMessage with theme.text.accent (purple).
-  return { glyph: '>', color: C.purple };
+  // UserMessage → PrefixedTextMessage with theme.text.accent.
+  return { glyph: '>', color: C.accent };
 }
 
 export function assistantMessageMeta(): { glyph: string; color: string } {
   // AssistantMessage → ICON.DIAMOND prefix, theme.text.accent.
-  return { glyph: ICON.DIAMOND, color: C.purple };
+  return { glyph: ICON.DIAMOND, color: C.accent };
 }
 
 /** ink ConversationMessages: under this a committed thought reads "briefly". */
@@ -421,17 +421,15 @@ export interface ThinkingMeta {
 /**
  * ThinkMessage semantics: a live thought shows `∵ Thinking…`, a committed
  * thought collapses to `∴ Thought for … (… to expand)` unless expanded. The
- * click hint mirrors the VP-mode "click or ctrl+o" affordance.
+ * collapsed hint follows ink's `clickable` branch — `ui.mouseTracking` off
+ * hands the pointer back to the terminal, so only the key hint is offered.
  */
 export function thinkingMeta(
   done: boolean,
   expanded: boolean,
-  clickable: boolean,
   durationMs?: number,
+  clickable = true,
 ): ThinkingMeta {
-  const expandHint = clickable
-    ? '(click or ctrl+o to expand)'
-    : '(ctrl+o to expand)';
   const completedLabel =
     durationMs === undefined
       ? null
@@ -439,9 +437,14 @@ export function thinkingMeta(
         ? 'Thought briefly'
         : `Thought for ${formatDuration(durationMs)}`;
   if (!done) {
+    // ink appends the live elapsed time to the pending label.
+    const pendingLabel =
+      durationMs === undefined
+        ? 'Thinking…'
+        : `Thinking… ${formatDuration(durationMs)}`;
     return {
       icon: ICON.BECAUSE,
-      label: 'Thinking…',
+      label: pendingLabel,
       hint: '',
       color: C.dim,
       collapsed: false,
@@ -451,7 +454,7 @@ export function thinkingMeta(
     return {
       icon: ICON.THEREFORE,
       label: completedLabel ?? 'Thinking',
-      hint: expandHint,
+      hint: clickable ? '(click or ctrl+o to expand)' : '(ctrl+o to expand)',
       color: C.dim,
       collapsed: true,
     };

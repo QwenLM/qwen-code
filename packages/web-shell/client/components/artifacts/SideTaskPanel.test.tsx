@@ -15,6 +15,7 @@ const {
   catalogController,
 } = vi.hoisted(() => ({
   connection: {
+    commands: undefined as Array<{ name: string; source: string }> | undefined,
     status: 'idle',
     sessionId: undefined as string | undefined,
     workspaceCwd: undefined as string | undefined,
@@ -117,6 +118,8 @@ afterEach(() => {
   container?.remove();
   container = null;
   root = null;
+  connection.commands = undefined;
+  vi.useRealTimers();
   connection.status = 'idle';
   connection.sessionId = undefined;
   connection.workspaceCwd = undefined;
@@ -374,6 +377,102 @@ it('renders a restored side task as a full chat pane', () => {
   });
 });
 
+it('threads model management policy to its chat pane', () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const modelManagement = { allowAdd: false, allowDelete: false };
+  act(() => {
+    renderSideTask({ modelManagement });
+  });
+  expect(latestChatPaneProps.current?.modelManagement).toEqual(modelManagement);
+});
+
+it('does not send a disabled model setup command as the initial side-task prompt', async () => {
+  connection.commands = [{ name: 'auth', source: 'builtin-command' }];
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onImageIngestionNotice = vi.fn();
+  const onInitialPromptRefused = vi.fn();
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: '/auth',
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
+  expect(onImageIngestionNotice).toHaveBeenCalledWith(
+    'warning',
+    'Adding models is disabled by the host.',
+  );
+  // The refusal must be terminal for the tab: the parent is told to drop the
+  // stored prompt, so a later remount neither re-toasts nor replays it.
+  expect(onInitialPromptRefused).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+  );
+
+  await act(async () => root!.unmount());
+  root = createRoot(container);
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: undefined,
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it('does not replay a refused initial prompt after the host re-allows adds', async () => {
+  connection.commands = [{ name: 'auth', source: 'builtin-command' }];
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onImageIngestionNotice = vi.fn();
+  const onInitialPromptRefused = vi.fn();
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: '/auth',
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(onInitialPromptRefused).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+  );
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  await act(async () => root!.unmount());
+  root = createRoot(container);
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: undefined,
+      modelManagement: { allowAdd: true },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
 it('threads sessionWorkflowEnabled to its chat pane', () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Investigate flaky tests';
@@ -492,6 +591,7 @@ it('sends the /btw question as the first side-task prompt', async () => {
   await act(async () => {
     renderSideTask({
       initialPrompt: 'Explain the current implementation',
+      modelManagement: { allowAdd: false },
       onTitleChange,
     });
     await Promise.resolve();
@@ -721,3 +821,83 @@ it('bounds first-prompt title retries and reports the final failure', async () =
   );
   expect(onError).toHaveBeenCalledWith(failure, 'Failed to name side task');
 });
+
+it('waits for the command snapshot before classifying an initial project auth command', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const props = {
+    initialPrompt: '/auth acme',
+    modelManagement: { allowAdd: false },
+    onInitialPromptRefused: vi.fn(),
+  };
+  await act(async () => {
+    renderSideTask(props);
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+  connection.commands = [
+    { name: 'clear', source: 'builtin-command' },
+    { name: 'auth', source: 'project' },
+  ];
+  await act(async () => {
+    renderSideTask(props);
+  });
+  expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+    '/auth acme',
+    expect.anything(),
+  );
+  expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'keeps an unresolved initial prompt after the metadata timeout (intervening prompt=%s)',
+  async (interveningPrompt) => {
+    vi.useFakeTimers();
+    connection.sessionId = 'side-session-1';
+    connection.status = 'connected';
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const props = {
+      initialPrompt: '/auth acme',
+      modelManagement: { allowAdd: false },
+      onInitialPromptRefused: vi.fn(),
+      onImageIngestionNotice: vi.fn(),
+    };
+    await act(async () => {
+      renderSideTask(props);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(props.onImageIngestionNotice).not.toHaveBeenCalled();
+    await act(async () => {
+      renderSideTask({ ...props });
+      vi.advanceTimersByTime(1);
+    });
+    expect(props.onImageIngestionNotice).toHaveBeenCalledExactlyOnceWith(
+      'warning',
+      'Command information is still unavailable. Your side-task prompt has been kept and will be checked when it loads.',
+    );
+    expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    if (interveningPrompt)
+      transcript.blocks = [{ kind: 'user', text: 'another question' }];
+    connection.commands = [
+      { name: 'clear', source: 'builtin-command' },
+      { name: 'auth', source: 'project' },
+    ];
+    await act(async () => {
+      renderSideTask(props);
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(interveningPrompt ? 0 : 1);
+    expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(props.onImageIngestionNotice).toHaveBeenCalledTimes(1);
+  },
+);

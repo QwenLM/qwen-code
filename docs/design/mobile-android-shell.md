@@ -4,6 +4,8 @@
 
 Status: development-only spike under review, following [issue #11704](https://github.com/QwenLM/qwen-code/issues/11704). It is not a production mobile client.
 
+This document records the Phase 1 baseline. The [Phase 2 connection-profile design](mobile-connection-profiles.md) supersedes the single-profile and plaintext native-storage sections below; other production prerequisites still apply.
+
 ## Problem and Goals
 
 Use the existing daemon-served Web Shell in an Android WebView, with no second native session UI and no locally bundled H5. Establish a buildable native bootstrap and a precise origin boundary before adding production credentials or background connectivity.

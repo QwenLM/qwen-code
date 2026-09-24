@@ -1215,6 +1215,71 @@ describe('ExportTranscriptDocumentV1', () => {
     );
   });
 
+  it('keeps structured shell fallback text in the HTML document safe preview', () => {
+    const text = 'Health check complete\nSaved under /Users/alice/project';
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('shell-start', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  args: { command: 'true' },
+                },
+              },
+            ],
+          },
+        }),
+        record('shell-result', 'shell-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  response: { output: 'Different legacy envelope' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'shell-1',
+            resultDisplay: {
+              type: 'shell_result',
+              version: 1,
+              text,
+              output: 'Health check complete',
+              directory: '/Users/alice/project',
+              exitCode: 0,
+              signal: null,
+              pid: 42,
+              error: null,
+              outcome: 'completed',
+              notices: [],
+              truncated: false,
+              outputFiles: [],
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+    expect(tool?.resultPreview).toEqual({
+      kind: 'text',
+      text: 'Health check complete\nSaved under [home]/project',
+    });
+    expect(JSON.stringify(document)).not.toContain('Different legacy envelope');
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+  });
+
   it('exports structured question answers through the safe preview allowlist', () => {
     const document = createExportTranscriptDocumentV1(
       [

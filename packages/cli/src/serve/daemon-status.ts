@@ -43,6 +43,11 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
+import {
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+} from './channel-worker-startup-ipc.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
@@ -103,6 +108,7 @@ export interface DaemonStatusIssue {
     | 'workspace_status_unavailable'
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
+    | 'channel_restore_failed'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
     | 'daemon_log_degraded'
@@ -136,6 +142,7 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
   maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -209,20 +216,19 @@ interface DaemonStatusLimits {
   acpPreAttachMaxPayloadBytesPerConnection: number | null;
   acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
-   * The daemon's resolved memory figures. Observed and reported only: nothing
-   * consumes them to size a child. `null` on paths that resolve none, such as
-   * direct-embed bridges.
+   * The daemon's resolved memory figures and child policy. `null` on paths
+   * that resolve none, such as direct-embed bridges.
    */
   memory: DaemonStatusMemoryLimits | null;
 }
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False: modeled child heap ceilings are not applied. Count admission is
-   * reported by `childHeap.admissionEnforced`; adaptive journal growth is
-   * reported separately under `journalGrowth`.
+   * True only when managed child-count admission and the fixed old-space
+   * ceiling are both applied. Does not bound total process RSS. Adaptive
+   * journal growth is reported separately under `journalGrowth`.
    */
-  enforced: false;
+  enforced: boolean;
   /**
    * Adaptive live-journal growth derived from this budget: session caps really do
    * grow within this pool mid-turn (per-session effective limits appear on
@@ -238,7 +244,7 @@ export interface DaemonStatusMemoryLimits {
     baselineMaxBytes: number;
   } | null;
   /**
-   * The per-child heap partition the daemon models but does not apply.
+   * The fixed per-child heap partition, applied only under `enforce`.
    * `null` when no policy was built.
    */
   childHeap: {
@@ -253,15 +259,15 @@ export interface DaemonStatusMemoryLimits {
      */
     maxConcurrentChildren: number | null;
     /**
-     * What each would receive. Never 0 and never below
+     * What each receives under `enforce`. Never 0 and never below
      * `modeled.minChildHeapMb`; `null` instead, both under `off` and wherever
      * the partition cannot be modeled within that floor.
      */
     perChildCeilingMb: number | null;
     /**
      * Spawns that would have exceeded `maxConcurrentChildren`. Admission
-     * pressure only: 0 does **not** mean the partition is safe to apply,
-     * because children still run on the much larger host-derived ceiling.
+     * pressure only: 0 does **not** prove the workload fits the ceiling.
+     * Under `observe` and `admit`, children retain the legacy heap arguments.
      *
      * Two known sources of counts that are not capacity pressure: a channel
      * swap on a daemon already at `maxConcurrentChildren` books one, because
@@ -281,8 +287,8 @@ export interface DaemonStatusMemoryLimits {
   availableMemorySource: 'constrained' | 'host';
   insufficientMemory: boolean;
   /**
-   * Derived memory model used to calculate the child-count admission limit.
-   * These values do not reserve memory or set child heap limits.
+   * Derived memory model used to calculate child-count admission and the
+   * fixed old-space ceiling. These values do not reserve physical memory.
    */
   modeled: {
     rootReserveMb: number;
@@ -306,7 +312,7 @@ export function toDaemonStatusMemoryLimits(
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    enforced: false,
+    enforced: admissionEnforced && childHeap?.mode === 'enforce',
     journalGrowth: journalGrowth ?? null,
     childHeap: childHeap
       ? {
@@ -472,8 +478,9 @@ interface DaemonStatusRuntimeMemory {
      * all while children keep running. Publishing zeros there would assert
      * that no child needs any heap.
      *
-     * Observational. Nothing here sizes a child or refuses a spawn; see
-     * `limits.memory.enforced`, which stays `false`.
+     * Observational. Nothing in this block sizes a child or refuses a spawn;
+     * `limits.memory.enforced` reports whether the modeled child ceiling is
+     * currently applied.
      */
     heap: {
       /** Committed high-water. Rises with the ceiling the child was given, so
@@ -1358,6 +1365,47 @@ function pushRuntimeIssues(
   const workers = groupedWorkers ?? [channelWorker];
   for (const worker of workers) {
     pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+  pushChannelRestoreIssues(issues, input.getChannelRestoreFailures?.() ?? []);
+}
+
+// A channel that failed to restore has no worker, so nothing above sees it.
+// One issue per workspace, naming each channel with its own error; the same
+// error is the channel's `runtime.lastError` in the workspace channel list.
+// Exported because the bootstrap status route builds its own response, and
+// boot records are written before the runtime app that serves the other one.
+export function pushChannelRestoreIssues(
+  issues: DaemonStatusIssue[],
+  failures: readonly ChannelRestoreFailure[],
+): void {
+  const byWorkspace = new Map<string, ChannelRestoreFailure[]>();
+  for (const failure of failures) {
+    const list = byWorkspace.get(failure.workspaceCwd) ?? [];
+    list.push(failure);
+    byWorkspace.set(failure.workspaceCwd, list);
+  }
+  for (const [workspaceCwd, list] of byWorkspace) {
+    // Bounded the way the sibling surface bounds the same class of data: a
+    // `serve.channels` list is not length-limited, and this message is
+    // returned on every status poll.
+    const shown = list.slice(0, MAX_CHANNEL_STARTUP_FAILURES);
+    const omitted = list.length - shown.length;
+    issues.push({
+      code: 'channel_restore_failed',
+      severity: 'warning',
+      message:
+        `serve.channels for workspace ${workspaceCwd} were not restored: ` +
+        `${shown
+          .map(
+            (failure) =>
+              `${failure.channel.slice(
+                0,
+                MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+              )} (${failure.message})`,
+          )
+          .join('; ')}` +
+        `${omitted > 0 ? `; and ${omitted} more` : ''}.`,
+    });
   }
 }
 

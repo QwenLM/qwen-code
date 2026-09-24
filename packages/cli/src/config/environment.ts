@@ -103,6 +103,15 @@ if (inheritedProvenance) {
   Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
+/**
+ * Whether `.env` files or `settings.env` put any value into this process's
+ * environment. Modules imported before that load captured the old values, so
+ * only a fresh image sees the environment the files describe.
+ */
+export function hasLoadedEnvironmentValues(): boolean {
+  return dotEnvSourcedKeys.size > 0 || settingsEnvSourcedKeys.size > 0;
+}
+
 export function getRelaunchEnvProvenance(): Record<string, string> {
   return {
     [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
@@ -305,10 +314,18 @@ export function getHomeEnvFallbackVars(
 /**
  * Finds the .env files to load, respecting workspace trust settings.
  *
- * When workspace is untrusted, only allow user-level .env files at:
+ * When workspace is untrusted (or has no recorded trust decision yet), only
+ * allow user-level .env files at:
  * - ~/.qwen/.env
  * - ~/.env
  * - <QWEN_HOME>/.env (when set)
+ *
+ * When the workspace IS trusted, the upward walk also accepts ancestor .env
+ * files: trust is a decision about the workspace, and re-resolving it per
+ * ancestor would reject every ancestor above a `TRUST_FOLDER` rule (the rule
+ * is keyed on the workspace path, so it cannot match a directory above it).
+ * An ancestor carrying its own explicit `DO_NOT_TRUST` rule still blocks its
+ * own .env.
  *
  * Exported so `settings-cache.ts` can re-run the exact same discovery when
  * validating its fingerprint; keep the discovery semantics in this single
@@ -333,19 +350,29 @@ export function findEnvFiles(
   const found: string[] = [];
   const seen = new Set<string>();
 
+  // Resolve the workspace's own decision once. An ancestor .env is inside the
+  // workspace's trust boundary: re-resolving trust against the ancestor itself
+  // would return `undefined` for every directory above a TRUST_FOLDER rule and
+  // silently drop values the user's explicit decision was meant to keep.
+  const workspaceIsTrusted =
+    workspaceTrusted ??
+    isWorkspaceTrusted(settings, undefined, realStartDir).isTrusted === true;
+
   const canUseEnvFile = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (userLevelPaths.has(normalized)) return true;
+    if (!workspaceIsTrusted) return false;
     const dirPath = path.dirname(normalized);
     const workspaceDir =
       path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
         ? path.dirname(dirPath)
         : dirPath;
-    const trusted =
-      workspaceTrusted !== undefined && workspaceDir === realStartDir
-        ? workspaceTrusted
-        : isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted;
-    return trusted !== false;
+    if (workspaceDir === realStartDir) return true;
+    // Ancestor: honour an explicit untrusted rule of its own, but do not treat
+    // "no rule recorded for this directory" as a refusal.
+    return (
+      isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted !== false
+    );
   };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy

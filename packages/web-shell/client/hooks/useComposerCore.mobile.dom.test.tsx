@@ -49,12 +49,14 @@ function Harness({
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
+  expanded = false,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
+  expanded?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -85,6 +87,18 @@ function Harness({
       ) : (
         <div ref={composer.containerRef} data-web-shell-composer-editor />
       )}
+      {expanded && composer.mobileComposer && (
+        <textarea
+          ref={composer.mobileComposer.expandedTextareaRef}
+          value={composer.mobileComposer.value}
+          onChange={composer.mobileComposer.onChange}
+          onPasteCapture={composer.imageTransferHandlers.onPasteCapture}
+          data-expanded
+        />
+      )}
+      {composer.searchState.searchMode && (
+        <input ref={composer.searchState.searchInputRef} data-history-search />
+      )}
     </div>
   );
 }
@@ -95,12 +109,14 @@ async function mount({
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
+  expanded = false,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
+  expanded?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -115,6 +131,7 @@ async function mount({
             onInputTextChange={onInputTextChange}
             sessionId={sessionId}
             atWorkspaceCwd={atWorkspaceCwd}
+            expanded={expanded}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -321,6 +338,24 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.searchState.searchMatches).toContain('first message');
   });
 
+  it('focuses history search when timers run before the input mounts', async () => {
+    mockTouchDevice();
+    await mount();
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        latest!.searchState.openHistorySearch();
+        vi.runOnlyPendingTimers();
+        expect(container!.querySelector('[data-history-search]')).toBeNull();
+      });
+      const search = container!.querySelector('[data-history-search]');
+      expect(search).not.toBeNull();
+      expect(document.activeElement).toBe(search);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('submits a selected history-search match through the pipeline', async () => {
     mockTouchDevice();
     const { onSubmit } = await mount();
@@ -480,6 +515,73 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.pastedFiles).toHaveLength(1);
     expect(latest!.pastedFiles[0].name).toBe('line line line line line….txt');
     expect(latest!.pastedFiles[0].text).toBe(text);
+  });
+
+  it('inserts into the expanded caret and restores its caret without replacing the collapsed selection', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('hello world');
+    const collapsed = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    const expanded =
+      container!.querySelector<HTMLTextAreaElement>('[data-expanded]')!;
+    act(() => {
+      collapsed.setSelectionRange(3, 5);
+      expanded.focus();
+      expanded.setSelectionRange(11, 11);
+      latest!.insertText(' dictated words ');
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(expanded.value).toBe('hello world dictated words ');
+    expect(document.activeElement).toBe(expanded);
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([27, 27]);
+    act(() => {
+      expanded.setSelectionRange(0, 5);
+      latest!.insertText('Hi');
+      latest!.focus();
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(expanded.value).toBe('Hi world dictated words ');
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([2, 2]);
+    expect(document.activeElement).toBe(expanded);
+  });
+
+  it('uses the expanded selection for long paste exemptions and folds only once', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('draft');
+    const expanded =
+      container!.querySelector<HTMLTextAreaElement>('[data-expanded]')!;
+    const collapsed = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    const paste = () => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [],
+          items: [],
+          types: ['text/plain'],
+          getData: () => 'line\n'.repeat(250),
+        },
+      });
+      act(() => expanded.dispatchEvent(event));
+      return event;
+    };
+    expanded.setSelectionRange(0, 5);
+    collapsed.setSelectionRange(0, 0);
+    expect(paste().defaultPrevented).toBe(false);
+    expect(latest!.pastedFiles).toHaveLength(0);
+    expanded.setSelectionRange(0, 0);
+    collapsed.setSelectionRange(0, 5);
+    expect(paste().defaultPrevented).toBe(true);
+    expect(latest!.pastedFiles).toHaveLength(1);
+    expect(expanded.value).toBe('draft');
   });
 
   it('moves a folded paste into the touch textarea on request', async () => {
