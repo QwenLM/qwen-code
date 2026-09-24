@@ -352,6 +352,16 @@ describe('ToolSearchTool', () => {
     );
     expect(ambiguous.returnDisplay).toBe('1 ambiguous');
 
+    // Two spellings of the SAME collision collapse into one report. The
+    // message above invites the model to echo both candidates back, and
+    // spending two names slots on one problem would push a genuinely
+    // requested tool into `truncated` unrendered.
+    const echoed = await search('select:DEFERRED_TARGET,deferred_TARGET');
+    expect(echoed.returnDisplay).toBe('1 ambiguous');
+    expect(
+      String(echoed.llmContent).match(/matches more than one/g),
+    ).toHaveLength(1);
+
     // An exact spelling still resolves to exactly that tool.
     const exact = await search('select:Deferred_Target');
     expect(String(exact.llmContent)).toContain('"name":"Deferred_Target"');
@@ -432,10 +442,11 @@ describe('ToolSearchTool', () => {
     });
   });
 
-  it('select: mode records what it returned for a hidden tool, so tool_call can detect a later change (#11321)', async () => {
+  it('select: records every tool it returned, so reveal state cannot decide gate coverage (#11321)', async () => {
     const hidden = new MockTool({ name: 'alpha', shouldDefer: true });
+    const visible = new MockTool({ name: 'visible_tool' });
     registry.registerTool(hidden);
-    registry.registerTool(new MockTool({ name: 'visible_tool' }));
+    registry.registerTool(visible);
 
     await new ToolSearchTool(config)
       .build({ query: 'select:alpha,visible_tool' })
@@ -444,8 +455,14 @@ describe('ToolSearchTool', () => {
     expect(registry.getReviewedDeclaration('alpha')).toBe(
       deferredDeclarationFingerprint(hidden),
     );
-    // A declared tool is called directly, never through tool_call.
-    expect(registry.getReviewedDeclaration('visible_tool')).toBeUndefined();
+    // Recorded too. tool_call compares the fingerprint only for a target that
+    // is hidden at call time, so this entry is inert while the tool stays
+    // visible — but a tool revealed here can be hidden again later, and
+    // gating the record on the reveal state at review time left that
+    // invocation on the never-reviewed pass-through.
+    expect(registry.getReviewedDeclaration('visible_tool')).toBe(
+      deferredDeclarationFingerprint(visible),
+    );
   });
 
   it.each([
@@ -498,19 +515,19 @@ describe('ToolSearchTool', () => {
     });
   });
 
-  it('a server reconnect forces a fresh review even when the declaration is identical (#11321)', async () => {
+  it('a reconnect needs a fresh review only when the republished contract differs (#11321)', async () => {
     registry.registerTool(new ToolCallTool(registry));
     const declaration = {
       type: 'object',
       properties: { text: { type: 'string' } },
     };
-    const makeTool = () =>
+    const makeTool = (inputSchema: unknown = declaration) =>
       new DiscoveredMCPTool(
         {} as CallableTool,
         'slack',
         'send_message',
         'send a message',
-        declaration,
+        inputSchema,
       );
     const reviewedTool = makeTool();
     const name = reviewedTool.name;
@@ -525,29 +542,86 @@ describe('ToolSearchTool', () => {
       deferredDeclarationFingerprint(reviewedTool),
     );
 
-    // Disconnect, then a reconnect that republishes a byte-identical tool.
+    // Disconnect, then a reconnect republishing a byte-identical tool. The
+    // contract the model's arguments were written against is still the live
+    // one, so the record matches and no round trip is forced.
     registry.removeMcpToolsByServer('slack');
     registry.registerTool(makeTool());
+    const identical = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { text: 'hi' },
+    });
+    expect(identical).toMatchObject({
+      tool: expect.objectContaining({ name }),
+    });
 
-    // The record was reclaimed but tombstoned, so the model cannot invoke the
-    // replacement with arguments written against the schema it saw before the
-    // disconnect — which is exactly the path a replacement server would use.
+    // A replacement publishing a changed contract does not match, and one
+    // re-review closes the loop.
+    registry.removeMcpToolsByServer('slack');
+    registry.registerTool(
+      makeTool({ type: 'object', properties: { channel: { type: 'string' } } }),
+    );
+    const changed = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { channel: 'x' },
+    });
+    expect(changed).toMatchObject({
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    });
+
+    await search(`select:${name}`);
+    const rereviewed = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { channel: 'x' },
+    });
+    expect(rereviewed).toMatchObject({
+      tool: expect.objectContaining({ name }),
+    });
+  });
+
+  it('records a deferred tool reviewed while revealed, so hiding it again does not drop the gate (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    const reviewed = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'slack',
+      'send_message',
+      'send a message',
+      { type: 'object', properties: { text: { type: 'string' } } },
+    );
+    const name = reviewed.name;
+    registry.registerTool(reviewed);
+    registry.revealDeferredTool(name);
+
+    await new ToolSearchTool(config)
+      .build({ query: `select:${name}` })
+      .execute(new AbortController().signal);
+    expect(registry.getReviewedDeclaration(name)).toBe(
+      deferredDeclarationFingerprint(reviewed),
+    );
+
+    // Revealed at review time, hidden again at call time with a changed
+    // contract — the sequence the restored-history reveal and the preload
+    // budget both produce. Gating the record on the reveal state at review
+    // time left this on the never-reviewed pass-through, so the gate's
+    // coverage turned on state the model neither controls nor observes.
+    registry.removeMcpToolsByServer('slack');
+    registry.registerTool(
+      new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        { type: 'object', properties: { channel: { type: 'string' } } },
+      ),
+    );
+    expect(registry.isDeferredAndHidden(name)).toBe(true);
+
     const refused = await resolveDeferredToolCall(registry, {
       name,
       arguments: { text: 'hi' },
     });
     expect(refused).toMatchObject({
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-    });
-
-    // And the recovery loop still closes with one re-review.
-    await search(`select:${name}`);
-    const resolved = await resolveDeferredToolCall(registry, {
-      name,
-      arguments: { text: 'hi' },
-    });
-    expect(resolved).toMatchObject({
-      tool: expect.objectContaining({ name }),
     });
   });
 

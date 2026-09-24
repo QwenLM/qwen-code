@@ -1029,20 +1029,18 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
     });
 
-    it('removeMcpToolsByServer reclaims the reviewed declaration without weakening the gate (#11321)', () => {
+    it('keeps the reviewed declaration after removal so a changed replacement is refused (#11321)', () => {
       const declaration = {
         type: 'object',
         properties: { text: { type: 'string' } },
       };
-      const makeTool = () =>
-        new DiscoveredMCPTool(
-          {} as CallableTool,
-          'slack',
-          'send_message',
-          'send a message',
-          declaration,
-        );
-      const tool = makeTool();
+      const tool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        declaration,
+      );
       toolRegistry.registerTool(tool);
       toolRegistry.recordReviewedDeclaration(tool);
       const recorded = toolRegistry.getReviewedDeclaration(tool.name);
@@ -1050,98 +1048,22 @@ describe('ToolRegistry', () => {
 
       toolRegistry.removeMcpToolsByServer('slack');
 
-      // The retained declaration text is reclaimed...
-      const tombstone = toolRegistry.getReviewedDeclaration(tool.name);
-      expect(tombstone).toBeDefined();
-      expect(tombstone!.length).toBeLessThan(recorded!.length);
-      // ...but the entry is NOT deleted: a re-registered tool with a
-      // byte-identical declaration must still fail the comparison, so
-      // tool_call asks for a fresh review instead of taking the
-      // never-reviewed pass-through on the reconnect path.
-      const replacement = makeTool();
-      toolRegistry.registerTool(replacement);
-      expect(toolRegistry.getReviewedDeclaration(tool.name)).not.toBe(
-        deferredDeclarationFingerprint(replacement),
-      );
+      // Deliberately NOT pruned. A dropped entry reads as "never reviewed" and
+      // passes a replacement through, while a retained one can only match the
+      // same server, schema name and parameter schema — so it either still
+      // describes the live tool or forces a re-review. No removal route has to
+      // remember to touch this map, which is the point.
+      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(recorded);
 
-      // A tool that was never reviewed keeps no entry, so removal cannot grow
-      // the map for the names a long-lived process merely saw.
-      const unreviewed = new DiscoveredMCPTool(
-        {} as CallableTool,
-        'github',
-        'list_prs',
-        'list pull requests',
-        declaration,
-      );
-      toolRegistry.registerTool(unreviewed);
-      toolRegistry.removeMcpToolsByServer('github');
-      expect(
-        toolRegistry.getReviewedDeclaration(unreviewed.name),
-      ).toBeUndefined();
-    });
-
-    it('removeDiscoveredTools reclaims the reviewed declaration the same way (#11321)', () => {
-      const tool = new DiscoveredMCPTool(
+      // A replacement republishing a changed contract does not match it.
+      const replacement = new DiscoveredMCPTool(
         {} as CallableTool,
         'slack',
         'send_message',
         'send a message',
-        { type: 'object', properties: { text: { type: 'string' } } },
+        { type: 'object', properties: { channel: { type: 'string' } } },
       );
-      toolRegistry.registerTool(tool);
-      toolRegistry.recordReviewedDeclaration(tool);
-      const recorded = toolRegistry.getReviewedDeclaration(tool.name)!;
-
-      (
-        toolRegistry as unknown as { removeDiscoveredTools: () => void }
-      ).removeDiscoveredTools();
-
-      expect(toolRegistry.getTool(tool.name)).toBeUndefined();
-      const tombstone = toolRegistry.getReviewedDeclaration(tool.name);
-      expect(tombstone).toBeDefined();
-      expect(tombstone).not.toBe(recorded);
-    });
-
-    it('discoverToolsForServer reclaims the reviewed declaration like the other removal routes (#11321)', async () => {
-      const declaration = {
-        type: 'object',
-        properties: { text: { type: 'string' } },
-      };
-      const makeTool = () =>
-        new DiscoveredMCPTool(
-          {} as CallableTool,
-          'slack',
-          'send_message',
-          'send a message',
-          declaration,
-        );
-      const tool = makeTool();
-      toolRegistry.registerTool(tool);
-      toolRegistry.recordReviewedDeclaration(tool);
-      const recorded = toolRegistry.getReviewedDeclaration(tool.name);
-      expect(recorded).toBe(deferredDeclarationFingerprint(tool));
-
-      // This is the route `/mcp reconnect`, the MCP management dialogs and
-      // `DiscoveredMCPTool.attemptReconnect()` actually take. Stub the manager
-      // so the replacement connection republishes a byte-identical declaration
-      // — the normal reconnect case, and the one the tombstone exists for.
-      const discover = vi
-        .spyOn(toolRegistry.getMcpClientManager(), 'discoverMcpToolsForServer')
-        .mockImplementation(async () => {
-          toolRegistry.registerTool(makeTool());
-        });
-
-      await toolRegistry.discoverToolsForServer('slack');
-
-      expect(discover).toHaveBeenCalledWith('slack', config);
-      const replacement = toolRegistry.getTool(tool.name);
-      expect(replacement).toBeDefined();
-      // The entry survives as a tombstone rather than the pre-reconnect
-      // fingerprint, so the identical declaration the replacement published
-      // still fails the comparison and tool_call asks for a fresh review.
-      const after = toolRegistry.getReviewedDeclaration(tool.name);
-      expect(after).toBeDefined();
-      expect(after).not.toBe(deferredDeclarationFingerprint(replacement!));
+      expect(deferredDeclarationFingerprint(replacement)).not.toBe(recorded);
     });
 
     it('includes deferred tools listed in visibleTools in function declarations', () => {

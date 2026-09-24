@@ -55,21 +55,16 @@ const debugLogger = createDebugLogger('TOOL_REGISTRY');
 /**
  * What a deferred tool looked like when tool_search returned it: the parameter
  * contract its arguments were written against plus, for an MCP tool, the server
- * it belongs to. tool_call compares against this so a model cannot invoke a
- * hidden tool whose schema or server changed after it last reviewed it
- * (#11321).
+ * it belongs to. `tool_call` recomputes it and refuses a bridged call whose
+ * live value differs (#11321); a direct call never reaches that comparison.
  *
  * The free-text `description` is deliberately excluded. Shipped deferred tools
  * rebuild it from mutable state on every `schema` access — `WebSearchTool`
- * interpolates the current month/year (web-search.ts:997-1004 via
- * `getWebSearchToolDescription`, web-search.ts:916-921) and `ReadFileTool`
- * rebuilds it from `config.getEffectiveInputModalities()` (read-file.ts:628-637)
- * — both intentionally, so a long-lived `qwen serve`/ACP process is not stale
- * across a month boundary or a mid-session `/model` switch. Hashing that prose
- * made an unchanged tool's fingerprint drift and refuse a legitimate call whose
- * parameters were still byte-identical to the reviewed schema. Those getters
- * must keep recomputing, so the fingerprint covers the invocation contract
- * instead.
+ * interpolates the current month/year and `ReadFileTool` the effective input
+ * modalities — intentionally, so a long-lived `qwen serve`/ACP process is not
+ * stale across a month boundary or a mid-session `/model` switch. Hashing that
+ * prose made an unchanged tool's fingerprint drift and refuse a legitimate call
+ * whose parameters still matched the reviewed schema.
  */
 export function deferredDeclarationFingerprint(
   tool: AnyDeclarativeTool,
@@ -80,23 +75,6 @@ export function deferredDeclarationFingerprint(
     schema.parametersJsonSchema,
   )}`;
 }
-
-/**
- * Sentinel recorded for a hidden deferred tool that was removed from the
- * registry after tool_search returned it (MCP disconnect/disable, discovered
- * tool refresh). It is not a fingerprint and cannot equal one — the last field
- * of a real fingerprint is `JSON.stringify(...)` output, which is never empty
- * and never contains a raw NUL — so tool_call's comparison always refuses and
- * sends the model back through tool_search instead of taking the
- * never-reviewed pass-through on a re-registered replacement.
- *
- * It replaces the retained declaration text rather than deleting the entry:
- * the multi-KB serialized `parametersJsonSchema` is reclaimed, while the
- * fail-closed invariant documented on
- * {@link ToolRegistry.getReviewedDeclaration} survives the reconnect
- * (#11321).
- */
-const REMOVED_DECLARATION_TOMBSTONE = '\u0000\u0000\u0000';
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
@@ -263,12 +241,13 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
-  // Fingerprint of each hidden deferred tool as tool_search last returned
-  // it. Kept across `/clear`: a stale entry can only make tool_call ask for
-  // a fresh review, never let a changed tool through. Removal replaces the
-  // declaration with `REMOVED_DECLARATION_TOMBSTONE` for the same reason, so
-  // the retained payload stays bounded by the number of distinct deferred
-  // tool names ever reviewed.
+  // Fingerprint of each tool as tool_search last returned it, kept across
+  // `/clear` and deliberately never pruned: an entry can only match the same
+  // server, schema name and parameter schema, so a stale one either still
+  // describes the live tool or makes tool_call ask for a fresh review.
+  // Pruning it on removal would invert that — a dropped entry reads as "never
+  // reviewed" and passes a replacement through. Bounded by the distinct tool
+  // names reviewed in this process.
   private reviewedDeferredDeclarations: Map<string, string> = new Map();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
@@ -566,7 +545,6 @@ export class ToolRegistry {
         // this a re-discovered tool of the same name would inherit
         // stale "revealed" state across the disconnect/reconnect.
         this.revealedDeferred.delete(tool.name);
-        this.invalidateReviewedDeclaration(tool.name);
       }
     }
   }
@@ -586,7 +564,6 @@ export class ToolRegistry {
         // checks reveal state) before the model has any way to know
         // the tool exists this session.
         this.revealedDeferred.delete(name);
-        this.invalidateReviewedDeclaration(name);
       }
     }
   }
@@ -714,16 +691,9 @@ export class ToolRegistry {
         // Drop reveal state too so a re-discovered tool of the same
         // name doesn't inherit a `revealed: true` from before the
         // disconnect (would surface in declarations immediately after
-        // reconnection).
+        // reconnection). The reviewed-declaration record is deliberately
+        // left alone: see `reviewedDeferredDeclarations`.
         this.revealedDeferred.delete(name);
-        // Same tombstone the other two removal routes write — see
-        // `removeMcpToolsByServer`. This is the route `/mcp reconnect`,
-        // the MCP dialogs and `DiscoveredMCPTool.attemptReconnect()`
-        // take, and the purge that follows re-discovers an already
-        // emptied set, so nothing else can reclaim the record here.
-        // Without it a replacement connection republishing a
-        // byte-identical declaration replays the pre-reconnect review.
-        this.invalidateReviewedDeclaration(name);
       }
     }
 
@@ -1011,7 +981,7 @@ export class ToolRegistry {
     this.revealedDeferred.delete(name);
   }
 
-  /** Records the declaration tool_search just returned for a hidden tool. */
+  /** Records the declaration tool_search just returned. */
   recordReviewedDeclaration(tool: AnyDeclarativeTool): void {
     this.reviewedDeferredDeclarations.set(
       tool.name,
@@ -1022,24 +992,9 @@ export class ToolRegistry {
   /**
    * The fingerprint recorded by {@link recordReviewedDeclaration}, or
    * `undefined` when tool_search has not returned this tool in the session.
-   * A tool removed after it was reviewed keeps a tombstone entry, which
-   * never equals a live fingerprint and therefore always asks for a fresh
-   * review.
    */
   getReviewedDeclaration(name: string): string | undefined {
     return this.reviewedDeferredDeclarations.get(name);
-  }
-
-  /**
-   * Reclaims the retained declaration of a removed tool without weakening the
-   * gate: the entry becomes a tombstone, so a re-registered tool of the same
-   * name is refused until tool_search returns it again. A tool that was never
-   * reviewed keeps no entry — there is nothing to reclaim, and adding one
-   * would turn "never reviewed" into "reviewed then removed".
-   */
-  private invalidateReviewedDeclaration(name: string): void {
-    if (!this.reviewedDeferredDeclarations.has(name)) return;
-    this.reviewedDeferredDeclarations.set(name, REMOVED_DECLARATION_TOMBSTONE);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */

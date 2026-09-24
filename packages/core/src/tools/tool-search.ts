@@ -196,21 +196,12 @@ class ToolSearchInvocation extends BaseToolInvocation<
         // for a tool literally named `"foo"` (with quotes) and miss.
         const stripped = stripMatchingQuotes(raw.trim());
         if (!stripped) continue;
-        // Dedupe on the RESOLVED tool, not on the raw lowercase spelling.
-        // resolveRegisteredToolName makes two names differing only by case two
-        // genuinely different tools, so collapsing them here would silently
-        // drop one: it lands in none of missing/truncated/ambiguous, is never
-        // handed to recordReviewedDeclaration, and then reaches tool_call,
-        // which resolves it exactly and takes the never-reviewed pass-through —
-        // the failure #11321 exists to close, via the path the ambiguity
-        // message below recommends. Repeat spellings of ONE resolved tool still
-        // collapse (exact match and a lone case variant resolve to the same
-        // registered name), and so do repeats that resolve to the same
-        // ambiguous candidate list. A name that resolves to NOTHING keys on
-        // the requested spelling instead: two unresolvable spellings that
-        // canonicalize to one alias (`task`/`agent`) are two distinct answers
-        // the model asked for, and collapsing them would drop the second from
-        // missing/truncated/ambiguous alike. Case-only repeats still collapse.
+        // Key on the RESOLVED tool, not the raw lowercase spelling: two names
+        // differing only by case can be two genuinely different tools, and
+        // collapsing them would silently drop one from every report list. A
+        // name that resolves to nothing keys on the requested spelling, so two
+        // unresolvable spellings of one alias (`task`/`agent`) are both
+        // reported instead of collapsing into one.
         const aliased = canonicalToolName(stripped);
         const resolved = resolveRegisteredToolName(aliased, knownNames);
         const key = Array.isArray(resolved)
@@ -432,6 +423,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
       reviewed.push(tool);
     }
 
+    // Record every tool this returned, not only the currently hidden ones: a
+    // tool revealed here can be hidden again later (session restore, preload
+    // budget), and gating the record on the reveal state at review time made
+    // tool_call's comparison depend on state the model neither controls nor
+    // observes (#11321).
+    for (const tool of reviewed) {
+      registry.recordReviewedDeclaration(tool);
+    }
+
     // Escape tag boundary characters in the JSON-stringified schema so any
     // `</function>`
     // (or `</functions>`) substring inside a tool's description / enum
@@ -439,11 +439,6 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // JSON unicode escapes decode back to their original characters when the
     // model interprets the JSON, but as raw text inside the wrapper they are
     // no longer tag delimiters.
-    for (const tool of reviewed) {
-      if (registry.isDeferredAndHidden(tool.name)) {
-        registry.recordReviewedDeclaration(tool);
-      }
-    }
     const schemaBlocks = reviewed.map(
       (tool) =>
         `<function>${escapeJsonTagCharacters(JSON.stringify(tool.schema))}</function>`,

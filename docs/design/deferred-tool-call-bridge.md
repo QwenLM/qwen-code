@@ -30,16 +30,19 @@ none of them — registration order decides nothing — and both halves refuse i
 `tool_call` refuses and asks for the exact name. A tool that was never reviewed
 in this session still resolves by name.
 
-When `tool_search` returns a hidden deferred tool, it records a fingerprint of
-that tool's invocation contract — its MCP server (empty for a built-in), the
-name in its schema, and its `parametersJsonSchema`. `tool_call` recomputes the
-fingerprint and refuses a hidden tool whose live value differs, telling the
-model to re-run `tool_search` with `select:<name>`. A re-review overwrites the
-record, so that loop closes in one round trip. The free-text `description` is
-not part of the fingerprint: shipped deferred tools rebuild it from mutable
-state on every `schema` access (`web_search` interpolates the current month,
-`read_file` the effective input modalities), so hashing that prose would refuse
-calls whose parameters still match the reviewed schema.
+When `tool_search` returns a tool, it records a fingerprint of that tool's
+invocation contract — its MCP server (empty for a built-in), the name in its
+schema, and its `parametersJsonSchema`. `tool_call` recomputes the fingerprint
+and refuses a hidden tool whose live value differs, telling the model to re-run
+`tool_search` with `select:<name>`. A re-review overwrites the record, so that
+loop closes in one round trip. Recording is not gated on whether the tool is
+hidden at review time: a revealed tool can be hidden again later, and gating
+the record on reveal state would make the comparison's coverage depend on state
+the model neither controls nor observes. The free-text `description` is not part
+of the fingerprint: shipped deferred tools rebuild it from mutable state on
+every `schema` access (`web_search` interpolates the current month, `read_file`
+the effective input modalities), so hashing that prose would refuse calls whose
+parameters still match the reviewed schema.
 
 The existing deferred-tools startup reminder carries the compact live catalog
 (names and short descriptions). Do not embed that catalog in either bridge
@@ -118,12 +121,12 @@ with arguments written against the previous connection. Telling a connection
 identity apart from a name label needs a channel the registry does not have
 today; it is tracked in the #11321 discussion rather than approximated here.
 
-Review records live on the registry instance and survive `/clear`: a stale
-entry can only make `tool_call` ask for a fresh review, never let a changed tool
-through. Removing a tool (MCP disconnect or disable, discovered-tool refresh)
-replaces its retained declaration with a tombstone, which reclaims the
-serialized schema while still forcing a re-review of anything re-registered
-under that name.
+Review records live on the registry instance, survive `/clear`, and are never
+pruned. An entry can only match the same server, schema name and parameter
+schema, so a stale one either still describes the live tool or makes `tool_call`
+ask for a fresh review. Pruning on removal would invert that: a dropped entry
+reads as "never reviewed" and passes a replacement through. The map is bounded
+by the distinct tool names reviewed in the process.
 
 ## Verification
 
@@ -141,5 +144,4 @@ under that name.
   spellings listed, projected name-only into the AUTO classifier transcript,
   and reviewed as two tools when both spellings are named explicitly.
 - A hidden tool whose recorded fingerprint no longer matches the live one is
-  refused until `tool_search` returns it again, including after an MCP
-  disconnect/reconnect that republishes an identical declaration.
+  refused until `tool_search` returns it again.
