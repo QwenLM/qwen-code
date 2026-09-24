@@ -2733,13 +2733,19 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
       f.summary,
       `Failure scenario: ${f.failureScenario}`,
       ...(f.fixWitness ? [`Fix witness: ${f.fixWitness}`] : []),
+      // The premise the fix owed, when the finding recorded one — the
+      // assumption this audit most needs to check is pinned.
+      ...(f.fixConstraint ? [`Fix constraint: ${f.fixConstraint}`] : []),
       ...(f.outcomeNote ? [`Fixer's note: ${f.outcomeNote}`] : []),
     ].join('\n'),
   );
   return [
     '# Fix audit input',
     '',
-    `## Findings the fix claims to close — ${fixed.length} with outcome \`fixed\``,
+    // Every `fixed` outcome the artifact holds, not only this round's: an
+    // artifact rebuilt on the interactive path carries earlier fixes too,
+    // whose edits predate these hunks.
+    `## Findings recorded as \`fixed\` — ${fixed.length} (every \`fixed\` outcome in the artifact; one fixed earlier has no hunk here)`,
     '',
     entries.join('\n\n'),
     '',
