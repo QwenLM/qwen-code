@@ -535,6 +535,11 @@ export interface WebShellAtProvider {
   order?: number;
   tabs?: readonly WebShellAtProviderTab[];
   renderItem?: WebShellAtItemRenderer;
+  /**
+   * Claims a typed `@query` that names no category, so it searches this
+   * provider instead of falling back to files.
+   */
+  claimsTypedQuery?(query: string): boolean;
   search(params: {
     query: string;
     signal: AbortSignal;

@@ -1060,6 +1060,27 @@ export function useAtMentionMenu({
           });
           return true;
         }
+        const claimingProvider = providerViewsRef.current.find(
+          (view) =>
+            !isBuiltinProviderId(view.id) &&
+            view.provider.claimsTypedQuery?.(parsed.query),
+        );
+        if (claimingProvider) {
+          scheduleLoadItems(claimingProvider.id, parsed.query, {
+            from: parsed.from,
+            to: parsed.to,
+            query: parsed.query,
+            level: 'items',
+            selectedProviderId: claimingProvider.id,
+            selectedIndex: 0,
+            providers: providerViewsRef.current,
+            itemMode: 'default',
+            mcpServerName: undefined,
+            fileDirectory: undefined,
+            inputMode: 'context',
+          });
+          return true;
+        }
         if (
           providerViewsRef.current.some(
             (provider) => provider.id === FILE_PROVIDER_ID,
