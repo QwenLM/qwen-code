@@ -194,6 +194,107 @@ describe('useMessageQueue', () => {
     expect(result.current.messageQueue).toEqual([]);
   });
 
+  // #11626: shell intent is recorded when the message enters the queue and
+  // travels with the entry, so the drain routes on the submit-time decision
+  // instead of the live shell-mode flag.
+  describe('shell intent', () => {
+    it('returns the recorded shell intent with the popped submission', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('gh workflow list', false, undefined, true);
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'gh workflow list',
+        shellMode: true,
+      });
+    });
+
+    it('keeps shell commands and model prompts in separate batches', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('model one', false, undefined, false);
+        result.current.addMessage('ls -la', false, undefined, true);
+        result.current.addMessage('model two', false, undefined, false);
+      });
+
+      let first: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        first = result.current.popNextSubmission();
+      });
+      // Model-bound prompts aggregate with each other; the shell command
+      // stays queued for its own batch.
+      expect(first).toMatchObject({
+        kind: 'user',
+        modelText: 'model one\n\nmodel two',
+        shellMode: false,
+      });
+      expect(result.current.messageQueue).toEqual(['ls -la']);
+
+      let second: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        second = result.current.popNextSubmission();
+      });
+      expect(second).toMatchObject({
+        kind: 'user',
+        modelText: 'ls -la',
+        shellMode: true,
+      });
+    });
+
+    it('leaves intent unrecorded for producers that do not pass it', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('remote input');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'remote input',
+      });
+      expect(
+        (submission as { shellMode?: boolean } | null)?.shellMode,
+      ).toBeUndefined();
+    });
+
+    it('preserves shell intent across an admission-failure restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.restoreMessages(
+          ['gh workflow list'],
+          undefined,
+          true,
+          true,
+        );
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'gh workflow list',
+        shellMode: true,
+      });
+    });
+  });
+
   it('hides the plain-user batch key from an active Goal turn reservation', () => {
     const { result } = renderHook(() => useMessageQueue());
     act(() => {
