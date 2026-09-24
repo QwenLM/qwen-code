@@ -39,6 +39,7 @@ const { connectionState, skillsState, workspaceState } = vi.hoisted(() => ({
   workspaceState: {
     current: {
       workspaceCwd: '/workspace/demo',
+      client: {},
       capabilities: {
         features: ['workspace_skill_settings_toggle'],
       },
@@ -160,6 +161,7 @@ beforeEach(() => {
   ];
   connectionState.current.sessionId = undefined;
   connectionState.current.workspaceCwd = '/workspace/demo';
+  workspaceState.current.client = {};
 });
 
 afterEach(() => {
@@ -250,45 +252,63 @@ describe('SkillsManagerPage', () => {
     },
   );
 
-  it.each(['write', 'refresh'])(
-    'does not show a stale result after switching workspaces during the %s',
-    async (phase) => {
-      let finish!: () => void;
-      const pending = new Promise<void>((resolve) => {
-        finish = resolve;
-      });
-      skillsState.current.skills = [disabledSkill];
-      if (phase === 'write') {
-        skillsState.current.setEnabled.mockImplementationOnce(async () => {
-          await pending;
-          return { changed: true };
-        });
-      } else {
-        skillsState.current.reloadConfig.mockImplementationOnce(async () => {
-          await pending;
-          return { skills: [] };
-        });
-      }
+  describe.each(['workspace', 'client', 'unmount'] as const)(
+    'when the toggle scope changes via %s',
+    (change) => {
+      it.each(['write', 'refresh'])(
+        'discards a stale result during the %s',
+        async (phase) => {
+          let finish!: () => void;
+          const pending = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          skillsState.current.skills = [disabledSkill];
+          if (phase === 'write') {
+            skillsState.current.setEnabled.mockImplementationOnce(async () => {
+              await pending;
+              return { changed: true };
+            });
+          } else {
+            skillsState.current.reloadConfig.mockImplementationOnce(
+              async () => {
+                await pending;
+                return { skills: [] };
+              },
+            );
+          }
 
-      await renderPage();
-      await openDisabledSkill('review');
-      await selectSkillAction();
-      await renderPage('/workspace/secondary');
-      await act(async () => {
-        finish();
-        await pending;
-      });
+          await renderPage();
+          await openDisabledSkill('review');
+          await selectSkillAction();
+          if (change === 'workspace') {
+            await renderPage('/workspace/secondary');
+          } else if (change === 'client') {
+            workspaceState.current.client = {};
+            await renderPage();
+          } else {
+            await act(async () => root.render(null));
+          }
+          await act(async () => {
+            finish();
+            await pending;
+          });
 
-      expect(container.textContent).not.toContain('Workspace setting updated.');
-      expect(container.textContent).not.toContain('Skill enabled.');
-      expect(skillsState.current.reloadConfig).toHaveBeenCalledTimes(
-        phase === 'write' ? 0 : 1,
+          expect(container.textContent).not.toContain(
+            'Workspace setting updated.',
+          );
+          expect(container.textContent).not.toContain('Skill enabled.');
+          expect(skillsState.current.reloadConfig).toHaveBeenCalledTimes(
+            phase === 'write' ? 0 : 1,
+          );
+          if (change !== 'unmount') {
+            expect(
+              container.querySelector<HTMLButtonElement>(
+                '[data-testid="skill-actions"]',
+              )?.disabled,
+            ).toBe(false);
+          }
+        },
       );
-      expect(
-        container.querySelector<HTMLButtonElement>(
-          '[data-testid="skill-actions"]',
-        )?.disabled,
-      ).toBe(false);
     },
   );
 

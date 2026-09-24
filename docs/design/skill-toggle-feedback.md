@@ -7,8 +7,8 @@
 This change addresses [#10152](https://github.com/QwenLM/qwen-code/issues/10152).
 A successful settings write can remove the selected Skill from the refreshed
 catalog. The page then returns to the list, where its result notice is missing.
-A Skill disabled by higher-scope settings also has no action to remove a legacy
-workspace enable declaration while it remains effectively disabled.
+A Skill disabled by higher-scope settings also has no action to remove a saved
+workspace enable declaration for its registered name while it remains disabled.
 
 ## Behavior
 
@@ -25,6 +25,7 @@ the higher-scope restriction or make the Skill runnable. This is an explicit
 workspace disable, not a reset to inherited settings. No daemon or SDK API is
 added. The current daemon already refuses new enable declarations under a
 higher-scope lock; the reverse action also handles declarations saved earlier.
+Legacy declarations using a different alias retain the existing daemon behavior.
 
 The App already releases its loaded-Skill fallback for a mutation that changes
 only a declaration. Add coverage without changing that production behavior.
@@ -39,8 +40,8 @@ locked Skills are preserved; do not change the TUI's save behavior.
 - Higher-scope lock: the new action writes `false` to the selected workspace,
   removes a pre-existing enable declaration, and keeps effective availability
   disabled. Unsupported daemons keep the action disabled.
-- Workspace changes during the write or refresh: discard the old notice and
-  do not keep the new workspace's controls busy.
+- Workspace or client changes during the write or refresh: discard the old
+  notice and release the controls. Unmounting also invalidates pending work.
 - Declaration-only mutation: release the fallback, display later session
   Skills, and avoid another status read on the next applied mutation.
 

@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
@@ -208,24 +215,14 @@ export function SkillsManagerPage({
     [displayedSkills, selectedName],
   );
   const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
-  const toggleScope = useMemo(
-    () => ({
-      workspaceCwd: targetWorkspaceCwd,
-      client: workspace.client,
-      active: true,
-    }),
-    [targetWorkspaceCwd, workspace.client],
-  );
-  const latestToggleScope = useRef(toggleScope);
-  latestToggleScope.current = toggleScope;
-  useEffect(() => {
-    toggleScope.active = true;
+  const toggleScopeEpoch = useRef(0);
+  useLayoutEffect(() => {
     setNotice(null);
     setBusySkill(null);
     return () => {
-      toggleScope.active = false;
+      toggleScopeEpoch.current += 1;
     };
-  }, [toggleScope]);
+  }, [targetWorkspaceCwd, workspace.client]);
   const targetsActiveWorkspace =
     connection.workspaceCwd !== undefined
       ? targetWorkspaceCwd === connection.workspaceCwd
@@ -266,8 +263,8 @@ export function SkillsManagerPage({
     skill: DaemonWorkspaceSkillStatus,
     enabled = skill.status === 'disabled',
   ) {
-    const isCurrent = () =>
-      toggleScope.active && latestToggleScope.current === toggleScope;
+    const epoch = toggleScopeEpoch.current;
+    const isCurrent = () => epoch === toggleScopeEpoch.current;
     setBusySkill(skill.name);
     setNotice(null);
     try {
