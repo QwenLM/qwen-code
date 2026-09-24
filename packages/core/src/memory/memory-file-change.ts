@@ -137,6 +137,18 @@ export function describeMemoryFileChange(
 
 const SCOPE_ORDER: readonly MemoryChangedScope[] = ['user', 'project', 'team'];
 
+/** Paths already notified while a coalesced window is open, per window. */
+const outsideWindowEmits = new Set<Set<string>>();
+
+function rememberOutsideEmit(filePaths: readonly string[]): void {
+  if (outsideWindowEmits.size === 0 || suppressDelivery.getStore()) return;
+  for (const bucket of outsideWindowEmits) {
+    for (const filePath of filePaths) {
+      bucket.add(filePath);
+    }
+  }
+}
+
 function recipientsFor(
   workspace: string,
   deliveryId: symbol | undefined,
@@ -208,9 +220,11 @@ export async function notifyMemoryFileChange(
     }
   }
   const changes: MemoryDocumentChange[] = [];
+  const emittedPaths: string[] = [];
   for (const scope of SCOPE_ORDER) {
     const group = grouped.get(scope);
     if (!group || group.paths.length === 0) continue;
+    emittedPaths.push(...group.paths);
     changes.push({
       scope,
       operation,
@@ -219,6 +233,7 @@ export async function notifyMemoryFileChange(
       ...(scope === 'user' ? {} : { workspace }),
     });
   }
+  rememberOutsideEmit(emittedPaths);
   await emit(projectRoot, changes, deliveryId);
 }
 
@@ -348,28 +363,36 @@ export async function withCoalescedMemoryChanges<T>(
   deliveryId: symbol | undefined,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const before = await readMemoryDocuments(projectRoot);
+  const outside = new Set<string>();
+  outsideWindowEmits.add(outside);
   try {
-    return await suppressDelivery.run(true, fn);
+    const before = await readMemoryDocuments(projectRoot);
+    try {
+      return await suppressDelivery.run(true, fn);
+    } finally {
+      const after = await readMemoryDocuments(projectRoot);
+      const created: string[] = [];
+      const updated: string[] = [];
+      const deleted: string[] = [];
+      const keep = (filePath: string) => !outside.has(filePath);
+      for (const [filePath, content] of after) {
+        if (!keep(filePath)) continue;
+        if (!before.has(filePath)) {
+          created.push(filePath);
+        } else if (before.get(filePath) !== content) {
+          updated.push(filePath);
+        }
+      }
+      for (const filePath of before.keys()) {
+        if (!after.has(filePath) && keep(filePath)) {
+          deleted.push(filePath);
+        }
+      }
+      await notifyMemoryFileChange(deleted, projectRoot, 'delete', deliveryId);
+      await notifyMemoryFileChange(updated, projectRoot, 'update', deliveryId);
+      await notifyMemoryFileChange(created, projectRoot, 'create', deliveryId);
+    }
   } finally {
-    const after = await readMemoryDocuments(projectRoot);
-    const created: string[] = [];
-    const updated: string[] = [];
-    const deleted: string[] = [];
-    for (const [filePath, content] of after) {
-      if (!before.has(filePath)) {
-        created.push(filePath);
-      } else if (before.get(filePath) !== content) {
-        updated.push(filePath);
-      }
-    }
-    for (const filePath of before.keys()) {
-      if (!after.has(filePath)) {
-        deleted.push(filePath);
-      }
-    }
-    await notifyMemoryFileChange(deleted, projectRoot, 'delete', deliveryId);
-    await notifyMemoryFileChange(updated, projectRoot, 'update', deliveryId);
-    await notifyMemoryFileChange(created, projectRoot, 'create', deliveryId);
+    outsideWindowEmits.delete(outside);
   }
 }

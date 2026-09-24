@@ -19218,6 +19218,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings setMemory does not emit when a workspace override still wins', async () => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockResolvedValue(undefined);
+    const userMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: false,
+    };
+    const mergedMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: false,
+    };
+    const settings = {
+      merged: { mcpServers: {}, memory: mergedMemory },
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: { memory: userMemory },
+      },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) {
+          userMemory[memoryKey] = value;
+        }
+      }),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: { enableManagedAutoMemory: true },
+      }),
+    ).resolves.toEqual({
+      settings: expect.objectContaining({
+        enableManagedAutoMemory: false,
+      }),
+    });
+    expect(userMemory['enableManagedAutoMemory']).toBe(true);
+    expect(notify).not.toHaveBeenCalled();
+
+    notify.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings setCoreValue syncs output language rule file', async () => {
     const settings = makeCoreSettings();
     vi.mocked(loadSettings).mockReturnValue(settings);

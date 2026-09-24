@@ -419,6 +419,56 @@ describe('memory file change hook', () => {
     ]);
   });
 
+  it('does not report an outside write again in the coalesced diff', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'outside.md');
+    const writer: MemoryChangedNotice[] = [];
+    const windowSeen: MemoryChangedNotice[] = [];
+    const writerRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        writer.push(change);
+      },
+    );
+    const windowRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        windowSeen.push(change);
+      },
+    );
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const pending = withCoalescedMemoryChanges(
+        projectRoot,
+        windowRegistration.id,
+        () => gate,
+      );
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'out\n');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        'create',
+        writerRegistration.id,
+      );
+      release();
+      await pending;
+    } finally {
+      writerRegistration();
+      windowRegistration();
+    }
+    expect(writer).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['user/outside.md'],
+      }),
+    ]);
+    expect(windowSeen).toEqual([]);
+  });
+
   it('reports a file removed inside a coalesced window once', async () => {
     const projectRoot = await setup();
     const file = path.join(tempDir!, 'memories', 'user', 'gone.md');
