@@ -456,7 +456,7 @@ try {
   const run4 = await run(project, env, ['run', 'plan4.json']);
   const taskId4 = /task (\S+):/.exec(run4.stdout)?.[1];
   state.behavior = 'stay';
-  const cancelOut = await run(project, env, ['cancel', '--task', taskId4]);
+  const cancelOut = await run(project, env, ['cancel', taskId4]);
   check(
     'cancel warns about billed partials',
     /still billed/.test(cancelOut.stdout),

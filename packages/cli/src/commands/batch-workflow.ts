@@ -5,7 +5,7 @@
  */
 
 // Orchestration for the agent-prepared Batch workflow (`qwen batch
-// run|collect|list|retry|cancel --task`). The agent owns understanding the
+// run|collect|list|retry|cancel`). The agent owns understanding the
 // task and writing a small plan file; everything here is deterministic:
 // assemble requests, persist intent before money moves, submit, later
 // collect, validate, deliver, and account for every attempt. No model calls
@@ -17,6 +17,7 @@ import {
   SETTLED_STATUSES,
   MAX_REQUESTS_PER_FILE,
   MAX_FILE_BYTES,
+  MAX_LINE_BYTES,
   assertValidWindow,
   uploadBatchJsonl,
   createBatchJob,
@@ -54,12 +55,6 @@ import {
   freezeRequest,
   describeThinking,
 } from './batch-docs.js';
-
-// Product-level cap for one assembled request line. The provider accepts
-// 6 MB; the workflow keeps 1 MB because a document transform bigger than
-// that belongs in the raw `qwen batch submit` path with hand-checked input,
-// not in an unattended agent-prepared job.
-const WORKFLOW_MAX_LINE_BYTES = 1 * 1024 * 1024;
 
 // Batch bills successful requests at half the realtime list price and does
 // not hit the context cache. Monetary estimates exist only when the operator
@@ -173,11 +168,10 @@ function assembleAttempt(
   for (const request of assembled) {
     const encoded = JSON.stringify(request.line) + '\n';
     const bytes = Buffer.byteLength(encoded);
-    if (bytes > WORKFLOW_MAX_LINE_BYTES) {
+    if (bytes > MAX_LINE_BYTES) {
       throw new Error(
         `item "${request.itemId}": assembled request is ${bytes} bytes, over the ` +
-          `${WORKFLOW_MAX_LINE_BYTES}-byte workflow line limit. For larger documents ` +
-          `use \`qwen batch submit\` with a hand-built file instead.`,
+          `provider's ${MAX_LINE_BYTES}-byte line limit; split the document.`,
       );
     }
     jsonl += encoded;
@@ -606,7 +600,7 @@ async function reconcileUnknownAttempt(
         .map((job) => job.id)
         .join(
           ', ',
-        )}. Not guessing — inspect them with \`qwen batch status <id>\` and fix task.json by hand.`,
+        )}. Not guessing — inspect them in the provider console and fix task.json by hand.`,
     );
   } else {
     deps.err(

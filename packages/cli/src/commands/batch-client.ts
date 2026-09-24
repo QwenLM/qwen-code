@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// HTTP client pieces for the DashScope Batch API, shared by the low-level
-// `qwen batch submit|status|fetch|cancel` commands (batch.ts) and the
-// agent-prepared workflow (batch-workflow.ts). One fetch wrapper carries the
+// HTTP client pieces for the DashScope Batch API, used by the agent-prepared
+// workflow (batch-workflow.ts). One fetch wrapper carries the
 // HTTP status on every failure so callers can tell a definite provider
 // refusal (4xx) from an ambiguous one (5xx or a dropped socket after the
 // provider accepted the work) — the two need opposite recovery behaviour.
@@ -26,10 +25,11 @@ export const SETTLED_STATUSES = new Set([
 // out-of-range file is refused before it is uploaded rather than after — the
 // upload is the slow, billable half of the mistake. These are the numbers the
 // user doc states (docs/users/features/batch.md); if the provider raises them,
-// both move together.
+// both move together. The provider's documents disagree on the line limit
+// (1 MB vs 6 MB), so the lower one is enforced.
 export const MAX_REQUESTS_PER_FILE = 50_000;
 export const MAX_FILE_BYTES = 500 * 1024 * 1024;
-export const MAX_LINE_BYTES = 6 * 1024 * 1024;
+export const MAX_LINE_BYTES = 1024 * 1024;
 // `completion_window` bounds, in hours: the provider offers 24h to 14d.
 const MIN_WINDOW_HOURS = 24;
 const MAX_WINDOW_HOURS = 14 * 24;
@@ -37,18 +37,20 @@ const MAX_WINDOW_HOURS = 14 * 24;
 /**
  * Reject a completion window the provider does not offer, before anything is
  * uploaded. Forwarding it verbatim costs a full upload to learn that `12h` is
- * not a window — a limit this PR's own docs state.
+ * not a window.
  */
 export function assertValidWindow(window: string): void {
   const match = /^(\d+)([hd])$/.exec(window);
   if (!match) {
     throw new Error(
-      `--window must be a number followed by h or d, e.g. 24h or 7d; got "${window}".`,
+      `completionWindow must be a number followed by h or d, e.g. 24h or 7d; got "${window}".`,
     );
   }
   const hours = Number(match[1]) * (match[2] === 'd' ? 24 : 1);
   if (hours < MIN_WINDOW_HOURS || hours > MAX_WINDOW_HOURS) {
-    throw new Error(`--window must be between 24h and 14d; got "${window}".`);
+    throw new Error(
+      `completionWindow must be between 24h and 14d; got "${window}".`,
+    );
   }
 }
 

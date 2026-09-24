@@ -4,14 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// File for 'qwen batch' — submit, inspect, fetch, and cancel DashScope Batch
-// API jobs. Batch runs at half the realtime price with a >=24h completion
-// window, so it is a fan-out tool for many independent single-turn requests,
-// not a path for the agent loop. Rationale and measurements:
-// docs/design/2026-09-23-batch-api-design.md
-import fs from 'node:fs';
-import path from 'node:path';
-import readline from 'node:readline';
+// File for 'qwen batch' — the deterministic executor behind `/batch-api`.
+// Batch runs at half the realtime price with a >=24h completion window, so it
+// is a fan-out tool for many independent single-turn requests, not a path for
+// the agent loop. Design: docs/design/2026-09-23-batch-api-design.md
 import type { Argv, CommandModule } from 'yargs';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { loadSettings } from '../config/settings.js';
@@ -21,19 +17,6 @@ import {
 } from '../utils/modelConfigUtils.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { resolveProxy } from './channel/proxy.js';
-import {
-  SETTLED_STATUSES,
-  MAX_REQUESTS_PER_FILE,
-  MAX_FILE_BYTES,
-  MAX_LINE_BYTES,
-  assertValidWindow,
-  uploadBatchJsonl,
-  createBatchJob,
-  getBatchJob,
-  cancelBatchJob,
-  downloadRemoteFile,
-  deleteRemoteFile,
-} from './batch-client.js';
 import {
   runPlan,
   collectTask,
@@ -178,253 +161,6 @@ const cliOptionsOf = (argv: Record<string, unknown>): BatchCliOptions => ({
   insecure: argv['insecure'] as boolean | undefined,
 });
 
-/**
- * Accept either a full batch request line (`{custom_id, method, url, body}`)
- * or a bare chat-completions body; fill in the envelope and default model.
- * A full line's `method`/`url` must match what the file-level endpoint will
- * be: silently rewriting `/v1/embeddings` (or a `GET`) to
- * `POST /v1/chat/completions` would only surface hours later as per-line
- * provider rejections, so a mismatch fails here instead.
- */
-export function toRequestLine(
-  line: Record<string, unknown>,
-  index: number,
-  model: string,
-): Record<string, unknown> {
-  // Any envelope key makes it a full request line. Testing only `body` would
-  // read `{custom_id, method, url}` — an envelope whose body is missing — as
-  // a bare chat body, nest the envelope into `body`, and rewrite its declared
-  // method/url to the defaults instead of failing here.
-  const isEnvelope = 'body' in line || 'method' in line || 'url' in line;
-  const suppliedId = line['custom_id'];
-  const customId = String(suppliedId ?? index);
-  if (isEnvelope && !('body' in line)) {
-    throw new Error(
-      `custom_id ${customId}: a full request line must carry a "body" — ` +
-        `or write the bare chat-completions body on its own`,
-    );
-  }
-  const method = isEnvelope
-    ? ((line['method'] as string | undefined) ?? 'POST')
-    : 'POST';
-  const url = isEnvelope
-    ? ((line['url'] as string | undefined) ?? '/v1/chat/completions')
-    : '/v1/chat/completions';
-  if (method !== 'POST' || url !== '/v1/chat/completions') {
-    throw new Error(
-      `custom_id ${customId}: only ` +
-        `POST /v1/chat/completions is supported, got ${method} ${url}`,
-    );
-  }
-  const body = {
-    ...((isEnvelope ? line['body'] : line) as Record<string, unknown>),
-  };
-  if (!isEnvelope) {
-    // A bare body's own `custom_id` is the caller's handle for that request:
-    // hoist it into the envelope rather than both losing it as an identifier
-    // and sending it to the provider as an unrecognised request field.
-    delete body['custom_id'];
-  }
-  return {
-    custom_id: customId,
-    method,
-    url,
-    body: { model, ...body },
-  };
-}
-
-export async function submitBatch(
-  ep: BatchEndpoint,
-  file: string,
-  window: string,
-): Promise<BatchJob> {
-  assertValidWindow(window);
-  // Stream the input line by line instead of readFileSync+split+map+join:
-  // the provider ceiling is 500 MB / 50 000 lines and this command path
-  // never reaches the CLI's larger-heap relaunch, so four live copies of the
-  // file would OOM the default heap. Only the joined output is held.
-  const rl = readline.createInterface({
-    input: fs.createReadStream(file, 'utf8'),
-    crlfDelay: Infinity,
-  });
-  let jsonl = '';
-  let lineNo = 0;
-  let requests = 0;
-  let bytes = 0;
-  const lineOfId = new Map<string, number>();
-  try {
-    for await (const raw of rl) {
-      lineNo += 1;
-      // A BOM is what PowerShell 5.1 and Notepad write by default;
-      // JSON.parse does not strip it.
-      const text = lineNo === 1 ? raw.replace(/^\uFEFF/, '') : raw;
-      if (!text.trim()) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch (error) {
-        throw new Error(
-          `${file}:${lineNo}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      if (
-        typeof parsed !== 'object' ||
-        parsed === null ||
-        Array.isArray(parsed)
-      ) {
-        throw new Error(
-          `${file}:${lineNo}: each line must be a JSON object (a chat body or a full batch request line)`,
-        );
-      }
-      let requestLine: Record<string, unknown>;
-      try {
-        // custom_id defaults to the 0-based file line index, so results map
-        // back to the input file's own numbering even when blank lines were
-        // skipped.
-        requestLine = toRequestLine(
-          parsed as Record<string, unknown>,
-          lineNo - 1,
-          ep.model,
-        );
-      } catch (error) {
-        throw new Error(
-          `${file}:${lineNo}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      // Duplicate ids make the output rows unmappable back to the input —
-      // the one thing the docs tell users to do themselves — so refuse the
-      // file here rather than let the provider return ambiguous results.
-      const id = String(requestLine['custom_id']);
-      const firstLine = lineOfId.get(id);
-      if (firstLine !== undefined) {
-        throw new Error(
-          `${file}:${lineNo}: custom_id "${id}" is already used by line ${firstLine}; ids must be unique`,
-        );
-      }
-      lineOfId.set(id, lineNo);
-      const encoded = JSON.stringify(requestLine) + '\n';
-      const encodedBytes = Buffer.byteLength(encoded);
-      if (encodedBytes > MAX_LINE_BYTES) {
-        throw new Error(
-          `${file}:${lineNo}: request is ${encodedBytes} bytes, over the ${MAX_LINE_BYTES}-byte per-line limit.`,
-        );
-      }
-      requests += 1;
-      if (requests > MAX_REQUESTS_PER_FILE) {
-        throw new Error(
-          `${file}: more than ${MAX_REQUESTS_PER_FILE} requests; split the file and submit the parts as separate jobs.`,
-        );
-      }
-      bytes += encodedBytes;
-      if (bytes > MAX_FILE_BYTES) {
-        throw new Error(
-          `${file}: over the ${MAX_FILE_BYTES}-byte per-file limit at line ${lineNo}; split the file and submit the parts as separate jobs.`,
-        );
-      }
-      jsonl += encoded;
-    }
-  } finally {
-    rl.close();
-  }
-  if (lineNo === 0 || jsonl.length === 0) {
-    throw new Error(`${file} has no requests.`);
-  }
-
-  const uploaded = await uploadBatchJsonl(ep, jsonl, path.basename(file));
-  // The input file is a billable object and this CLI has no `files`
-  // subcommand, so name it before the create: if the create fails (or the
-  // transport drops ambiguously after the provider accepted it), the id is
-  // the only handle the user has. stderr, to keep stdout to the batch id.
-  writeStderrLine(`[batch] uploaded input file ${uploaded.id}`);
-
-  try {
-    return await createBatchJob(ep, uploaded.id, window);
-  } catch (error) {
-    // Only a 4xx is the provider definitely refusing the job, which makes the
-    // uploaded input an orphan worth deleting. A 5xx, a dropped socket or an
-    // unreadable body is ambiguous — the job may exist and be billing — and
-    // deleting its input file would break it, so keep the file and name it.
-    const status = (error as { status?: number } | undefined)?.status;
-    if (typeof status === 'number' && status >= 400 && status < 500) {
-      await deleteRemoteFile(ep, uploaded.id).catch(() => undefined);
-    } else {
-      writeStderrLine(
-        `[batch] warning: POST /batches did not complete cleanly, so the job ` +
-          `may exist and be billing. Input file ${uploaded.id} was kept; ` +
-          `check the provider's batch list before submitting again.`,
-      );
-    }
-    throw error;
-  }
-}
-
-/** One line: id, status, N/M done, phase from the timestamps, deadline. */
-export function describeBatch(job: BatchJob, now = Date.now() / 1000): string {
-  const rc = job.request_counts ?? {};
-  // Status first: failed/expired/cancelled are terminal, and deriving the
-  // phase from timestamps alone would report them as still "running".
-  const phase = SETTLED_STATUSES.has(job.status)
-    ? job.status === 'completed' && job.in_progress_at && job.completed_at
-      ? `ran ${job.completed_at - job.in_progress_at}s`
-      : job.status
-    : !job.in_progress_at
-      ? `queued ${Math.max(0, Math.floor(now - job.created_at))}s`
-      : `running ${Math.floor(now - job.in_progress_at)}s`;
-  const deadline = job.expires_at
-    ? new Date(job.expires_at * 1000).toISOString()
-    : '-';
-  return `${job.id}\t${job.status}\t${rc.completed ?? 0}/${rc.total ?? 0} done, ${rc.failed ?? 0} failed\t${phase}\texpires ${deadline}`;
-}
-
-/** Download output/error files to `<outDir>/<id>.{output,error}.jsonl`. */
-export async function fetchBatch(
-  ep: BatchEndpoint,
-  id: string,
-  outDir: string,
-  remove: boolean,
-): Promise<{ job: BatchJob; written: string[] }> {
-  // The argv id also becomes a filename; the route check in batchRequest
-  // refuses one with path separators before anything is written.
-  const job = await getBatchJob(ep, id);
-  if (!SETTLED_STATUSES.has(job.status)) {
-    throw new Error(
-      `${id} is ${job.status}; results are only available once the batch settles.`,
-    );
-  }
-  fs.mkdirSync(outDir, { recursive: true });
-  const written: string[] = [];
-  for (const [fileId, suffix] of [
-    [job.output_file_id, 'output'],
-    [job.error_file_id, 'error'],
-  ] as const) {
-    if (!fileId) continue;
-    const target = path.join(outDir, `${id}.${suffix}.jsonl`);
-    await downloadRemoteFile(ep, fileId, target);
-    written.push(target);
-  }
-  if (remove) {
-    // Non-fatal: the results are already on disk, so a failed DELETE must
-    // not abort the command before the written paths are reported (the core
-    // runner uses Promise.allSettled for the same reason).
-    const fileIds = [
-      job.input_file_id,
-      job.output_file_id,
-      job.error_file_id,
-    ].filter((fileId): fileId is string => Boolean(fileId));
-    const results = await Promise.allSettled(
-      fileIds.map((fileId) => deleteRemoteFile(ep, fileId)),
-    );
-    results.forEach((result, i) => {
-      if (result.status === 'rejected') {
-        writeStderrLine(
-          `[batch] warning: could not delete remote file ${fileIds[i]}: ${result.reason}`,
-        );
-      }
-    });
-  }
-  return { job, written };
-}
-
 async function run(fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
@@ -433,125 +169,6 @@ async function run(fn: () => Promise<void>): Promise<void> {
     process.exitCode = 1;
   }
 }
-
-const submitCommand: CommandModule = {
-  command: 'submit <file>',
-  describe: 'Upload a JSONL file of chat requests and start a batch job',
-  builder: (yargs) =>
-    yargs
-      .positional('file', {
-        describe:
-          'JSONL: one chat-completions body per line, or full batch request lines',
-        type: 'string',
-        demandOption: true,
-      })
-      .option('window', {
-        describe: 'Completion window, e.g. 24h or 7d (min 24h, max 14d)',
-        type: 'string',
-        default: '24h',
-      }),
-  handler: (argv) =>
-    run(async () => {
-      const job = await submitBatch(
-        await prepareEndpoint(process.env, cliOptionsOf(argv)),
-        argv['file'] as string,
-        argv['window'] as string,
-      );
-      writeStdoutLine(job.id);
-    }),
-};
-
-const statusCommand: CommandModule = {
-  command: 'status <id>',
-  describe: 'Show status, progress, and deadline of a batch job',
-  builder: (yargs) =>
-    yargs
-      .positional('id', {
-        describe: 'Batch id',
-        type: 'string',
-        demandOption: true,
-      })
-      .option('json', {
-        describe: 'Print the raw batch object',
-        type: 'boolean',
-        default: false,
-      }),
-  handler: (argv) =>
-    run(async () => {
-      const job = await getBatchJob(
-        await prepareEndpoint(process.env, cliOptionsOf(argv)),
-        argv['id'] as string,
-      );
-      writeStdoutLine(
-        argv['json'] ? JSON.stringify(job, null, 2) : describeBatch(job),
-      );
-    }),
-};
-
-const fetchCommand: CommandModule = {
-  command: 'fetch <id>',
-  describe: 'Download the results of a settled batch job',
-  builder: (yargs) =>
-    yargs
-      .positional('id', {
-        describe: 'Batch id',
-        type: 'string',
-        demandOption: true,
-      })
-      .option('out', {
-        describe: 'Directory to write <id>.output.jsonl / <id>.error.jsonl',
-        type: 'string',
-        default: '.',
-      })
-      .option('delete', {
-        describe: 'Delete the remote input/output/error files after download',
-        type: 'boolean',
-        default: false,
-      }),
-  handler: (argv) =>
-    run(async () => {
-      const { job, written } = await fetchBatch(
-        await prepareEndpoint(process.env, cliOptionsOf(argv)),
-        argv['id'] as string,
-        argv['out'] as string,
-        argv['delete'] as boolean,
-      );
-      writeStdoutLine(describeBatch(job));
-      for (const p of written) writeStdoutLine(p);
-    }),
-};
-
-const cancelCommand: CommandModule = {
-  command: 'cancel [id]',
-  describe: 'Cancel a batch job (already-completed requests are still billed)',
-  builder: (yargs) =>
-    yargs
-      .positional('id', {
-        describe: 'Batch id',
-        type: 'string',
-      })
-      .option('task', {
-        describe:
-          'Cancel the active batch of a workflow task instead of a bare batch id',
-        type: 'string',
-      })
-      .check((argv) =>
-        argv['task'] || argv['id']
-          ? true
-          : 'cancel needs a batch id or --task <task-id>',
-      ),
-  handler: (argv) =>
-    run(async () => {
-      const ep = await prepareEndpoint(process.env, cliOptionsOf(argv));
-      if (argv['task']) {
-        await cancelTask(workflowDeps(ep), argv['task'] as string);
-        return;
-      }
-      writeStdoutLine(
-        describeBatch(await cancelBatchJob(ep, argv['id'] as string)),
-      );
-    }),
-};
 
 // A session's auto-collector holds a task lock for a few seconds at most;
 // waiting beats failing a command the user or agent just ran.
@@ -710,6 +327,25 @@ const checkWorkflowCommand: CommandModule = {
     }),
 };
 
+const cancelWorkflowCommand: CommandModule = {
+  command: 'cancel <task-id>',
+  describe:
+    "Cancel a workflow task's active batch (already-completed requests are still billed)",
+  builder: (yargs) =>
+    yargs.positional('task-id', {
+      describe: 'Task id',
+      type: 'string',
+      demandOption: true,
+    }),
+  handler: (argv) =>
+    run(async () => {
+      await cancelTask(
+        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        argv['task-id'] as string,
+      );
+    }),
+};
+
 const listWorkflowCommand: CommandModule = {
   command: 'list',
   describe: 'List all recorded workflow tasks with their project',
@@ -726,13 +362,10 @@ export const batchCommand: CommandModule = {
   describe: 'Run many independent requests through the DashScope Batch API',
   builder: (yargs: Argv) =>
     yargs
-      .command(submitCommand)
-      .command(statusCommand)
-      .command(fetchCommand)
-      .command(cancelCommand)
       .command(runWorkflowCommand)
       .command(collectWorkflowCommand)
       .command(retryWorkflowCommand)
+      .command(cancelWorkflowCommand)
       .command(listWorkflowCommand)
       .command(checkWorkflowCommand)
       .command(cleanWorkflowCommand)
