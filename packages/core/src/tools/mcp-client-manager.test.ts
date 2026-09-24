@@ -4798,4 +4798,73 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     // Config overlay should have been rolled back
     expect(removeSpy).toHaveBeenCalledWith('fail-srv');
   });
+
+  it('probes a pending transport error before counting a health-check failure (abort-recovery step 1)', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const manager = mkManager();
+    const verify = vi.fn().mockResolvedValue(true);
+    const internals = manager as unknown as {
+      clients: Map<string, unknown>;
+      consecutiveFailures: Map<string, number>;
+      performHealthCheck(name: string): Promise<void>;
+    };
+    internals.clients.set('flaky-http', {
+      hasPendingTransportError: () => true,
+      verifyPendingTransportError: verify,
+      getStatus: () => MCPServerStatus.CONNECTED,
+    });
+    internals.consecutiveFailures.set('flaky-http', 2);
+
+    await internals.performHealthCheck('flaky-http');
+
+    // A bare `onerror` (late response for a cancelled request) must not be
+    // enough to count a failure: the probe runs first and a live session
+    // resets the counter instead of advancing toward reconnect.
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(internals.consecutiveFailures.get('flaky-http')).toBe(0);
+  });
+
+  it('counts a failure when the probe confirms the transport is gone', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const manager = mkManager();
+    const verify = vi.fn().mockResolvedValue(false);
+    const internals = manager as unknown as {
+      clients: Map<string, unknown>;
+      consecutiveFailures: Map<string, number>;
+      performHealthCheck(name: string): Promise<void>;
+    };
+    internals.clients.set('dead-http', {
+      hasPendingTransportError: () => true,
+      verifyPendingTransportError: verify,
+      getStatus: () => MCPServerStatus.DISCONNECTED,
+    });
+
+    await internals.performHealthCheck('dead-http');
+
+    // The probe resolved the ambiguity, so the failure still counts and
+    // reconnect eventually fires.
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(internals.consecutiveFailures.get('dead-http')).toBe(1);
+  });
+
+  it('skips the probe when no transport error is pending', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const manager = mkManager();
+    const verify = vi.fn().mockResolvedValue(true);
+    const internals = manager as unknown as {
+      clients: Map<string, unknown>;
+      consecutiveFailures: Map<string, number>;
+      performHealthCheck(name: string): Promise<void>;
+    };
+    internals.clients.set('quiet-http', {
+      hasPendingTransportError: () => false,
+      verifyPendingTransportError: verify,
+      getStatus: () => MCPServerStatus.CONNECTED,
+    });
+
+    await internals.performHealthCheck('quiet-http');
+
+    expect(verify).not.toHaveBeenCalled();
+    expect(internals.consecutiveFailures.get('quiet-http')).toBe(0);
+  });
 });

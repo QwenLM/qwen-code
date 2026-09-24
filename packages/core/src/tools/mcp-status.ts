@@ -14,10 +14,11 @@ export enum MCPServerStatus {
    * This is not proof the session is dead. The SDK client reports the same
    * status when a cancelled request's late response (or an in-flight progress
    * notification) reaches a handler it already deleted — while the transport
-   * stays open and keeps serving protocol requests. Consumers that would tear
-   * down or rebuild the connection must verify first
-   * (`McpClient.verifyPendingTransportError`) instead of treating this status
-   * as a death certificate.
+   * stays open and keeps serving protocol requests. So far only the periodic
+   * health check consumes that ambiguity, by probing the recorded error
+   * (`McpClient.verifyPendingTransportError`) before counting a failure.
+   * Tear-down and rebuild sites that still read this status directly have not
+   * been converted yet.
    */
   DISCONNECTED = 'disconnected',
   /** Server is in the process of connecting */

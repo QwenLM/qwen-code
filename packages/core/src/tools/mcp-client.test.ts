@@ -870,13 +870,19 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
   describe('McpClient', () => {
     it('resolves a pending transport error with a ping instead of trusting the status', async () => {
       const ping = vi.fn().mockResolvedValue({});
-      vi.mocked(ClientLib.Client).mockReturnValue({
+      const mockedClient = {
         connect: vi.fn(),
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         getInstructions: vi.fn(),
         ping,
-      } as unknown as ClientLib.Client);
+        // `connect()` installs these two handlers on the object it was handed.
+        onerror: undefined as ((error: Error) => void) | undefined,
+        onclose: undefined as (() => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
 
       const serverName = 'unverified-transport-error-server';
       const client = new McpClient(
@@ -889,13 +895,14 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         } as unknown as WorkspaceContext,
         false,
       );
-      // An `onerror` records DISCONNECTED, but that status is not proof the
+      await client.connect();
+      mockedClient.onerror?.(new Error('late response for a cancelled request'));
+
+      // `onerror` records DISCONNECTED, but that status is not proof the
       // session is dead: a cancelled request's late response reaches a
       // deleted handler with the transport still open.
-      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
-      (
-        client as unknown as { transportErrorPending: boolean }
-      ).transportErrorPending = true;
+      expect(client.hasPendingTransportError()).toBe(true);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
 
       expect(client.hasPendingTransportError()).toBe(true);
       await expect(client.verifyPendingTransportError(5)).resolves.toBe(true);
@@ -906,6 +913,42 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(ping).toHaveBeenCalledTimes(1);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
       expect(client.hasPendingTransportError()).toBe(false);
+    });
+
+    it('clears the pending flag when the transport actually closes', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+        ping: vi.fn(),
+        onerror: undefined as ((error: Error) => void) | undefined,
+        onclose: undefined as (() => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+
+      const serverName = 'closing-transport-server';
+      const client = new McpClient(
+        serverName,
+        { httpUrl: 'https://example.com/mcp' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      mockedClient.onerror?.(new Error('write EPIPE'));
+      expect(client.hasPendingTransportError()).toBe(true);
+
+      // `onclose` is the authoritative "transport is gone" signal, so it
+      // resolves the ambiguity without a probe.
+      mockedClient.onclose?.();
+      expect(client.hasPendingTransportError()).toBe(false);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
 
     it('reports a failed verification as unreachable', async () => {
@@ -929,6 +972,11 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         } as unknown as WorkspaceContext,
         false,
       );
+      // Discriminating baseline: the registry starts CONNECTED, so the
+      // assertion below fails if the catch branch stops recording the
+      // unreachable status (an unknown server name defaults to DISCONNECTED
+      // and would pass vacuously).
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
       (
         client as unknown as { transportErrorPending: boolean }
       ).transportErrorPending = true;
@@ -936,6 +984,52 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       await expect(client.verifyPendingTransportError(5)).resolves.toBe(false);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
       expect(client.hasPendingTransportError()).toBe(false);
+    });
+
+    it('keeps a transport error that arrives during the verification probe pending', async () => {
+      let resolvePing: (() => void) | undefined;
+      const ping = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolvePing = resolve;
+          }),
+      );
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+        ping,
+        // `connect()` installs these two handlers on the object it was handed.
+        onerror: undefined as ((error: Error) => void) | undefined,
+        onclose: undefined as (() => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+
+      const serverName = 'late-error-server';
+      const client = new McpClient(
+        serverName,
+        { httpUrl: 'https://example.com/mcp' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      mockedClient.onerror?.(new Error('first error'));
+
+      const verified = client.verifyPendingTransportError(5);
+      // A newer error lands while the probe is in flight. The probe only
+      // proved the state as of when it was sent, so it must not erase it.
+      mockedClient.onerror?.(new Error('newer error'));
+      resolvePing?.();
+
+      await expect(verified).resolves.toBe(false);
+      expect(client.hasPendingTransportError()).toBe(true);
     });
 
     it('recovers HTTP connections when the SDK omits the 401 status', async () => {

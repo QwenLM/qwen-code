@@ -551,6 +551,13 @@ export class McpClient {
    * unusable, so a live session is never torn down for a bare error.
    */
   private transportErrorPending = false;
+  /**
+   * Bumped by every `onerror`. A probe only ever proves the state that existed
+   * when it was sent, so `verifyPendingTransportError` compares this before and
+   * after the await to tell whether a newer, unresolved error arrived while it
+   * was in flight.
+   */
+  private transportErrorGeneration = 0;
   private instructions: string | undefined;
 
   constructor(
@@ -610,13 +617,16 @@ export class McpClient {
         // verify first (`verifyPendingTransportError`, consumed by the health
         // check and by connection preparation).
         this.transportErrorPending = true;
+        this.transportErrorGeneration += 1;
         this.updateStatus(MCPServerStatus.DISCONNECTED);
       };
 
       // `onclose` is the authoritative signal that the transport is gone.
-      // Chain whatever handler the SDK client (or an outer layer) already
-      // installed instead of bashing over it.
-      const priorOnClose = this.client.onclose;
+      // Plain idempotent assignment, matching `this.client.onerror =` above:
+      // nothing else installs `onclose` on this client, and `connect()` can run
+      // again on the same instance (the lazy re-spawn in
+      // `McpClientManager.readResource`), so chaining would stack one wrapper
+      // per connect and walk all of them on a single transport close.
       this.client.onclose = () => {
         this.transportErrorPending = false;
         // A late close from a replaced (already disconnecting) instance must
@@ -624,7 +634,6 @@ export class McpClient {
         if (!this.isDisconnecting) {
           this.updateStatus(MCPServerStatus.DISCONNECTED);
         }
-        priorOnClose?.();
       };
 
       this.client.registerCapabilities({
@@ -953,15 +962,11 @@ export class McpClient {
     if (!this.hasPendingTransportError()) {
       return true;
     }
+    const probedGeneration = this.transportErrorGeneration;
     try {
       await this.client.ping({
         timeout: timeoutMs ?? MCP_VERIFY_TIMEOUT_MSEC,
       });
-      this.transportErrorPending = false;
-      // The transport answered a protocol request, so the session is live:
-      // re-assert CONNECTED instead of leaving the error-time status behind.
-      this.updateStatus(MCPServerStatus.CONNECTED);
-      return true;
     } catch (error) {
       this.transportErrorPending = false;
       debugLogger.warn(
@@ -970,6 +975,24 @@ export class McpClient {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
       return false;
     }
+    // A `disconnect()` that landed while the probe was in flight owns the
+    // connection state now: report "not verified" rather than re-asserting
+    // CONNECTED on a client being torn down, which would hide the teardown
+    // from the manager's lazy re-spawn and from `readResource`'s guard.
+    if (this.isDisconnecting) {
+      return false;
+    }
+    // The probe only proved the state as of when it was sent. An `onerror`
+    // that arrived while it was in flight is newer and unresolved, so keep it
+    // pending and let the next check re-probe rather than erasing it.
+    if (this.transportErrorGeneration !== probedGeneration) {
+      return false;
+    }
+    this.transportErrorPending = false;
+    // The transport answered a protocol request, so the session is live:
+    // re-assert CONNECTED instead of leaving the error-time status behind.
+    this.updateStatus(MCPServerStatus.CONNECTED);
+    return true;
   }
 
   getInstructions(): string | undefined {
