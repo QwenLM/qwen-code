@@ -10,16 +10,19 @@ adapters.
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
 intent, and fails ambiguous dispatch outcomes as `UNKNOWN`. A persisted
-`READY` binding is never reused by a new process without explicit adoption or
-reconciliation; this core currently fails closed when it has no process-local
-attestation for that binding.
+`READY` binding is never reused by a new process without proof: a binding
+whose request carries a durable provisioner kind is adopted only after the
+provisioner observes the physical resource and the Broker re-attests the
+Runtime identity through the transport, while a legacy binding still fails
+closed with `runtime_reconciliation_required`; see
+[Runtime binding reconciliation](../../../docs/design/2026-09-24-runtime-binding-reconciliation.md).
 
 The module ships one local process provider, `LocalProcessRuntimeProvisioner`,
 which starts the merged Managed Runtime worker and adopts it only after
 attestation; see
 [Managed Runtime process adoption](../../../docs/design/2026-09-23-managed-runtime-process-adoption.md).
-The embedding service still owns the worker command wiring, reconciliation of
-persisted `READY` bindings, and any container or remote provider. The module
+The embedding service still owns the worker command wiring, recovery-capable
+provisioners, and any container or remote provider. The module
 intentionally does not expose an HTTP API, wire Spring, call the Hosted
 Harness, or define public Agent resources. Those adapters belong to later PRs.
 

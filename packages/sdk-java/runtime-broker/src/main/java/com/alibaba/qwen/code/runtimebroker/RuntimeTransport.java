@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
@@ -14,6 +15,20 @@ import java.util.concurrent.CompletionStage;
  * completion only with {@code true}.
  */
 public interface RuntimeTransport {
+    /**
+     * Re-proves the identity behind a restored lease. The default fails
+     * closed: a transport that cannot attest can never adopt a binding.
+     */
+    default CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        CompletableFuture<RuntimeAttestation> failed =
+                new CompletableFuture<>();
+        failed.completeExceptionally(new RuntimeBrokerException(503,
+                "runtime_broker_attestation_unavailable",
+                "Runtime transport does not support attestation.", false));
+        return failed;
+    }
+
     CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
 

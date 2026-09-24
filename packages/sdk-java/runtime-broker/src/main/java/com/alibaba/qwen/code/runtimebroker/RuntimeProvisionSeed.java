@@ -1,6 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import java.security.SecureRandom;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * Credentials fixed before one physical Runtime is provisioned.
@@ -9,6 +14,8 @@ import java.util.Objects;
  * needs the identity this seed already binds.
  */
 public final class RuntimeProvisionSeed {
+    private static final SecureRandom RANDOM = new SecureRandom();
+
     private final String provisionRequestId;
     private final String provisionalRuntimeId;
     private final String gatewayIncarnation;
@@ -31,6 +38,25 @@ public final class RuntimeProvisionSeed {
         }
         this.epoch = epoch;
         this.token = BrokerValues.requireId(token, "token");
+    }
+
+    /**
+     * Creates fresh credentials bound to one binding generation, so a retried
+     * provision for the same binding keeps a stable identity.
+     */
+    public static RuntimeProvisionSeed create(String bindingId,
+            long generation) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (generation <= 0) {
+            throw new IllegalArgumentException("generation must be positive");
+        }
+        byte[] tokenBytes = new byte[32];
+        RANDOM.nextBytes(tokenBytes);
+        String provisionRequestId = id + ":" + generation;
+        return new RuntimeProvisionSeed(provisionRequestId, id,
+                provisionRequestId, UUID.randomUUID().toString(), generation,
+                Base64.getUrlEncoder().withoutPadding()
+                        .encodeToString(tokenBytes));
     }
 
     public String getProvisionRequestId() {
@@ -61,6 +87,58 @@ public final class RuntimeProvisionSeed {
         return lease != null && leaseId.equals(lease.getLeaseId())
                 && epoch == lease.getEpoch()
                 && token.equals(lease.getToken());
+    }
+
+    byte[] encode() {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("provisionRequestId", provisionRequestId);
+        value.put("provisionalRuntimeId", provisionalRuntimeId);
+        value.put("gatewayIncarnation", gatewayIncarnation);
+        value.put("leaseId", leaseId);
+        value.put("epoch", epoch);
+        value.put("token", token);
+        return JsonCodec.encode(value);
+    }
+
+    static RuntimeProvisionSeed decode(byte[] encoded) {
+        Map<String, Object> value = JsonCodec.parseObject(encoded,
+                "Runtime provision seed");
+        if (value.size() != 6) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        Object rawEpoch = value.get("epoch");
+        if (!(rawEpoch instanceof Number)) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        Number number = (Number) rawEpoch;
+        long parsedEpoch = number.longValue();
+        if (number.doubleValue() != parsedEpoch) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        try {
+            return new RuntimeProvisionSeed(required(value,
+                    "provisionRequestId"), required(value,
+                            "provisionalRuntimeId"), required(value,
+                                    "gatewayIncarnation"), required(value,
+                                            "leaseId"), parsedEpoch,
+                    required(value, "token"));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid", exception);
+        }
+    }
+
+    private static String required(Map<String, Object> value,
+            String field) {
+        Object raw = value.get(field);
+        if (!(raw instanceof String)) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        return (String) raw;
     }
 
     @Override

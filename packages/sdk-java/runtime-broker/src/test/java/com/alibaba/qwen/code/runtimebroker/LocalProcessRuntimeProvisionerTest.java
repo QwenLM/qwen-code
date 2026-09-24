@@ -386,6 +386,13 @@ class LocalProcessRuntimeProvisionerTest {
             return delegate.renewOperation(bindingId, owner,
                     operationGeneration, leaseDuration);
         }
+
+        @Override
+        public RuntimeBindingRecord releaseOperation(String bindingId,
+                String owner, long operationGeneration) {
+            return delegate.releaseOperation(bindingId, owner,
+                    operationGeneration);
+        }
     }
 
     private static final class AcceptingTransport implements RuntimeTransport {
