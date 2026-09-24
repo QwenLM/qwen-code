@@ -855,6 +855,43 @@ export function registerWorkspaceExtensionRoutes(
       }
     });
 
+    app.get(`${base}/summary`, async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      try {
+        assertGenerationOpen?.();
+        const status = await ctrl.buildLocalExtensionSummaries();
+        assertGenerationOpen?.();
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, { route: `GET ${base}/summary` });
+      }
+    });
+
+    app.get(`${base}/:name/details`, async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      try {
+        assertGenerationOpen?.();
+        const extension = await ctrl.buildLocalExtensionDetails(
+          req.params['name']!,
+        );
+        assertGenerationOpen?.();
+        if (!extension) {
+          res.status(404).json({
+            error: 'Extension not found',
+            code: 'extension_not_found',
+          });
+          return;
+        }
+        res.status(200).json(extension);
+      } catch (err) {
+        sendBridgeError(res, err, { route: `GET ${base}/:name/details` });
+      }
+    });
+
     app.get(`${base}/operations`, async (req, res) => {
       const ctrl = resolve(req, res, false);
       if (!ctrl) return;
