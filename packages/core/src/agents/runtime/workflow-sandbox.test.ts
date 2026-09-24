@@ -137,6 +137,15 @@ return x;`;
     expect(stripExportMeta(src)).toBe(src);
   });
 
+  it('does not strip metadata text inside a template literal after a leading comment', () => {
+    const src = `// header
+const banner = \`
+export const meta = { name: 'fake' }
+\`;
+return banner;`;
+    expect(stripExportMeta(src)).toBe(src);
+  });
+
   // Sanity: leading whitespace at file start is still tolerated.
   it('strips export const meta even with leading whitespace/newlines (T33)', () => {
     const src = `\n\n  export const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
@@ -2947,6 +2956,22 @@ describe('createWorkflowSandbox primitives', () => {
       );
       expect(script).toBeDefined();
       expect(meta?.name).toBe('n');
+    });
+
+    it.each([
+      ['line comment', "// header { export const meta = { name: 'fake' } }\n"],
+      [
+        'block comment',
+        "/* header { export const meta = { name: 'fake' } } */\n",
+      ],
+    ])('compiles metadata after a leading %s', async (_kind, prefix) => {
+      const source =
+        prefix +
+        "  export  const meta =  { name: 'real', description: 'workflow' };\nreturn 42;";
+      const { script, meta } = compileWorkflowScript(source);
+
+      expect(meta).toEqual({ name: 'real', description: 'workflow' });
+      expect(await script.runInNewContext()).toBe(42);
     });
 
     it('throws on a body that does not parse', () => {

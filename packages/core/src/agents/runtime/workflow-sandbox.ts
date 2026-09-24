@@ -27,16 +27,39 @@ export function stripExportMeta(source: string): string {
   return source.slice(0, bounds.exportIdx) + source.slice(bounds.afterMeta);
 }
 
+function skipLeadingTrivia(source: string): number {
+  let index = 0;
+  while (index < source.length) {
+    if (/\s/.test(source[index]!)) {
+      index++;
+    } else if (source.startsWith('//', index)) {
+      index += 2;
+      while (
+        index < source.length &&
+        !/[\r\n\u2028\u2029]/.test(source[index]!)
+      )
+        index++;
+    } else if (source.startsWith('/*', index)) {
+      const end = source.indexOf('*/', index + 2);
+      if (end === -1) break;
+      index = end + 2;
+    } else {
+      break;
+    }
+  }
+  return index;
+}
+
 /**
  * Locate the `export const meta = {...}` declaration's bounds in the source.
  *
- * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at file
- * start (no `/m` flag — see T33 comment below); walks the brace block while
- * skipping over comment / regex / string contexts; throws on unbalanced
- * braces rather than returning a truncated string (T9/T17 — silently
- * deleting the script body is the worst-case failure mode).
+ * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at the
+ * first statement after leading whitespace and comments (see T33 below);
+ * walks the brace block while skipping over comment / regex / string contexts;
+ * throws on unbalanced braces rather than returning a truncated string
+ * (T9/T17), which would silently delete the script body.
  *
- * Returns null when no meta declaration is present at the file start —
+ * Returns null when no meta declaration is present at the first statement —
  * callers treat this as "no meta", not an error.
  */
 function findMetaBlockBounds(source: string): {
@@ -49,16 +72,17 @@ function findMetaBlockBounds(source: string): {
   /** Offset past meta + any trailing whitespace + optional `;`. */
   afterMeta: number;
 } | null {
-  // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
-  // doc, `export const meta = {...}` must be the script's FIRST statement.
+  // T33 (PR #4732 R4): anchor at the first statement, not every line. Per
+  // the design doc, `export const meta = {...}` must be the FIRST statement.
   // With `/m`, the regex matched every line-start occurrence — including
   // inside template literals — and the brace-walker then ripped content
   // out of the string body, silently corrupting the script.
-  const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
+  const exportIdx = skipLeadingTrivia(source);
+  const re = /export\s+const\s+meta\s*=\s*\{/y;
+  re.lastIndex = exportIdx;
   const match = re.exec(source);
   if (!match) return null;
-  const exportIdx = match.index;
-  const startBrace = source.indexOf('{', exportIdx);
+  const startBrace = exportIdx + match[0].length - 1;
   let depth = 1;
   let i = startBrace + 1;
   while (i < source.length && depth > 0) {

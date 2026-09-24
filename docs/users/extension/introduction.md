@@ -416,6 +416,8 @@ provides one workflow when its script declares a static `meta` object with `name
 
 Each script must declare a static `export const meta = { name, description }` block. The `description` is shown in the install consent prompt and in the command list. The file name may differ from `meta.name`; calls always use the metadata name. If multiple scripts declare the same `meta.name`, the first discovered script is kept. A `description` longer than 500 characters is shortened wherever it is shown.
 
+Whitespace and comments may precede the `meta` declaration, but it must be the first JavaScript statement in the script.
+
 A script can also declare `whenToUse`, a sentence saying when the workflow applies:
 
 ```js
