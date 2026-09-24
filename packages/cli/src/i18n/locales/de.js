@@ -1851,6 +1851,10 @@ export default {
     'Kontext überschreitet Limit! Verwenden Sie /compress oder /clear zum Reduzieren.',
   'No API response yet. Send a message to see actual usage.':
     'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
+  'Estimated usage, including the conversation':
+    'Geschätzte Nutzung inkl. Unterhaltung',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Noch keine Nutzungsdaten vom Anbieter. Dies sind lokale Schätzungen einschließlich der Unterhaltung.',
   'Estimated pre-conversation overhead':
     'Geschätzte Vorabkosten vor der Unterhaltung',
   'Context window': 'Kontextfenster',

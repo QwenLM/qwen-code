@@ -1893,6 +1893,10 @@ export default {
     'El context supera el límit! Useu /compress o /clear per reduir-lo.',
   'No API response yet. Send a message to see actual usage.':
     "Encara no hi ha cap resposta de l'API. Envieu un missatge per veure l'ús real.",
+  'Estimated usage, including the conversation':
+    'Ús estimat, inclosa la conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Encara no hi ha dades d'ús del proveïdor. Són estimacions locals, inclosa la conversa.",
   'Estimated pre-conversation overhead':
     'Càrrega estimada prèvia a la conversa',
   'Context window': 'Finestra de context',

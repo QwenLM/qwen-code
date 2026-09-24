@@ -139,8 +139,10 @@ const SKILLS_ADDED_OPENER =
  * result and then folds the whole result into
  * `functionResponse.response.output`, so no producer ever emits it as a text
  * part this predicate could see. Matching it here would only ever match text
- * core did not build — see #12235, which records that the activation listing
- * stays billed to `messages` with no detail row.
+ * core did not build. The envelope is billed with its tool result under
+ * `messages`; the activated skill keeps its own detail row (`listSkills()`
+ * returns it whether or not it is active), which shows only what a text-part
+ * listing billed for it — 0 when it was path-gated at startup (#12540).
  */
 export function isSkillListingReminder(text: string): boolean {
   const open = `${SYSTEM_REMINDER_OPEN}\n`;

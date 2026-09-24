@@ -146,7 +146,12 @@ describe('ContextUsageMessage', () => {
   it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
     const status = makeStatus(0, true);
     status.usage.breakdown.messages = 25;
-    expect(render(status).textContent).toContain('Messages 25 (25.0%)');
+    const text = render(status).textContent;
+    expect(text).toContain('Messages 25 (25.0%)');
+    // The captions follow the row, in both locales' source strings.
+    expect(text).toContain('The estimates below include the conversation.');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('excluding conversation messages');
     expect(render(makeStatus(0, true)).textContent).not.toContain('Messages');
   });
 

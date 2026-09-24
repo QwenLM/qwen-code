@@ -3029,6 +3029,12 @@ export interface DaemonContextCategoryBreakdown {
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older daemons. */
   startupContext?: number;
+  /**
+   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * (no provider count yet: after a model switch, `/restore` or a resume) this
+   * is a local estimate of the history rather than 0, so the rows include the
+   * conversation. Older daemons report 0 there.
+   */
   messages: number;
   /** Provider total not accounted for by any category. Absent from older daemons. */
   unattributed?: number;

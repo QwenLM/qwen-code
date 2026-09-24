@@ -27,6 +27,8 @@ const CONTENT_WIDTH = 56;
 export const CATEGORY_LABEL_WIDTH = 24;
 /** Label column of a compaction-threshold row. */
 export const THRESHOLD_LABEL_WIDTH = 22;
+/** Label column of a loaded skill's body sub-row. */
+export const BODY_LOADED_LABEL_WIDTH = 30;
 
 interface ContextUsageProps {
   modelName: string;
@@ -324,13 +326,20 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           {/* No API data yet — show hint instead of progress bar */}
           <Box marginBottom={1}>
             <Text color={theme.status.warning} italic>
-              {t('No API response yet. Send a message to see actual usage.')}
+              {breakdown.messages > 0
+                ? t(
+                    'No provider usage yet. These are local estimates, including the conversation.',
+                  )
+                : t('No API response yet. Send a message to see actual usage.')}
             </Text>
           </Box>
 
-          {/* Estimated overhead categories */}
+          {/* Estimated categories; they include the conversation after
+              /model, /restore or a resume (#12235). */}
           <Text bold color={theme.text.primary}>
-            {t('Estimated pre-conversation overhead')}
+            {breakdown.messages > 0
+              ? t('Estimated usage, including the conversation')
+              : t('Estimated pre-conversation overhead')}
           </Text>
           <Text color={theme.text.secondary}>
             {t('Model')}: {modelName}
@@ -579,7 +588,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
                     skill.bodyTokens > 0 && (
                       <Box width={CONTENT_WIDTH} paddingLeft={4}>
                         <Text color={theme.text.secondary}>{'  \u2514'} </Text>
-                        <Box width={30}>
+                        <Box width={BODY_LOADED_LABEL_WIDTH}>
                           <Text color={theme.text.secondary} italic>
                             {t('body loaded')}
                           </Text>

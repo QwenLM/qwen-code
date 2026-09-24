@@ -316,11 +316,17 @@ export function ContextUsageMessage({
       </div>
       {!hasTokenCount ? (
         <>
+          {/* After /model, /restore or a resume the estimate includes the
+              conversation, so the base-overhead captions would be false. */}
           <div className={styles.estimateHint}>
-            {t('contextUsage.usageUnavailable')}
+            {breakdown.messages > 0
+              ? t('contextUsage.usageEstimatedWithConversation')
+              : t('contextUsage.usageUnavailable')}
           </div>
           <div className={styles.sectionTitle}>
-            {t('contextUsage.estimatedOverhead')}
+            {breakdown.messages > 0
+              ? t('contextUsage.estimatedUsage')
+              : t('contextUsage.estimatedOverhead')}
           </div>
           <div className={styles.metaLine}>
             {t('contextUsage.contextWindow')}: {formatTokens(contextWindowSize)}{' '}

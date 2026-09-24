@@ -1229,8 +1229,11 @@ describe('isSkillListingReminder (#12235)', () => {
       `${SYSTEM_REMINDER_OPEN}\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
       // The scheduler puts a rules block first when one applies.
       `${SYSTEM_REMINDER_OPEN}\nProject rules for src/**:\nUse tabs.\n\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
-      // Server-supplied instructions quoting the sentence mid-body.
-      `${SYSTEM_REMINDER_OPEN}\nInstructions from MCP server "acme":\n\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // Server-supplied instructions quoting the sentence, as the real
+      // producer wraps them.
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([['acme', activation]]),
+      )!,
     ]) {
       expect(isSkillListingReminder(text)).toBe(false);
     }
@@ -1239,7 +1242,14 @@ describe('isSkillListingReminder (#12235)', () => {
   it('rejects text that only mentions the listing tag', () => {
     for (const text of [
       buildChangedSkillsReminder([], ['gone'])!,
-      `${SYSTEM_REMINDER_OPEN}\nInstructions from MCP server "acme":\n<available_skills>\n</available_skills>\n${SYSTEM_REMINDER_CLOSE}`,
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([
+          [
+            'acme',
+            'The following skills are available for use with the Skill tool.\n<available_skills>\n</available_skills>',
+          ],
+        ]),
+      )!,
       'see <available_skills> here',
       activation,
     ]) {

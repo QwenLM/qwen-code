@@ -198,7 +198,10 @@ function mergeSkillListing(
  * The scheduler's path-activation block is deliberately not covered:
  * `coreToolScheduler` folds that envelope into `functionResponse.response.output`
  * via `convertToFunctionResponse`, so it never reaches this scan as `part.text`
- * and stays billed to `messages` with no detail row (#12235).
+ * and is billed with its tool result under `messages`. The activated skill
+ * still has its own detail row, since `listSkills()` returns it whether or
+ * not it is active; that row carries only what a text-part listing billed for
+ * it, which is 0 for a skill that was path-gated at startup (#12540).
  */
 function measureTailSkillListings(conversation: Content[]): {
   listing: SkillListingCost;
@@ -854,9 +857,21 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
   lines.push('');
 
   if (!hasTokenCount) {
-    lines.push('*No API response yet. Send a message to see actual usage.*');
+    // After /model, /restore or a resume the history is intact while the
+    // provider total is 0; the rows then include the conversation, so the
+    // captions must not call them pre-conversation overhead (#12235).
+    const includesConversation = breakdown.messages > 0;
+    lines.push(
+      includesConversation
+        ? '*No provider usage yet. These are local estimates, including the conversation.*'
+        : '*No API response yet. Send a message to see actual usage.*',
+    );
     lines.push('');
-    lines.push('**Estimated pre-conversation overhead**');
+    lines.push(
+      includesConversation
+        ? '**Estimated usage, including the conversation**'
+        : '**Estimated pre-conversation overhead**',
+    );
     lines.push(
       `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
     );

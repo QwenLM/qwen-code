@@ -8,7 +8,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import stringWidth from 'string-width';
 import { setLanguageAsync, t } from '../../../i18n/index.js';
 import { SUPPORTED_LANGUAGES } from '../../../i18n/languages.js';
-import { CATEGORY_LABEL_WIDTH, THRESHOLD_LABEL_WIDTH } from './ContextUsage.js';
+import {
+  BODY_LOADED_LABEL_WIDTH,
+  CATEGORY_LABEL_WIDTH,
+  THRESHOLD_LABEL_WIDTH,
+} from './ContextUsage.js';
 
 /**
  * `/context` renders each label in a fixed-width column. A translation wider
@@ -30,6 +34,10 @@ const CATEGORY_LABELS = [
   'Unattributed',
 ];
 
+/**
+ * No locale translates these five yet, so today this half compares English
+ * nine times; it is here so the first translation cannot overflow its column.
+ */
 const THRESHOLD_LABELS = [
   'Effective window',
   'Warn threshold',
@@ -53,6 +61,9 @@ describe('/context label widths', () => {
         ),
         ...THRESHOLD_LABELS.filter(
           (key) => stringWidth(t(key)) > THRESHOLD_LABEL_WIDTH,
+        ),
+        ...['body loaded'].filter(
+          (key) => stringWidth(t(key)) > BODY_LOADED_LABEL_WIDTH,
         ),
       ].map((key) => `${key} -> ${t(key)}`);
 

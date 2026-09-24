@@ -109,6 +109,13 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
 
     expect(frame(90_000)).toContain('Messages');
     expect(frame(0)).not.toContain('Messages');
+    // The captions follow the row: an estimated history is not
+    // pre-conversation overhead.
+    expect(frame(90_000)).toContain(
+      'Estimated usage, including the conversation',
+    );
+    expect(frame(90_000)).not.toContain('pre-conversation');
+    expect(frame(0)).toContain('Estimated pre-conversation overhead');
   });
 
   it('renders the startup context, unattributed and cached prefix rows only when nonzero (#12033)', () => {

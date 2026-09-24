@@ -425,8 +425,16 @@ export function projectContextUsage(item: Record<string, unknown>): string {
   const showDetails = Boolean(item['showDetails']);
   const lines = ['Context Usage', ''];
   if (totalTokens <= 0) {
-    lines.push('No API response yet. Send a message to see actual usage.');
-    lines.push('Estimated pre-conversation overhead');
+    // Parity of views/ContextUsage: an estimated history changes the captions.
+    if (Number(breakdown['messages'] ?? 0) > 0) {
+      lines.push(
+        'No provider usage yet. These are local estimates, including the conversation.',
+      );
+      lines.push('Estimated usage, including the conversation');
+    } else {
+      lines.push('No API response yet. Send a message to see actual usage.');
+      lines.push('Estimated pre-conversation overhead');
+    }
   }
   lines.push(
     `Model: ${modelName} Context window: ${fmtTokensShort(windowSize)} tokens`,

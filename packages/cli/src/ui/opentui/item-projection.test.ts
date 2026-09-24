@@ -203,10 +203,14 @@ function expectCoherentBreakdown(item: {
   if (hasProviderTotal) {
     expect(rows).toBe(item.totalTokens);
   }
+  // The producer clamps at 0, so an over-full window reports no free space.
   expect(breakdown.freeSpace).toBe(
-    item.contextWindowSize -
-      (hasProviderTotal ? item.totalTokens : rows) -
-      (breakdown.autocompactBuffer ?? 0),
+    Math.max(
+      0,
+      item.contextWindowSize -
+        (hasProviderTotal ? item.totalTokens : rows) -
+        (breakdown.autocompactBuffer ?? 0),
+    ),
   );
 }
 
@@ -331,6 +335,9 @@ describe('projectContextUsage', () => {
     const text = projectContextUsage(item);
     expectCoherentBreakdown(item);
     expect(text).toContain('█ Messages 40.0k tokens (40.0%)');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('No API response yet.');
+    expect(text).not.toContain('pre-conversation');
   });
 
   it('shows the no-API-response notice before the first turn', () => {
