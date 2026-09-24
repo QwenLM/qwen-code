@@ -61,8 +61,8 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // The bundle pulls web-shell's built transcript entry, which carries the
 // whole i18n table, so every string the Web Shell adds anywhere lands here.
 // Measured for #12154 by building this bundle twice against the same tree,
-// once with its dictionary and once with main's: 1,996,101 against
-// 1,989,890, so +6,211 bytes for thirty-eight keys across two locales,
+// once with its dictionary and once with main's: 2,021,942 against
+// 2,013,739, so +8,203 bytes for forty-two keys across two locales,
 // which the cap above has room for. Both figures are local and both are
 // higher than the lane's; it is the difference between them that is
 // comparable, and the lane's absolute number is what these constants

@@ -24,7 +24,14 @@ import {
   type NestedRepositoryAnswer,
   type GitWorktreeEntry,
 } from '@qwen-code/qwen-code-core/utils/git-worktrees.js';
+import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import {
+  readWorktreeSessionStrict,
+  type StrictWorktreeSession,
+} from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { isValidSessionId } from '../../config/session-id.js';
 import type { SendBridgeError } from '../server/error-response.js';
+import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import { safeBody } from '../server/request-helpers.js';
 import type {
   WorkspaceRegistry,
@@ -273,6 +280,30 @@ function sendError(
   res.status(status).json({ error, code, ...extra });
 }
 
+/** The session list's transcript file name, less the `.jsonl`. */
+const SIDECAR_SESSION_ID = /^[0-9a-fA-F-]{32,36}$/;
+
+/**
+ * A sidecar read in full that parses, but not as a record.
+ *
+ * Only that: a file that does not parse is also what a read sees between an
+ * in-place rewrite's truncate and its write — for as long as the writer
+ * stalls there, however many times it is asked — and no prefix of a record
+ * parses. That rests on every sidecar writer either going through
+ * `writeWorktreeSession`, which renames a new file into place or, where it
+ * cannot, truncates before it writes, or moving a whole file into place by
+ * rename (archive, unarchive, a session's storage moving — the one of these
+ * that falls back to a copy across devices, and the copy truncates first). A
+ * tool that overwrote the bytes in place without truncating could splice two
+ * records into something else.
+ *
+ * The reason is core's own words; one it rewords stops matching and falls
+ * through to "could not tell", which only ever holds a removal.
+ */
+function isNoRecord(read: StrictWorktreeSession): boolean {
+  return read.state === 'invalid' && read.reason === 'invalid sidecar contents';
+}
+
 /**
  * Live sessions whose checkout is this worktree, counted across every
  * registered runtime rather than only the selected one.
@@ -289,28 +320,83 @@ function sendError(
  * and those are the sessions a removal would strand. Ids key the set so the
  * number the user is shown counts each session once.
  */
-function countLiveSessionsIn(
+async function countLiveSessionsIn(
   registry: WorkspaceRegistry,
   worktreePath: string,
-): number {
+): Promise<{ sessions: number; unknown: number }> {
   const target = realpathOnDiskOrSelf(worktreePath);
+  // Sessions usually carry the very path git listed, so compare the strings
+  // before spending a `realpath` syscall on each one.
+  const names = (candidate: string) =>
+    candidate === worktreePath || realpathOnDiskOrSelf(candidate) === target;
   const sessionIds = new Set<string>();
+  const unknownIds = new Set<string>();
   for (const runtime of registry.listManaged()) {
+    let sessions: SessionService | undefined;
     for (const session of runtime.bridge.listWorkspaceSessions(
       runtime.workspaceCwd,
     )) {
-      // Sessions usually carry the very path git listed, so compare the
-      // strings before spending a `realpath` syscall on each one.
+      if (session.worktree !== undefined && names(session.worktree.path)) {
+        sessionIds.add(session.sessionId);
+        continue;
+      }
+      // A session that moved into a worktree after it started —
+      // `enter_worktree` — is recorded in that session's worktree sidecar,
+      // not in the bridge's summary of it. The tab reads the sidecar to put
+      // the session's chip on this row; a gate that did not would show the
+      // session here and then delete its checkout on the first click. Only
+      // sessions the bridge says are running get this far, so a sidecar can
+      // only add a session that is live, never invent one. The id check
+      // keeps a session id from naming a file outside the chats directory,
+      // and admits every id the session list reads a transcript — and so a
+      // chip — for.
       if (
-        session.worktree !== undefined &&
-        (session.worktree.path === worktreePath ||
-          realpathOnDiskOrSelf(session.worktree.path) === target)
+        !isValidSessionId(session.sessionId) &&
+        !SIDECAR_SESSION_ID.test(session.sessionId)
       ) {
+        continue;
+      }
+      sessions ??= createWorkspaceRuntimeSessionService(runtime);
+      // The strict reader: it never follows a link and never waits on a
+      // FIFO, so a planted sidecar can neither point this elsewhere nor hold
+      // the request (and the thread pool) open.
+      const sidecar = sessions.getWorktreeSessionPathForArchiveState(
+        session.sessionId,
+        'active',
+      );
+      let recorded = await readWorktreeSessionStrict(sidecar);
+      // Writers replace the file by rename (or, where they cannot, truncate
+      // and rewrite it) and clear it by unlink or by renaming it away. A read
+      // that overlaps a rename or an unlink finds the file gone or replaced
+      // under it — or, from an lstat that caught the old inode with no links
+      // left, an unsafe file type. Those answers are about the moment, not
+      // the record, so any unreadable answer is asked again before it is
+      // allowed to hold a removal anywhere.
+      let heldNoRecord = isNoRecord(recorded);
+      for (let retry = 0; retry < 2 && recorded.state === 'invalid'; retry++) {
+        recorded = await readWorktreeSessionStrict(sidecar);
+        heldNoRecord &&= isNoRecord(recorded);
+      }
+      // A file that parses and holds no record names no worktree, which is
+      // also what the session list makes of it: it puts no chip anywhere.
+      if (heldNoRecord) continue;
+      // A record that is there but cannot be read might name this worktree:
+      // could not look is not nothing there, so it holds the removal as its
+      // own warning rather than as a session claimed to be running here.
+      if (recorded.state === 'invalid') {
+        unknownIds.add(session.sessionId);
+        continue;
+      }
+      // Superseded or not: a worktree reset that could not stop the old
+      // session leaves it live inside the checkout, and the tab still shows
+      // its chip on this row.
+      if (recorded.state === 'valid' && names(recorded.session.worktreePath)) {
         sessionIds.add(session.sessionId);
       }
     }
   }
-  return sessionIds.size;
+  for (const id of sessionIds) unknownIds.delete(id);
+  return { sessions: sessionIds.size, unknown: unknownIds.size };
 }
 
 async function findWorktree(
@@ -706,15 +792,22 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
           };
           // Reads every registered workspace's bridge, so a forced removal
           // never pays for an answer it would ignore.
-          const liveSessions = countLiveSessionsIn(
+          const liveSessions = await countLiveSessionsIn(
             deps.workspaceRegistry,
             entry.path,
           );
-          if (liveSessions > 0) {
+          if (liveSessions.sessions > 0 || liveSessions.unknown > 0) {
             await refuse(
               'worktree_in_use',
-              'Sessions are still running in this worktree',
-              { sessions: liveSessions },
+              liveSessions.sessions > 0
+                ? 'Sessions are still running in this worktree'
+                : 'Could not tell whether a running session is in this worktree',
+              {
+                sessions: liveSessions.sessions,
+                ...(liveSessions.unknown > 0
+                  ? { sessionsUnknown: liveSessions.unknown }
+                  : {}),
+              },
             );
             return;
           }

@@ -59,6 +59,8 @@ interface RemoveState {
     code: string;
     count: number;
     detail?: string;
+    /** Running sessions whose worktree could not be read, which may be here. */
+    sessionsUnknown?: number;
     /** Uncommitted work the same click would discard, whatever it refused on. */
     changes?: number;
     /** That work could not be counted, which is its own warning. */
@@ -124,6 +126,13 @@ function refusalSentence(
     return t('gitWorktrees.blockedDirty', { count: blocked.count });
   }
   if (blocked.code === 'worktree_in_use') {
+    // Held only by sessions whose worktree could not be read: claiming they
+    // are running here would be a number the daemon never found.
+    if (blocked.count === 0 && blocked.sessionsUnknown) {
+      return t('gitWorktrees.blockedInUseUnknown', {
+        count: blocked.sessionsUnknown,
+      });
+    }
     return t('gitWorktrees.blockedInUse', { count: blocked.count });
   }
   if (blocked.code === 'worktree_locked') {
@@ -259,6 +268,13 @@ const WorktreeRow = memo(function WorktreeRow({
     const blocked = removal.blocked;
     const also: string[] = [];
     if (blocked) {
+      if (blocked.sessionsUnknown && blocked.count > 0) {
+        also.push(
+          t('gitWorktrees.blockedInUseUnknown', {
+            count: blocked.sessionsUnknown,
+          }),
+        );
+      }
       if (blocked.changes !== undefined && blocked.code !== 'worktree_dirty') {
         also.push(t('gitWorktrees.blockedDirty', { count: blocked.changes }));
       }
@@ -682,6 +698,11 @@ export function GitWorktreesContent({
                 ? body['changes']
                 : undefined;
             const statusUnknown = body?.['statusUnknown'] === true;
+            const sessionsUnknown =
+              code === 'worktree_in_use' &&
+              typeof body?.['sessionsUnknown'] === 'number'
+                ? body['sessionsUnknown']
+                : 0;
             const operation =
               typeof body?.['operation'] === 'string'
                 ? body['operation']
@@ -698,6 +719,7 @@ export function GitWorktreesContent({
                 code,
                 count,
                 ...(detail ? { detail } : {}),
+                ...(sessionsUnknown > 0 ? { sessionsUnknown } : {}),
                 ...(changes !== undefined ? { changes } : {}),
                 ...(statusUnknown ? { statusUnknown: true } : {}),
                 ...(operation ? { operation } : {}),

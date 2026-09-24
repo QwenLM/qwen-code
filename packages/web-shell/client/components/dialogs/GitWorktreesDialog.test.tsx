@@ -803,6 +803,61 @@ describe('GitWorktreesContent', () => {
     expect(text).toContain('5 uncommitted change(s) would be discarded.');
   });
 
+  it('does not call sessions it could not place running here', async () => {
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValueOnce(
+      rejection({
+        code: 'worktree_in_use',
+        error: 'Could not tell whether a running session is in this worktree',
+        sessions: 0,
+        sessionsUnknown: 1,
+      }),
+    );
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    const unknownLine = (count: number) =>
+      `Could not read where ${count} running session(s) are working.`;
+    let text = document.body.textContent ?? '';
+    // Once: as the reason, not again as one more thing the click takes.
+    expect(text.split(unknownLine(1)).length - 1).toBe(1);
+    expect(text).not.toContain('running session(s) would lose their checkout');
+    expect(button('Remove anyway')).toBeTruthy();
+
+    // Beside sessions it did place, the ones it could not are their own line.
+    workspaceGitRemoveWorktree.mockRejectedValueOnce(
+      rejection({
+        code: 'worktree_in_use',
+        error: 'Sessions are still running in this worktree',
+        sessions: 1,
+        sessionsUnknown: 2,
+      }),
+    );
+    await act(async () => {
+      button('Cancel').click();
+    });
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+    text = document.body.textContent ?? '';
+    expect(text).toContain('1 running session(s) would lose their checkout.');
+    expect(text.split(unknownLine(2)).length - 1).toBe(1);
+  });
+
   it('says the uncommitted work could not be counted, beside the refusal', async () => {
     workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
     listWorkspaceSessions.mockResolvedValue([]);

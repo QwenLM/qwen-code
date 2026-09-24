@@ -299,6 +299,8 @@ const EN: Messages = {
     `${v?.count ?? 0} uncommitted change(s) would be discarded.`,
   'gitWorktrees.blockedInUse': (v) =>
     `${v?.count ?? 0} running session(s) would lose their checkout.`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `Could not read where ${v?.count ?? 0} running session(s) are working. Any working here would lose their checkout.`,
   'gitWorktrees.blockedUnknown':
     'The working tree could not be checked for uncommitted changes, and any there would be discarded.',
   'gitWorktrees.blockedOperation': (v) =>
@@ -4312,6 +4314,8 @@ const ZH: Messages = {
   'gitWorktrees.blockedDirty': (v) => `${v?.count ?? 0} 处未提交改动将被丢弃。`,
   'gitWorktrees.blockedInUse': (v) =>
     `${v?.count ?? 0} 个运行中的会话将失去其检出。`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `无法读取 ${v?.count ?? 0} 个运行中会话所在的位置。若有会话在这里，将失去其检出。`,
   'gitWorktrees.blockedUnknown':
     '无法检查该工作树是否有未提交改动，若有也将一并丢弃。',
   'gitWorktrees.blockedOperation': (v) =>

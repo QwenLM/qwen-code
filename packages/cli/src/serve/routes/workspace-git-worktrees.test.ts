@@ -29,6 +29,8 @@ import {
   type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
+import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import {
   PRUNE_GUARD_REASON,
   pruneTurnsHeld,
@@ -52,6 +54,21 @@ vi.mock('@qwen-code/qwen-code-core/utils/git-worktrees.js', async (real) => ({
   worktreeAdminHoldsModules: vi.fn(),
   worktreeHoldsSubmodules: vi.fn(),
 }));
+// The real reader, wrapped: a writer racing the read is a timing, and only a
+// queued answer makes it happen on every run.
+vi.mock(
+  '@qwen-code/qwen-code-core/services/worktreeSessionService.js',
+  async (real) => {
+    const actual =
+      await real<
+        typeof import('@qwen-code/qwen-code-core/services/worktreeSessionService.js')
+      >();
+    return {
+      ...actual,
+      readWorktreeSessionStrict: vi.fn(actual.readWorktreeSessionStrict),
+    };
+  },
+);
 vi.mock('@qwen-code/qwen-code-core/utils/gitDiff.js', () => ({
   getGitWorkingTreeStatus: vi.fn(),
 }));
@@ -141,6 +158,9 @@ function runtime(
     primary: workspaceId === 'primary',
     trusted,
     ...(internal ? { provenance: 'live-conversation' } : {}),
+    // Session state under this suite's own temp root: the removal gate reads
+    // session sidecars, and without this it would read the real home's.
+    sessionRuntimeBaseDir: path.join(ROOT, '.session-runtime'),
     env: { mode: 'parent-process', overlayKeys: [], effectiveEnv: {} },
     bridge: {
       publishWorkspaceEvent: vi.fn(),
@@ -891,6 +911,299 @@ describe('workspace git worktree routes', () => {
 
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(pruneMock).not.toHaveBeenCalled();
+  });
+
+  it('counts a session that entered the worktree after it started', async () => {
+    // `enter_worktree` records where a running session went in that
+    // session's worktree sidecar and nowhere in the bridge's summary. The
+    // tab puts the session's chip on the row from the sidecar; the gate has
+    // to see the same thing, or the first click deletes the checkout from
+    // under a session the user was just shown.
+    const moved = { sessionId: 'aaaaaaaa-1111-4222-8333-444444444444' };
+    const rt = runtime('primary', ROOT, true, [moved]);
+    const sidecar = createWorkspaceRuntimeSessionService(
+      rt,
+    ).getWorktreeSessionPathForArchiveState(moved.sessionId, 'active');
+    fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+    const record = {
+      slug: 'swift-fox',
+      worktreePath: LINKED_PATH,
+      worktreeBranch: 'qwen/swift-fox',
+      originalCwd: ROOT,
+      originalBranch: 'main',
+      originalHeadCommit: 'a'.repeat(40),
+    };
+    fs.writeFileSync(sidecar, JSON.stringify(record));
+    try {
+      const app = mount([rt]);
+      const remove = () =>
+        request(app)
+          .post('/workspaces/primary/git/worktrees/remove')
+          .send({ path: LINKED_PATH });
+      const refused = await remove();
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({
+        code: 'worktree_in_use',
+        sessions: 1,
+      });
+      expect(refused.body.sessionsUnknown).toBeUndefined();
+      expect(refused.body.error).toBe(
+        'Sessions are still running in this worktree',
+      );
+
+      // Recorded under another spelling of the same directory.
+      const alias = path.join(ROOT, 'alias-of-linked');
+      fs.symlinkSync(LINKED_PATH, alias);
+      fs.writeFileSync(
+        sidecar,
+        JSON.stringify({ ...record, worktreePath: alias }),
+      );
+      expect((await remove()).body).toMatchObject({ sessions: 1 });
+      fs.rmSync(alias);
+      fs.writeFileSync(sidecar, JSON.stringify(record));
+
+      // Handed on by a worktree reset that could not stop it: the session is
+      // still running inside the checkout, and the tab still shows its chip.
+      fs.writeFileSync(
+        sidecar,
+        JSON.stringify({ ...record, supersededBy: 'someone-else' }),
+      );
+      const handedOn = await remove();
+      expect(handedOn.status).toBe(409);
+      expect(handedOn.body).toMatchObject({ sessions: 1 });
+
+      // There but unreadable: it may name this worktree, so it holds the
+      // removal — without being claimed as a session running here.
+      fs.rmSync(sidecar);
+      fs.mkdirSync(sidecar);
+      const unreadable = await remove();
+      expect(unreadable.status).toBe(409);
+      expect(unreadable.body).toMatchObject({
+        code: 'worktree_in_use',
+        sessions: 0,
+        sessionsUnknown: 1,
+      });
+      expect(unreadable.body.error).toBe(
+        'Could not tell whether a running session is in this worktree',
+      );
+      fs.rmSync(sidecar, { recursive: true });
+
+      // A link is not followed, even to a record naming this worktree.
+      const target = path.join(path.dirname(sidecar), 'elsewhere.json');
+      fs.writeFileSync(target, JSON.stringify(record));
+      fs.symlinkSync(target, sidecar);
+      const linked = await remove();
+      expect(linked.body).toMatchObject({ sessions: 0, sessionsUnknown: 1 });
+      fs.rmSync(sidecar);
+      expect(removeMock).not.toHaveBeenCalled();
+
+      // A file that does not parse is also what an in-place rewrite shows
+      // between its truncate and its write, for as long as the writer
+      // stalls there: it may be about to name this worktree.
+      for (const torn of ['', '{"slug":']) {
+        fs.writeFileSync(sidecar, torn);
+        expect((await remove()).body).toMatchObject({
+          sessions: 0,
+          sessionsUnknown: 1,
+        });
+      }
+      expect(removeMock).not.toHaveBeenCalled();
+
+      // Parses, and is not a record: it names no worktree, and the session
+      // list puts no chip anywhere for it either.
+      fs.mkdirSync(LINKED_PATH, { recursive: true });
+      fs.writeFileSync(path.join(LINKED_PATH, '.git'), 'gitdir: /somewhere\n');
+      fs.writeFileSync(sidecar, JSON.stringify({ ...record, slug: 1 }));
+      const notARecord = await remove();
+      expect(notARecord.status).toBe(200);
+      expect(notARecord.body.sessionsUnknown).toBeUndefined();
+
+      // No sidecar at all: a live session that never moved holds nothing.
+      fs.rmSync(sidecar);
+      fs.mkdirSync(LINKED_PATH, { recursive: true });
+      fs.writeFileSync(path.join(LINKED_PATH, '.git'), 'gitdir: /somewhere\n');
+      expect((await remove()).status).toBe(200);
+
+      // A sidecar naming some other worktree says nothing about this one.
+      fs.writeFileSync(
+        sidecar,
+        JSON.stringify({ ...record, worktreePath: path.join(ROOT, 'other') }),
+      );
+      fs.mkdirSync(LINKED_PATH, { recursive: true });
+      fs.writeFileSync(path.join(LINKED_PATH, '.git'), 'gitdir: /somewhere\n');
+      const elsewhere = await remove();
+      expect(elsewhere.status).toBe(200);
+    } finally {
+      fs.rmSync(path.dirname(sidecar), { recursive: true, force: true });
+    }
+  });
+
+  it('reads each session\u2019s sidecar where its own workspace keeps it', async () => {
+    // A session the bridge places in another worktree may have entered this
+    // one since; a session with a pre-UUID id still has a transcript, and so
+    // a chip; and a session of another workspace keeps its sidecar in that
+    // workspace's storage, not the selected one's.
+    const record = {
+      slug: 'swift-fox',
+      worktreePath: LINKED_PATH,
+      worktreeBranch: 'qwen/swift-fox',
+      originalCwd: ROOT,
+      originalBranch: 'main',
+      originalHeadCommit: 'a'.repeat(40),
+    };
+    const primary = runtime('primary', ROOT, true, [
+      {
+        sessionId: 'bbbbbbbb-1111-4222-8333-444444444444',
+        worktree: { path: path.join(ROOT, 'other') },
+      },
+      { sessionId: '0123456789abcdef0123456789abcdef' },
+      { sessionId: 'dddddddd-1111-4222-8333-444444444444-agent-reviewer' },
+      // Not an id any listing reads a transcript for, and one that would
+      // name a file outside the chats directory if it were read.
+      { sessionId: '../escape' },
+    ]);
+    const secondary = runtime('secondary', '/work/other', true, [
+      { sessionId: 'cccccccc-1111-4222-8333-444444444444' },
+      // Also listed here, where its sidecar cannot be read: a session
+      // already counted is not also one nobody could place.
+      { sessionId: 'bbbbbbbb-1111-4222-8333-444444444444' },
+    ]);
+    const written: string[] = [];
+    const write = (rt: WorkspaceRuntime, sessionId: string) => {
+      const sidecar = createWorkspaceRuntimeSessionService(
+        rt,
+      ).getWorktreeSessionPathForArchiveState(sessionId, 'active');
+      fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+      fs.writeFileSync(sidecar, JSON.stringify(record));
+      written.push(path.dirname(sidecar));
+    };
+    write(primary, 'bbbbbbbb-1111-4222-8333-444444444444');
+    write(primary, '0123456789abcdef0123456789abcdef');
+    write(primary, 'dddddddd-1111-4222-8333-444444444444-agent-reviewer');
+    write(secondary, 'cccccccc-1111-4222-8333-444444444444');
+    fs.mkdirSync(
+      createWorkspaceRuntimeSessionService(
+        secondary,
+      ).getWorktreeSessionPathForArchiveState(
+        'bbbbbbbb-1111-4222-8333-444444444444',
+        'active',
+      ),
+    );
+    const escaped = createWorkspaceRuntimeSessionService(
+      primary,
+    ).getWorktreeSessionPathForArchiveState('../escape', 'active');
+    fs.writeFileSync(escaped, JSON.stringify(record));
+    written.push(escaped);
+    try {
+      const refused = await request(mount([primary, secondary]))
+        .post('/workspaces/primary/git/worktrees/remove')
+        .send({ path: LINKED_PATH });
+      expect(refused.body).toMatchObject({
+        code: 'worktree_in_use',
+        sessions: 4,
+      });
+      expect(refused.body.sessionsUnknown).toBeUndefined();
+      expect(removeMock).not.toHaveBeenCalled();
+    } finally {
+      for (const dir of written) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('asks a sidecar again when a writer raced the read, and only twice', async () => {
+    const strictMock = vi.mocked(readWorktreeSessionStrict);
+    const real = (
+      await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/services/worktreeSessionService.js')
+      >('@qwen-code/qwen-code-core/services/worktreeSessionService.js')
+    ).readWorktreeSessionStrict;
+    const moved = { sessionId: 'eeeeeeee-1111-4222-8333-444444444444' };
+    const rt = runtime('primary', ROOT, true, [moved]);
+    const sidecar = createWorkspaceRuntimeSessionService(
+      rt,
+    ).getWorktreeSessionPathForArchiveState(moved.sessionId, 'active');
+    fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+    fs.writeFileSync(
+      sidecar,
+      JSON.stringify({
+        slug: 'swift-fox',
+        worktreePath: LINKED_PATH,
+        worktreeBranch: 'qwen/swift-fox',
+        originalCwd: ROOT,
+        originalBranch: 'main',
+        originalHeadCommit: 'a'.repeat(40),
+      }),
+    );
+    const raced = {
+      state: 'invalid' as const,
+      reason: 'sidecar identity changed during read',
+    };
+    // What a read between an in-place truncate and its write sees.
+    const torn = { state: 'invalid' as const, reason: 'invalid sidecar JSON' };
+    const gone = {
+      state: 'invalid' as const,
+      reason: 'sidecar disappeared during read',
+    };
+    const notARecord = {
+      state: 'invalid' as const,
+      reason: 'invalid sidecar contents',
+    };
+    const app = mount([rt]);
+    const remove = () =>
+      request(app)
+        .post('/workspaces/primary/git/worktrees/remove')
+        .send({ path: LINKED_PATH });
+    try {
+      // Two raced reads, then the real one: the record still holds.
+      strictMock.mockReset();
+      strictMock.mockImplementation(real);
+      strictMock.mockResolvedValueOnce(raced).mockResolvedValueOnce(torn);
+      const second = await remove();
+      expect(second.body).toMatchObject({ sessions: 1 });
+      expect(second.body.sessionsUnknown).toBeUndefined();
+      expect(strictMock).toHaveBeenCalledTimes(3);
+
+      // Three raced reads: bounded, and what is left is unknown, not a pass.
+      strictMock.mockClear();
+      strictMock
+        .mockResolvedValueOnce(raced)
+        .mockResolvedValueOnce(raced)
+        .mockResolvedValueOnce(raced);
+      const bounded = await remove();
+      expect(bounded.status).toBe(409);
+      expect(bounded.body).toMatchObject({ sessions: 0, sessionsUnknown: 1 });
+      expect(strictMock).toHaveBeenCalledTimes(3);
+
+      // Not a record once, and something else the other times: the file was
+      // changing under the reads, which is not a file that names nothing.
+      strictMock.mockClear();
+      strictMock
+        .mockResolvedValueOnce(notARecord)
+        .mockResolvedValueOnce(raced)
+        .mockResolvedValueOnce(notARecord);
+      const mixed = await remove();
+      expect(mixed.body).toMatchObject({ sessions: 0, sessionsUnknown: 1 });
+
+      // A writer stalled between truncate and write looks the same on every
+      // read, and a file that vanishes on every read is still being written.
+      for (const held of [torn, gone]) {
+        strictMock.mockClear();
+        strictMock
+          .mockResolvedValueOnce(held)
+          .mockResolvedValueOnce(held)
+          .mockResolvedValueOnce(held);
+        expect((await remove()).body).toMatchObject({
+          sessions: 0,
+          sessionsUnknown: 1,
+        });
+      }
+      expect(removeMock).not.toHaveBeenCalled();
+    } finally {
+      strictMock.mockReset();
+      strictMock.mockImplementation(real);
+      fs.rmSync(path.dirname(sidecar), { recursive: true, force: true });
+    }
   });
 
   it('counts every live session in the worktree, not just one', async () => {

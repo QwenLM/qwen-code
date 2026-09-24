@@ -106,6 +106,9 @@ function runtime(
     workspaceCwd,
     primary: workspaceId === 'primary',
     trusted: true,
+    // Session state beside the repository under test: the removal gate reads
+    // session sidecars, and without this it would read the real home's.
+    sessionRuntimeBaseDir: path.join(workspaceCwd, '..', '.session-runtime'),
     // A real runtime carries the daemon's whole environment, which is what
     // puts git on PATH; a sparse overlay here would not reach git at all.
     env: { mode: 'parent-process', overlayKeys: [], effectiveEnv: process.env },
