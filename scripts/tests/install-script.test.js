@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
 const {
   appendFileSync,
@@ -2574,6 +2575,10 @@ describe('standalone release packaging', () => {
       try {
         const nativeModulesDir = createFakeNodePtyModulesWithoutAddon(tmpDir);
 
+        // `Required ` is what separates the fatal gate from the degrade arm:
+        // copyNodePtyAddon emits the same message on both, so a prefix-less
+        // match is also satisfied by the warning a build prints before dying
+        // for an unrelated reason.
         expect(() =>
           packageFakeStandalone(
             tmpDir,
@@ -2583,7 +2588,7 @@ describe('standalone release packaging', () => {
               env: { QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1' },
             },
           ),
-        ).toThrow(/node-pty packages for linux-x64/);
+        ).toThrow(/Required node-pty packages for linux-x64/);
       } finally {
         restoreMinimalDist(createdDist);
         rmSync(tmpDir, { recursive: true, force: true });
@@ -2936,12 +2941,18 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).toContain(
       'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
     );
-    // Pin the whole wiring line, not just the variable name: the bare name also
-    // appears in create-standalone-package.js's usage text, so a name-only
-    // match stays green if release.yml stops evaluating it to '1' for the
-    // canonical repo and the gate silently reverts to warn-and-degrade.
-    expect(releaseWorkflow).toContain(
-      `QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: "\${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"`,
+    // Pin the gate structurally on the step that actually runs the packager:
+    // build-standalone-release.js spawns it with no env override, so the value
+    // reaches create-standalone-package.js only from this step's env. A
+    // whole-file substring stays green when the line is commented out or moved
+    // into a neighbouring step's env, and the gate then silently reverts to
+    // warn-and-degrade. The value stays the conditional expression because the
+    // publish job also runs on forks, where the gate is deliberately off.
+    const archiveStep = parse(releaseWorkflow).jobs.publish.steps.find(
+      (step) => step.name === 'Build Standalone Archives',
+    );
+    expect(archiveStep?.env?.QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}",
     );
     expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
