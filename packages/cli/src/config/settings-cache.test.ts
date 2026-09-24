@@ -264,12 +264,12 @@ describe('loadSettingsCached', () => {
   });
 
   it('does not cache a load failure and recovers once the file is fixed', () => {
-    // Valid JSON that is not an object bypasses corruption recovery and
-    // makes loadSettings throw FatalConfigError.
-    fs.writeFileSync(userSettingsPath(), '[1]');
+    // A malformed operator sandbox policy must fail closed without caching
+    // the failure, so a repaired file can be loaded normally.
+    fs.writeFileSync(userSettingsPath(), '{"tools":{"executionSandbox":');
 
     expect(() => loadSettingsCached(workspaceDir)).toThrow(
-      /not a valid JSON object/,
+      /Cannot read operator sandbox policy/,
     );
 
     writeJson(userSettingsPath(), versioned({ model: { name: 'fixed' } }));

@@ -81,6 +81,13 @@ describe('ideCommand', () => {
     expect(command.subCommands?.[0].name).toBe('enable');
     expect(command.subCommands?.[1].name).toBe('status');
     expect(command.subCommands?.[2].name).toBe('install');
+    // BuiltinCommandLoader only builds `/ide` when
+    // `config.isInteractive() !== false`; these declarations are what makes
+    // that skip unobservable.
+    expect(command.supportedModes).toEqual(['interactive']);
+    for (const sub of command.subCommands ?? []) {
+      expect(sub.supportedModes).toEqual(['interactive']);
+    }
   });
 
   it('should show disable command when connected', async () => {
@@ -95,6 +102,10 @@ describe('ideCommand', () => {
     const subCommandNames = command.subCommands?.map((cmd) => cmd.name);
     expect(subCommandNames).toContain('disable');
     expect(subCommandNames).not.toContain('enable');
+    expect(
+      command.subCommands?.find((cmd) => cmd.name === 'disable')
+        ?.supportedModes,
+    ).toEqual(['interactive']);
   });
 
   describe('status subcommand', () => {

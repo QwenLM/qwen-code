@@ -8,6 +8,7 @@ import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../tool-names.js';
 import {
+  buildForkExecutionAllowlist,
   buildForkedMessages,
   FORK_PLACEHOLDER_RESULT,
   normalizeForkTurns,
@@ -15,6 +16,34 @@ import {
   selectForkHistory,
   validateForkToolList,
 } from './fork-subagent.js';
+
+describe('buildForkExecutionAllowlist', () => {
+  const advertisedTools = [
+    ToolNames.READ_FILE,
+    ToolNames.TOOL_SEARCH,
+    ToolNames.TOOL_CALL,
+  ];
+
+  it('preserves an explicit empty deny-all list', () => {
+    expect(
+      buildForkExecutionAllowlist([], [ToolNames.READ_FILE], advertisedTools),
+    ).toEqual([]);
+  });
+
+  it('keeps both bridge tools for a non-empty explicit request', () => {
+    expect(
+      buildForkExecutionAllowlist(
+        [ToolNames.READ_FILE],
+        [ToolNames.READ_FILE],
+        advertisedTools,
+      ),
+    ).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.TOOL_SEARCH,
+      ToolNames.TOOL_CALL,
+    ]);
+  });
+});
 
 describe('resolveForkExecutionAllowedTools', () => {
   const parentTools = [

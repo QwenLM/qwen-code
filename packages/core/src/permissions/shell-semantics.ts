@@ -35,7 +35,11 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommandSegments } from './rule-parser.js';
+import {
+  splitCompoundCommandSegments,
+  splitCompoundCommandSegmentsForReading,
+  type BackslashReading,
+} from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -2150,18 +2154,18 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  const ops = walkCompoundCommand(command, cwd, 0, false, false);
   if (!command.includes('\\')) {
-    return ops;
+    return walkCompoundCommand(command, cwd, 0, false, undefined);
   }
   // The two quote readings can disagree on where the operators are when a
   // backslash appears: the escape-everywhere reading sees terminators that
   // bash's literal-backslash-in-single-quotes reading does not (and vice
-  // versa). A boundary only one reading sees must not decide a `cd`'s
-  // foreground/background effect on its own — evaluate the bash-accurate
-  // reading as well and keep both operation sets, since the permission
-  // layer aggregates to the most restrictive verdict (#12246).
-  const bashOps = walkCompoundCommand(command, cwd, 0, false, true);
+  // versa). Each reading is walked on its own because it is self-consistent;
+  // the union split's mixed boundaries would attribute writes to phantom
+  // cwds that no shell produces. Both operation sets are kept, since the
+  // permission layer aggregates to the most restrictive verdict (#12246).
+  const ops = walkCompoundCommand(command, cwd, 0, false, 'escape-everywhere');
+  const bashOps = walkCompoundCommand(command, cwd, 0, false, 'bash');
   const seen = new Set(ops.map((op) => JSON.stringify(op)));
   for (const op of bashOps) {
     const key = JSON.stringify(op);
@@ -2292,14 +2296,12 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
-  backslashLiteralInSingleQuotes: boolean,
+  reading?: BackslashReading,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(
-    stripHeredocBodies(command),
-    {
-      backslashLiteralInSingleQuotes,
-    },
-  );
+  const stripped = stripHeredocBodies(command);
+  const subCommands = reading
+    ? splitCompoundCommandSegmentsForReading(stripped, reading)
+    : splitCompoundCommandSegments(stripped);
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
@@ -2339,7 +2341,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
-            backslashLiteralInSingleQuotes,
+            reading,
           ),
         );
         continue;

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readReportedArtifacts } from './reported-artifacts.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
@@ -30,6 +31,7 @@ import {
   isActiveToolStatus,
   isSubAgentToolCall,
   projectTerminalBackgroundAgentTool,
+  resolveToolCallName,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
 import {
@@ -740,6 +742,8 @@ export function transcriptBlocksToDaemonMessages(
           });
           break;
         }
+        const meta = getRecord(textBlock.meta);
+        const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
         if (notice?.source === 'vision_bridge_notice') {
           messages.push({
             id: block.id,
@@ -804,7 +808,10 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        const insightSegments = splitInsightSegments(textBlock.text);
+        const insightSegments =
+          reportedArtifacts.length > 0
+            ? null
+            : splitInsightSegments(textBlock.text);
         if (insightSegments) {
           let lastProgress: ParsedInsight | null = null;
           let hasTerminal = false;
@@ -889,6 +896,14 @@ export function transcriptBlocksToDaemonMessages(
           messages[currentAssistantIdx!] = {
             ...target,
             content: target.content + textBlock.text,
+            ...(reportedArtifacts.length
+              ? {
+                  reportedArtifacts: [
+                    ...(target.reportedArtifacts ?? []),
+                    ...reportedArtifacts,
+                  ],
+                }
+              : {}),
             isStreaming: textBlock.streaming,
             sourceBlockIds: unionMessageIds(target.sourceBlockIds, block.id),
             ...(textBlock.branchRecordId
@@ -903,6 +918,7 @@ export function transcriptBlocksToDaemonMessages(
             id: block.id,
             role: 'assistant',
             content: textBlock.text,
+            ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
@@ -1319,7 +1335,10 @@ export function transcriptBlocksToDaemonMessages(
       tool.args = permissionInfo.args;
     }
     if (
-      isSubAgentToolCall(tool) &&
+      (isSubAgentToolCall(tool) ||
+        /^(shell|bash|run_shell_command|execute_command)$/i.test(
+          tool.toolName,
+        )) &&
       isActiveToolStatus(tool.status) &&
       tool.endTime === undefined
     ) {
@@ -1567,7 +1586,7 @@ function getString(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function daemonToolBlockToToolCall(
+export function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
   safeToolProjection: boolean,
 ): DaemonMessageToolCall {
@@ -1597,11 +1616,13 @@ function daemonToolBlockToToolCall(
     block.status === 'canceled';
   const forceBackgroundPending =
     isBackgroundAgent && (!safeToolProjection || !isComplete);
+  const toolName =
+    resolveToolCallName(block.toolName, block.rawInput) || 'unknown';
 
   return {
     callId: block.toolCallId,
-    toolName: block.toolName || 'unknown',
-    title: block.title,
+    toolName,
+    title: block.title === block.toolName ? toolName : block.title,
     status:
       (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
       (block.status as DaemonMessageToolCallStatus) ||
@@ -1628,7 +1649,11 @@ function getToolArgs(
   safeToolProjection: boolean,
 ): Record<string, unknown> | undefined {
   if (!safeToolProjection) {
-    return block.rawInput as Record<string, unknown> | undefined;
+    const rawInput = getRecord(block.rawInput);
+    return block.toolName === 'tool_call' &&
+      resolveToolCallName(block.toolName, rawInput) !== block.toolName
+      ? getRecord(rawInput?.['arguments'])
+      : rawInput;
   }
   return daemonToolPreviewToArgs(block.preview);
 }
@@ -1775,8 +1800,12 @@ function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
 
+  // `details` is the daemon's redacted JSON dump of the tool *input* whenever
+  // rawInput is present (see the SDK normalizer), so it is never a result:
+  // falling back to it renders the call's own arguments — `{}` for empty
+  // args — as the completed tool's output.
   if (!isCancelledStatus(block.status) || !block.details) {
-    return block.rawOutput ?? block.details;
+    return block.rawOutput;
   }
 
   if (
@@ -1805,6 +1834,7 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'shell_result') return preview.result;
   if (preview.kind === 'question_answers') {
     return {
       type: 'ask_user_question_answers',

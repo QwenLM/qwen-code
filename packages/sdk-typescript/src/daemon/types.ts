@@ -176,6 +176,7 @@ export interface DaemonWorkspaceCapability {
   id: string;
   cwd: string;
   displayName?: string;
+  ssh?: { host: string; port?: number; directory: string };
   primary: boolean;
   trusted: boolean;
   /** Whether new sessions in this workspace can use Workflow. */
@@ -959,10 +960,10 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /**
-       * False, and required: modeled child heap ceilings are not applied.
-       * Count enforcement is reported separately by `childHeap.admissionEnforced`.
+       * True only when managed child-count admission and the fixed old-space
+       * ceiling are both applied. Does not bound total process RSS.
        */
-      enforced: false;
+      enforced: boolean;
       /**
        * Adaptive live-journal growth derived from the budget: session journal caps really do grow
        * within this daemon-wide pool mid-turn. `null` when growth is
@@ -975,11 +976,11 @@ export interface DaemonStatusReport {
         baselineMaxBytes: number;
       } | null;
       /**
-       * The per-child heap partition the daemon models but does not apply.
+       * The fixed per-child heap partition, applied only under `enforce`.
        * `null` when no policy was built; absent on daemons predating it.
        */
       childHeap?: {
-        mode: 'off' | 'observe' | 'admit';
+        mode: 'off' | 'observe' | 'admit' | 'enforce';
         admissionEnforced?: boolean;
         /**
          * `null` under `off`, which models nothing — distinct from `0`,
@@ -993,9 +994,10 @@ export interface DaemonStatusReport {
         perChildCeilingMb: number | null;
         /**
          * Admission pressure only. 0 does not mean the partition is safe to
-         * apply: children still run on the host-derived ceiling. A channel
-         * swap at full occupancy also books one, and on a host too small to
-         * model a partition this equals the total ACP spawn count.
+         * apply. Under `observe` and `admit`, children retain legacy heap
+         * arguments. A channel swap at full occupancy also books one, and on
+         * a host too small to model a partition this equals the total ACP
+         * spawn count.
          */
         refusals: number;
       } | null;
@@ -1298,7 +1300,13 @@ export interface DaemonSessionIssueInfo {
 export interface DaemonBackgroundTurn {
   turnId: string;
   taskId: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /**
+   * What produced the turn. `peer` is a message another session sent to
+   * this one, which the receiving session's cross-session gate accepted.
+   * It is not a task: its `taskId` is the message id, and `tasks/cancel`
+   * does not answer to it.
+   */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   sourceTurnId?: string;
   label?: string;
@@ -1319,7 +1327,8 @@ export function parseDaemonBackgroundTurn(
     (record['kind'] !== 'agent' &&
       record['kind'] !== 'monitor' &&
       record['kind'] !== 'shell' &&
-      record['kind'] !== 'workflow') ||
+      record['kind'] !== 'workflow' &&
+      record['kind'] !== 'peer') ||
     typeof record['startedAt'] !== 'number' ||
     !Number.isFinite(record['startedAt']) ||
     record['startedAt'] < 0 ||
@@ -1653,6 +1662,14 @@ export interface DaemonSessionTranscriptPage {
   hasOlder?: boolean;
 }
 
+/** Complete persisted tool replay for one navigation turn; agents are summaries. */
+export interface DaemonSessionToolCalls {
+  v: 1;
+  sessionId: string;
+  turnId: string;
+  events: DaemonEvent[];
+}
+
 export interface DaemonSessionTurnIndexPageOptions {
   snapshot?: string;
   start?: number;
@@ -1783,6 +1800,40 @@ export interface DaemonSessionListPage {
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
+}
+
+export interface DaemonSessionCatalogWorkspace {
+  /** Registered workspace id or absolute cwd. */
+  workspace: string;
+  /** This workspace's opaque cursor from a previous catalog batch. */
+  cursor?: string;
+}
+
+export interface DaemonSessionCatalogRequest {
+  /** 1–20 entries; `all` excludes internal workspaces. */
+  workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+  /** Shared filters; pageSize is 1–100, default 20. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  includeGroups?: boolean;
+}
+
+export interface DaemonSessionCatalogPage extends DaemonSessionListPage {
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+  groups?: DaemonSessionGroupCatalog;
+}
+
+export interface DaemonSessionCatalogError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonSessionCatalogResult {
+  /** One page or explicit error per selected workspace, in selection order. */
+  workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
 }
 
 /** One content-search hit: the matching session plus an excerpt of the match. */
@@ -3052,6 +3103,11 @@ export interface DaemonSessionSupportedCommandsStatus {
      * own `run-saved`, `run-script`, `retry` and `rerun` are not restricted.
      */
     nameOnly?: boolean;
+    /**
+     * Whether `retry` and `rerun` accept a run restored from history
+     * (`isHistorical`), such as one a daemon restart interrupted.
+     */
+    retryHistorical?: boolean;
   };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
@@ -3317,8 +3373,26 @@ export interface DaemonSessionWorkflowTaskStatus {
   toolUseId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
-  /** Restored from the project snapshot store; controls are read-only. */
+  /**
+   * Restored from the project snapshot store. `pause` and `resume` do not
+   * apply; `delete-history` does, and so do `retry` and `rerun` when
+   * `workflowToolFeatures.retryHistorical` is reported.
+   */
   isHistorical?: boolean;
+  /**
+   * The run was launched with `args` too large for its snapshot to keep. It
+   * is one reason for {@link argsUnavailable}, reported separately so a
+   * client can say which.
+   */
+  argsOmitted?: true;
+  /**
+   * The run cannot be retried or rerun from history because its history does
+   * not have the `args` to start it with: they were too large to keep
+   * (`argsOmitted`), or the snapshot predates keeping them at all and so
+   * cannot say whether the run had any. Offer neither action when this is
+   * set -- the daemon answers both with `workflow_args_unavailable`.
+   */
+  argsUnavailable?: true;
   sourceRunId?: string;
   startMode?: 'retry' | 'rerun';
   label: string;
@@ -3911,6 +3985,11 @@ export interface DaemonLiveStatus {
   blocker?: DaemonLiveBlocker;
   message?: string;
   callId?: string;
+  coordinator?: {
+    workspaceCwd: string;
+    workspaceId?: string;
+    sessionId: string;
+  };
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
@@ -3965,8 +4044,40 @@ export interface DaemonLiveSetupStatus {
   enabled: boolean;
   keyConfigured: boolean;
   model: string;
+  /**
+   * Where the selected model's key comes from. `route`: the `envKey` of its
+   * `realtimeOnly` route — `apiKey` cannot be set and `replace` is refused.
+   * `settings`: the stored `liveVoice.apiKey`. Absent on older daemons, which
+   * only know `settings`.
+   */
+  keySource?: 'route' | 'settings';
+  /** The environment variable a `route` key is read from. Never its value. */
+  keyEnv?: string;
+  /**
+   * Why the resolved route cannot produce a credential (rejected `baseUrl`,
+   * missing `envKey`). Absent when the credential resolves, when the only
+   * problem is the unset `keyEnv` variable, and on older daemons.
+   */
+  keyError?: string;
+  /**
+   * Whether a clear-text `liveVoice.apiKey` is stored (never its value), so
+   * `clear` can be offered even when the selected model cannot use the key.
+   * Absent on older daemons.
+   */
+  storedKey?: boolean;
+  /** Why `model` cannot be resolved; absent when it resolves. */
+  modelError?: string;
   /** Absent on daemons that predate selectable Live Voice models. */
   voice?: string;
+  /**
+   * The base URL the selected model connects through: the stored
+   * `liveVoice.endpoint`, empty while the default is in use, or with
+   * `keySource: 'route'` the route's `baseUrl` (which cannot be set here).
+   * Absent on daemons that predate a configurable endpoint.
+   */
+  endpoint?: string;
+  /** Why the stored endpoint would be refused at call time. */
+  endpointError?: string;
   /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
   models?: Array<{ id: string; provider: string; name?: string }>;
   /**
@@ -3988,9 +4099,19 @@ export interface DaemonLiveSetupUpdate {
   enabled?: boolean;
   shortcut?: string;
   apiKey?: DaemonLiveSetupApiKeyMutation;
-  /** `modelId` or `provider:modelId` of a `realtimeOnly` route. */
+  /**
+   * `modelId` or `provider:modelId` of a `realtimeOnly` route, or any model
+   * id used with the stored `endpoint` and key.
+   */
   model?: string;
   voice?: string;
+  /**
+   * An OpenAI-compatible base URL (`https://…/compatible-mode/v1`) on a
+   * DashScope or `*.maas.aliyuncs.com` host, stored as entered; empty
+   * restores the default. Refused with `live_endpoint_unused` when the model
+   * follows a `realtimeOnly` route.
+   */
+  endpoint?: string;
 }
 
 export interface DaemonLiveMuteUpdate {

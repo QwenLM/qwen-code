@@ -4,6 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isWebShellPage } from './navigationUrl';
+
+export function inferStandaloneBasePath(pathname: string): string {
+  const sessionPath = pathname.match(/^(.*)\/session\/[^/]+\/?$/);
+  if (sessionPath) return sessionPath[1];
+  const path = pathname.replace(/\/$/, '');
+  const lastSlash = path.lastIndexOf('/');
+  return isWebShellPage(path.slice(lastSlash + 1))
+    ? path.slice(0, lastSlash)
+    : path;
+}
+
 /**
  * Build the pathname for a standalone session URL while preserving any base
  * path the app is deployed under (e.g. `/app/session/<id>` stays under
@@ -14,8 +26,7 @@ export function buildSessionPathname(
   currentPathname: string,
   sessionId: string | undefined,
 ): string {
-  const sessionPath = currentPathname.match(/^(.*)\/session\/[^/]+\/?$/);
-  const basePath = sessionPath?.[1] ?? currentPathname.replace(/\/$/, '');
+  const basePath = inferStandaloneBasePath(currentPathname);
   return sessionId
     ? `${basePath}/session/${encodeURIComponent(sessionId)}`
     : basePath || '/';

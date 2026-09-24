@@ -19,65 +19,26 @@ function loadComputerUseSkill() {
     fs.readFileSync(skillPath, 'utf-8'),
     skillPath,
   );
-  const resource = (name: string) =>
-    fs.readFileSync(
-      path.join(path.dirname(skillPath), 'references', name),
-      'utf-8',
-    );
-  return {
-    config,
-    body: config.body,
-    macos: resource('macos.md'),
-    legacy: resource('windows-linux.md'),
-  };
+  return { config, body: config.body };
 }
 
 describe('bundled computer-use skill', () => {
-  it('routes one entrypoint by the connected driver platform', () => {
+  it('loads a self-contained App workflow for every connected platform', () => {
     const { config, body } = loadComputerUseSkill();
     expect(config.name).toBe('computer-use');
+    expect(config.allowedTools).toBeUndefined();
     expect(body).toContain('ComputerUse.create()');
     expect(body).toContain('await computer.getPlatform()');
-    expect(body).toContain('references/macos.md');
-    expect(body).toContain('references/windows-linux.md');
-    expect(body).not.toContain('references/linux.md');
-    expect(body).toContain('Read exactly one resource with `read_file`');
-    expect(body).toContain('Skill base directory');
-    expect(body).toContain('not the CLI or Node host operating system');
-    expect(body).not.toContain('process.platform');
-    expect(body).toContain("if (platform === 'macos') {");
-    expect(body).toContain("computer.getApp('App named by the task')");
-    expect(body).toContain('before any editing or input');
-    expect(config.allowedTools).toBeUndefined();
-  });
-
-  it('includes the full Linux workflow in the fixed skill entrypoint', () => {
-    const { body } = loadComputerUseSkill();
-    const linux = body.split('## Linux Computer Use')[1];
-    expect(linux).toContain('computer.listWindows(');
-    expect(linux).toContain('computer.observeWindow(target)');
-    expect(linux).toContain('elementToken: string');
-    expect(linux).toContain('Input delivery is\nmanaged by the runtime');
-    expect(linux).toContain('nodeRepl.write(state.text)');
-    expect(linux).toContain('nodeRepl.emitImage(');
-    expect(linux).toContain('Observe the current windows and state');
-    expect(linux).not.toMatch(/deliveryMode|delivery_mode|references\//);
-  });
-
-  it('exposes the macOS app workflow without native targeting or routing choices', () => {
-    const { macos: body } = loadComputerUseSkill();
     expect(body).toContain('computer.getApp(');
     expect(body).toContain('app.getState(');
     expect(body).toContain('app.click(37)');
     expect(body).not.toMatch(
-      /deliveryMode|delivery_mode|foreground|background|elementToken|element_token|windowId|window_id|\bpid\b/,
+      /references\/|computer\.observeWindow\(|computer\.listWindows\(|elementToken|windowId/,
     );
-    expect(body).not.toContain('computer.observeWindow(');
-    expect(body).not.toContain('computer.listWindows(');
   });
 
   it('preserves batching, incremental observation and safe refresh guidance', () => {
-    const { macos: body } = loadComputerUseSkill();
+    const { body } = loadComputerUseSkill();
     expect(body).toMatch(/After performing one or more UI actions/);
     expect(body).toMatch(/Batch actions whose target remains the same/);
     expect(body).toContain('Prefer this default diff output');
@@ -95,7 +56,7 @@ describe('bundled computer-use skill', () => {
   });
 
   it('requests screenshots separately and keeps the persistent REPL lifecycle', () => {
-    const { macos: body } = loadComputerUseSkill();
+    const { body } = loadComputerUseSkill();
     const screenshotSection = body.split('## Reading screenshots')[1];
     expect(screenshotSection).toContain('includeScreenshot: true');
     expect(screenshotSection).not.toContain('disableDiff');
@@ -108,38 +69,17 @@ describe('bundled computer-use skill', () => {
   });
 
   it('documents the macOS text methods and their uncertainty boundaries', () => {
-    const { macos } = loadComputerUseSkill();
-    expect(macos).toContain('app.selectText(37,');
-    expect(macos).toContain("await app.paste('ready')");
-    expect(macos).toContain("format?: 'text' | 'md' | 'html'");
-    expect(macos).toContain(
+    const { body } = loadComputerUseSkill();
+    expect(body).toContain('app.selectText(37,');
+    expect(body).toContain("await app.paste('ready')");
+    expect(body).toContain("format?: 'text' | 'md' | 'html'");
+    expect(body).toContain(
       "selection?: 'text' | 'cursor_before' | 'cursor_after'",
     );
-    expect(macos).toContain('immediately adjacent');
-    expect(macos).toContain('Missing or');
-    expect(macos).toContain('ambiguous matches fail');
-    expect(macos).toContain('Observe state before');
-    expect(macos).toContain('newer external clipboard change');
-  });
-
-  it('retains exact-window targeting and full actionable tokens for Windows', () => {
-    const { legacy } = loadComputerUseSkill();
-    expect(legacy).toContain('computer.listWindows(');
-    expect(legacy).toContain('computer.observeWindow(target)');
-    expect(legacy).toContain('windowId: selectedWindowId');
-    expect(legacy).toContain('elementToken: string');
-    expect(legacy).toContain('maxTextChars?: number');
-    expect(legacy).toContain('12,000 characters');
-    expect(legacy).toContain(
-      'the first entry is not necessarily the task window',
-    );
-    expect(legacy).toContain(
-      '`state.elements` remains the current full actionable element list',
-    );
-    expect(legacy).toContain("type DeliveryMode = 'background' | 'foreground'");
-    expect(legacy).not.toMatch(
-      /macOS|computer\.getApp|app\.getState|app\.paste|app\.selectText/,
-    );
-    expect(legacy).not.toContain('ComputerUse.create()');
+    expect(body).toContain('immediately adjacent');
+    expect(body).toContain('Missing or');
+    expect(body).toContain('ambiguous matches fail');
+    expect(body).toContain('Observe state before');
+    expect(body).toContain('newer external clipboard change');
   });
 });
