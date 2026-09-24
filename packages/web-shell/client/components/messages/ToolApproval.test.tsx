@@ -468,42 +468,90 @@ describe('ToolApproval accessibility', () => {
 
   it.each([
     {
+      name: 'whitespace around the placeholder',
       title: '  {}  ',
       rawInput: {},
       toolName: 'mcp__sample__ping',
       description: undefined,
     },
     {
+      name: 'MCP display-name prefix',
+      title: 'ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: undefined,
+    },
+    {
+      name: 'meaningful title',
       title: 'Check server health',
       rawInput: {},
       toolName: 'mcp__sample__ping',
       description: 'Check server health',
     },
     {
+      name: 'prose ending in an empty object',
+      title: 'Expected response: {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Expected response: {}',
+    },
+    {
+      name: 'explicit description',
       title: '{}',
       rawInput: { description: '  Check server health  ' },
       toolName: 'mcp__sample__ping',
       description: 'Check server health',
     },
     {
+      name: 'prose containing an MCP display name',
+      title: 'Expected response from ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Expected response from ping (sample MCP Server): {}',
+    },
+    {
+      name: 'serialized nonempty input',
       title: '{"target":"health"}',
       rawInput: { target: 'health' },
       toolName: 'mcp__sample__ping',
       description: '{"target":"health"}',
     },
     {
+      name: 'nonempty input with a {} title',
+      title: '{}',
+      rawInput: { target: 'health' },
+      toolName: 'mcp__sample__ping',
+      description: '{}',
+    },
+    {
+      name: 'missing input with a {} title',
       title: '{}',
       rawInput: undefined,
       toolName: 'mcp__sample__ping',
       description: '{}',
     },
-    { title: '{}', rawInput: {}, toolName: 'custom_tool', description: '{}' },
+    {
+      name: 'non-MCP tool',
+      title: '{}',
+      rawInput: {},
+      toolName: 'custom_tool',
+      description: '{}',
+    },
   ])(
-    'preserves meaningful or unconfirmed subtitles: $title / $toolName',
+    'renders the expected subtitle: $name',
     ({ title, rawInput, toolName, description }) => {
       render(undefined, { ...request, title, rawInput, toolName });
       expect(container!.querySelector('[class*="desc"]')?.textContent).toBe(
         description,
+      );
+      const panel = container!.querySelector('[role="alertdialog"]')!;
+      const descriptions = panel.getAttribute('aria-describedby')!.split(' ');
+      expect(
+        descriptions.map((id) => document.getElementById(id)?.textContent),
+      ).toEqual(
+        description === undefined
+          ? ['Apply this change?']
+          : ['Apply this change?', description],
       );
     },
   );

@@ -90,6 +90,66 @@ describe('toolFormatting', () => {
     ).toBe('README.md');
   });
 
+  it.each([
+    { name: 'bare empty-object title', title: '{}', args: {}, expected: '' },
+    {
+      name: 'trimmed empty-object title',
+      title: '  {}  ',
+      args: {},
+      expected: '',
+    },
+    {
+      name: 'MCP display-name prefix',
+      title: 'ping (sample MCP Server): {}',
+      args: {},
+      expected: '',
+    },
+    {
+      name: 'meaningful title',
+      title: 'Check server health',
+      args: {},
+      expected: 'Check server health',
+    },
+    {
+      name: 'prose ending in an empty object',
+      title: 'Expected response: {}',
+      args: {},
+      expected: 'Expected response: {}',
+    },
+    {
+      name: 'nonempty input with a {} title',
+      title: '{}',
+      args: { target: 'health' },
+      expected: '{}',
+    },
+    {
+      name: 'prose containing an MCP display name',
+      title: 'Expected response from ping (sample MCP Server): {}',
+      args: {},
+      expected: 'Expected response from ping (sample MCP Server): {}',
+    },
+    {
+      name: 'missing input with a {} title',
+      title: '{}',
+      args: undefined,
+      expected: '{}',
+    },
+    {
+      name: 'non-MCP tool',
+      toolName: 'custom_tool',
+      title: '{}',
+      args: {},
+      expected: '{}',
+    },
+  ])(
+    'renders the expected transcript description: $name',
+    ({ toolName = 'mcp__sample__ping', title, args, expected }) => {
+      const call = tool({ toolName, title, args });
+      expect(getToolDescription(call)).toBe(expected);
+      expect(getToolSummaryDescription(call)).toBe(expected);
+    },
+  );
+
   it('normalizes absolute paths from daemon title descriptions', () => {
     expect(
       getToolDescription(

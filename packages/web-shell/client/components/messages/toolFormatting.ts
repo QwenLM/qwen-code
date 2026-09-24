@@ -326,6 +326,28 @@ export function getToolResultSummary(tool: ACPToolCall): string {
   return truncateText(firstLine, 80);
 }
 
+export function isEmptyMcpToolTitle(
+  toolName: string | undefined,
+  title: string | undefined,
+  input: Record<string, unknown> | undefined,
+): boolean {
+  if (
+    !toolName?.startsWith('mcp__') ||
+    !input ||
+    Object.keys(input).length > 0
+  ) {
+    return false;
+  }
+  // core's mcp-tool.ts getDescription serializes arguments as JSON; the CLI
+  // tool-call-emitter may prefix the MCP display name. Require confirmed-empty
+  // input so missing or nonempty arguments keep their original title.
+  const trimmed = title?.trim() ?? '';
+  if (trimmed === '{}') return true;
+  const match = /^(.+) \((.+) MCP Server\): \{\}$/.exec(trimmed);
+  // Preserve prose or aliased names when the prefix cannot be confirmed.
+  return match !== null && toolName === `mcp__${match[2]}__${match[1]}`;
+}
+
 function getDescriptionFromTitle(
   tool: ACPToolCall,
   workspaceCwd?: string,
@@ -334,6 +356,7 @@ function getDescriptionFromTitle(
 
   const displayName = formatToolDisplayName(tool.toolName);
   const title = tool.title.trim();
+  if (isEmptyMcpToolTitle(tool.toolName, title, tool.args)) return null;
   if (title === tool.toolName || title === displayName) return null;
 
   const prefixes = [displayName, tool.toolName];
