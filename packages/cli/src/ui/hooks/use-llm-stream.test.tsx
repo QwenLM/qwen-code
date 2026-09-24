@@ -13345,6 +13345,108 @@ describe('useLlmStream', () => {
       expect(hook.result.current.streamingState).toBe(StreamingState.Idle);
     });
 
+    it('does not expose command-idle while a detached continuation streams', async () => {
+      let releaseLog!: () => void;
+      let releaseToolStream!: () => void;
+      mockLogMessage.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseLog = resolve;
+          }),
+      );
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+
+      const hook = renderTestHook([], undefined, undefined, undefined, {
+        logMessage: mockLogMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+      let slashRequest!: Promise<void>;
+      let toolResultRequest!: Promise<void>;
+      const detachedAbortController = new AbortController();
+
+      try {
+        await act(async () => {
+          slashRequest = hook.result.current.submitQuery('/cd D:/Games');
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(1));
+        expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+
+        mockSendMessageStream.mockImplementationOnce(() =>
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.Content,
+              value: 'Detached continuation response',
+            };
+            await new Promise<void>((resolve) => {
+              releaseToolStream = resolve;
+            });
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            };
+          })(),
+        );
+        await act(async () => {
+          toolResultRequest = hook.result.current.submitQuery(
+            'detached tool result',
+            SendMessageType.ToolResult,
+            'detached-prompt',
+            {
+              toolContinuationOwner: {
+                promptId: 'detached-prompt',
+                signal: detachedAbortController.signal,
+                survivesGenerationChange: true,
+                detachedAbortController,
+              },
+            },
+          );
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(releaseToolStream).toBeDefined());
+        await act(async () => {
+          hook.rerenderWithHistory([
+            { id: 1, type: MessageType.INFO, text: 'force ref projection' },
+          ]);
+        });
+
+        expect(hook.result.current.streamingState).toBe(
+          StreamingState.Responding,
+        );
+        expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+
+        await act(async () => {
+          releaseToolStream();
+          await toolResultRequest;
+          releaseLog();
+          await slashRequest;
+        });
+      } finally {
+        await act(async () => {
+          releaseToolStream?.();
+          releaseLog?.();
+          await Promise.allSettled([slashRequest, toolResultRequest]);
+        });
+      }
+    });
+
+    it('resets command-idle state when slash preparation throws', async () => {
+      mockHandleSlashCommand.mockRejectedValueOnce(
+        new Error('command preparation failed'),
+      );
+      const hook = renderTestHook();
+
+      await act(async () => {
+        await expect(
+          hook.result.current.submitQuery('/failing-command'),
+        ).rejects.toThrow('command preparation failed');
+      });
+
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+    });
+
     it('should call Gemini with prompt content when slash command returns a `submit_prompt` action', async () => {
       const customCommandResult: SlashCommandProcessorResult = {
         type: 'submit_prompt',
@@ -18260,9 +18362,10 @@ describe('useLlmStream', () => {
         return false;
       });
 
-      const { result } = renderTestHook([], undefined, undefined, undefined, {
+      const hook = renderTestHook([], undefined, undefined, undefined, {
         logMessage: mockLogMessage,
       } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+      const { result } = hook;
 
       let mainRequest!: Promise<void>;
       await act(async () => {
@@ -18286,16 +18389,27 @@ describe('useLlmStream', () => {
           btwRequest = result.current.submitQuery(btwQuery);
           await Promise.resolve();
         });
-        await waitFor(() => expect(mockLogMessage).toHaveBeenCalled());
+        await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(2));
         expect(result.current.streamingState).toBe(StreamingState.Responding);
         expect(result.current.localCommandDispatchIsIdle).toBe(false);
+
+        await act(async () => {
+          resolveFirstCall();
+          await mainRequest;
+          hook.rerenderWithHistory([
+            { id: 1, type: MessageType.INFO, text: 'force ref projection' },
+          ]);
+        });
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(result.current.localCommandDispatchIsIdle).toBe(false);
+
         await act(async () => {
           releaseLog();
           await btwRequest;
         });
 
         expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
-        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
         expect(result.current.localCommandDispatchIsIdle).toBe(false);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {

@@ -3052,6 +3052,38 @@ describe('AppContainer State Management', () => {
       expect(mockQueueMessage).toHaveBeenCalledWith('/help', false, '/help');
     });
 
+    it.each([true, false])(
+      'passes command-only idle state to slash processing (%s)',
+      (localCommandDispatchIsIdle) => {
+        mockedUseLlmStream.mockReturnValue({
+          streamingState: StreamingState.Responding,
+          localCommandDispatchIsIdle,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        const commandIdleRef = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[10] as { current: boolean } | undefined;
+        expect(commandIdleRef?.current).toBe(localCommandDispatchIsIdle);
+      },
+    );
+
     it('injects a recovered-agent reminder into the next ordinary prompt once', () => {
       const mockQueueMessage = vi.fn();
       vi.spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')
