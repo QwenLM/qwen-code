@@ -6195,7 +6195,7 @@ describe('DaemonClient', () => {
       for await (const event of client.generateSessionContent(
         's/1',
         'Translate this',
-        { clientId: 'client-1' },
+        { clientId: 'client-1', skipOutputLanguagePreference: true },
       )) {
         events.push(event);
       }
@@ -6236,6 +6236,7 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
         prompt: 'Translate this',
+        skipOutputLanguagePreference: true,
       });
     });
 
@@ -9354,7 +9355,7 @@ describe('DaemonClient', () => {
     });
 
     it('streams stateless workspace generation with the session envelope', async () => {
-      const { fetch } = recordingFetch(() =>
+      const { fetch, calls } = recordingFetch(() =>
         sseResponse(
           `data: ${JSON.stringify({ v: 1, type: 'started', requestId: 'request-1', model: 'qwen-plus', modelSource: 'fast' })}\n\n` +
             `data: ${JSON.stringify({ v: 1, type: 'delta', requestId: 'request-1', seq: 0, text: 'hello' })}\n\n` +
@@ -9364,7 +9365,9 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const events = [];
 
-      for await (const event of client.generateWorkspaceContent('say hello')) {
+      for await (const event of client.generateWorkspaceContent('say hello', {
+        skipOutputLanguagePreference: true,
+      })) {
         events.push(event);
       }
 
@@ -9391,6 +9394,10 @@ describe('DaemonClient', () => {
           modelSource: 'fast',
         },
       ]);
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        prompt: 'say hello',
+        skipOutputLanguagePreference: true,
+      });
     });
 
     it('keeps structured workspace agent generation compatible', async () => {

@@ -95,7 +95,7 @@ describe('executeGeneration', () => {
     });
   });
 
-  it('lets the output-language preference override the prompt language', async () => {
+  it('uses a fixed preference without overriding task language or format', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'qwen-generation-'));
     try {
       const outputLanguagePath = path.join(dir, 'output-language.md');
@@ -108,7 +108,7 @@ describe('executeGeneration', () => {
       await executeGeneration(
         config,
         'request-language',
-        'Explain this command in English.',
+        'Explain this command. If no fixed output-language preference is configured, use English.',
         new AbortController().signal,
         async () => undefined,
       );
@@ -117,20 +117,105 @@ describe('executeGeneration', () => {
       expect(request?.contents).toEqual([
         {
           role: 'user',
-          parts: [{ text: 'Explain this command in English.' }],
+          parts: [
+            {
+              text: 'Explain this command. If no fixed output-language preference is configured, use English.',
+            },
+          ],
         },
       ]);
-      expect(request?.config?.systemInstruction).toContain(
-        'You MUST always respond in **Russian**',
-      );
       const instruction = String(request?.config?.systemInstruction);
-      expect(
-        instruction.indexOf('If the user **explicitly** requests'),
-      ).toBeLessThan(
-        instruction.indexOf(
-          'overrides any conflicting language named in the user prompt',
-        ),
+      expect(instruction).toContain(
+        'configured output language for this request is Russian',
       );
+      expect(instruction).toContain('translation target');
+      expect(instruction).toContain('application UI fallback');
+      expect(instruction).not.toContain(
+        'overrides any conflicting language named in the user prompt',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not inject the auto rule into stateless generation', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'qwen-generation-auto-'));
+    try {
+      const outputLanguagePath = path.join(dir, 'output-language.md');
+      writeOutputLanguageFile('auto', outputLanguagePath);
+      const { config, generateContentStream } = createConfig(
+        'fast-model',
+        outputLanguagePath,
+      );
+
+      await executeGeneration(
+        config,
+        'request-auto-language',
+        'Explain this command.',
+        new AbortController().signal,
+        async () => undefined,
+      );
+
+      expect(
+        generateContentStream.mock.calls[0]?.[0].config,
+      ).not.toHaveProperty('systemInstruction');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps generation working when the configured preference file is unreadable', async () => {
+    const dir = await mkdtemp(
+      path.join(tmpdir(), 'qwen-generation-unreadable-'),
+    );
+    try {
+      const outputLanguagePath = path.join(dir, 'output-language.md');
+      writeOutputLanguageFile('Russian', outputLanguagePath);
+      await rm(outputLanguagePath);
+      const { config, generateContentStream } = createConfig(
+        'fast-model',
+        outputLanguagePath,
+      );
+
+      await expect(
+        executeGeneration(
+          config,
+          'request-unreadable-language',
+          'Explain this command.',
+          new AbortController().signal,
+          async () => undefined,
+        ),
+      ).resolves.toMatchObject({ model: 'fast-model' });
+      expect(
+        generateContentStream.mock.calls[0]?.[0].config,
+      ).not.toHaveProperty('systemInstruction');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lets a caller skip the output-language preference', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'qwen-generation-skip-'));
+    try {
+      const outputLanguagePath = path.join(dir, 'output-language.md');
+      writeOutputLanguageFile('Russian', outputLanguagePath);
+      const { config, generateContentStream } = createConfig(
+        'fast-model',
+        outputLanguagePath,
+      );
+
+      await executeGeneration(
+        config,
+        'request-skip-language',
+        'Translate this into Japanese.',
+        new AbortController().signal,
+        async () => undefined,
+        { skipOutputLanguagePreference: true },
+      );
+
+      expect(
+        generateContentStream.mock.calls[0]?.[0].config,
+      ).not.toHaveProperty('systemInstruction');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

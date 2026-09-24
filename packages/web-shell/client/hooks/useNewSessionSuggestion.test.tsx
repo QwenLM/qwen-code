@@ -197,6 +197,9 @@ describe('useNewSessionSuggestion', () => {
     await flush(3);
 
     expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(testState.generateContent.mock.calls[0]?.[1]).toMatchObject({
+      skipOutputLanguagePreference: true,
+    });
     expect(latestSuggestion).toEqual({
       suggestion: 'new_session',
       classifiedInput: '帮我写一篇新的设计文档，主题是 Web Shell 新功能方案',

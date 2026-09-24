@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
 import type {
   Content,
   GenerateContentConfig,
@@ -13,6 +12,7 @@ import type {
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { DEFAULT_QWEN_MODEL } from './default-qwen-model.js';
+import { readOutputLanguagePreference } from './output-language.js';
 import { SchemaValidator } from './schemaValidator.js';
 
 export interface SideQueryJsonOptions<TResponse> {
@@ -147,24 +147,17 @@ function applyThinkingDefault(
   };
 }
 
-export async function getOutputLanguageInstruction(
+async function getOutputLanguageInstruction(
   config: Config,
 ): Promise<string | undefined> {
-  const outputLanguageFilePath = config.getOutputLanguageFilePath?.();
-  if (!outputLanguageFilePath) return undefined;
+  const preference = await readOutputLanguagePreference(config);
+  if (!preference) return undefined;
 
-  try {
-    const preference = (await readFile(outputLanguageFilePath, 'utf8')).trim();
-    if (!preference) return undefined;
-
-    return [
-      'Follow the user-visible output language preference below for this side query.',
-      'This preference overrides any earlier language-selection rule in this system instruction.',
-      preference,
-    ].join('\n\n');
-  } catch {
-    return undefined;
-  }
+  return [
+    'Follow the user-visible output language preference below for this side query.',
+    'This preference overrides any earlier language-selection rule in this system instruction.',
+    preference,
+  ].join('\n\n');
 }
 
 function appendSystemInstruction(

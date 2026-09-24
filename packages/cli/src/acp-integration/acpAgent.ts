@@ -10562,6 +10562,8 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart: {
         const requestId = params['requestId'];
         const prompt = params['prompt'];
+        const skipOutputLanguagePreference =
+          params['skipOutputLanguagePreference'];
         if (typeof requestId !== 'string' || requestId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -10572,7 +10574,9 @@ class QwenAgent implements Agent {
           typeof prompt !== 'string' ||
           !prompt.trim() ||
           Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES ||
-          params['purpose'] !== 'text'
+          params['purpose'] !== 'text' ||
+          (skipOutputLanguagePreference !== undefined &&
+            typeof skipOutputLanguagePreference !== 'boolean')
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -10598,12 +10602,18 @@ class QwenAgent implements Agent {
               { v: 1, requestId, event },
             );
           };
+          // Workspace generation follows this workspace runtime's scoped
+          // preference; session generation below uses the session's config.
           const result = await executeGeneration(
             this.config,
             requestId,
             prompt.trim(),
             signal,
             emit,
+            {
+              skipOutputLanguagePreference:
+                skipOutputLanguagePreference === true,
+            },
           );
           return { requestId, ...result };
         } finally {
@@ -11954,12 +11964,16 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'];
         const requestId = params['requestId'];
         const prompt = params['prompt'];
+        const skipOutputLanguagePreference =
+          params['skipOutputLanguagePreference'];
         if (
           typeof sessionId !== 'string' ||
           typeof requestId !== 'string' ||
           typeof prompt !== 'string' ||
           prompt.trim().length === 0 ||
-          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES ||
+          (skipOutputLanguagePreference !== undefined &&
+            typeof skipOutputLanguagePreference !== 'boolean')
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -11991,6 +12005,10 @@ class QwenAgent implements Agent {
                 'qwen/notify/session/generation/event',
                 { v: 1, sessionId, requestId, event },
               );
+            },
+            {
+              skipOutputLanguagePreference:
+                skipOutputLanguagePreference === true,
             },
           );
           return { sessionId, requestId, ...result };

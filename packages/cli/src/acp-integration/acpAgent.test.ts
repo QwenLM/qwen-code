@@ -3655,6 +3655,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         requestId: 'request-text',
         prompt: 'say hello',
         purpose: 'text',
+        skipOutputLanguagePreference: true,
       }),
     ).resolves.toMatchObject({
       requestId: 'request-text',
@@ -3667,6 +3668,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'say hello',
       expect.any(AbortSignal),
       expect.any(Function),
+      { skipOutputLanguagePreference: true },
     );
     expect(extNotification).toHaveBeenCalledTimes(2);
 

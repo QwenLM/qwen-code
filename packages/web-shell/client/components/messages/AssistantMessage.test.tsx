@@ -22,6 +22,7 @@ vi.mock('../../WebShellContexts', async () => {
 const {
   AssistantMessage,
   ThinkingMessage,
+  ThinkingTranslateButton,
   formatThinkingDuration,
   getThinkingSummaryKey,
 } = await import('./AssistantMessage');
@@ -301,6 +302,9 @@ describe('AssistantMessage thinking logic', () => {
 
     await act(async () => translateButton?.click());
     expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(generateContent.mock.calls[0]?.[1]).toMatchObject({
+      skipOutputLanguagePreference: true,
+    });
 
     const retranslateButton = Array.from(
       document.body.querySelectorAll<HTMLButtonElement>('button'),
@@ -323,6 +327,69 @@ describe('AssistantMessage thinking logic', () => {
         ?.click(),
     );
     expect(container.querySelector('button[title="Translate"]')).toBeNull();
+  });
+
+  it('does not reuse an explanation after the server output language changes', async () => {
+    let outputLanguage = 'Russian';
+    const generateContent = vi.fn(async function* (
+      _prompt: string,
+      _options?: {
+        signal?: AbortSignal;
+        skipOutputLanguagePreference?: boolean;
+      },
+    ) {
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: `request-${outputLanguage}`,
+        seq: 0,
+        text: outputLanguage,
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: `request-${outputLanguage}`,
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    });
+
+    const first = render(
+      <ThinkingTranslateButton
+        content="npm test"
+        generateContent={generateContent}
+        mode="explain-shell"
+      />,
+    );
+    await act(async () => {
+      first
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click();
+    });
+    expect(document.body.textContent).toContain('Russian');
+    expect(generateContent.mock.calls[0]?.[0]).toContain(
+      'If no fixed output-language preference is configured, use English.',
+    );
+    expect(
+      generateContent.mock.calls[0]?.[1]?.skipOutputLanguagePreference,
+    ).toBe(undefined);
+
+    outputLanguage = 'English';
+    const second = render(
+      <ThinkingTranslateButton
+        content="npm test"
+        generateContent={generateContent}
+        mode="explain-shell"
+      />,
+    );
+    await act(async () => {
+      second
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click();
+    });
+
+    expect(generateContent).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('English');
   });
 
   it('shows a failure when generation completes without translated text', async () => {

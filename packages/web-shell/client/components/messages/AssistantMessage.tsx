@@ -205,7 +205,10 @@ interface ThinkingMessageProps {
 
 export type SessionContentGenerator = (
   prompt: string,
-  opts?: { signal?: AbortSignal },
+  opts?: {
+    signal?: AbortSignal;
+    skipOutputLanguagePreference?: boolean;
+  },
 ) => AsyncGenerator<DaemonSessionGenerationEvent>;
 
 interface ThinkingTranslation {
@@ -465,14 +468,17 @@ export function ThinkingTranslateButton({
     async (force = false) => {
       if (!generateContent || (translationLoading && !force)) return;
       const cacheKey = `${mode}:${language}:${content}`;
-      const cached = thinkingTranslationCache.get(cacheKey);
+      const cacheable = mode === 'translate';
+      const cached = cacheable
+        ? thinkingTranslationCache.get(cacheKey)
+        : undefined;
       if (cached && !force) {
         cacheThinkingTranslation(cacheKey, cached);
         setTranslation(cached);
         return;
       }
 
-      if (force) thinkingTranslationCache.delete(cacheKey);
+      if (force || !cacheable) thinkingTranslationCache.delete(cacheKey);
       translationAbortRef.current?.abort();
       const controller = new AbortController();
       translationAbortRef.current = controller;
@@ -487,10 +493,13 @@ export function ThinkingTranslateButton({
           language === 'zh-CN' ? 'Simplified Chinese' : 'English';
         const prompt =
           mode === 'explain-shell'
-            ? `Explain the following shell command in ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``
+            ? `Explain the following shell command. If no fixed output-language preference is configured, use ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``
             : `Translate the following model reasoning into ${targetLanguage}. Preserve its meaning and Markdown formatting. Output only the translation.\n\n${content}`;
         for await (const event of generateContent(prompt, {
           signal: controller.signal,
+          ...(mode === 'translate' && {
+            skipOutputLanguagePreference: true,
+          }),
         })) {
           if (translationAbortRef.current !== controller) return;
           if (event.type === 'thinking') {
@@ -507,7 +516,7 @@ export function ThinkingTranslateButton({
               inputTokens: event.inputTokens,
               outputTokens: event.outputTokens,
             };
-            cacheThinkingTranslation(cacheKey, result);
+            if (cacheable) cacheThinkingTranslation(cacheKey, result);
             setTranslation(result);
           } else if (event.type === 'error') {
             throw new Error(event.message);
