@@ -89,6 +89,40 @@ describe('resolveEnvVars', () => {
 });
 
 describe('parseChannelConfig', () => {
+  it('normalizes message routes and resolves the default route', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      messageRoutes: { ' /review ': ' Review code. ', '/QA': '' },
+      defaultMessageRoute: ' /QA ',
+    });
+    expect(config.messageRoutes).toEqual({
+      '/review': 'Review code.',
+      '/QA': '',
+    });
+    expect(config.defaultMessageRoute).toBe('/QA');
+  });
+
+  it.each([
+    { messageRoutes: null },
+    { messageRoutes: [] },
+    { messageRoutes: '/review' },
+    { messageRoutes: {} },
+    { messageRoutes: { ' ': 'instructions' } },
+    { messageRoutes: { ' constructor ': 'instructions' } },
+    { messageRoutes: { '/review': 1 } },
+    { messageRoutes: { '/review': '', ' /review ': '' } },
+    { messageRoutes: { '/review': '' }, multiSession: true },
+    { defaultMessageRoute: '/review' },
+    { messageRoutes: { '/review': '' }, defaultMessageRoute: '/missing' },
+    { defaultMessageRoute: '' },
+    { defaultMessageRoute: null },
+    { defaultMessageRoute: 1 },
+  ])('rejects invalid message routing %j', async (routing) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', ...routing }),
+    ).rejects.toThrow(/messageRoutes|defaultMessageRoute/);
+  });
+
   it('throws when type is missing', async () => {
     await expect(parseChannelConfig('bot', {})).rejects.toThrow(
       'missing required field "type"',
