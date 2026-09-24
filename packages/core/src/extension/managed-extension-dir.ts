@@ -10,6 +10,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('Extension:managedDir');
 
+// The alreadyResolved branch runs on every Config/ExtensionManager
+// construction (a daemon constructs one per request), so an unavailable
+// root is reported on stderr once per root per process, not per request.
+const warnedUnavailableRoots = new Set<string>();
+
 export function resolveManagedExtensionsDir(
   value: string | undefined,
   cwd?: string,
@@ -35,11 +40,19 @@ export function resolveManagedExtensionsDir(
       }
       fs.accessSync(directory, fs.constants.R_OK | fs.constants.X_OK);
     } catch (error) {
-      debugLogger.warn(
-        `Managed extensions root "${directory}" is unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }. Continuing without managed packages.`,
-      );
+      const message = `Managed extensions root "${directory}" is unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }. Continuing without managed packages.`;
+      debugLogger.warn(message);
+      // debugLogger is silent without an active debug session; without this
+      // line a dropped root releases every managed name to a same-name user
+      // extension with no signal anywhere.
+      if (!warnedUnavailableRoots.has(directory)) {
+        warnedUnavailableRoots.add(directory);
+        process.stderr.write(
+          `Warning: ${message} Same-name user extensions are no longer shadowed.\n`,
+        );
+      }
     }
     return directory;
   }

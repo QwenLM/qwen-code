@@ -1705,7 +1705,11 @@ export class ExtensionManager {
 
   async loadManagedExtensions(
     workspaceDir: string,
-    options: { manifestOnly?: boolean; createDataDir?: boolean } = {},
+    options: {
+      manifestOnly?: boolean;
+      createDataDir?: boolean;
+      onListFailure?: (extensionsDir: string, error: unknown) => void;
+    } = {},
     onLoadFailure?: (extensionDir: string, error: unknown) => void,
   ): Promise<Extension[]> {
     if (!this.managedExtensionsDir) return [];
@@ -1735,7 +1739,18 @@ export class ExtensionManager {
     const failedManaged: Array<{ directory: string; error: unknown }> = [];
     const manageds = await this.loadManagedExtensions(
       workspaceDir,
-      options,
+      {
+        ...options,
+        onListFailure: (directory, error) => {
+          // A root that cannot be listed at all releases every reservation
+          // at once: same-name user copies are then admitted because the
+          // managed set is unknown, not because it is empty. Signal the
+          // precedence loss the way the entry-level reservation below does.
+          process.stderr.write(
+            `Warning: Managed extensions root "${directory}" could not be listed; same-name user extensions are no longer shadowed. ${getErrorMessage(error)}\n`,
+          );
+        },
+      },
       (directory, error) => {
         failedManaged.push({ directory, error });
       },
@@ -1771,13 +1786,27 @@ export class ExtensionManager {
   private async assertUserManagedExtension(
     extension: Pick<Extension, 'name' | 'source'>,
   ): Promise<void> {
-    if (
-      extension.source === 'managed' ||
-      (await this.loadManagedExtensions(this.workspaceDir)).some(
-        (managed) =>
-          managed.name.toLowerCase() === extension.name.toLowerCase(),
-      )
-    ) {
+    if (extension.source === 'managed') {
+      throw new ManagedExtensionReadOnlyError(extension.name);
+    }
+    const failedManaged: Array<{ directory: string; error: unknown }> = [];
+    const manageds = await this.loadManagedExtensions(
+      this.workspaceDir,
+      {},
+      (directory, error) => {
+        failedManaged.push({ directory, error });
+      },
+    );
+    const managedNames = new Set(
+      manageds.map((managed) => managed.name.toLowerCase()),
+    );
+    // Discovery reserves the directory name of a managed entry that failed
+    // to load; the gate must honor the same reservation, or an install or
+    // update would seize a name the load path refuses to release.
+    for (const { directory } of failedManaged) {
+      managedNames.add(path.basename(directory).toLowerCase());
+    }
+    if (managedNames.has(extension.name.toLowerCase())) {
       throw new ManagedExtensionReadOnlyError(extension.name);
     }
   }
@@ -1798,6 +1827,7 @@ export class ExtensionManager {
       createDataDir?: boolean;
       source?: 'managed' | 'user';
       onLoadFailure?: (extensionDir: string, error: unknown) => void;
+      onListFailure?: (extensionsDir: string, error: unknown) => void;
     } = {},
   ): Promise<Extension[]> {
     const source = options.source ?? 'user';
@@ -1806,7 +1836,8 @@ export class ExtensionManager {
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);
-    } catch {
+    } catch (error) {
+      options.onListFailure?.(extensionsDir, error);
       return [];
     }
 

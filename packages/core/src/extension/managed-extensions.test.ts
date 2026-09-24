@@ -367,6 +367,15 @@ describe('managed extensions', () => {
     expect(writes).toContain('shadowed');
     const catalog = await subject.refreshCatalogSnapshot();
     expect(catalog.extensions).toEqual([]);
+    // The management gate honors the same reservation: a user install of
+    // the reserved name is refused even though the managed package never
+    // loaded.
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'example',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
   });
 
   // Windows cannot create directory symlinks without extra privileges.
@@ -664,8 +673,32 @@ describe('managed extensions', () => {
       subject.getLoadedExtensions().map((extension) => extension.name),
     ).toEqual(['valid']);
     fs.rmSync(managed, { recursive: true });
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     await subject.refreshCache();
     expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(
+      `Managed extensions root "${managed}" could not be listed`,
+    );
+    expect(writes).toContain('no longer shadowed');
+  });
+
+  it('warns that same-name user extensions are no longer shadowed when the managed root cannot be listed', async () => {
+    writeExtension(user, 'example', { name: 'example', version: 'user' });
+    const missing = path.join(temporary, 'missing-root');
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager({ managedExtensionsDir: missing });
+    await subject.refreshCache();
+    // The managed set is unknown rather than empty: the user copy loads,
+    // and the lost shadowing is announced on stderr.
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({ name: 'example', source: 'user' }),
+    ]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(
+      `Managed extensions root "${missing}" could not be listed`,
+    );
+    expect(writes).toContain('no longer shadowed');
   });
 
   it('constructs without re-validating after the root disappears', async () => {
@@ -842,6 +875,9 @@ describe('managed extensions', () => {
   );
 
   it('rejects invalid roots clearly and allows an empty root', async () => {
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const writes = () =>
+      warning.mock.calls.map(([chunk]) => String(chunk)).join('');
     expect(resolveManagedExtensionsDir('managed', temporary)).toBe(managed);
     expect(resolveManagedExtensionsDir(undefined)).toBeUndefined();
     expect(() => resolveManagedExtensionsDir('')).toThrow(
@@ -853,11 +889,16 @@ describe('managed extensions', () => {
     expect(() =>
       resolveManagedExtensionsDir(path.join(temporary, 'missing')),
     ).toThrow(/Invalid --managed-extensions.*missing/);
+    const missingRoot = path.join(temporary, 'missing');
     const missing = manager({
-      managedExtensionsDir: path.join(temporary, 'missing'),
+      managedExtensionsDir: missingRoot,
     });
     await missing.refreshCache();
     expect(missing.getLoadedExtensions()).toEqual([]);
+    expect(writes()).toContain(
+      `Managed extensions root "${missingRoot}" is unavailable`,
+    );
+    expect(writes()).toContain('no longer shadowed');
     const file = path.join(temporary, 'file');
     fs.writeFileSync(file, 'not a directory');
     expect(() => resolveManagedExtensionsDir(file)).toThrow(
@@ -886,6 +927,9 @@ describe('managed extensions', () => {
     const fileRoot = manager({ managedExtensionsDir: file });
     await fileRoot.refreshCache();
     expect(fileRoot.getLoadedExtensions()).toEqual([]);
+    expect(writes()).toContain(
+      `Managed extensions root "${file}" is unavailable`,
+    );
     await manager().refreshCache();
     if (process.platform !== 'win32' && process.getuid?.() !== 0) {
       fs.chmodSync(managed, 0);
@@ -896,6 +940,9 @@ describe('managed extensions', () => {
         const unreadable = manager();
         await unreadable.refreshCache();
         expect(unreadable.getLoadedExtensions()).toEqual([]);
+        expect(writes()).toContain(
+          `Managed extensions root "${managed}" is unavailable`,
+        );
       } finally {
         fs.chmodSync(managed, 0o755);
       }
