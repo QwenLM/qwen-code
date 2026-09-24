@@ -44,14 +44,24 @@ export const OVERVIEW_HEIGHT = 64;
 export const DRAG_THRESHOLD_PX = 4;
 
 /** The narrowest stretch of time the strip will zoom to, in ms. */
-export const MIN_VIEWPORT_MS = 20;
+const MIN_VIEWPORT_MS = 20;
+
+/**
+ * The most the strip will magnify, as a ratio of the whole run to the stretch
+ * in view. The drawn layer is this many track widths wide at the limit, and
+ * browsers stop laying out boxes a few tens of millions of pixels wide:
+ * Chromium clamps at 2^25 px and Firefox near 1.8e7 px, after which the layer
+ * collapses and the strip goes blank. 5000 × a wide 1800px track is 9e6 px,
+ * inside both, and a 720ms window on a one-hour run still shows one request.
+ */
+const MAX_ZOOM_RATIO = 5000;
 
 /**
  * Zoom per pixel of wheel travel: the visible length is multiplied by
  * `exp(deltaY × this)`, so equal wheel travel is an equal zoom ratio whatever
  * the current zoom. One notch of a common mouse wheel (120px) is about 1.2×.
  */
-export const ZOOM_PER_WHEEL_PX = 0.0015;
+const ZOOM_PER_WHEEL_PX = 0.0015;
 
 /** One wheel notch, which is what the zoom buttons step by. */
 const WHEEL_NOTCH_PX = 120;
@@ -64,7 +74,7 @@ const WHEEL_NOTCH_PX = 120;
 const WHOLE_RUN_FRACTION = 0.999;
 
 /** A stretch of the domain shown across the strip's width, in ms. */
-export interface Viewport {
+interface Viewport {
   start: number;
   end: number;
 }
@@ -115,11 +125,25 @@ interface Pan {
   /** The viewport when the press began; the pan is measured from it. */
   start: number;
   length: number;
-  moved: boolean;
+  /**
+   * The view actually moved. Pointer travel alone is not a pan: at the whole
+   * run, or pinned against an end of it, a drag moves nothing, and a right
+   * click with a wobbling hand must still clear as a right click.
+   */
+  panned: boolean;
 }
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * The shortest stretch the strip will show of a run `total` ms long: 20ms, or
+ * a 5000th of the run on runs long enough that 20ms would pass the layout
+ * limit. Never more than the run itself.
+ */
+function narrowestLength(total: number): number {
+  return Math.min(total, Math.max(MIN_VIEWPORT_MS, total / MAX_ZOOM_RATIO));
 }
 
 /**
@@ -130,17 +154,14 @@ function clamp01(value: number): number {
  * The length is clamped before the start is placed, so a zoom that hits its
  * limit still keeps the anchor where it was rather than drifting.
  */
-export function placeViewport(
+function placeViewport(
   total: number,
   anchorMs: number,
   fraction: number,
   length: number,
 ): Viewport | undefined {
   if (!(total > 0)) return undefined;
-  const len = Math.min(
-    total,
-    Math.max(Math.min(MIN_VIEWPORT_MS, total), length),
-  );
+  const len = Math.min(total, Math.max(narrowestLength(total), length));
   if (len >= total * WHOLE_RUN_FRACTION) return undefined;
   const start = Math.min(total - len, Math.max(0, anchorMs - fraction * len));
   return { start, end: start + len };
@@ -162,19 +183,59 @@ export function percent(value: number): string {
   return `${Number(value.toFixed(3))}%`;
 }
 
+/**
+ * Percentages of the whole run, for what is drawn inside the zoomable layer.
+ *
+ * Not rounded like `percent`: these resolve against the layer, which is up to
+ * `MAX_ZOOM_RATIO` track widths wide, so any rounding is magnified by the zoom
+ * — three decimals was 75px on a long run at the limit, enough to draw a span
+ * over the time of its neighbour. Eight decimals is under a thousandth of a
+ * pixel at the limit, and fixed notation keeps tiny values from printing as
+ * `1e-7`, which CSS would reject.
+ */
+export function exactPercent(value: number): string {
+  const fixed = value.toFixed(8).replace(/\.?0+$/, '');
+  return `${fixed === '-0' ? '0' : fixed}%`;
+}
+
+/**
+ * A point on the axis, as precise as the stretch in view needs.
+ *
+ * `formatDuration` rounds to a tenth of a second under a minute and to whole
+ * seconds above it, which is right for a run's total but not for the ends of
+ * a 20ms window: both ends would print the same. The precision here follows
+ * the window instead, about a tenth of its length.
+ */
+export function formatWindowTime(ms: number, windowMs: number): string {
+  if (windowMs >= 60_000) return formatDuration(ms);
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const decimals =
+    windowMs >= 10_000 ? 0 : windowMs >= 1_000 ? 1 : windowMs >= 100 ? 2 : 3;
+  // Rounded once, at the precision shown, so 59.97s never prints as "60.0s".
+  const unit = 10 ** (3 - decimals);
+  const rounded = Math.round(ms / unit) * unit;
+  if (rounded < 60_000) return `${(rounded / 1000).toFixed(decimals)}s`;
+  const hours = Math.floor(rounded / 3_600_000);
+  const minutes = Math.floor((rounded % 3_600_000) / 60_000);
+  const seconds = ((rounded % 60_000) / 1000).toFixed(decimals);
+  return `${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`;
+}
+
 function spanStyle(span: TimelineSpan, total: number): CSSProperties {
   const length = span.end - span.start;
   const share = total > 0 ? length / total : 0;
   const style: Record<string, string> = {
-    '--left': percent(total > 0 ? (span.start / total) * 100 : 0),
-    '--width': percent(share * 100),
+    '--left': exactPercent(total > 0 ? (span.start / total) * 100 : 0),
+    '--width': exactPercent(share * 100),
     // Calls running side by side share a lane, and a long one drawn after a
     // short one would cover it completely. Shorter spans stack higher, so
     // every one stays visible and clickable.
     '--stack': String(1 + Math.round((1 - share) * 1000)),
   };
   if (span.ttftEnd !== undefined && length > 0) {
-    style['--ttft'] = percent(((span.ttftEnd - span.start) / length) * 100);
+    style['--ttft'] = exactPercent(
+      ((span.ttftEnd - span.start) / length) * 100,
+    );
   }
   return style as CSSProperties;
 }
@@ -302,6 +363,10 @@ export function TrajectoryOverview({
     // Attached by hand: React's own wheel listener is passive, and a wheel
     // that zooms the strip must not also scroll the page under it.
     const onWheel = (event: WheelEvent) => {
+      // A pinch on a trackpad, and Ctrl with the wheel, are the browser's page
+      // zoom. Someone enlarging the page must get the page enlarged, not the
+      // strip under their pointer.
+      if (event.ctrlKey) return;
       if (gestureRef.current || panRef.current) return;
       const width = plot.getBoundingClientRect().width;
       const dx = wheelPixels(event.deltaX, event.deltaMode, width);
@@ -325,6 +390,27 @@ export function TrajectoryOverview({
     return () => plot.removeEventListener('wheel', onWheel);
   }, [hasModel, currentView, fractionAt, msAt, panBy, zoomBy]);
 
+  // A row selected in the table, or from the keyboard, may be one the zoomed
+  // strip is not showing. Its span is the strip's only record of where that
+  // row sits in the run, so the view slides to take it in — only when it is
+  // out of view, the way the table scrolls, so that stepping through spans
+  // already in view never moves the strip under the reader.
+  useEffect(() => {
+    if (selectedKey === undefined || model === undefined) return;
+    const span = model.spans.find(
+      (candidate) => candidate.rowKey === selectedKey,
+    );
+    if (!span) return;
+    const { start, length } = currentView();
+    if (length >= model.total) return;
+    const end = start + length;
+    if (span.end >= start && span.start <= end) return;
+    const margin = length * 0.1;
+    const target =
+      span.end < start ? span.start - margin : span.end - length + margin;
+    panBy(start, length, target - start);
+  }, [selectedKey, model, currentView, panBy]);
+
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     // One press at a time: a right press during a left drag, or the other way
     // round, is ignored rather than allowed to steal the capture.
@@ -336,7 +422,7 @@ export function TrajectoryOverview({
         anchorX: event.clientX,
         start,
         length,
-        moved: false,
+        panned: false,
       };
       const element = event.currentTarget;
       if (typeof element.setPointerCapture === 'function') {
@@ -370,14 +456,17 @@ export function TrajectoryOverview({
     const pan = panRef.current;
     if (pan && pan.pointerId === event.pointerId) {
       const dx = event.clientX - pan.anchorX;
-      if (!pan.moved && Math.abs(dx) >= DRAG_THRESHOLD_PX) {
-        pan.moved = true;
+      // Below the drag threshold a right press is still a click.
+      if (!pan.panned && Math.abs(dx) < DRAG_THRESHOLD_PX) return;
+      const width = plotRef.current?.getBoundingClientRect().width ?? 0;
+      // Dragging right brings earlier time into view.
+      if (
+        width > 0 &&
+        panBy(pan.start, pan.length, (-dx / width) * pan.length) &&
+        !pan.panned
+      ) {
+        pan.panned = true;
         setPanning(true);
-      }
-      if (pan.moved) {
-        const width = plotRef.current?.getBoundingClientRect().width ?? 0;
-        // Dragging right brings earlier time into view.
-        if (width > 0) panBy(pan.start, pan.length, (-dx / width) * pan.length);
       }
       return;
     }
@@ -399,9 +488,10 @@ export function TrajectoryOverview({
     if (pan && pan.pointerId === event.pointerId) {
       panRef.current = null;
       setPanning(false);
-      // A right click that went nowhere clears the selection, as it always
-      // has. One that panned was a pan, and leaves the selection alone.
-      if (!pan.moved) onRangeChange(undefined);
+      // A right press that moved the view was a pan, and leaves the selection
+      // alone. Any other — still, or travelling where nothing could move —
+      // was a right click, and clears it as a right click always has.
+      if (!pan.panned) onRangeChange(undefined);
       return;
     }
     const gesture = gestureRef.current;
@@ -425,21 +515,36 @@ export function TrajectoryOverview({
     setPanning(false);
   };
 
-  // Only the browser's menu is kept away here. Clearing belongs to the right
-  // button's release, which knows whether the press panned: on Linux and macOS
-  // the menu event fires on the press, before anyone can tell.
+  // The browser's menu is kept away here, and a plain right click is left to
+  // the right button's release, which knows whether the press panned: on Linux
+  // and macOS the menu event fires on the press, before anyone can tell.
+  //
+  // A right press during a left drag is different. A second button pressed
+  // while one is held raises no pointerdown or pointerup of its own, only this
+  // menu event, so this is the one place that can hear a right click meant to
+  // abandon the drag.
   const onContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (gestureRef.current) {
+      abandon();
+      onRangeChange(undefined);
+    }
   };
 
   const zoomed = viewport !== undefined;
-  const atNarrowest = vLength <= Math.min(MIN_VIEWPORT_MS, total);
+  const atNarrowest = vLength <= narrowestLength(total);
   const centre = vStart + vLength / 2;
   const notch = Math.exp(WHEEL_NOTCH_PX * ZOOM_PER_WHEEL_PX);
-  const domainStyle = {
-    '--domain-left': percent(vLength > 0 ? -(vStart / vLength) * 100 : 0),
-    '--domain-width': percent(vLength > 0 ? (total / vLength) * 100 : 100),
-  } as CSSProperties;
+  // Written as real properties, not custom ones: a custom property inherits,
+  // so changing it restyles every span below on every frame of a pan, which
+  // measured at a third of the frame time with a thousand spans. These
+  // resolve against the fixed-width track, so rounding them is harmless.
+  const domainStyle: CSSProperties = {
+    left: percent(vLength > 0 ? -(vStart / vLength) * 100 : 0),
+    width: percent(vLength > 0 ? (total / vLength) * 100 : 100),
+  };
+  const windowFrom = formatWindowTime(vStart, vLength);
+  const windowTo = formatWindowTime(vStart + vLength, vLength);
 
   const shown = draft ?? range;
   const inside = useMemo(
@@ -468,10 +573,7 @@ export function TrajectoryOverview({
                   })
                 : '') +
               (viewport
-                ? t('trajectory.zoom.aria', {
-                    from: formatDuration(viewport.start),
-                    to: formatDuration(viewport.end),
-                  })
+                ? t('trajectory.zoom.aria', { from: windowFrom, to: windowTo })
                 : ''),
           }
         : {})}
@@ -511,10 +613,10 @@ export function TrajectoryOverview({
                   data-draft={draft ? 'true' : undefined}
                   style={
                     {
-                      '--left': percent(
+                      '--left': exactPercent(
                         total > 0 ? (shown.start / total) * 100 : 0,
                       ),
-                      '--width': percent(
+                      '--width': exactPercent(
                         total > 0
                           ? ((shown.end - shown.start) / total) * 100
                           : 0,
@@ -530,7 +632,7 @@ export function TrajectoryOverview({
                   data-testid="trajectory-turn-mark"
                   style={
                     {
-                      '--left': percent(
+                      '--left': exactPercent(
                         model.total > 0 ? (mark.at / model.total) * 100 : 0,
                       ),
                     } as CSSProperties
@@ -564,18 +666,12 @@ export function TrajectoryOverview({
           </div>
           <div className={styles.axis}>
             <span aria-hidden="true" data-testid="trajectory-overview-from">
-              {vStart > 0 ? formatDuration(vStart) : '0'}
+              {vStart > 0 ? windowFrom : '0'}
             </span>
             <span className={styles.axisEnd}>
-              <span aria-hidden="true" data-testid="trajectory-overview-busy">
-                {zoomed
-                  ? t('trajectory.zoom.window', {
-                      to: formatDuration(vStart + vLength),
-                      busy: busy ?? '',
-                    })
-                  : t('trajectory.overview.busy', { duration: busy ?? '' })}
-              </span>
-              {/* Not `disabled` when there is nothing to do: a disabled button
+              {/* The buttons come first so the value stays last, its right
+                  edge on the track's right end, which is the point it names.
+                  Not `disabled` when there is nothing to do: a disabled button
                   drops the focus of the reader who just pressed it, and these
                   are pressed exactly when they are about to run out. */}
               <button
@@ -617,8 +713,33 @@ export function TrajectoryOverview({
               >
                 <Maximize2Icon size={10} strokeWidth={1.8} aria-hidden="true" />
               </button>
+              <span aria-hidden="true" data-testid="trajectory-overview-busy">
+                {zoomed
+                  ? t('trajectory.zoom.window', {
+                      to: windowTo,
+                      busy: busy ?? '',
+                    })
+                  : t('trajectory.overview.busy', { duration: busy ?? '' })}
+              </span>
             </span>
           </div>
+          {/* The axis is hidden from assistive technology, and the group's
+              name is read only when focus enters it — which it already has,
+              on the button just pressed. So the stretch a zoom lands on is
+              said here, politely, and said nothing about at the whole run. */}
+          <span
+            className={styles.srOnly}
+            role="status"
+            data-testid="trajectory-zoom-status"
+          >
+            {zoomed
+              ? t('trajectory.zoom.status', {
+                  from: windowFrom,
+                  to: windowTo,
+                  busy: busy ?? '',
+                })
+              : ''}
+          </span>
         </>
       ) : notice ? (
         <div className={styles.notice} role="status">

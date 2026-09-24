@@ -551,6 +551,17 @@ test.describe('trajectory panel', () => {
         return box!;
       };
 
+      /** The axis value names the track's right end, so it must end there. */
+      async function expectValueAtTrackEnd(page: Page) {
+        const [value, plot] = await Promise.all([
+          page.getByTestId('trajectory-overview-busy').boundingBox(),
+          page.getByTestId('trajectory-plot').boundingBox(),
+        ]);
+        expect(
+          Math.abs(value!.x + value!.width - (plot!.x + plot!.width)),
+        ).toBeLessThanOrEqual(1);
+      }
+
       /** Wait until the drawn layer says it is zoomed, or not. */
       async function expectZoomed(page: Page, zoomed: boolean) {
         const domain = page.getByTestId('trajectory-domain');
@@ -582,6 +593,7 @@ test.describe('trajectory panel', () => {
         expect(
           Math.abs(after.x + after.width / 2 - point.x),
         ).toBeLessThanOrEqual(2);
+        await expectValueAtTrackEnd(page);
         // Zooming happens inside the strip: nothing below it moves.
         expect(
           (await page.getByTestId('trajectory-overview').boundingBox())!.height,
@@ -680,6 +692,7 @@ test.describe('trajectory panel', () => {
           'aria-disabled',
           'true',
         );
+        await expectValueAtTrackEnd(page);
       });
     });
   });
