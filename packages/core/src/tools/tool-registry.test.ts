@@ -1102,6 +1102,48 @@ describe('ToolRegistry', () => {
       expect(tombstone).not.toBe(recorded);
     });
 
+    it('discoverToolsForServer reclaims the reviewed declaration like the other removal routes (#11321)', async () => {
+      const declaration = {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+      };
+      const makeTool = () =>
+        new DiscoveredMCPTool(
+          {} as CallableTool,
+          'slack',
+          'send_message',
+          'send a message',
+          declaration,
+        );
+      const tool = makeTool();
+      toolRegistry.registerTool(tool);
+      toolRegistry.recordReviewedDeclaration(tool);
+      const recorded = toolRegistry.getReviewedDeclaration(tool.name);
+      expect(recorded).toBe(deferredDeclarationFingerprint(tool));
+
+      // This is the route `/mcp reconnect`, the MCP management dialogs and
+      // `DiscoveredMCPTool.attemptReconnect()` actually take. Stub the manager
+      // so the replacement connection republishes a byte-identical declaration
+      // — the normal reconnect case, and the one the tombstone exists for.
+      const discover = vi
+        .spyOn(toolRegistry.getMcpClientManager(), 'discoverMcpToolsForServer')
+        .mockImplementation(async () => {
+          toolRegistry.registerTool(makeTool());
+        });
+
+      await toolRegistry.discoverToolsForServer('slack');
+
+      expect(discover).toHaveBeenCalledWith('slack', config);
+      const replacement = toolRegistry.getTool(tool.name);
+      expect(replacement).toBeDefined();
+      // The entry survives as a tombstone rather than the pre-reconnect
+      // fingerprint, so the identical declaration the replacement published
+      // still fails the comparison and tool_call asks for a fresh review.
+      const after = toolRegistry.getReviewedDeclaration(tool.name);
+      expect(after).toBeDefined();
+      expect(after).not.toBe(deferredDeclarationFingerprint(replacement!));
+    });
+
     it('includes deferred tools listed in visibleTools in function declarations', () => {
       const visibleConfig = new Config({
         ...baseConfigParams,

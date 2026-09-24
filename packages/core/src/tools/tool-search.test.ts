@@ -306,6 +306,22 @@ describe('ToolSearchTool', () => {
     expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
   });
 
+  it('select: reports every unresolvable spelling, not one per alias (#11321)', async () => {
+    // `task` canonicalizes to `agent` and neither is registered here, so both
+    // spellings fail to resolve. Keying the unresolved dedupe branch on the
+    // canonicalized alias would collapse them onto one key and drop the second
+    // before the maxResults check: it then lands in none of
+    // missing/truncated/ambiguous, which is exactly what the key's comment says
+    // it exists to prevent.
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:task,agent' })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('Not found: task, agent');
+    expect(result.returnDisplay).toBe('2 missing');
+  });
+
   it('select: mode reports a name that matches several tools only by case (#11321)', async () => {
     registry.registerTool(
       new MockTool({ name: 'deferred_target', shouldDefer: true }),

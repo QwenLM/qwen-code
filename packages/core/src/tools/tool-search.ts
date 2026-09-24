@@ -206,12 +206,16 @@ class ToolSearchInvocation extends BaseToolInvocation<
         // message below recommends. Repeat spellings of ONE resolved tool still
         // collapse (exact match and a lone case variant resolve to the same
         // registered name), and so do repeats that resolve to the same
-        // ambiguous candidate list.
+        // ambiguous candidate list. A name that resolves to NOTHING keys on
+        // the requested spelling instead: two unresolvable spellings that
+        // canonicalize to one alias (`task`/`agent`) are two distinct answers
+        // the model asked for, and collapsing them would drop the second from
+        // missing/truncated/ambiguous alike. Case-only repeats still collapse.
         const aliased = canonicalToolName(stripped);
         const resolved = resolveRegisteredToolName(aliased, knownNames);
         const key = Array.isArray(resolved)
           ? `ambiguous\u0000${resolved.join('\u0000')}`
-          : (resolved ?? `unresolved\u0000${aliased.toLowerCase()}`);
+          : (resolved ?? `unresolved\u0000${stripped.toLowerCase()}`);
         if (seen.has(key)) continue;
         seen.add(key);
         if (names.length >= maxResults) {

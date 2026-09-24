@@ -716,6 +716,14 @@ export class ToolRegistry {
         // disconnect (would surface in declarations immediately after
         // reconnection).
         this.revealedDeferred.delete(name);
+        // Same tombstone the other two removal routes write — see
+        // `removeMcpToolsByServer`. This is the route `/mcp reconnect`,
+        // the MCP dialogs and `DiscoveredMCPTool.attemptReconnect()`
+        // take, and the purge that follows re-discovers an already
+        // emptied set, so nothing else can reclaim the record here.
+        // Without it a replacement connection republishing a
+        // byte-identical declaration replays the pre-reconnect review.
+        this.invalidateReviewedDeclaration(name);
       }
     }
 
