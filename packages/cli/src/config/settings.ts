@@ -22,6 +22,7 @@ import type {
 import stripJsonComments from 'strip-json-comments';
 import {
   parseExecutionSandboxSettings,
+  readBareModeOperatorSettings,
   readOperatorSandboxSettings,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
@@ -924,20 +925,22 @@ export class LoadedSettings {
  * Used in stream-json mode where settings are ignored.
  */
 export function createMinimalSettings(): LoadedSettings {
-  const operator = readOperatorSandboxSettings();
+  const operator = readBareModeOperatorSettings();
   const executionSandbox = parseExecutionSandboxSettings(
     operator.tools?.executionSandbox,
   );
   const legacy = operator.tools?.sandbox;
-  const operatorSettings: Settings =
-    executionSandbox || legacy === 'bwrap'
+  const operatorSettings: Settings = {
+    ...(executionSandbox || legacy === 'bwrap'
       ? {
           tools: {
             executionSandbox,
             sandbox: legacy as boolean | string | undefined,
           },
         }
-      : {};
+      : {}),
+    ...(operator.privacy ? { privacy: operator.privacy } : {}),
+  };
   const emptySettingsFile: SettingsFile = {
     path: '',
     settings: {},

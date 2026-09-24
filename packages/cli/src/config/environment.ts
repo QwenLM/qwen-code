@@ -103,6 +103,15 @@ if (inheritedProvenance) {
   Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
+/**
+ * Whether `.env` files or `settings.env` put any value into this process's
+ * environment. Modules imported before that load captured the old values, so
+ * only a fresh image sees the environment the files describe.
+ */
+export function hasLoadedEnvironmentValues(): boolean {
+  return dotEnvSourcedKeys.size > 0 || settingsEnvSourcedKeys.size > 0;
+}
+
 export function getRelaunchEnvProvenance(): Record<string, string> {
   return {
     [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({

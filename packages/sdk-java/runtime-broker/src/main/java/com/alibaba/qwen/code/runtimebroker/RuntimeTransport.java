@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
@@ -9,11 +10,14 @@ import java.util.concurrent.CompletionStage;
  * <p>Acquire and release must be idempotent by Runtime Session identifier.
  * Attestation must bind the exact provision request, lease, Runtime identity,
  * and scope before a recovered endpoint is reused.
+ * Status results contain {@code state} with one of {@code prepared},
+ * {@code executing}, {@code cancel_requested}, {@code settled}, or
+ * {@code unknown}.
  */
 public interface RuntimeTransport {
     default CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-        return java.util.concurrent.CompletableFuture.failedFuture(
+        return CompletableFuture.failedFuture(
                 new RuntimeBrokerException(503,
                         "runtime_broker_attestation_unavailable",
                         "Runtime transport does not support attestation.",
@@ -28,9 +32,30 @@ public interface RuntimeTransport {
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
 
-    CompletionStage<Map<String, Object>> status(RuntimeLease lease,
+    /**
+     * Looks up the original invocation by its {@code reference} without
+     * preparing, attaching, or executing anything. {@code afterSequence} is
+     * the last result sequence the Broker recorded. The result contains
+     * {@code state}, plus {@code result} when the state is {@code settled};
+     * progress fields may accompany them. {@code unknown}
+     * means this Runtime holds no record of the reference; it is never
+     * evidence that the call did not run. A settled result is the Runtime's
+     * own terminal answer, {@code not_started} included. The call must not
+     * block, and its stage must complete in bounded time; the service also
+     * abandons it after the operation lease duration. Settling runs
+     * repository work on the thread that completes the stage, so a
+     * transport should not complete it on an I/O thread. The default fails
+     * closed, so a transport without the lookup can never settle an
+     * execution.
+     */
+    default CompletionStage<Map<String, Object>> status(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
-            long afterSequence);
+            long afterSequence) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_broker_execution_status_unsupported",
+                "Runtime transport does not support execution lookup.",
+                false));
+    }
 
     CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);

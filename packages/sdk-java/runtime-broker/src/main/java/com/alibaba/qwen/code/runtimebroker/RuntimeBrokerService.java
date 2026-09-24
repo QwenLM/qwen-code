@@ -27,6 +27,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             "preflight");
     private static final Set<String> EXECUTION_STATES = Set.of(
             "not_started", "success", "error", "cancelled");
+    // A lookup may also report that the Runtime holds no record at all.
+    private static final Set<String> RUNTIME_STATUS_STATES = Set.of(
+            "prepared", "executing", "cancel_requested", "settled",
+            "unknown");
+    private static final int MAX_CAS_ATTEMPTS = 16;
 
     private final HarnessSessionResolver sessionResolver;
     private final RuntimeProvisioner provisioner;
@@ -50,6 +55,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             new ConcurrentHashMap<>();
     private final Set<String> retiredHarnessSessions =
             ConcurrentHashMap.newKeySet();
+    private final ConcurrentMap<String,
+            CompletableFuture<ExecutionReconciliation>> reconciliations =
+                    new ConcurrentHashMap<>();
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport) {
@@ -248,6 +256,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
     public CompletionStage<Map<String, Object>> cancelExecution(
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
+        ExecutionRecord running = executionsById.get(
+                BrokerValues.requireId(executionCallId, "executionCallId"));
+        if (running != null && running.invoking()) {
+            // The renewal loop may already have fenced a lapsed claim as
+            // UNKNOWN while transport.execute is still running here; the
+            // physical cancel must still reach that invocation.
+            ToolExecutionRecord current = executionRepository
+                    .findByExecutionCallId(executionCallId);
+            if (current != null
+                    && current.getState() == ToolExecutionRecord.State.UNKNOWN
+                    && current.getHarnessSessionId().equals(harnessSessionId)
+                    && current.getRuntimeSessionId().equals(
+                            runtimeSessionId)) {
+                return running.cancelInvocation(transport);
+            }
+        }
         ExecutionRecord execution = requireExecution(harnessSessionId,
                 runtimeSessionId, executionCallId);
         return execution.cancel(transport);
@@ -308,6 +332,206 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 return executionSnapshot(updated);
             }
         }
+    }
+
+    /**
+     * Asks the original Runtime once whether an {@code UNKNOWN} execution
+     * settled, and settles the record only on that evidence. Any other
+     * answer, and any failure, leaves it {@code UNKNOWN}. This never executes
+     * or re-claims the dispatch, and it never retries: polling belongs to
+     * the caller. A record that is not {@code UNKNOWN} is answered from the
+     * repository before any Session or liveness check.
+     */
+    public CompletionStage<ExecutionReconciliation> reconcileExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId) {
+        ensureOpen();
+        String harnessId = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+                "runtimeSessionId");
+        String executionId = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        ToolExecutionRecord unknown = executionRepository
+                .findByExecutionCallId(executionId);
+        if (unknown == null
+                || !unknown.getHarnessSessionId().equals(harnessId)
+                || !unknown.getRuntimeSessionId().equals(runtimeId)) {
+            throw notFound("runtime_broker_execution_not_found",
+                    "Tool execution was not found.");
+        }
+        if (unknown.getState() != ToolExecutionRecord.State.UNKNOWN) {
+            return CompletableFuture.completedFuture(notUnknown(unknown,
+                    null));
+        }
+        // Only the binding generation the execution was dispatched to may
+        // answer; once it is gone, polling must stop rather than retry.
+        requireAnswerableBinding(unknown);
+        SessionBinding session = requireSession(harnessId, runtimeId);
+        // A Session keeps its binding generation for life, so a mismatch
+        // means inconsistent records rather than something a retry fixes.
+        if (!unknown.getBindingId().equals(session.binding.bindingId)
+                || unknown.getRuntimeGeneration()
+                        != session.binding.generation()) {
+            throw conflict("runtime_broker_execution_conflict",
+                    "Tool execution belongs to another Runtime generation.");
+        }
+        return lookupOnce(session, unknown);
+    }
+
+    private CompletionStage<ExecutionReconciliation> lookupOnce(
+            SessionBinding session, ToolExecutionRecord unknown) {
+        String executionId = unknown.getExecutionCallId();
+        CompletableFuture<ExecutionReconciliation> created =
+                new CompletableFuture<>();
+        CompletableFuture<ExecutionReconciliation> existing =
+                reconciliations.putIfAbsent(executionId, created);
+        if (existing != null) {
+            return existing;
+        }
+        // Bridge into a future this service owns, so nothing the transport
+        // returns or throws can leave the in-flight slot claimed, and bound
+        // it so a hung transport call cannot hold the slot and every later
+        // poll. The lease is health-checked first, so a dead worker is never
+        // treated as the original Runtime.
+        CompletableFuture<Map<String, Object>> lookup =
+                new CompletableFuture<>();
+        try {
+            session.ready.thenCompose(lease ->
+                    session.binding.ensureHealthy(lease))
+                    .thenCompose(lease -> transport.status(lease,
+                            session.session, unknown.getReference(),
+                            unknown.getLastSequence()))
+                    .whenComplete((status, error) -> {
+                        if (error == null) {
+                            lookup.complete(status);
+                        } else {
+                            lookup.completeExceptionally(error);
+                        }
+                    });
+        } catch (RuntimeException | Error exception) {
+            lookup.completeExceptionally(exception);
+        }
+        lookup.orTimeout(operationLeaseDuration.toMillis(),
+                TimeUnit.MILLISECONDS);
+        lookup.thenApply(status -> absorbRuntimeStatus(unknown, status))
+                .whenComplete((reconciled, error) -> {
+                    reconciliations.remove(executionId, created);
+                    if (error == null) {
+                        created.complete(reconciled);
+                    } else {
+                        created.completeExceptionally(unwrap(error));
+                    }
+                });
+        return created;
+    }
+
+    /**
+     * An execution permanently points at the binding generation it was
+     * dispatched to. Once that generation is retired, replaced, or gone, no
+     * Runtime can answer for it.
+     */
+    private void requireAnswerableBinding(ToolExecutionRecord record) {
+        RuntimeBindingRecord binding = bindingRepository.findById(
+                record.getBindingId());
+        if (binding == null
+                || binding.getGeneration() != record.getRuntimeGeneration()
+                || (binding.getState() != RuntimeBindingRecord.State.READY
+                        && binding.getState()
+                                != RuntimeBindingRecord.State.DRAINING)) {
+            throw evidenceUnavailable();
+        }
+    }
+
+    private static ExecutionReconciliation notUnknown(
+            ToolExecutionRecord record, String runtimeState) {
+        return new ExecutionReconciliation(record, record.isSettled()
+                ? ExecutionReconciliation.Outcome.ALREADY_SETTLED
+                : ExecutionReconciliation.Outcome.IN_FLIGHT, runtimeState);
+    }
+
+    private ExecutionReconciliation absorbRuntimeStatus(
+            ToolExecutionRecord unknown, Map<String, Object> status) {
+        // The worker status also carries progress fields, so only the state
+        // and its result are read here.
+        if (status == null) {
+            throw invalidStatus(null);
+        }
+        Object state = status.get("state");
+        if (!(state instanceof String)
+                || !RUNTIME_STATUS_STATES.contains(state)
+                || "settled".equals(state)
+                        != status.containsKey("result")) {
+            throw invalidStatus(null);
+        }
+        String runtimeState = (String) state;
+        if (!"settled".equals(runtimeState)) {
+            ToolExecutionRecord latest = executionRepository
+                    .findByExecutionCallId(unknown.getExecutionCallId());
+            ToolExecutionRecord current = latest == null ? unknown : latest;
+            return current.getState() == ToolExecutionRecord.State.UNKNOWN
+                    ? new ExecutionReconciliation(current,
+                            ExecutionReconciliation.Outcome.UNRESOLVED,
+                            runtimeState)
+                    : notUnknown(current, runtimeState);
+        }
+        Map<String, Object> result;
+        try {
+            Object raw = status.get("result");
+            if (!(raw instanceof Map)) {
+                throw invalidStatus(null);
+            }
+            result = BrokerValues.immutableMap(castMap(raw));
+            // Validate before writing, so an invalid result is reported as
+            // the Runtime's fault rather than as a repository failure. A
+            // not_started status is accepted only as the Runtime's own
+            // terminal answer; the Broker never derives it.
+            unknown.resolveUnknown(result, Instant.now());
+        } catch (IllegalArgumentException exception) {
+            throw invalidStatus(exception);
+        }
+        ToolExecutionRecord current = unknown;
+        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+            if (current == null) {
+                throw notFound("runtime_broker_execution_not_found",
+                        "Tool execution was not found.");
+            }
+            if (current.getState() != ToolExecutionRecord.State.UNKNOWN) {
+                return notUnknown(current, runtimeState);
+            }
+            // A racing cancel advances the version; re-read and retry.
+            ToolExecutionRecord resolved = executionRepository
+                    .resolveUnknown(current, result, Instant.now());
+            if (resolved != null) {
+                return new ExecutionReconciliation(resolved,
+                        ExecutionReconciliation.Outcome.RESOLVED,
+                        runtimeState);
+            }
+            current = executionRepository.findByExecutionCallId(
+                    unknown.getExecutionCallId());
+        }
+        // The record is still UNKNOWN, so the next poll can try again.
+        throw unavailable("runtime_broker_reconcile_failed",
+                "Tool execution changed while reconciling.");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castMap(Object value) {
+        return (Map<String, Object>) value;
+    }
+
+    private static RuntimeBrokerException invalidStatus(Throwable cause) {
+        return new RuntimeBrokerException(502,
+                "runtime_broker_execution_status_invalid",
+                "Runtime execution lookup returned an invalid status.", false,
+                cause);
+    }
+
+    private static RuntimeBrokerException evidenceUnavailable() {
+        return new RuntimeBrokerException(409,
+                "runtime_broker_execution_evidence_unavailable",
+                "The original Runtime generation cannot answer for this "
+                        + "execution.", false);
     }
 
     public CompletionStage<Boolean> release(String harnessSessionId,
@@ -710,6 +934,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        reconciliations.values().forEach(future -> future.cancel(false));
         scheduler.shutdownNow();
         provisioner.close();
         bindings.clear();
@@ -2504,6 +2729,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         private final String executionCallId;
         private final SessionBinding session;
         private final AtomicBoolean started = new AtomicBoolean();
+        // Set while transport.execute is in flight in this process, which a
+        // lapsed or fenced dispatch claim does not stop.
+        private final AtomicBoolean invoking = new AtomicBoolean();
         private CompletableFuture<Map<String, Object>> cancellation;
         private ScheduledFuture<?> dispatchRenewal;
 
@@ -2596,8 +2824,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }
                 return;
             }
+            invoking.set(true);
             transport.execute(lease, session.session, current.getReference())
                     .whenComplete((physicalResult, error) -> {
+                        // Dropped before the outcome is written, so a cancel
+                        // that reads that outcome does not treat the finished
+                        // invocation as running.
+                        invoking.set(false);
                         if (error != null) {
                             scheduleReconcile(transport, lease);
                             return;
@@ -2637,10 +2870,45 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     executionCallId, brokerOwnerId, dispatchLeaseDuration);
             if (claimed == null
                     || !brokerOwnerId.equals(claimed.getDispatchOwner())) {
-                return CompletableFuture.completedFuture(snapshot());
+                // A lapsed claim is fenced (UNKNOWN) by claimDispatch, but the
+                // invocation this process is still running must be stopped.
+                return invoking.get() ? cancelInvocation(transport)
+                        : CompletableFuture.completedFuture(snapshot());
             }
             startDispatchRenewal(claimed.getDispatchGeneration(), transport);
             return cancelOwned(transport, claimed);
+        }
+
+        boolean invoking() {
+            return invoking.get();
+        }
+
+        /**
+         * Delivers the physical cancel to an invocation this process is
+         * still running after its claim lapsed. The record is not owned, so
+         * the Runtime's answer is never written; an UNKNOWN record is still
+         * settled only through reconciliation.
+         */
+        synchronized CompletionStage<Map<String, Object>> cancelInvocation(
+                RuntimeTransport transport) {
+            ToolExecutionRecord requested = requestCancel();
+            if (requested == null) {
+                throw notFound("runtime_broker_execution_not_found",
+                        "Tool execution was not found.");
+            }
+            if (requested.isSettled() || !invoking.get()) {
+                return CompletableFuture.completedFuture(snapshot());
+            }
+            return session.ready.thenCompose(lease -> transport.cancel(lease,
+                    session.session, requested.getReference()))
+                    .handle((ignored, error) -> {
+                        if (error != null) {
+                            throw new CompletionException(unavailable(
+                                    "runtime_broker_cancel_failed",
+                                    "Runtime cancellation failed."));
+                        }
+                        return snapshot();
+                    });
         }
 
         void settleOwned(Map<String, Object> executionResult) {

@@ -482,6 +482,7 @@ interface UuidIndexEntry {
   navigationTextSuppressed: boolean;
   assistantPreviewCandidate: boolean;
   turnResultPromptId?: string;
+  daemonPromptId?: string;
   segments: RecordSegment[];
 }
 
@@ -1146,7 +1147,7 @@ function navigationDisplayText(text: string, systemPayload: unknown): string {
   return isUserPromptSubmitContextPartText(stripped) ? '' : stripped;
 }
 
-function navigationKindForRecord(
+export function navigationKindForRecord(
   record: ChatRecord,
 ): SessionTranscriptNavigationTurnKind | undefined {
   if (record.type !== 'user') return undefined;
@@ -1768,6 +1769,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.subtype) +
       estimateStringBytes(entry.navigationKind) +
       estimateStringBytes(entry.turnResultPromptId) +
+      estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
@@ -2098,6 +2100,9 @@ function newIndexEntry(
     goalRecoveryCandidate: isGoalRecoveryCandidate(record),
     turnHint: getSessionTurnRecordHint(record, sessionId),
     ...(navigationKind ? { navigationKind } : {}),
+    ...(typeof record.daemonPromptId === 'string'
+      ? { daemonPromptId: record.daemonPromptId }
+      : {}),
     navigationTextSuppressed:
       record.subtype === 'cron' ||
       projectUserTranscriptForDisplay(record).displayText !== undefined,
@@ -2284,6 +2289,7 @@ async function buildIndex(params: {
         turnId: uuid,
         replayPosition: position,
         kind: entry.navigationKind,
+        ...(entry.daemonPromptId ? { promptId: entry.daemonPromptId } : {}),
       };
       entry.navigationOrdinal = navigationTurns.length;
       navigationTurns.push(turn);
@@ -2303,7 +2309,7 @@ async function buildIndex(params: {
       if (targetTurn) targetTurn.finalAssistantRecordId = uuid;
     }
     if (entry?.turnResultPromptId && currentPromptTurn) {
-      currentPromptTurn.promptId = entry.turnResultPromptId;
+      currentPromptTurn.promptId ??= entry.turnResultPromptId;
       currentPromptTurn = undefined;
     }
   }

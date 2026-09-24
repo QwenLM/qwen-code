@@ -205,6 +205,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         HttpRequest request = HttpRequest.newBuilder(target)
                 .timeout(REQUEST_TIMEOUT)
                 .header("Authorization", "Bearer " + lease.getToken())
+                .header("Cache-Control", "no-store")
                 .header("Content-Type", "application/json")
                 .header("X-Qwen-Managed-Lease-Id", lease.getLeaseId())
                 .header("X-Qwen-Managed-Lease-Epoch",

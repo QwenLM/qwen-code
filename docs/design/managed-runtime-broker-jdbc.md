@@ -53,7 +53,7 @@ Schema initialization executes idempotent `CREATE TABLE IF NOT EXISTS` statement
 
 ## Recovery boundary
 
-A durable binding or session row proves only that broker state survived. It does not prove that the referenced runtime process is live. Likewise, an `UNKNOWN` Tool Execution records uncertainty rather than proving whether the side effect happened. Process reconciliation, transport health checks, and authoritative execution reconciliation remain responsibilities of the later runtime integration.
+A durable binding or session row proves only that broker state survived. It does not prove that the referenced runtime process is live. Likewise, an `UNKNOWN` Tool Execution records uncertainty rather than proving whether the side effect happened. Process reconciliation and transport health checks remain responsibilities of the later runtime integration. On-demand execution reconciliation asks the original Runtime and settles through `resolveUnknown` only on its terminal evidence; see the UNKNOWN reconciliation section of `managed-runtime-broker-service-core.md`.
 
 ## Security and tenancy
 
@@ -94,7 +94,7 @@ The default test suite runs the contract on H2 in MySQL compatibility mode. CI a
 
 ## Follow-up work
 
-Server wiring, process reconciliation, authoritative `UNKNOWN` resolution, schema migration deployment, and multi-process end-to-end validation remain follow-up work.
+Server wiring, process reconciliation, takeover scans of `UNKNOWN` executions, schema migration deployment, and multi-process end-to-end validation remain follow-up work.
 
 ## Follow-up integration
 

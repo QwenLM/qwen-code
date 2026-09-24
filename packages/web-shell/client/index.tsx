@@ -325,6 +325,7 @@ export type {
   PaneHeaderActionsRenderer,
 } from './components/ChatPane';
 export type {
+  ArtifactFilter,
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './components/artifacts/TurnOutputs';
@@ -352,3 +353,11 @@ export type {
   WebShellSettingItemId,
   WebShellSettingsOptions,
 } from './settings';
+
+export type { WebShellModelManagementOptions } from './modelManagement';
+export type {
+  WebShellMessageNavigationRequest,
+  WebShellMessageNavigationResult,
+} from './hooks/useMessageNavigation';
+export { highlightCode } from './components/messages/codeHighlighter';
+export type { CodeHighlightRequest } from './components/messages/codeHighlighter';

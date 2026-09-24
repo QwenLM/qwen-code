@@ -29,7 +29,10 @@ import type {
   ToolConfirmationPayload,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { registerSessionCommit } from '../permissions/destructive-commands.js';
+import {
+  getSessionCommitGeneration,
+  registerSessionCommit,
+} from '../permissions/destructive-commands.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -649,21 +652,101 @@ function parseGitInvocation(tokens: string[]): {
 }
 
 /**
+ * Leading tokens the loose commit recogniser skips over: shell
+ * control-flow keywords and noise words that `splitCommands` leaves at
+ * the front of a segment because it splits on operators only and has
+ * no shell-grammar notion — `if true; then git commit` yields the
+ * segment `then git commit`, `while …; do git commit; done` yields
+ * `do git commit`, and `time git commit` / `! git commit` never get
+ * split at all. The amend guard recognises every one of these
+ * spellings, so registration must recognise them too (#12514).
+ */
+const COMMIT_RECOGNITION_LEADING_NOISE: ReadonlySet<string> = new Set([
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'while',
+  'until',
+  'for',
+  'do',
+  'done',
+  'time',
+  '!',
+  '{',
+  '}',
+]);
+
+/**
+ * The program recogniser shared by `gitCommitContext` and
+ * `findAttributableCommitSegment` (#12514): skip leading
+ * control-flow/noise keywords and match the program on its
+ * basename (see `programBasename`), so `then git commit`,
+ * `time git commit`, `! git commit` and `/usr/bin/git commit` all
+ * resolve to the `git` invocation a `tokens[0] === 'git'` check
+ * misses. Returns the token slice starting at the recognised program,
+ * or `null` when the segment is nothing but noise. The slice keeps the
+ * program token at index 0 so `parseGitInvocation` applies unchanged.
+ */
+function skipCommitRecognitionNoise(tokens: string[]): string[] | null {
+  let i = 0;
+  while (
+    i < tokens.length &&
+    COMMIT_RECOGNITION_LEADING_NOISE.has(tokens[i]!)
+  ) {
+    i++;
+  }
+  if (i >= tokens.length) return null;
+  return tokens.slice(i);
+}
+
+/**
+ * Basename a program token and drop a Windows `.exe` suffix.
+ *
+ * `getCommandRoot` stops at the basename and keeps the suffix (pinned
+ * as `bar.exe` by `utils/shell-utils.test.ts`), so this deliberately
+ * goes one step further: recognition here is purely textual —
+ * `shell.ts` has no `process.platform` branch — and
+ * `"C:\Program Files\Git\cmd\git.exe" commit` is the spelling a
+ * Windows session really produces. Without the strip neither `git`
+ * branch fires, the commit lands unregistered, and the follow-up bare
+ * `git commit --amend` is hard-blocked with the false reason #12514
+ * set out to remove. Same normalisation the guard side already
+ * applies (`dangerousRules.stripWindowsExecutableSuffix`).
+ */
+function programBasename(program: string): string {
+  const base = program.split(/[\\/]/).pop()!;
+  return base.endsWith('.exe') ? base.slice(0, -'.exe'.length) : base;
+}
+
+/**
  * Classify whether a command chain (potentially compound) contains a
  * `git commit` invocation, and whether that invocation lands in the
  * tool's initial cwd.
  *
  * Two flags are returned because the answers feed different decisions:
  * - `hasCommit` is the broader "did the user try to commit anywhere
- *   in this chain?" — used to refuse background mode and to gate
- *   prompt-counter snapshotting.
+ *   in this chain?" — used to refuse background mode.
  * - `attributableInCwd` is the stricter "is it safe to capture HEAD
  *   in our cwd and write a note to that repo?" — used by the actual
- *   trailer rewrite and git-notes write.
+ *   trailer rewrite, the git-notes write, and session-commit
+ *   registration (`trackSessionCommit`).
+ *
+ * Program recognition is loose (#12514): leading control-flow/noise
+ * keywords are skipped and the program is matched on its basename (see
+ * `skipCommitRecognitionNoise`), so `if …; then git commit; fi`,
+ * `time git commit`, `! git commit` and `/usr/bin/git commit` all
+ * resolve to the `git` invocation they execute. The amend guard
+ * recognises those spellings, so every gate fed by this walk must too
+ * — a commit the guard would block must be a commit that can register.
  *
  * Walks segments in order so a `cd` AFTER an in-cwd commit doesn't
  * invalidate that commit's attribution; only a `cd` (or `git -C` /
- * `--git-dir` / `--work-tree`) BEFORE the commit shifts safety.
+ * `--git-dir` / `--work-tree`) BEFORE the commit shifts safety. The
+ * loose recognition also covers a `cd` hidden behind a noise keyword
+ * (`if …; then cd /elsewhere; fi; git commit`), which a
+ * `tokens[0]`-only walk would miss.
  *
  * `cwdShifted` is intentionally a one-way latch — it isn't reset on
  * a subsequent `cd .` or `cd ..`, so harmless cd cycles like
@@ -680,10 +763,12 @@ function gitCommitContext(command: string): {
   let cwdShifted = false;
 
   for (const sub of splitCommands(command)) {
-    const tokens = tokeniseSegment(sub);
-    if (!tokens || tokens.length === 0) continue;
+    const rawTokens = tokeniseSegment(sub);
+    if (!rawTokens || rawTokens.length === 0) continue;
 
-    const program = tokens[0]!;
+    const tokens = skipCommitRecognitionNoise(rawTokens);
+    if (!tokens) continue;
+    const program = programBasename(tokens[0]!);
 
     if (program === 'cd' || program === 'pushd') {
       // A cd / pushd before any commit might redirect a later
@@ -852,6 +937,40 @@ function isAmendCommit(command: string): boolean {
  * the `git commit ...` part, NOT later `&& git tag -m ...` or
  * earlier `git status &&` segments.
  *
+ * Recognition is the loose one shared with `gitCommitContext`
+ * (`skipCommitRecognitionNoise`, #12514): leading
+ * control-flow/noise keywords are skipped and the program is matched
+ * on its basename, so the spellings that walk accepts (`then git
+ * commit`, `time git commit`, `! git commit`, `/usr/bin/git commit`)
+ * earn their `Co-authored-by` trailer here too. The returned range
+ * covers the whole segment including any skipped keyword; the caller's
+ * `-m` rewrite is scoped by regex and unaffected by the prefix.
+ *
+ * That is recognition alignment, NOT a universal "amend-exempt implies
+ * trailer" invariant, and no edit to this function can make it one:
+ * this walk reads the RAW command while registration reads
+ * `stripShellWrapper(this.params.command)`, so a commit hidden inside a
+ * `bash -c '…'` wrapper registers (and earns the exemption) while the
+ * rewriter is deliberately a no-op — see the wrapper note in
+ * `addCoAuthorToGitCommit`.
+ *
+ * Skipping the noise keywords also NARROWS one case, deliberately: a
+ * `cd` spelled behind a keyword (`if …; then cd "$CI_DIR"; fi && git
+ * commit`) now reaches the `cdTargetMayChangeRepo` latch and suppresses
+ * recognition — the trailer here and, through the same shared helper,
+ * `gitCommitContext`'s `attributableInCwd` (registration + git-notes) —
+ * where the pre-#12514 `tokens[0]`-only walk saw `then` and ignored the
+ * `cd` entirely. That includes a branch that never executes.
+ * `splitCommands` evaluates nothing, so a false
+ * branch and a true branch produce identical segment sequences: any
+ * loosening that recovers the never-executed `cd` also recovers
+ * stamping our trailer onto a commit in a DIFFERENT repository
+ * (`if true; then cd <other>; fi && git commit`). Missing a trailer is
+ * the conservative half of that trade-off, matching `cwdShifted`'s
+ * stated intent ("better miss than corrupt unrelated repos"). Pinned by
+ * the `if false; then cd …` row in
+ * `shell.session-commit-tracking.test.ts`.
+ *
  * Used by `addCoAuthorToGitCommit` to scope the `-m` regex rewrite
  * so a later `git tag -m "..."` (different sub-command in the same
  * compound) can't be mistaken for the commit message.
@@ -879,12 +998,16 @@ function findAttributableCommitSegment(
     cursor = end;
     const tokens = tokeniseSegment(sub);
     if (!tokens || tokens.length === 0) continue;
-    const program = tokens[0]!;
+    const looseTokens = skipCommitRecognitionNoise(tokens);
+    if (!looseTokens) continue;
+    const program = programBasename(looseTokens[0]!);
     if (program === 'cd' || program === 'pushd') {
       // Mirror gitCommitContext's cd/pushd heuristic: relative paths
       // that don't escape upward are treated as in-repo, so
       // `cd subdir && git commit ...` still finds the segment.
-      if (!cwdShifted && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      if (!cwdShifted && cdTargetMayChangeRepo(looseTokens)) {
+        cwdShifted = true;
+      }
       continue;
     }
     if (program === 'popd') {
@@ -892,11 +1015,21 @@ function findAttributableCommitSegment(
       continue;
     }
     if (program === 'git') {
-      const { subcommand, changesCwd } = parseGitInvocation(tokens);
+      const { subcommand, changesCwd } = parseGitInvocation(looseTokens);
       if (subcommand === 'commit' && !cwdShifted && !changesCwd) {
         return { start, end };
       }
-      if (changesCwd && !cwdShifted) cwdShifted = true;
+      // Mirror `gitCommitContext`'s latch, which only trips on a
+      // NON-commit `git -C …`: a redirected `git -C ../other commit` is
+      // a commit this walk has already decided about (not attributable
+      // in our cwd, so not returned above), and latching on it would
+      // cost a *later* in-cwd commit its trailer — the exact chain
+      // `gitCommitContext` still calls attributable, so the two sides
+      // would disagree. `git -C ../other status` keeps latching: that
+      // is the cwd-elsewhere intent signal the latch exists for.
+      if (subcommand !== 'commit' && changesCwd && !cwdShifted) {
+        cwdShifted = true;
+      }
     }
   }
   return null;
@@ -2330,11 +2463,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Capture preHead only when the commit will actually be
     // attributed in our cwd: that's the only consumer (the
     // `attributableInCwd` branch below feeds preHead into
-    // `attachCommitAttribution`). For non-attributable
-    // hasCommit cases (`cd /elsewhere && git commit`,
-    // `git -C /other commit`), no consumer reads preHead and the
-    // ~10–50 ms execFileSync is dead work that just blocks the
+    // `attachCommitAttribution` and `trackSessionCommit`). For
+    // non-attributable hasCommit cases (`cd /elsewhere && git
+    // commit`, `git -C /other commit`), no consumer reads preHead and
+    // the ~10–50 ms execFileSync is dead work that just blocks the
     // event loop before the user's real command spawns.
+    // Registration must never run against a null preHead —
+    // `head.sha !== preHead` would be trivially true and exempt
+    // whatever HEAD happens to be there (the fail-open #12463's
+    // regression row ② pins).
     const preHead: string | null =
       !this.config.getShellExecutionSandbox?.() && commitCtx.attributableInCwd
         ? this.getGitHeadSync(cwd)
@@ -2753,12 +2890,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // redirect (so /tasks shows live output) and a settle hook (so
     // natural exit transitions the entry to `completed`/`failed`).
     if (result.promoted) {
+      // `handlePromotedForeground` takes over the still-running child
+      // and this method returns before the registration block below —
+      // hand the pre-spawn preHead over so a commit landed by the
+      // promoted command can still register when the child settles
+      // (#12514).
       const promotedToolResult = await this.handlePromotedForeground(
         result,
         cwd,
         commandToExecute,
         promoteAbortController,
         promoteArtifacts,
+        preHead,
       );
       return promotedToolResult;
     }
@@ -2856,11 +2999,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       !this.config.getShellExecutionSandbox?.() &&
       commitCtx.attributableInCwd
     ) {
-      // Before attribution: `attachCommitAttribution` returns early on the
-      // `gitCoAuthor.commit` toggle, but the amend exemption must not depend
-      // on it, and an attribution failure must not cost the registration.
+      // Registration runs ahead of attribution:
+      // `attachCommitAttribution` returns early on the
+      // `gitCoAuthor.commit` toggle, but the amend exemption must not
+      // depend on it, and an attribution failure must not cost the
+      // registration. Registration stays fail-closed: it still
+      // requires a `commit:` reflog verb plus HEAD movement against
+      // the captured preHead.
       await this.trackSessionCommit(cwd, preHead);
-
       // `git commit --amend` rewrites HEAD in place, so the standard
       // parent-vs-postHead diff (`${postHead}~1..${postHead}`) would
       // span the entire amended commit (the amended commit's parent
@@ -3330,6 +3476,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * `executeForeground`. The `promoteArtifacts` parameter carries the
    * pre-allocated buffer/stream slots that absorb the race between
    * service-side promote-time data flush and this finalizer running.
+   *
+   * `preHead` is the HEAD captured synchronously before spawn (null
+   * unless the command carried a commit recognisable as landing in our
+   * cwd, unsandboxed). A promoted command settles after `execute()`
+   * has returned, so the foreground registration block never runs for
+   * it — registration happens here, at settle (#12514).
    */
   private async handlePromotedForeground(
     result: ShellExecutionResult,
@@ -3337,6 +3489,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     commandToExecute: string,
     abortController: AbortController,
     promoteArtifacts: PromoteArtifacts,
+    preHead: string | null,
   ): Promise<ToolResult> {
     // Mirror executeBackground's outputPath layout so /tasks-on-disk and
     // ReadFileTool's auto-allow rules treat foreground-promoted shells
@@ -3721,7 +3874,77 @@ export class ShellToolInvocation extends BaseToolInvocation<
         registry.fail(shellId, cls.failMsg as string, info.endTime);
       }
     };
+    // Session-commit registration for the promoted path (#12514 A.3).
+    // `execute()` returns the promote ToolResult without reaching the
+    // foreground registration block, so a commit landed by a promoted
+    // command would never earn the amend exemption. `preHead` arrives
+    // from the caller's pre-spawn capture, gated there on
+    // `attributableInCwd` (and non-sandboxed), so a
+    // null here means the command carried no commit recognisable as
+    // landing in our cwd — `cd /elsewhere && git commit` stays
+    // unregistered exactly as the foreground path leaves it, and
+    // `head.sha !== preHead` can never be trivially true.
+    //
+    // Registration is settle-only by design: the commit can land at any
+    // point in the backgrounded child's life, and the only moment this
+    // path can observe "the child is done" is its settle. So for a child
+    // that is still running the exemption arrives later than the
+    // ToolResult that precedes it (pinned by the deferred-settle row in
+    // `shell.session-commit-tracking.test.ts`), and for a child that
+    // never settles (`npm run dev`, `tail -f`) it never arrives. Closing
+    // that needs a probe independent of the settle, which is a different
+    // mechanism than this PR's; the promote handoff probe alone would
+    // still miss a commit that lands after the user pressed Ctrl+B.
+    let promotedCommitRegistration: Promise<void> | null = null;
+    // Snapshot the registry generation at promote time. `Config.
+    // setApprovalMode` clears the session-commit registry on every real
+    // transition because exemptions must not carry across that boundary
+    // — but this registration fires when the child exits, arbitrarily
+    // later, so without the check a settle landing after such a
+    // transition writes the exemption straight back into the cleared
+    // registry.
+    const registrationGeneration = getSessionCommitGeneration();
+    const registerPromotedCommit = (): void => {
+      if (preHead === null || promotedCommitRegistration !== null) return;
+      if (getSessionCommitGeneration() !== registrationGeneration) {
+        // Fail-closed: the registry this decision was made against no
+        // longer exists, so the exemption it would grant is stale. The
+        // agent's own commit stays amend-blocked until it commits again
+        // inside the current registry generation.
+        debugLogger.warn(
+          `promote: skipping session-commit registration in ${cwd}: the ` +
+            `session-commit registry was cleared (approval-mode transition or ` +
+            `session end) after this command was promoted, so the exemption ` +
+            `must not carry across that boundary.`,
+        );
+        return;
+      }
+      promotedCommitRegistration = this.trackSessionCommit(
+        cwd,
+        preHead,
+        // Lineage, not mere difference. This runs when the backgrounded
+        // child exits — arbitrarily later than the caller's pre-spawn
+        // capture — so a commit anybody else lands in this repository
+        // while the child runs is the newest `commit:` entry by then,
+        // and `head.sha !== preHead` alone would adopt it: the foreign
+        // commit would earn the amend exemption and the promoted one
+        // would lose its own. Requiring that entry to have moved HEAD
+        // *from* `preHead` keeps the registered SHA one this command
+        // created (see `trackSessionCommit`'s `requirePredecessor`).
+        preHead,
+      ).catch((err: unknown) => {
+        // Registration must never break the settle path — a failure
+        // here costs the exemption (fail-closed), nothing more.
+        debugLogger.warn(
+          `promote: session-commit registration failed: ${getErrorMessage(err)}`,
+        );
+      });
+    };
     promoteArtifacts.onSettleWired = (info) => {
+      // The child has exited — if the promoted command landed a commit
+      // in our cwd, this is the moment to register it (the foreground
+      // path's equivalent runs after the foreground result resolves).
+      registerPromotedCommit();
       // Synchronous observation — the child has exited; classify now
       // so the model-facing copy can branch correctly even when the
       // registry transition is deferred behind the stream's flush.
@@ -3786,6 +4009,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       promoteArtifacts.settleQueued = null;
       promoteArtifacts.onSettleWired(queued);
     }
+    // When the settle was already queued (a fast-settling promoted
+    // command), the registration probe kicked off above is in flight —
+    // await it so the exemption is in place by the time the ToolResult
+    // is returned. For a still-running child this is null and costs
+    // nothing; the registration then completes via `onSettleWired`
+    // whenever the child exits.
+    await promotedCommitRegistration;
 
     // Build the model-facing status line based on whether the settle
     // was observed synchronously (i.e. the child has exited). Branch
@@ -4209,12 +4439,45 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * to *partition* per-file contribution and so bails. In `commit a &&
    * commit b` HEAD is `b`, created by this command, so registering it is
    * sound and `a` stays blocked.
+   *
+   * `requirePredecessor` is the promoted path's lineage guard and is
+   * deliberately not applied to the foreground one. There, the window
+   * between the pre-spawn capture and this reflog read is the command's
+   * own duration — the trade-off #12523 tracks and this docblock
+   * discloses. On a Ctrl+B promote the same window is the backgrounded
+   * child's whole (deliberately long) lifetime, so a commit anybody else
+   * lands in this repository meanwhile is not a narrow race but the
+   * expected shape, and difference-from-`preHead` alone would adopt it.
+   * Passing the captured `preHead` here requires the entry that created
+   * HEAD to have moved it *from* that SHA, which only this command's own
+   * commit does. Fail-closed both ways: a foreign commit never earns an
+   * exemption, and a multi-commit promoted chain (`commit a && commit b`,
+   * whose newest entry descends from `a`) loses one it had earned rather
+   * than guessing. The foreground call site passes nothing and keeps the
+   * disclosed window unchanged.
    */
   private async trackSessionCommit(
     cwd: string,
     preHead: string | null,
+    requirePredecessor?: string,
   ): Promise<void> {
     const head = await this.getGitHeadOrigin(cwd);
+    if (
+      head !== null &&
+      requirePredecessor !== undefined &&
+      head.predecessor !== requirePredecessor
+    ) {
+      // Same visibility contract as the `head === null` branch below: the
+      // only other output of this path is a block reason asserting the
+      // commit was not the agent's, so say which side of the lineage
+      // check failed.
+      debugLogger.warn(
+        `Session commit not registered in ${cwd}: the newest HEAD reflog entry descends from ` +
+          `${head.predecessor ?? '(no predecessor)'}, not from the pre-spawn HEAD ` +
+          `${requirePredecessor.slice(0, 12)}, so it was not created by this command.`,
+      );
+      return;
+    }
     // Neither condition subsumes the other: `createdByCommit` rejects a HEAD
     // something else relocated, and the `preHead` comparison rejects a commit
     // that never moved HEAD (nothing staged), which would otherwise
@@ -4235,30 +4498,43 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Read HEAD and the reflog action that last moved it in one subprocess.
+   * Read HEAD, the reflog action that last moved it, and the SHA that
+   * entry moved it *from*, in one subprocess.
    *
    * `--no-show-signature` is required, not cosmetic: with
    * `log.showSignature=true` git prints the signature verdict ahead of the
    * formatted output, shifting both fields and making an agent's own signed
    * commit look uncommitted. Inert when nothing is signed.
    *
+   * `-2` rather than `-1` so the second entry's SHA is available as the
+   * newest entry's predecessor — the lineage input
+   * {@link trackSessionCommit} requires on the promoted path. It costs one
+   * extra reflog record inside the same 2 s budget.
+   *
    * Returns `null` when git cannot answer (not a repo, no HEAD, reflog off or
-   * expired, git missing) so every caller fails closed.
+   * expired, git missing) so every caller fails closed. `predecessor` is
+   * `null` when the reflog holds a single entry (an initial commit, or one
+   * expired down to a single record).
    */
-  private async getGitHeadOrigin(
-    cwd: string,
-  ): Promise<{ sha: string; createdByCommit: boolean } | null> {
+  private async getGitHeadOrigin(cwd: string): Promise<{
+    sha: string;
+    createdByCommit: boolean;
+    predecessor: string | null;
+  } | null> {
     return new Promise((resolve) => {
       const child = childProcess.execFile(
         'git',
-        ['log', '-g', '-1', '--no-show-signature', '--format=%H%n%gs', 'HEAD'],
+        ['log', '-g', '-2', '--no-show-signature', '--format=%H%n%gs', 'HEAD'],
         { cwd, timeout: 2000, windowsHide: true },
         (error, stdout) => {
           if (error) {
             resolve(null);
             return;
           }
-          const [sha, subject] = String(stdout).split('\n');
+          // One line per field, newest entry first: its SHA, its reflog
+          // subject, then the previous entry's SHA (whose subject is not
+          // read).
+          const [sha, subject, predecessor] = String(stdout).split('\n');
           if (!sha || !subject) {
             resolve(null);
             return;
@@ -4268,6 +4544,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           resolve({
             sha: sha.trim(),
             createdByCommit: /^commit\b/.test(subject),
+            predecessor: predecessor?.trim() || null,
           });
         },
       );
@@ -4956,8 +5233,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Shell-aware detection — a raw regex would falsely match quoted
     // text such as `echo "git commit"` and hand a corrupted command
-    // (with the trailer mid-string) back to the executor. The stricter
-    // `attributableInCwd` is what we want here: only inject the
+    // (with the trailer mid-string) back to the executor. The
+    // in-cwd check is what we want here: only inject the
     // trailer when we're confident the commit lands in our cwd.
     const segmentRange = findAttributableCommitSegment(command);
     if (!segmentRange) {

@@ -141,6 +141,9 @@ export class ToolCallEmitter extends BaseEmitter {
         timestamp: params.timestamp,
         asUpdate: updatesPreparedCall,
         extra: {
+          ...(params.startedAt !== undefined
+            ? { startedAt: params.startedAt }
+            : {}),
           ...(params.phase ? { phase: params.phase } : {}),
           ...(params.toolName === ToolNames.AGENT && !params.subagentMeta
             ? { subagentSessionReady: false }
@@ -231,6 +234,12 @@ export class ToolCallEmitter extends BaseEmitter {
       contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
       timestamp: params.timestamp,
       extra: {
+        ...(params.startedAt !== undefined
+          ? { startedAt: params.startedAt }
+          : {}),
+        ...(params.durationMs !== undefined
+          ? { durationMs: params.durationMs }
+          : {}),
         ...params.subagentMeta,
         provenance: provenance.provenance,
         ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
@@ -261,6 +270,7 @@ export class ToolCallEmitter extends BaseEmitter {
     toolName: string,
     error: Error,
     subagentMeta?: SubagentMeta,
+    timing?: { startedAt: number; durationMs: number },
   ): Promise<void> {
     this.preparedCallIds.delete(callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
@@ -274,6 +284,7 @@ export class ToolCallEmitter extends BaseEmitter {
         success: false,
         errorMessage: error.message,
         extra: {
+          ...timing,
           ...subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),

@@ -22,6 +22,9 @@ The module provides:
 - Runtime Session acquisition and release;
 - in-memory and JDBC execution ledgers with at-most-once dispatch per
   idempotency key;
+- evidence-only `UNKNOWN` reconciliation through `reconcileExecution`,
+  which settles only on the original Runtime's terminal answer and never
+  replays the call;
 - a two-phase Tool boundary that reserves a durable execution identity before
   the Harness checkpoint and starts physical execution only after that commit;
 - encrypted durable Runtime seeds, versioned resource handles, and an

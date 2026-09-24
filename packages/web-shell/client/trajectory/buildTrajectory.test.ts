@@ -296,6 +296,23 @@ describe('buildTrajectory', () => {
       expect(rows.find((row) => row.kind === 'tool')?.timing).toBeUndefined();
     });
 
+    it('matches wrapper calls to the resolved tool while rejecting unrelated names', () => {
+      for (const toolName of ['mcp__yuque__yuque_whoami', 'wrong_tool']) {
+        const rows = buildTrajectory([
+          block(
+            toolBlock('call_a', {
+              toolName: 'tool_call',
+              rawInput: { name: 'mcp__yuque__yuque_whoami', arguments: {} },
+            }),
+          ),
+          toolTiming('call_a', { toolName, durationMs: 515 }),
+        ]).rows;
+        expect(
+          rows.find((row) => row.kind === 'tool')?.timing?.durationMs,
+        ).toBe(toolName === 'wrong_tool' ? undefined : 515);
+      }
+    });
+
     it('refuses a main-session frame on a subagent block', () => {
       const rows = buildTrajectory([
         block(toolBlock('call_a', { parentToolCallId: 'call_parent' })),
@@ -342,7 +359,7 @@ describe('buildTrajectory', () => {
       expect(new Set(tools.map((row) => row.key)).size).toBe(2);
     });
 
-    it('keeps the start time a tool frame recorded', () => {
+    it('preserves an explicitly recorded tool start time', () => {
       const rows = buildTrajectory([
         block(toolBlock('call_a')),
         {
@@ -610,3 +627,37 @@ describe('buildTrajectory', () => {
     ).toHaveLength(250);
   });
 });
+
+it.each(['tool_call', 'mcp__server__lookup', 'wrong_tool'])(
+  'matches wrapper timing name %s without accepting unrelated tools',
+  (toolName) => {
+    const { rows } = buildTrajectory([
+      block(
+        toolBlock('wrapped', {
+          toolName: 'tool_call',
+          rawInput: { name: 'mcp__server__lookup', arguments: {} },
+        }),
+      ),
+      toolTiming('wrapped', { toolName, durationMs: 0 }),
+    ]);
+    expect(rows.find((row) => row.kind === 'tool')?.timing?.durationMs).toBe(
+      toolName === 'wrong_tool' ? undefined : 0,
+    );
+  },
+);
+
+it.each(['goal_runtime', 'goal_control'])(
+  'keeps %s within the existing turn',
+  (source) => {
+    const { rows, turns } = buildTrajectory([
+      block(textBlock('user')),
+      block(toolBlock('first')),
+      block(textBlock('user', { meta: { source } })),
+      block(toolBlock('second')),
+    ]);
+    expect(turns).toHaveLength(1);
+    expect(
+      rows.filter((row) => row.kind === 'tool').map((row) => row.turnIndex),
+    ).toEqual([1, 1]);
+  },
+);

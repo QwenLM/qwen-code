@@ -341,10 +341,12 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onBrandResolved: handleBrandResolved,
                 managedAgentProvider,
                 sidebar: { enabled: true, showLive: true },
+                showToolCalls: true,
                 className: macosOverlayTitlebar
                   ? MACOS_TITLEBAR_CLASS
                   : undefined,
                 header: {
+                  showMobileAccess: true,
                   items: [
                     'title',
                     'environment',

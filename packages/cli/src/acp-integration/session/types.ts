@@ -105,6 +105,7 @@ export interface ToolCallStartParams {
   subagentMeta?: SubagentMeta;
   /** Server-side timestamp (ISO string or ms) for message ordering */
   timestamp?: string | number;
+  startedAt?: number;
 }
 
 /**
@@ -133,6 +134,8 @@ export interface ToolCallResultParams {
   subagentMeta?: SubagentMeta;
   /** Server-side timestamp (ISO string or ms) for message ordering */
   timestamp?: string | number;
+  startedAt?: number;
+  durationMs?: number;
 }
 
 /**
