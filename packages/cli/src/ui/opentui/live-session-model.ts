@@ -13,7 +13,11 @@
  */
 
 import type { HistoryItem } from '../model/streaming-model.js';
-import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
+import type {
+  GoalSnapshotLike,
+  OpenTuiStreamEvent,
+  SubagentSummary,
+} from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { GoalLegacyCardData } from '../utils/goal-card-view.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
@@ -44,6 +48,9 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
     totalLines?: number;
     totalBytes?: number;
   };
+  /** Structured subagent summary: the card renders ink's three coloured runs
+   * (SubagentScrollbackSummary parity) instead of the flattened output. */
+  subagentSummary?: SubagentSummary;
   /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
    * under the result): tells the user their image/prompt left the machine
    * via the vision model. */
@@ -173,8 +180,18 @@ export type LiveGoalItem = {
 /** Fields of an ink goal_status history item (kind form). */
 export type LiveGoalLegacyData = GoalLegacyCardData;
 
+export type LiveAssistantItem = Extract<HistoryItem, { kind: 'assistant' }> & {
+  /** When the block opened: the record's own time on a resume replay, the fold
+   * time live. Rendered by `output.showTimestamps`. */
+  timestamp?: number;
+};
+
 export type LiveHistoryItem =
-  | Exclude<HistoryItem, { kind: 'tool' } | { kind: 'thinking' }>
+  | Exclude<
+      HistoryItem,
+      { kind: 'tool' } | { kind: 'thinking' } | { kind: 'assistant' }
+    >
+  | LiveAssistantItem
   | LiveThinkingItem
   | LiveToolItem
   | LiveImageItem
@@ -264,6 +281,7 @@ export function foldLiveEvent(
           id: nid('as'),
           text: ev.delta,
           streaming: true,
+          timestamp: ev.timestamp ?? Date.now(),
         });
       }
       return items;
@@ -328,6 +346,7 @@ export function foldLiveEvent(
           diff: structured?.diff,
           todos: structured?.todos,
           ansi: structured?.ansi,
+          subagentSummary: structured?.subagentSummary,
         };
         if (ev.type === 'tool-result' && ev.visionBridgeNotice) {
           next.visionBridgeNotice = ev.visionBridgeNotice;
@@ -398,7 +417,6 @@ export function foldLiveEvent(
         name: ev.name,
         description: ev.description,
         progress: [],
-        done: false,
       });
       return items;
     case 'task-progress': {
@@ -410,15 +428,11 @@ export function foldLiveEvent(
       return items;
     }
     case 'task-end': {
+      // ink drops the roster row the moment a subagent turns terminal; the
+      // tool card's own one-line summary is the only record left, so keeping
+      // this card would print the same stats twice.
       const i = items.findIndex((it) => it.kind === 'task' && it.id === ev.id);
-      if (i >= 0 && items[i].kind === 'task') {
-        const t = items[i] as Extract<HistoryItem, { kind: 'task' }>;
-        items[i] = {
-          ...t,
-          done: true,
-          stats: `${ev.tools} tools · ${ev.seconds}s · ${ev.tokens} tokens`,
-        };
-      }
+      if (i >= 0) items.splice(i, 1);
       return items;
     }
     case 'image': {

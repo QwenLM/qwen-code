@@ -2,6 +2,8 @@
 
 This package is an isolated Tauri 2 shell around the existing Web Shell. It does not contain a second UI.
 
+Window zoom follows `Cmd`/`Ctrl` + `-`/`=`/`0` and `Ctrl`+wheel (a trackpad pinch), and the chosen factor is restored on the next launch. The shortcuts are captured in the webview and applied by the shell, which owns the factor: the webview engines expose no zoom UI, and WebView2's own zoom control is off by default.
+
 ## Runtime layout
 
 `npm run build:runtime` prepares `runtime/qwen-code/` with:
@@ -40,7 +42,7 @@ The daemon log is written to `~/Library/Logs/com.alibaba.qwen-code/desktop-runti
 tail -f ~/Library/Logs/com.alibaba.qwen-code/desktop-runtime.log
 ```
 
-The desktop state (saved workspace, window position) is stored in `~/Library/Application Support/com.alibaba.qwen-code/desktop-state.json`.
+The desktop state (saved workspace, window position, zoom factor) is stored in `~/Library/Application Support/com.alibaba.qwen-code/desktop-state.json`.
 
 ### WebView DevTools
 
@@ -48,12 +50,13 @@ Open the Web Shell's DevTools from the running window with `Cmd+Option+I` (macOS
 
 ### Environment variables
 
-| Variable                     | Purpose                                                             |
-| ---------------------------- | ------------------------------------------------------------------- |
-| `QWEN_DESKTOP_WORKSPACE`     | Override the initial workspace path                                 |
-| `QWEN_DEFAULT_WORKSPACE_DIR` | Relocate the first-launch default workspace directory               |
-| `QWEN_DESKTOP_SKIP_BUILD`    | Set to `1` to skip the CLI/Web Shell rebuild during `build:runtime` |
-| `QWEN_CODE_ROOT`             | Point to a local qwen-code checkout for the runtime bundle          |
+| Variable                       | Purpose                                                             |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `QWEN_DESKTOP_WORKSPACE`       | Override the initial workspace path                                 |
+| `QWEN_DEFAULT_WORKSPACE_DIR`   | Relocate the first-launch default workspace directory               |
+| `QWEN_DESKTOP_DISABLE_UPDATES` | Set to `1` to disable the startup update check and prompt           |
+| `QWEN_DESKTOP_SKIP_BUILD`      | Set to `1` to skip the CLI/Web Shell rebuild during `build:runtime` |
+| `QWEN_CODE_ROOT`               | Point to a local qwen-code checkout for the runtime bundle          |
 
 ### Rust tests
 

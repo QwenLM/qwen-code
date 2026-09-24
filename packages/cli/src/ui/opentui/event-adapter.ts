@@ -32,6 +32,8 @@ import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
+import { AGENT_TOOL_NAMES } from '../utils/agent-tool-names.js';
+import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
@@ -41,7 +43,11 @@ import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
  * segmentation and inline images.
  */
 export type OpenTuiStreamEvent =
-  | StreamEvent
+  | Exclude<StreamEvent, { type: 'text' }>
+  /** Widened over the neutral `text` event: a replayed assistant record
+   * carries its own recorded time, which ink stamps on the first display run
+   * of that record. Live deltas leave it unset and fold as "now". */
+  | { type: 'text'; delta: string; timestamp?: number }
   | { type: 'tool-args'; id: string; args: string }
   /** Real invocation description (live sessions only): the scheduler's
    * tracked call carries the invocation object, so the card title is the
@@ -68,6 +74,9 @@ export type OpenTuiStreamEvent =
         totalLines?: number;
         totalBytes?: number;
       };
+      /** Structured subagent summary: rendered as ink's three coloured runs
+       * (SubagentScrollbackSummary parity) instead of the flattened text. */
+      subagentSummary?: SubagentSummary;
       /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
        * under the result): tells the user their image/prompt left the
        * machine via the vision model. */
@@ -297,7 +306,8 @@ export function renderResultDisplay(display: unknown): string {
         .join('\n');
     }
     if (
-      o['type'] === 'ask_user_question_answers' &&
+      (o['type'] === 'ask_user_question_answers' ||
+        o['type'] === 'shell_result') &&
       typeof o['text'] === 'string'
     ) {
       return o['text'];
@@ -335,18 +345,13 @@ export function renderResultDisplay(display: unknown): string {
       const notice = typeof o['notice'] === 'string' ? o['notice'] : '';
       return [summary, notice].filter(Boolean).join('\n');
     }
-    // task_execution: status line + termination reason and result — the raw
-    // JSON fallback would dump toolCalls[].responseParts (multi-MB base64);
-    // core strips those exact fields in toolResultDisplayCompaction.
+    // task_execution: ink renders exactly one summary line once the subagent
+    // reaches a terminal state, and nothing at all while it runs (the running
+    // phase belongs to the bottom-of-screen roster). The raw `result` field is
+    // the child's whole answer, so inlining it under the parent's tool card
+    // dumps an entire sub-transcript into the parent's scrollback.
     if (o['type'] === 'task_execution') {
-      const subagent =
-        typeof o['subagentName'] === 'string' ? o['subagentName'] : '';
-      const status = typeof o['status'] === 'string' ? o['status'] : '';
-      const reason =
-        typeof o['terminateReason'] === 'string' ? o['terminateReason'] : '';
-      const result = typeof o['result'] === 'string' ? o['result'] : '';
-      const header = [subagent, status].filter(Boolean).join(': ');
-      return [header, reason, result].filter(Boolean).join('\n');
+      return subagentSummaryLine(o);
     }
     // findings_list: count + optional severity summary; the raw fallback
     // dumps every finding object.
@@ -374,6 +379,100 @@ export function renderResultDisplay(display: unknown): string {
 }
 
 /**
+ * ink's SubagentScrollbackSummary row as its three coloured runs: the status
+ * glyph, the bold `name: ` prefix, and the secondary description/tail/reason.
+ */
+export interface SubagentSummary {
+  glyph: string;
+  /** ink's glyph colour: success / error / warning by terminal status. */
+  tone: 'success' | 'error' | 'warning';
+  prefix: string;
+  rest: string;
+}
+
+/**
+ * One summary per subagent that has reached a terminal state, `null` while it
+ * still runs.
+ */
+export function extractSubagentSummary(
+  display: unknown,
+): SubagentSummary | null {
+  if (typeof display !== 'object' || display === null) return null;
+  const o = display as Record<string, unknown>;
+  if (o['type'] !== 'task_execution') return null;
+  const status = typeof o['status'] === 'string' ? o['status'] : '';
+  if (status !== 'completed' && status !== 'failed' && status !== 'cancelled') {
+    return null;
+  }
+  const summary =
+    typeof o['executionSummary'] === 'object' && o['executionSummary'] !== null
+      ? (o['executionSummary'] as Record<string, unknown>)
+      : {};
+  const parts: string[] = [];
+  const totalToolCalls = summary['totalToolCalls'];
+  if (typeof totalToolCalls === 'number') {
+    parts.push(`${totalToolCalls} tool${totalToolCalls === 1 ? '' : 's'}`);
+  }
+  // Direct children this agent spawned = its successful AgentTool calls.
+  // Tool-usage stats key on the raw request name, so every alias counts.
+  const toolUsage = Array.isArray(summary['toolUsage'])
+    ? (summary['toolUsage'] as Array<Record<string, unknown>>)
+    : [];
+  const spawns = toolUsage
+    .filter(
+      (tu) =>
+        typeof tu['name'] === 'string' && AGENT_TOOL_NAMES.has(tu['name']),
+    )
+    .reduce(
+      (sum, tu) =>
+        sum + (typeof tu['success'] === 'number' ? tu['success'] : 0),
+      0,
+    );
+  if (spawns > 0) {
+    parts.push(`${spawns} sub-agent${spawns === 1 ? '' : 's'}`);
+  }
+  const totalDurationMs = summary['totalDurationMs'];
+  if (typeof totalDurationMs === 'number') {
+    parts.push(formatDuration(totalDurationMs, { hideTrailingZeros: true }));
+  }
+  const outputTokens = summary['outputTokens'];
+  if (typeof outputTokens === 'number' && outputTokens > 0) {
+    parts.push(`${formatTokenCount(outputTokens)} tokens`);
+  }
+  const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  const subagent =
+    typeof o['subagentName'] === 'string' ? o['subagentName'] : '';
+  const description =
+    typeof o['taskDescription'] === 'string' ? o['taskDescription'] : '';
+  const terminateReason =
+    typeof o['terminateReason'] === 'string' ? o['terminateReason'] : '';
+  const reason =
+    status !== 'completed' && terminateReason ? ` · ${terminateReason}` : '';
+  return {
+    glyph: status === 'completed' ? '✔' : '✖',
+    tone:
+      status === 'completed'
+        ? 'success'
+        : status === 'failed'
+          ? 'error'
+          : 'warning',
+    prefix: subagent ? `${subagent}: ` : '',
+    rest: `${description}${tail}${reason}`,
+  };
+}
+
+/**
+ * The same row as plain text, for the consumers that keep the flattened
+ * display. Derived from the segments so the two forms cannot drift.
+ */
+function subagentSummaryLine(o: Record<string, unknown>): string {
+  const summary = extractSubagentSummary(o);
+  // The leading space is ink's own: its summary sits in a box that adds one
+  // column of padding on top of the card body's indent.
+  return summary ? ` ${summary.glyph} ${summary.prefix}${summary.rest}` : '';
+}
+
+/**
  * The structured payload a result display carries, if any. The tool card has an
  * ink-parity renderer for each of a file diff, a todo list and an ANSI grid,
  * and `renderResultDisplay` would reduce any of them to text — a todo list to
@@ -386,7 +485,7 @@ export function extractStructuredResult(
 ): Partial<
   Pick<
     Extract<OpenTuiStreamEvent, { type: 'tool-result' }>,
-    'diff' | 'todos' | 'ansi'
+    'diff' | 'todos' | 'ansi' | 'subagentSummary'
   >
 > | null {
   const diff = extractFileDiff(display);
@@ -395,6 +494,8 @@ export function extractStructuredResult(
   if (todos) return { todos };
   const ansi = extractAnsiOutput(display);
   if (ansi) return { ansi };
+  const subagentSummary = extractSubagentSummary(display);
+  if (subagentSummary) return { subagentSummary };
   return null;
 }
 
@@ -755,9 +856,6 @@ export function createEventMapper(
         });
         break;
       }
-      case 'active_goal':
-        // ink parity: useGeminiStream ignores this legacy projection event.
-        break;
       case 'goal_state': {
         closeThought();
         const v = ev as {

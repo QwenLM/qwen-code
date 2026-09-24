@@ -6,7 +6,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: calc(12px + var(--web-shell-desktop-titlebar-height, 0px)) 12px 12px;
   overflow: hidden;
   background: var(--sidebar-background);
   border-right: 1px solid var(--sidebar-border);
@@ -298,6 +298,63 @@
 .liveWorkspaceLabel {
   min-width: 0;
   flex: 1 1 auto;
+}
+
+.livePendingHeader,
+.livePendingSession {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 8px;
+  color: var(--sidebar-foreground);
+  font-size: 13px;
+}
+
+.livePendingSession {
+  padding-left: 32px;
+  color: var(--muted-foreground);
+}
+
+button.livePendingSession {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.livePendingSession:hover {
+  color: var(--sidebar-foreground);
+}
+
+.livePendingSession svg {
+  width: 14px;
+  height: 14px;
+  color: var(--primary);
+  animation: livePendingSpin 1s linear infinite;
+}
+
+.liveSessionSpinner {
+  width: 14px;
+  height: 14px;
+  color: var(--primary);
+  animation: livePendingSpin 1s linear infinite;
+}
+
+@keyframes livePendingSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .livePendingSession svg {
+    animation: none;
+  }
+  .liveSessionSpinner {
+    animation: none;
+  }
 }
 
 .projectsHeader {
@@ -2062,7 +2119,6 @@
   }
 }
 
-/* Registered workspace count next to the Projects label. */
 .projectsHeaderCount {
   display: inline-flex;
   align-items: center;

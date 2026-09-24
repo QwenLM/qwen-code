@@ -397,6 +397,133 @@ describe('SystemMessage — vision bridge notice', () => {
   });
 });
 
+describe('SystemMessage — context compression', () => {
+  const result = {
+    originalTokenCount: 263195,
+    newTokenCount: 99799,
+    originalTokenCountIsEstimated: false,
+    newTokenCountIsEstimated: true,
+  };
+  const done = { phase: 'done', ...result };
+
+  it('renders the in-progress row in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compressing context..."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'progress' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('正在压缩');
+    expect(container.textContent).not.toContain('Compressing context...');
+  });
+
+  it('renders a no-op result in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="No compression needed."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'noop' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('无需压缩。');
+  });
+
+  it('renders the truncation notice in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compression instructions were truncated to 2000 characters."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'notice', instructionsLimit: 2000 }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('压缩指令已截断为 2,000 个字符');
+  });
+
+  it('renders the counts in the UI language instead of the daemon sentence', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('上下文已压缩 263,195 → ~99,799');
+    expect(container.textContent).not.toContain('Context compressed');
+  });
+
+  it('renders the English line for an English UI', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+  });
+
+  it('carries a server-authored warning on a second line', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={{ ...done, warning: 'Recent history was left intact.' }}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+    expect(container.textContent).toContain('Recent history was left intact.');
+    // A hard break, not a soft one: the row renders through Markdown, which
+    // would fold a bare newline into the line above.
+    expect(container.querySelector('br')).not.toBeNull();
+  });
+
+  it.each([
+    [
+      'a malformed count',
+      { phase: 'done', ...result, originalTokenCount: 'many' },
+    ],
+    ['no phase at all', result],
+    ['an unreadable payload', 'not-a-payload'],
+  ])('falls back to the daemon sentence for %s', (_label, data) => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={data}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed (263195 -> ~99799).',
+    );
+  });
+});
+
 describe('SystemMessage — background notification label', () => {
   it('labels background task notifications and preserves display text', () => {
     const container = render(
@@ -831,6 +958,38 @@ describe('background continuation', () => {
     act(() => container.querySelectorAll('button')[1]!.click());
     expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
   });
+  it('names a cross-session message and offers no details to open', () => {
+    const details = vi.fn();
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Ask the other session"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{
+            turnId: 'turn-1',
+            taskId: 'msg-1',
+            kind: 'peer',
+            startedAt: 100,
+            label: 'qwen on api',
+            backgroundTask: { status: 'completed' },
+          }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain(
+      'Cross-session message·qwen on api',
+    );
+    // Nothing in the task registry answers to a message id, so the details
+    // button would open a tab that can never load.
+    expect(
+      [...container.querySelectorAll('button')].map((button) =>
+        button.textContent?.trim(),
+      ),
+    ).not.toContain('View details');
+    expect(details).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['failed', 'Background task failed'],
     ['cancelled', 'Background task cancelled'],

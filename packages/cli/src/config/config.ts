@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
@@ -56,6 +58,10 @@ import {
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import {
+  agentExecutionBackend,
+  agentExecutionFactory,
+} from './agent-execution.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
@@ -87,6 +93,11 @@ import {
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
+import {
+  BWRAP_MIGRATION_MESSAGE,
+  validateExecutionSandboxSelection,
+} from './execution-sandbox-settings.js';
+import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
@@ -756,6 +767,21 @@ export async function parseArguments(): Promise<CliArgs> {
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
+          const optionArgs = rawArgv.slice(
+            0,
+            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
+          );
+          if (
+            optionArgs.some(
+              (arg, index) =>
+                arg === '--sandbox=bwrap' ||
+                arg === '-s=bwrap' ||
+                ((arg === '--sandbox' || arg === '-s') &&
+                  optionArgs[index + 1] === 'bwrap'),
+            )
+          ) {
+            return BWRAP_MIGRATION_MESSAGE;
+          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -1618,6 +1644,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
     sessionRestore?: {
@@ -1629,12 +1656,44 @@ export async function loadCliConfig(
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
+  const sshWorkspace = readSshWorkspace(cwd);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings,
+    argv,
+  );
+  const sandboxEnabled = Boolean(
+    executionSandboxSettings || hostPolicy?.shellExecutionSandbox,
+  );
+  if (executionSandboxSettings && hostPolicy?.shellExecutionSandbox) {
+    throw new Error(
+      'Choose operator settings or a programmatic execution sandbox policy, not both.',
+    );
+  }
+  if (
+    sandboxEnabled &&
+    (argv.promptInteractive !== undefined ||
+      argv.inputFormat === 'stream-json' ||
+      argv.acp ||
+      argv.experimentalAcp ||
+      argv.worktree !== undefined ||
+      argv.experimentalLsp ||
+      argv.mcpConfig ||
+      argv.extensions?.length ||
+      argv.includeDirectories?.length ||
+      overrideExtensions?.length ||
+      Object.keys(sessionMcpServers ?? {}).length ||
+      provisionalWorkspace)
+  ) {
+    throw new Error(
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
+    );
+  }
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
 
@@ -1673,11 +1732,17 @@ export async function loadCliConfig(
   if (!Storage.hasRuntimeBaseDirContext()) {
     Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
   }
+  const requestedShellExecutionSandbox =
+    hostPolicy?.shellExecutionSandbox ??
+    (executionSandboxSettings
+      ? createExecutionSandboxPolicy(executionSandboxSettings, cwd)
+      : undefined);
+  const shellExecutionSandbox = requestedShellExecutionSandbox;
 
-  const ideMode = settings.ide?.enabled ?? false;
+  const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
+  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1734,7 +1799,10 @@ export async function loadCliConfig(
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
-    !provisionalWorkspace && !bareMode && argv.experimentalLsp === true;
+    !sshWorkspace &&
+    !provisionalWorkspace &&
+    !bareMode &&
+    argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -1756,12 +1824,19 @@ export async function loadCliConfig(
 
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
+  // Whether a privileged mode was actually asked for (flag or setting). The
+  // AUTO fall-through below is a built-in default, not a request, so an
+  // untrusted folder must not claim it overrode something the caller never set.
+  let approvalModeRequested = false;
   if (argv.approvalMode) {
     approvalMode = parseApprovalModeValue(argv.approvalMode);
+    approvalModeRequested = true;
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
+    approvalModeRequested = true;
   } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
+    approvalModeRequested = true;
   } else if (bareMode || safeMode) {
     // Restricted modes strip permissions/allowlists and are meant to be
     // maximally restrictive, so they keep manual approval rather than the
@@ -1777,9 +1852,11 @@ export async function loadCliConfig(
     approvalMode !== ApprovalMode.DEFAULT &&
     approvalMode !== ApprovalMode.PLAN
   ) {
-    writeStderrLine(
-      `Approval mode overridden to "default" because the current folder is not trusted.`,
-    );
+    if (approvalModeRequested) {
+      writeStderrLine(
+        `Approval mode overridden to "default" because the current folder is not trusted.`,
+      );
+    }
     approvalMode = ApprovalMode.DEFAULT;
   }
 
@@ -2086,24 +2163,17 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
-  // Disable ToolSearch when explicitly configured or for models that benefit
-  // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)
-  // all use prefix-based disk KV caching with heavily discounted cached
-  // token pricing (up to 1/120 for v4). When tool_search is in the deny
-  // list, client.ts eagerly reveals all deferred tools so every MCP tool
-  // schema is in the initial declaration list, keeping the prompt prefix
-  // stable and maximizing cache hit rates.
-  // Note: no `^` anchor — model names may include a provider prefix
-  // (e.g. "openrouter/deepseek/deepseek-v4-flash").
-  const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
-  const shouldDisableToolSearch =
-    toolSearchExplicitlyEnabled === false ||
-    (toolSearchExplicitlyEnabled === undefined &&
-      resolvedModel !== undefined &&
-      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+  // The ToolSearch + ToolCall bridge keeps the model-facing declaration list
+  // stable, including for prefix-cache-sensitive models. Only an explicit
+  // opt-out disables both halves of the bridge and eagerly reveals deferred
+  // schemas through client.ts.
+  const shouldDisableToolSearch = settings.tools?.toolSearch?.enabled === false;
   if (shouldDisableToolSearch) {
     if (!mergedDeny.includes('tool_search')) {
       mergedDeny.push('tool_search');
+    }
+    if (!mergedDeny.includes('tool_call')) {
+      mergedDeny.push('tool_call');
     }
   }
 
@@ -2111,6 +2181,11 @@ export async function loadCliConfig(
     bareMode || safeMode ? ({} as Settings) : settings,
     argv,
   );
+  if (shellExecutionSandbox && sandboxConfig) {
+    throw new Error(
+      'Tool execution sandbox cannot be combined with a whole-CLI sandbox.',
+    );
+  }
   const screenReader =
     argv.screenReader !== undefined
       ? argv.screenReader
@@ -2280,6 +2355,16 @@ export async function loadCliConfig(
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
+  // `undefined` is the meaningful third state here: it defers to core's
+  // `shouldDefaultToNodePty()`, so only an explicit one-shot prompt gets the
+  // pipe default while interactive and protocol-driven modes keep PTY.
+  const isExplicitOneShotPrompt =
+    !interactive &&
+    hasPrompt &&
+    !isAcpMode &&
+    !(argv.inputFile ?? settings.dualOutput?.inputFile) &&
+    inputFormat !== InputFormat.STREAM_JSON;
+
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
@@ -2366,6 +2451,7 @@ export async function loadCliConfig(
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
+    shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);
@@ -2549,7 +2635,9 @@ export async function loadCliConfig(
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
-    shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    shouldUseNodePtyShell:
+      settings.tools?.shell?.enableInteractiveShell ??
+      (isExplicitOneShotPrompt ? false : undefined),
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
@@ -2662,7 +2750,39 @@ export async function loadCliConfig(
         }
       : undefined,
     settingsWatcher,
+    agentExecutionBackend: agentExecutionBackend(),
+    executionEnvironmentFactory: agentExecutionFactory(),
   };
+
+  if (sshWorkspace) {
+    configParams.executionEnvironment = new SshExecutionEnvironment(
+      sshWorkspace,
+      cwd,
+      {
+        outputThreshold: configParams.truncateToolOutputThreshold,
+        shellDefaultTimeoutMs: configParams.shellDefaultTimeoutMs,
+        customIgnoreFiles: configParams.fileFiltering?.customIgnoreFiles,
+      },
+    );
+    configParams.codeModeOnly = false;
+    configParams.disableAllHooks = true;
+    configParams.mcpServers = {};
+    configParams.overrideExtensions = [];
+    configParams.workflowsEnabled = false;
+    configParams.enableManagedAutoMemory = false;
+    configParams.enableManagedAutoDream = false;
+    configParams.enableTeamMemory = false;
+    configParams.enableTeamMemorySync = false;
+    configParams.enableAutoSkill = false;
+    configParams.fileCheckpointingEnabled = false;
+    configParams.artifactEnabled = false;
+    configParams.appendSystemPrompt = [
+      argv.appendSystemPrompt,
+      `This is an SSH workspace on ${sshWorkspace.host}. The project directory is ${sshWorkspace.directory}. All file, search and shell tools operate on that remote project. The local directory ${cwd} is only for session storage; it is not the project. Use remote absolute paths or paths relative to the remote project. Read QWEN.md and AGENTS.md at the remote project root before working if they exist. Remote hooks, skills, MCP, LSP, subagents, workflows and worktree management are unavailable in this session.`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
 
   const config = new Config(configParams);
 

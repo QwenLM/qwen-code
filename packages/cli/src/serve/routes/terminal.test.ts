@@ -62,6 +62,27 @@ function registryWithSnapshot(
 }
 
 describe('terminal WebSocket route', () => {
+  it('passes the selected SSH launch command through to the terminal registry', async () => {
+    const registry = registryWithSnapshot(undefined);
+    const ws = new FakeWebSocket();
+    const command = {
+      file: 'ssh',
+      args: ['-tt', 'host', 'cd /srv/project && exec sh -l'],
+    };
+    await createTerminalWsHandler(registry, () => ({
+      ...context,
+      command,
+    })).onConnection(ws as unknown as WebSocket, request);
+    expect(registry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: context.workspaceCwd,
+        env: context.env,
+        command,
+      }),
+    );
+    ws.emit('close');
+  });
+
   it('rejects legacy replay clients before creating a PTY', async () => {
     const registry = registryWithSnapshot(undefined);
     const ws = new FakeWebSocket();

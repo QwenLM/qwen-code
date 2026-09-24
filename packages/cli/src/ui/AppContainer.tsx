@@ -1253,7 +1253,7 @@ export const AppContainer = (props: AppContainerProps) => {
         // produce an INFO message the model sees on the next turn.
         // Skipped when Phase D-1 already injected a --worktree startup
         // notice above (startup wins over resume on the same prompt).
-        if (!startupWorktreeNotice) {
+        if (!startupWorktreeNotice && !config.getShellExecutionSandbox?.()) {
           try {
             const sessionPath = config
               .getSessionService()
@@ -1314,6 +1314,7 @@ export const AppContainer = (props: AppContainerProps) => {
     });
 
     registerCleanup(async () => {
+      if (config.getShellExecutionSandbox?.()) return;
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
     });
@@ -1715,7 +1716,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     openApprovalModeDialog,
     handleApprovalModeSelect,
-  } = useApprovalModeCommand(settings, config);
+  } = useApprovalModeCommand(settings, config, historyManager.addItem);
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
@@ -1904,6 +1905,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
+    logger,
   });
 
   const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
@@ -2195,6 +2197,16 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       setShowWorktreeExitDialog(false);
+      if (choice === 'remove' && config.getShellExecutionSandbox?.()) {
+        historyManager.addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Worktree removal is unavailable in tool sandbox.',
+          },
+          Date.now(),
+        );
+        return;
+      }
       if (choice === 'remove' && activeWorktree) {
         try {
           // Anchor at the repo top-level (captured at enter time) rather
@@ -2348,6 +2360,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getContextRuleExcludes(),
         {
           loadReason: 'refresh',
+          extensionRuleSources: config.getExtensionRuleSources(),
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),
@@ -3863,15 +3876,17 @@ export const AppContainer = (props: AppContainerProps) => {
     useState<StartupIdeConnectionStatus>({ state: 'idle' });
 
   useEffect(() => {
+    if (config.getShellExecutionSandbox?.()) return;
     const getIde = async () => {
       const ideClient = await IdeClient.getInstance();
       const currentIde = ideClient.getCurrentIde();
       setCurrentIDE(currentIde || null);
     };
     getIde();
-  }, []);
+  }, [config]);
   const shouldShowIdePrompt = Boolean(
-    currentIDE &&
+    !config.getShellExecutionSandbox?.() &&
+      currentIDE &&
       !config.getIdeMode() &&
       !settings.merged.ide?.hasSeenNudge &&
       !idePromptAnswered,
@@ -3945,7 +3960,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
-  } = useIdeTrustListener();
+  } = useIdeTrustListener(!config.getShellExecutionSandbox?.());
   const {
     isFeedbackDialogOpen,
     openFeedbackDialog,
@@ -4181,6 +4196,19 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
       try {
+        if (
+          config.getShellExecutionSandbox?.() &&
+          (option === 'code' || option === 'both')
+        ) {
+          historyManager.addItem(
+            {
+              type: 'error',
+              text: 'File restore is unavailable in tool sandbox.',
+            },
+            Date.now(),
+          );
+          return;
+        }
         // For 'both', validate that conversation can be truncated BEFORE
         // touching files — otherwise we'd roll back the workspace while
         // the conversation stays at the newer state.

@@ -26,7 +26,8 @@ import {
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
-import { parseAnsi, hasAnsi } from '../../utils/ansi';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { ShellToolOutput } from './tools/ShellToolOutput';
 import {
   extractTodosFromToolCall,
   isTodoWriteToolName,
@@ -181,8 +182,10 @@ export function extractDiff(tool: ACPToolCall): string {
 
   const previewPatch = tool.args?.patch;
   if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
-  const previewNewText = tool.args?.newText;
-  const previewOldText = tool.args?.oldText;
+  // `newText`/`oldText` come from the safe tool preview projection; the full
+  // projection carries the edit tool's real parameter names instead.
+  const previewNewText = tool.args?.newText ?? tool.args?.new_string;
+  const previewOldText = tool.args?.oldText ?? tool.args?.old_string;
   if (
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
@@ -211,53 +214,6 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
   );
 }
 
-const MAX_DIFF_PRODUCT = 250_000;
-
-export function buildUnifiedDiff(oldText: string, newText: string): string {
-  const oldLines = oldText.split('\n');
-  const newLines = newText.split('\n');
-
-  const n = oldLines.length;
-  const m = newLines.length;
-
-  if (n * m > MAX_DIFF_PRODUCT) {
-    const removed = oldLines.map((l) => (l ? `-${l}` : '-'));
-    const added = newLines.map((l) => (l ? `+${l}` : '+'));
-    return [...removed, ...added].join('\n');
-  }
-
-  const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    Array(m + 1).fill(0),
-  );
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      dp[i][j] =
-        oldLines[i - 1] === newLines[j - 1]
-          ? dp[i - 1][j - 1] + 1
-          : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
-
-  const result: string[] = [];
-  let i = n,
-    j = m;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-      result.push(` ${oldLines[i - 1]}`);
-      i--;
-      j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      result.push(`+${newLines[j - 1]}`);
-      j--;
-    } else {
-      result.push(`-${oldLines[i - 1]}`);
-      i--;
-    }
-  }
-
-  return result.reverse().join('\n');
-}
-
 // A description longer than this is likely ellipsised on a normal-width row, so
 // the row becomes expandable to re-flow the full text into a wrapped block.
 const DESCRIPTION_EXPAND_THRESHOLD = 60;
@@ -279,35 +235,6 @@ const READ_LANGUAGE_ALIASES: Record<string, string> = {
   tsx: 'tsx',
   yml: 'yaml',
 };
-
-function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
-  const output = useMemo(() => extractText(tool) || '', [tool]);
-  const ansiSegments = useMemo(
-    () => (hasAnsi(output) ? parseAnsi(output) : null),
-    [output],
-  );
-
-  return (
-    <div className={styles.expandedBash}>
-      <pre className={styles.expandedOutput}>
-        {ansiSegments
-          ? ansiSegments.map((seg, i) => (
-              <span
-                key={i}
-                style={{
-                  color: seg.color,
-                  fontWeight: seg.bold ? 'bold' : undefined,
-                  opacity: seg.dim ? 0.6 : undefined,
-                }}
-              >
-                {seg.text}
-              </span>
-            ))
-          : output}
-      </pre>
-    </div>
-  );
-}
 
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   const content = useMemo(() => extractText(tool) || '', [tool]);
@@ -1033,7 +960,7 @@ function AgentIcon() {
   );
 }
 
-function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
+export function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
   const kind = getToolHeaderKind(tool);
   if (kind === 'agent') return <AgentIcon />;
   if (kind === 'ask') return <AskUserIcon />;
@@ -1398,7 +1325,7 @@ export const ToolLine = memo(function ToolLine({
 
   const fullDescription = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const summaryShell = summaryOnly && isShellToolName(tool.toolName);
+  const summaryShell = isShellToolName(tool.toolName);
   const description = summaryShell
     ? getToolSummaryDescription(tool, workspaceCwd)
     : fullDescription;
@@ -1644,6 +1571,8 @@ export const ToolLine = memo(function ToolLine({
                 detail={expandedCardDetail}
                 result={result}
               />
+            ) : isShell ? (
+              <ShellToolOutput tool={tool} />
             ) : isRead ? (
               <ToolExpandedCard
                 title={displayName}
@@ -1659,7 +1588,6 @@ export const ToolLine = memo(function ToolLine({
                 status={tool.status}
                 action={filePreviewAction}
               >
-                {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
                 {(name === 'write_file' || name === 'writefile') && (
                   <ExpandedEditContent tool={tool} />
                 )}
@@ -1789,7 +1717,11 @@ const ThoughtLine = memo(function ThoughtLine({
       />
       {showContent && (
         <div className={styles.chatSummaryThoughtContent}>
-          <Markdown content={content} source="thinking" />
+          <Markdown
+            content={content}
+            source="thinking"
+            isStreaming={isStreaming}
+          />
         </div>
       )}
     </div>

@@ -28,6 +28,7 @@ import type {
   BrowserHistoryEntry,
   BrowserInfo,
   DispatchResult,
+  FinalizeTabDisposition,
   LogEntry,
 } from '../core/primitives.js';
 import { commandSchemas, type SupportedCommand } from '../core/schemas.js';
@@ -85,7 +86,9 @@ export interface PlaywrightRuntimeOptions
 }
 
 export class PlaywrightRuntime {
-  readonly browserId = BROWSER_ID;
+  private selectedBrowserId = BROWSER_ID;
+  private profileChosen = false;
+  private stopped = false;
 
   private readonly bridge: ChromeBridge;
   private readonly documentationText: string;
@@ -100,15 +103,26 @@ export class PlaywrightRuntime {
     this.session = new PlaywrightSession({ bridge: this.bridge });
   }
 
+  get browserId(): string {
+    return this.selectedBrowserId;
+  }
+
   async start(): Promise<void> {
     await this.session.start();
+    this.profileChosen = true;
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     await this.session.stop();
   }
 
   async dispatch(method: string, input: unknown): Promise<DispatchResult> {
+    if (this.stopped)
+      throw new BrowserRuntimeError(
+        'NOT_RUNNING',
+        'Browser Use runtime stopped',
+      );
     // commandSchemas is a plain object literal: an own-property check keeps
     // inherited Object.prototype keys from bypassing the UNKNOWN_METHOD guard.
     const schema = Object.hasOwn(commandSchemas, method)
@@ -127,13 +141,36 @@ export class PlaywrightRuntime {
       throw error;
     }
     let tab: TabState | undefined;
+    let requested: string | undefined;
     try {
       if (
         typeof args.tabId === 'string' &&
         this.session.isSessionStale(args.tabId)
       )
         throw staleSessionError();
+      if (method === 'browsers.list' && this.bridge.profiles !== undefined) {
+        return (await this.bridge.profiles()).map((profile) => ({
+          ...this.browserInfo(),
+          id: `chrome:${profile.extensionInstanceId}`,
+          name:
+            profile.profileName ?? `Chrome · ${profile.extensionInstanceId}`,
+        }));
+      }
+      if (
+        method === 'browsers.get' &&
+        this.bridge.selectProfile !== undefined
+      ) {
+        const id = stringArg(args, 'id');
+        this.bridge.selectProfile(id);
+        if (!this.profileChosen && id.startsWith('chrome:')) requested = id;
+      }
       await this.start();
+      if (requested !== undefined) {
+        // A profile becomes this runtime's id only once it connected; this
+        // rejects when a concurrent start bound another profile first.
+        this.bridge.selectProfile?.(requested);
+        this.selectedBrowserId = requested;
+      }
       tab =
         typeof args.tabId === 'string'
           ? this.session.claimed(args.tabId)
@@ -162,7 +199,7 @@ export class PlaywrightRuntime {
     switch (method) {
       case 'browsers.list':
         try {
-          await this.bridge.request('ping', {}, 1_500);
+          await this.bridge.request('ping');
           return [this.browserInfo()];
         } catch (error) {
           if (
@@ -207,6 +244,14 @@ export class PlaywrightRuntime {
       case 'tabs.selected':
         this.assertBrowser(stringArg(args, 'browserId'));
         return await this.session.selectedTabInfo();
+      case 'tabs.finalize':
+        this.assertBrowser(stringArg(args, 'browserId'));
+        await this.session.finalizeTabs(
+          Array.isArray(args.keep)
+            ? (args.keep as FinalizeTabDisposition[])
+            : [],
+        );
+        return null;
       case 'tab.goto': {
         const tab = this.tab(args);
         const url = stringArg(args, 'url');
@@ -609,6 +654,8 @@ export class PlaywrightRuntime {
   }
 
   private assertBrowserSelector(id: string): void {
+    // dispatch already had a profile-aware bridge validate the id.
+    if (this.bridge.selectProfile !== undefined) return;
     if (id !== this.browserId && id !== 'extension')
       throw new BrowserRuntimeError(
         'NOT_FOUND',

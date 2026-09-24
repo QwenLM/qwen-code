@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => {
   const state = {
     renderer: {
       destroy: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
     },
     root: {
       render: vi.fn(),
@@ -74,10 +76,12 @@ vi.mock('@opentui/core', () => ({
   }),
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
+  CliRenderEvents: { FOCUS: 'focus', BLUR: 'blur' },
 }));
 vi.mock('@opentui/react', () => ({
   createRoot: vi.fn(() => mocks.state.root),
   useKeyboard: () => {},
+  useRenderer: () => mocks.state.renderer,
   useTerminalDimensions: () => ({ width: 120, height: 40 }),
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
@@ -322,7 +326,13 @@ describe('startOpenTuiUI fallback contract', () => {
     const started = await startOpenTuiUI(
       buildConfig(),
       {
-        merged: { ui: { hideWindowTitle: true, showToolCallArgs: true } },
+        merged: {
+          ui: {
+            hideWindowTitle: true,
+            showToolCallArgs: true,
+            mouseTracking: false,
+          },
+        },
       } as unknown as LoadedSettings,
       [],
       '/tmp/project',
@@ -330,8 +340,13 @@ describe('startOpenTuiUI fallback contract', () => {
     );
     expect(started).toBe(true);
 
+    // The entry mounts useTerminalFocus, which writes the ?1004 mode escape.
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
     const calls = mocks.state.root.render.mock.calls;
     render(calls[calls.length - 1]?.[0] as ReactElement);
+    write.mockRestore();
     // renderMain draws the transcript inside a box, and the mocked JSX
     // runtime turns that box into a plain element, so the transcript's own
     // props sit one level below the returned element.
@@ -341,6 +356,11 @@ describe('startOpenTuiUI fallback contract', () => {
     const props = main?.props?.children?.props;
     expect(props?.['awaitingCallId']).toBe('q1');
     expect(props?.['showToolCallArgs']).toBe(true);
+    expect(props?.['mouseTracking']).toBe(false);
+    // The renderer takes no pointer events when the setting is off.
+    expect(createCliRenderer).toHaveBeenLastCalledWith(
+      expect.objectContaining({ useMouse: false }),
+    );
   });
 
   it('warms the shell AST parser before the renderer is created', async () => {
