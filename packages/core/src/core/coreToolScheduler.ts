@@ -1374,6 +1374,7 @@ function withPostToolBatchStop(
     request: lastCall.request,
     tool: lastCall.tool,
     response,
+    startTime: lastCall.startTime,
     durationMs: lastCall.durationMs,
     outcome: undefined,
   } as ErroredToolCall;

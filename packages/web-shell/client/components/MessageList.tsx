@@ -5813,6 +5813,7 @@ export const MessageList = memo(
                 changes={displayItem.changes}
                 turnId={displayItem.turnId}
                 artifacts={displayItem.artifacts}
+                sourceSessionId={sourceSessionId}
                 scheduledTasks={displayItem.scheduledTasks}
                 workspaceCwd={workspaceCwd}
                 onOpenRequest={onTurnOutputOpen}
@@ -6032,6 +6033,7 @@ export const MessageList = memo(
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
+        sourceSessionId,
         onOpenArtifact,
         onOpenScheduledTask,
         onReviewChanges,

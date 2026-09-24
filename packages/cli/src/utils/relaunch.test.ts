@@ -220,6 +220,48 @@ describe('relaunchAppInChildProcess', () => {
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
+  it('continues in place when the replacement would boot an identical image', async () => {
+    process.argv = ['/usr/bin/node', '/app/cli.js', '-p', 'hi'];
+    const execveSpy = vi.fn((): never => {
+      throw new Error('UNEXPECTED_EXECVE');
+    });
+    process.execve = execveSpy;
+
+    await relaunchAppInChildProcess([], [], {
+      childEnv: { QWEN_TEST_CHILD: '1' },
+      replaceProcess: true,
+    });
+
+    expect(execveSpy).not.toHaveBeenCalled();
+    expect(mockedSpawn).not.toHaveBeenCalled();
+    expect(processExitSpy).not.toHaveBeenCalled();
+    // Matches what the replaced image would see, so nested launches and later
+    // relaunch calls in this process stay no-ops.
+    expect(process.env['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+    // Child-only state stays out of the continuing process's environment,
+    // which every tool subprocess inherits.
+    expect(process.env['QWEN_TEST_CHILD']).toBeUndefined();
+  });
+
+  it('still replaces the process when the environment changed since boot', async () => {
+    // e.g. `.env` supplied DASHSCOPE_PROXY_BASE_URL, which a provider module
+    // reads at import, or NODE_EXTRA_CA_CERTS, which only Node's boot reads.
+    process.argv = ['/usr/bin/node', '/app/cli.js', '-p', 'hi'];
+    const execveSpy = vi.fn(() => undefined as never);
+    process.execve = execveSpy;
+
+    await relaunchAppInChildProcess([], [], {
+      environmentChangedSinceBoot: true,
+      replaceProcess: true,
+    });
+
+    expect(execveSpy).toHaveBeenCalledWith(
+      '/usr/bin/node',
+      expect.arrayContaining(['/app/cli.js', '-p', 'hi']),
+      expect.objectContaining({ QWEN_CODE_NO_RELAUNCH: 'true' }),
+    );
+  });
+
   it('falls back to supervised spawn when process replacement fails', async () => {
     process.argv = ['/usr/bin/node', '/app/cli.js'];
     process.execve = vi.fn((): never => {
@@ -228,7 +270,13 @@ describe('relaunchAppInChildProcess', () => {
     const child = createMockChildProcess(0, false);
     mockedSpawn.mockReturnValue(child);
 
-    const promise = relaunchAppInChildProcess([], [], { replaceProcess: true });
+    const promise = relaunchAppInChildProcess(
+      ['--max-old-space-size=4096'],
+      [],
+      {
+        replaceProcess: true,
+      },
+    );
     await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
     child.emit('close', 0);
     await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
