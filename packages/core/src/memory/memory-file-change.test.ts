@@ -469,6 +469,59 @@ describe('memory file change hook', () => {
     expect(windowSeen).toEqual([]);
   });
 
+  it('still reports a window change to a path an outside write already reported', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'shared.md');
+    const writer: MemoryChangedNotice[] = [];
+    const windowSeen: MemoryChangedNotice[] = [];
+    const writerRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        writer.push(change);
+      },
+    );
+    const windowRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        windowSeen.push(change);
+      },
+    );
+    let outsideDone: () => void = () => {};
+    const outsideReported = new Promise<void>((resolve) => {
+      outsideDone = resolve;
+    });
+    try {
+      const pending = withCoalescedMemoryChanges(
+        projectRoot,
+        windowRegistration.id,
+        async () => {
+          await outsideReported;
+          await fs.writeFile(file, 'rewritten by the window\n');
+        },
+      );
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'out\n');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        'create',
+        writerRegistration.id,
+      );
+      outsideDone();
+      await pending;
+    } finally {
+      writerRegistration();
+      windowRegistration();
+    }
+    expect(writer).toEqual([expect.objectContaining({ operation: 'create' })]);
+    expect(windowSeen).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['user/shared.md'],
+      }),
+    ]);
+  });
+
   it('reports a file removed inside a coalesced window once', async () => {
     const projectRoot = await setup();
     const file = path.join(tempDir!, 'memories', 'user', 'gone.md');

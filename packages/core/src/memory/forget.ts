@@ -712,7 +712,10 @@ export async function forgetManagedAutoMemoryEntries(
     projectRoot,
     selection.matches,
     now,
-    { abortSignal: options.abortSignal },
+    {
+      abortSignal: options.abortSignal,
+      memoryHookDeliveryId: options.config?.getMemoryHookDeliveryId?.(),
+    },
   );
   return { ...result, query: trimmedQuery };
 }

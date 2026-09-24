@@ -137,14 +137,20 @@ export function describeMemoryFileChange(
 
 const SCOPE_ORDER: readonly MemoryChangedScope[] = ['user', 'project', 'team'];
 
-/** Paths already notified while a coalesced window is open, per window. */
-const outsideWindowEmits = new Set<Set<string>>();
+/**
+ * Content already reported while a coalesced window is open, per window.
+ * `null` means the path was reported while absent.
+ */
+const outsideWindowEmits = new Set<Map<string, string | null>>();
 
-function rememberOutsideEmit(filePaths: readonly string[]): void {
+async function rememberOutsideEmit(
+  filePaths: readonly string[],
+): Promise<void> {
   if (outsideWindowEmits.size === 0 || suppressDelivery.getStore()) return;
-  for (const bucket of outsideWindowEmits) {
-    for (const filePath of filePaths) {
-      bucket.add(filePath);
+  for (const filePath of filePaths) {
+    const content = await fs.readFile(filePath, 'utf-8').catch(() => null);
+    for (const bucket of outsideWindowEmits) {
+      bucket.set(filePath, content);
     }
   }
 }
@@ -233,7 +239,7 @@ export async function notifyMemoryFileChange(
       ...(scope === 'user' ? {} : { workspace }),
     });
   }
-  rememberOutsideEmit(emittedPaths);
+  await rememberOutsideEmit(emittedPaths);
   await emit(projectRoot, changes, deliveryId);
 }
 
@@ -363,7 +369,7 @@ export async function withCoalescedMemoryChanges<T>(
   deliveryId: symbol | undefined,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const outside = new Set<string>();
+  const outside = new Map<string, string | null>();
   outsideWindowEmits.add(outside);
   try {
     const before = await readMemoryDocuments(projectRoot);
@@ -374,17 +380,21 @@ export async function withCoalescedMemoryChanges<T>(
       const created: string[] = [];
       const updated: string[] = [];
       const deleted: string[] = [];
-      const keep = (filePath: string) => !outside.has(filePath);
+      // An outside emit moves the baseline. It does not hide the path.
+      const baseline = (filePath: string) =>
+        outside.has(filePath)
+          ? (outside.get(filePath) ?? undefined)
+          : before.get(filePath);
       for (const [filePath, content] of after) {
-        if (!keep(filePath)) continue;
-        if (!before.has(filePath)) {
+        const reported = baseline(filePath);
+        if (reported === undefined) {
           created.push(filePath);
-        } else if (before.get(filePath) !== content) {
+        } else if (reported !== content) {
           updated.push(filePath);
         }
       }
-      for (const filePath of before.keys()) {
-        if (!after.has(filePath) && keep(filePath)) {
+      for (const filePath of new Set([...before.keys(), ...outside.keys()])) {
+        if (!after.has(filePath) && baseline(filePath) !== undefined) {
           deleted.push(filePath);
         }
       }
