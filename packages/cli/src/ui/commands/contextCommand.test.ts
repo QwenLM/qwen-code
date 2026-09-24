@@ -221,6 +221,36 @@ describe('collectContextData (contextCommand)', () => {
     expect(formatContextUsageText(data)).not.toContain('Cached prefix');
   });
 
+  it('uses the global cached count when no session chat is initialized (#12047)', async () => {
+    // No chat yet (first /context, or resume before initialize). The
+    // per-session preference has nothing to read, so the displayed cached
+    // figure is the process-global value, including when that value is
+    // nonzero.
+    mockGetLastPromptTokenCount.mockReturnValue(65_267);
+    mockGetLastCachedContentTokenCount.mockReturnValue(1_000);
+    const config = {
+      ...makeMockConfig(200_000),
+      getLlmClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(false),
+        getChat: vi.fn(() => {
+          throw new Error('Chat not initialized');
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    const cached = data.breakdown.cachedTokens ?? -1;
+    expect(data.totalTokens).toBe(65_267);
+    expect(data.totalTokens).toBeGreaterThan(cached);
+    expect(cached).toBeGreaterThanOrEqual(0);
+    expect(cached).toBe(1_000);
+    const cachedLine = formatContextUsageText(data)
+      .split('\n')
+      .find((line) => line.includes('Cached prefix'));
+    expect(cachedLine).toContain('1.0k tokens');
+  });
+
   it('reads the history through the shallow reader, not a deep clone', async () => {
     const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
     const getHistoryShallow = vi.fn().mockReturnValue(history);

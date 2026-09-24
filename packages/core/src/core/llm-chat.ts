@@ -2619,7 +2619,8 @@ export class LlmChat {
    * Seed the restored prompt and previous-response output token counts in one
    * step. Resume restores chat history plus both counters and their provenance
    * from the same checkpoint, so callers must avoid the normal
-   * setLastPromptTokenCount() clearing behavior.
+   * setLastPromptTokenCount() clearing behavior. The checkpoint does not
+   * carry a cached-content count, so that slot is cleared.
    */
   seedResumeTokenCounts(
     promptTokenCount: number,
@@ -2633,6 +2634,7 @@ export class LlmChat {
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
+    this.lastCachedContentTokenCount = 0;
     // Attribute the seeded counts to the active route so a model switch
     // after resume invalidates them like any API-reported count. (Detecting
     // a route that already differed at save time requires persisting route
