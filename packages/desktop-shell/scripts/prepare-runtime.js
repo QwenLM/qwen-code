@@ -231,12 +231,14 @@ function stageNodePty(desktopTarget) {
   const packageNames = ['@lydell/node-pty', prebuildPackage];
   const specs = nodePtyPackageSpecs(packageNames);
   if (!specs) {
-    // Degrade only where the repo pins nothing: every shipped desktop target
-    // has a pinned prebuild package, so this arm fires only for a target the
-    // map does not know (a future platform), where failing would trade a
-    // missing Web Terminal for no app at all. The release job still refuses
-    // to publish such a runtime — smoke-runtime.js's PTY round-trip
-    // hard-fails.
+    // Degrade only where the repo pins nothing. desktopTarget() throws for any
+    // target outside the five it allows and NODE_PTY_PREBUILD_PACKAGE maps
+    // exactly those five, so prebuildPackage is always a real name: reaching
+    // this arm means the source root's optionalDependencies dropped a pin, not
+    // that the target is unknown. Degrading still beats failing — a checkout
+    // missing one pin would otherwise trade a missing Web Terminal for no app
+    // at all. The release job still refuses to publish such a runtime —
+    // smoke-runtime.js's PTY round-trip hard-fails.
     console.warn(
       `[desktop] ${prebuildPackage} is not pinned in ` +
         `${path.join(sourceRoot, 'package.json')}; bundling ${desktopTarget} ` +
