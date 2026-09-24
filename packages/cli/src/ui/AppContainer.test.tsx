@@ -2213,6 +2213,7 @@ describe('AppContainer State Management', () => {
           kind: 'user' as const,
           modelText: 'persistent failure batch',
           turnKey: 'message-queue:persistent',
+          shellMode: true,
         };
       });
       const restoreMessages = vi.fn(() => {
@@ -2253,14 +2254,26 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
+      // #11626: this spread is the only production hop carrying the recorded
+      // shell intent from the queue entry to the router, and an
+      // `objectContaining({ userAdmission })` assertion cannot fail on a
+      // missing `shellMode` key — so pin the key itself.
+      expect(submitQuery).toHaveBeenCalledWith(
+        'persistent failure batch',
+        SendMessageType.UserQuery,
+        undefined,
+        expect.objectContaining({ shellMode: true }),
+      );
       // Deferred: admission failed because a turn is active, and the
       // mid-turn steer drain must not pull the restored batch (a peer
-      // envelope would leak into the turn raw, projection lost).
+      // envelope would leak into the turn raw, projection lost). The restore
+      // carries the same recorded intent, so the retry routes the same way
+      // (#11626).
       expect(restoreMessages).toHaveBeenCalledWith(
         ['persistent failure batch'],
         undefined,
         true,
-        undefined,
+        true,
       );
 
       // The guard holds while nothing has settled or changed: a failed
@@ -3067,12 +3080,13 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    // The shell-mode gate is load-bearing only through this call site: a
-    // shell-mode submission goes to bash, where a leading `<system-reminder>`
-    // is a syntax error, and is recorded as the command the user ran. Both arms
-    // go through the real handleFinalSubmit and the real shellModeActive state,
-    // so dropping `shellMode: shellModeActive` from the call turns the shell
-    // arm red while the ordinary arm keeps the assertion from passing vacuously.
+    // The workflow reminder's shell-mode gate is load-bearing through this
+    // call site: a shell-mode submission goes to bash, where a leading
+    // `<system-reminder>` is a syntax error, and is recorded as the command
+    // the user ran. Both arms go through the real handleFinalSubmit and the
+    // real shellModeActive state, so dropping `shellMode: shellModeActive`
+    // from the call turns the shell arm red while the ordinary arm keeps the
+    // assertion from passing vacuously.
     it.each([
       ['a shell-mode submission', true, false],
       ['an ordinary prompt', false, true],
@@ -3138,8 +3152,8 @@ describe('AppContainer State Management', () => {
         const submitted = mockQueueMessage.mock.calls[0][0] as string;
         expect(submitted).toContain('gh workflow list');
         // Asserted on the workflow reminder's own text: this call site gates
-        // only that reminder. The other notices the handler can prepend do not
-        // check shell mode yet (#11626).
+        // only that reminder. The other notices the handler prepends gate
+        // shell mode at their own call sites (see the #11626 cases below).
         const workflowReminder = 'includes the "workflow" keyword';
         if (expectReminder) {
           expect(submitted).toContain(workflowReminder);
