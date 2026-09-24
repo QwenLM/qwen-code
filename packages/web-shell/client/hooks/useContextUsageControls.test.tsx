@@ -59,6 +59,7 @@ function mount() {
   const command = deferred<{ stopReason: 'end_turn' | 'cancelled' }>();
   const read = deferred<DaemonSessionContextUsageStatus>();
   const onBeforeCompress = vi.fn();
+  const onAnnouncement = vi.fn();
   const sendPrompt = vi.fn().mockReturnValue(command.promise);
   const getContextUsage = vi.fn().mockReturnValue(read.promise);
   const actions = {
@@ -97,6 +98,7 @@ function mount() {
       busy,
       writeBlocked,
       onBeforeCompress,
+      onAnnouncement,
     });
     return null;
   }
@@ -117,6 +119,7 @@ function mount() {
     sendPrompt,
     getContextUsage,
     onBeforeCompress,
+    onAnnouncement,
     captureOwner,
     get controls() {
       return latest!;
@@ -152,6 +155,40 @@ function mount() {
 }
 
 describe('useContextUsageControls', () => {
+  it('announces each real operation transition once and gives retries a new identity', async () => {
+    const h = mount();
+    let operation!: Promise<void>;
+    act(() => {
+      operation = h.controls.compress();
+      void h.controls.compress();
+    });
+    expect(h.onAnnouncement).toHaveBeenCalledExactlyOnceWith({
+      operation: expect.any(Object),
+      sessionId: 'session-a',
+      workspaceCwd: '/workspace',
+      phase: 'pending',
+    });
+    const first = h.onAnnouncement.mock.calls[0][0].operation;
+    h.update({});
+    expect(h.onAnnouncement).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      h.command.reject(new Error('failed'));
+      await operation;
+    });
+    expect(h.onAnnouncement.mock.calls[1][0]).toMatchObject({
+      operation: first,
+      phase: 'failed',
+    });
+    h.sendPrompt.mockResolvedValueOnce({ stopReason: 'cancelled' });
+    await act(async () => h.controls.compress());
+    expect(h.onAnnouncement).toHaveBeenCalledTimes(4);
+    expect(h.onAnnouncement.mock.calls[2][0].operation).not.toBe(first);
+    expect(h.onAnnouncement.mock.calls[3][0]).toMatchObject({
+      operation: h.onAnnouncement.mock.calls[2][0].operation,
+      phase: 'cancelled',
+    });
+  });
+
   it('captures recovery-aware owners for retained counter reconciliation', () => {
     const h = mount();
     const original = h.controls.captureOwner();
@@ -411,6 +448,7 @@ describe('useContextUsageControls', () => {
         await operation;
       });
       expect(h.getContextUsage).not.toHaveBeenCalled();
+      expect(h.onAnnouncement).toHaveBeenCalledTimes(1);
       if (change === 'switch') expect(h.controls.result).toBeUndefined();
     },
   );

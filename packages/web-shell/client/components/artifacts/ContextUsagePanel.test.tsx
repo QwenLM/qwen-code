@@ -160,9 +160,11 @@ describe('ContextUsagePanel', () => {
     expect(button.disabled).toBe(true);
     expect(refresh(container).disabled).toBe(true);
     expect(button.parentElement?.title).toBe('');
-    expect(container.querySelector('[role="status"]')?.textContent).toBe(
-      'Compressing…',
-    );
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]')
+        ?.textContent,
+    ).toBe('Compressing…');
+    expect(container.querySelector('[role="status"]')).toBeNull();
     const updated = fixture();
     updated.usage.totalTokens = 30;
     updated.usage.breakdown.freeSpace = 60;
@@ -194,9 +196,11 @@ describe('ContextUsagePanel', () => {
       ...controls,
       result: { kind: 'refreshFailed' },
     });
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
-      'Compression completed, but usage could not be refreshed.',
-    );
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]')
+        ?.textContent,
+    ).toContain('Compression completed, but usage could not be refreshed.');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
     await act(async () => refresh(container).click());
     expect(compress).not.toHaveBeenCalled();
     expect(get).toHaveBeenCalledTimes(2);
@@ -275,7 +279,10 @@ describe('ContextUsagePanel', () => {
         ...controls,
         result: { kind: outcome },
       });
-      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      expect(
+        container.querySelector('[data-web-shell-compression-feedback]')
+          ?.textContent,
+      ).toBe(
         outcome === 'cancelled'
           ? 'Cancellation requested. Refresh to check current usage.'
           : 'Connection changed during compression. Refresh to check current usage.',
