@@ -221,5 +221,7 @@ claim renewal, round-trips a 200-character provisioner kind, and covers
 - Recoverable local-process provisioning (ready-record adoption) so a real
   local Runtime survives a Broker restart.
 - Drain lifecycle and adopted-binding health refresh.
-- Execution-level `UNKNOWN` reconciliation (tracked separately in #12380).
+- Settling an `UNKNOWN` execution whose generation is proven `LOST`.
+  `reconcileExecution` shipped in #12655 and answers only for a generation
+  that can still produce evidence, so this case needs its own rule.
 - Kubernetes provisioning, and schema migrations once the schema is versioned.

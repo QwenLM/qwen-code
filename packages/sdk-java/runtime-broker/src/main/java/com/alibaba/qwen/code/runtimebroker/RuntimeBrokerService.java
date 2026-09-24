@@ -377,9 +377,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             invalidateBinding(context.binding());
             throw evidenceUnavailable();
         }
-        // Cannot fail on this base, where a live entry always carries the
-        // lease the Session was acquired with; it guards a later adoption
-        // that re-registers the binding under a different lease.
+        // Adoption can re-register the binding at a different endpoint than
+        // the one this Session was acquired with; that stale route must not be
+        // used, so the lookup fails as runtime_reconciliation_required.
         requireLiveBinding(context.binding());
         return lookupOnce(context, unknown);
     }
