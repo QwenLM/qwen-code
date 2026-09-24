@@ -1,5 +1,7 @@
 # `/batch-api` design
 
+[中文版](./2026-09-23-batch-api-design.zh-CN.md)
+
 Status: implemented in PR #12492. User guide: `docs/users/features/batch.md`.
 Measured data: `docs/verification/batch-api/results-2026-09-23.md`.
 
@@ -116,11 +118,13 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   re-collection idempotent. The source is re-hashed before writing; a source
   changed since submission holds its result.
 - **Batch runs the user's realtime settings.** `run` freezes the configured
-  sampling parameters, output limit and thinking mode into the task, and
-  every retry reuses them. Settings with no verified Batch equivalent (e.g.
-  reasoning effort) are reported as notes, not guessed.
+  `samplingParams` and `extra_body` into the task exactly as realtime sends
+  them (verbatim, `extra_body` merged last), and every retry reuses them. A
+  unified reasoning effort with no wire equivalent is reported as a note,
+  not guessed.
 - **No money figure without prices.** Token estimates are always shown
-  (rough, chars / 3). A dollar estimate needs
+  (rough: ~4 characters per token for Latin text, ~1.5 for CJK). A dollar
+  estimate needs
   `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` / `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`.
   A plan's `maxCostUsd` is an **estimate gate, not a cap on the bill**; set
   without prices, it refuses to submit.
@@ -155,7 +159,7 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
 ```
 
 - Validated by `batch-task.ts` with zod `.strict()`:
-  - item ids match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`, since they ride inside
+  - item ids match `[A-Za-z0-9][A-Za-z0-9_-]{0,59}`, since they ride inside
     the custom_id;
   - ids and targets are unique;
   - targets never start inside `.git/`, `.github/`, `.husky/` or `.qwen/`:
@@ -228,8 +232,9 @@ involved only once, when results are in.
     - Same safety as a manual collect: the same lock, idempotency and
       no-overwrite delivery.
     - What it cannot collect is said once: no usable Batch credentials, a
-      submission with no matching provider batch, or a task pinned to another
-      endpoint or key (it backs off until the session switches back).
+      submission with no matching provider batch, a task pinned to another
+      endpoint or key (it backs off until the session switches back), or
+      three failed passes in a row.
   - `general.batchAutoCollect` (default `true`) turns it off.
   - Not covered: headless, `qwen serve`, ACP, web-shell — no model-free notice
     channel there; use `qwen batch collect`.

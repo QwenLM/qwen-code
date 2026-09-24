@@ -34,6 +34,9 @@ const mockGetIdeClientInstance = vi.hoisted(() =>
 const mockInitializeTelemetry = vi.hoisted(() => vi.fn());
 const mockStartBackgroundHousekeeping = vi.hoisted(() => vi.fn());
 const mockStartBatchAutoCollect = vi.hoisted(() => vi.fn());
+const mockResolveEndpoint = vi.hoisted(() =>
+  vi.fn(() => ({ apiKey: 'k', baseUrl: 'http://b', model: 'm' })),
+);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({
@@ -104,7 +107,7 @@ vi.mock('../commands/batch-auto-collect.js', () => ({
 }));
 
 vi.mock('../commands/batch.js', () => ({
-  resolveEndpoint: () => ({ apiKey: 'k', baseUrl: 'http://b', model: 'm' }),
+  resolveEndpoint: (...args: unknown[]) => mockResolveEndpoint(...args),
 }));
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
@@ -734,7 +737,12 @@ describe('startupPrefetch', () => {
   it('starts batch auto-collect for interactive sessions by default', async () => {
     // Update check off: when it and auto-collect import the mocked update
     // emitter in the same tick, vitest hands one of them the real module.
-    startPostRenderPrefetches(makeConfig(), makeSettings(false));
+    const settings = makeSettings(false);
+    // The working directory, not the project root, scopes the collector.
+    startPostRenderPrefetches(
+      makeConfig({ getWorkingDir: () => '/repo/sub' } as Partial<Config>),
+      settings,
+    );
 
     await vi.dynamicImportSettled();
 
@@ -743,12 +751,17 @@ describe('startupPrefetch', () => {
       projectRoot: string;
       notify: (message: string) => void;
     };
-    expect(options).toMatchObject({ projectRoot: '/repo' });
+    expect(options).toMatchObject({ projectRoot: '/repo/sub' });
     expect(
       (
         options as unknown as { resolveEndpoint: () => unknown }
       ).resolveEndpoint(),
     ).toMatchObject({ baseUrl: 'http://b' });
+    // The session's own loaded settings, not a re-read from disk.
+    expect(mockResolveEndpoint).toHaveBeenCalledWith(
+      process.env,
+      expect.objectContaining({ settings: settings.merged }),
+    );
     // Notices go through the update-notice channel, deferred while streaming.
     options.notify('Batch task t: 2 result(s) delivered.');
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {

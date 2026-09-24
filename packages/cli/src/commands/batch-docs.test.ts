@@ -166,25 +166,32 @@ describe('assembleRequests', () => {
 });
 
 describe('freezeRequest', () => {
-  it('keeps only verified wire fields from the sampling params', () => {
+  it('sends samplingParams and extra_body verbatim, as realtime does', () => {
     const { params } = freezeRequest({
       samplingParams: {
         temperature: 0.2,
-        top_p: 0.9,
         max_tokens: 1000,
-        some_sdk_option: true,
+        thinking_budget: 512,
+        top_k: null,
       },
+      extra_body: { temperature: 0.7, reasoning_effort: 'low' },
     });
-    expect(params).toEqual({ temperature: 0.2, top_p: 0.9, max_tokens: 1000 });
+    expect(params).toEqual({
+      temperature: 0.7,
+      max_tokens: 1000,
+      thinking_budget: 512,
+      reasoning_effort: 'low',
+    });
   });
 
   it('resolves the thinking switch with the realtime precedence', () => {
+    // extra_body is merged last on the realtime wire, so it wins.
     expect(
       freezeRequest({
         samplingParams: { enable_thinking: false },
         extra_body: { enable_thinking: true },
       }).params['enable_thinking'],
-    ).toBe(false);
+    ).toBe(true);
     expect(
       freezeRequest({ extra_body: { enable_thinking: true } }).params[
         'enable_thinking'
@@ -465,5 +472,10 @@ describe('estimateTokens', () => {
     expect(estimateTokens('a'.repeat(300))).toBeGreaterThan(
       estimateTokens('a'.repeat(3)),
     );
+  });
+
+  it('counts CJK text at its own, denser rate', () => {
+    expect(estimateTokens('a'.repeat(300))).toBe(75);
+    expect(estimateTokens('中'.repeat(300))).toBe(200);
   });
 });

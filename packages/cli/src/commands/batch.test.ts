@@ -14,6 +14,7 @@ import {
   batchRequest,
   downloadRemoteFile,
   getBatchJob,
+  listBatchJobs,
 } from './batch-client.js';
 import { prepareEndpoint, resolveEndpoint } from './batch.js';
 
@@ -173,6 +174,27 @@ describe('batch-client', () => {
     );
     expect(() => assertValidWindow('24h')).not.toThrow();
     expect(() => assertValidWindow('14d')).not.toThrow();
+  });
+
+  it('pages through the batch list with the last id as the cursor', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [{ id: 'b1' }, { id: 'b2' }],
+            has_more: true,
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ id: 'b3' }], has_more: false })),
+      );
+    const jobs = await listBatchJobs(ep, 2);
+    expect(jobs.map((job) => job.id)).toEqual(['b1', 'b2', 'b3']);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://x/v1/batches?limit=2',
+      'https://x/v1/batches?limit=2&after=b2',
+    ]);
   });
 
   it('leaves nothing under the final name when a download is cut short', async () => {

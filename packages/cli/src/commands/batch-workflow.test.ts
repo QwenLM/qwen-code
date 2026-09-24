@@ -1273,4 +1273,31 @@ describe('review fixes', () => {
     expect(task.items.map((item) => item.state)).toEqual(['held', 'delivered']);
     expect(task.items[0].heldReason).toMatch(/cannot write target/);
   });
+
+  it('creates the batch with the plan completion window', async () => {
+    const h = (harness = setup({ completionWindow: '7d' }));
+    await runPlan(h.deps, h.planPath);
+    expect(h.api.createBatch).toHaveBeenCalledWith(
+      h.deps.ep,
+      'file-in-1',
+      '7d',
+    );
+  });
+
+  it('downloads a result file again when its recorded local copy is gone', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    const task = h.store.load(taskId);
+    task.attempts[0].outputPath = path.join(h.home, 'gone', 'output.jsonl');
+    h.store.save(task);
+    await collectTask(h.deps, taskId);
+    expect(h.api.downloadFile).toHaveBeenCalled();
+    expect(h.store.load(taskId).items.map((item) => item.state)).toEqual([
+      'delivered',
+      'delivered',
+    ]);
+  });
 });

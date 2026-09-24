@@ -126,8 +126,10 @@ export function createBatchAutoCollector(
   // One-time warnings: a submission that cannot be reconciled, and a
   // session that cannot reach the Batch API at all.
   const warnedAmbiguous = new Set<string>();
-  // Tasks already told they are pinned to another endpoint or key.
-  const warnedEndpoint = new Set<string>();
+  // Consecutive failed passes per task, and tasks already told why they are
+  // not being collected (a switched endpoint or key, or repeated failures).
+  const failures = new Map<string, number>();
+  const warnedFailure = new Set<string>();
   let warnedNoEndpoint = false;
   let nextResolveAt = 0;
 
@@ -193,6 +195,12 @@ export function createBatchAutoCollector(
       log(`batch auto-collect: cannot read task records: ${String(error)}`);
       return IDLE_SCAN_MS;
     }
+    // A task reconciled by hand since its warning is polled again.
+    for (const task of tasks) {
+      if (warnedAmbiguous.has(task.id) && !task.attempts.some(isAmbiguous)) {
+        warnedAmbiguous.delete(task.id);
+      }
+    }
     const due = tasks.filter(
       (task) =>
         (nextPollAt.get(task.id) ?? 0) <= now() &&
@@ -227,16 +235,20 @@ export function createBatchAutoCollector(
           let reconciled = true;
           try {
             await collectOne(ep, task);
+            failures.delete(task.id);
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error);
-            // Persistent until the user switches back, so say it once rather
-            // than leave them waiting for a notice that cannot come.
+            const failed = (failures.get(task.id) ?? 0) + 1;
+            failures.set(task.id, failed);
+            // A switched endpoint or key lasts until the user switches back,
+            // and three failed passes in a row are not a blip: say it once,
+            // rather than leave the user waiting for a notice that cannot come.
             if (
-              /was submitted (to|with)/.test(message) &&
-              !warnedEndpoint.has(task.id)
+              (/was submitted (to|with)/.test(message) || failed >= 3) &&
+              !warnedFailure.has(task.id)
             ) {
-              warnedEndpoint.add(task.id);
+              warnedFailure.add(task.id);
               options.notify(
                 `Batch task ${task.id} cannot be collected automatically: ${message}`,
               );

@@ -10,6 +10,7 @@
 // the agent loop. Design: docs/design/2026-09-23-batch-api-design.md
 import type { Argv, CommandModule } from 'yargs';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
+import { isTlsVerificationDisabled } from '@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js';
 import { loadSettings } from '../config/settings.js';
 import {
   getAuthTypeFromEnv,
@@ -138,13 +139,16 @@ export async function prepareEndpoint(
   env: Record<string, string | undefined> = process.env,
   cliOptions: BatchCliOptions = {},
 ): Promise<BatchEndpoint> {
-  if (cliOptions.insecure) {
-    // Same route loadCliConfig uses: the dispatcher layer ORs this with
-    // NODE_TLS_REJECT_UNAUTHORIZED, which is what the global fetch obeys.
-    process.env['QWEN_TLS_INSECURE'] = '1';
+  // Same route loadCliConfig uses: --insecure surfaces as QWEN_TLS_INSECURE,
+  // and either one disables verification for the global fetch used here.
+  if (cliOptions.insecure) process.env['QWEN_TLS_INSECURE'] = '1';
+  if (
+    isTlsVerificationDisabled() &&
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0'
+  ) {
     process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
     writeStderrLine(
-      'WARNING: TLS certificate verification is disabled (--insecure); ' +
+      'WARNING: TLS certificate verification is disabled (--insecure / QWEN_TLS_INSECURE); ' +
         'connections made by this command are vulnerable to man-in-the-middle attacks.',
     );
   }
@@ -168,6 +172,14 @@ async function run(fn: () => Promise<void>): Promise<void> {
     writeStderrLine(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   }
+  // parseArguments exits right after the handler: let queued output reach a
+  // pipe first, or a long summary read by the agent is cut off.
+  await Promise.all(
+    [process.stdout, process.stderr].map(
+      (stream) =>
+        new Promise<void>((resolve) => stream.write('', () => resolve())),
+    ),
+  );
 }
 
 // A session's auto-collector holds a task lock for a few seconds at most;

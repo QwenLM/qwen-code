@@ -20,12 +20,21 @@ export const sha256 = (text: string) =>
   crypto.createHash('sha256').update(text).digest('hex');
 
 /**
- * Rough token estimate for budgeting only: ~3 chars/token splits the
- * difference between English (~4) and CJK (~1.5) prose. It is never shown
- * as metering; actual usage comes back in the batch output lines.
+ * Rough token estimate for budgeting only: ~4 chars/token for Latin text and
+ * ~1.5 for CJK and other wide scripts, counted per character so a Chinese
+ * document is not under-estimated by half. Never shown as metering; actual
+ * usage comes back in the batch output lines.
  */
-export const estimateTokens = (text: string) =>
-  Math.max(1, Math.ceil([...text].length / 3));
+export const estimateTokens = (text: string) => {
+  let latin = 0;
+  let wide = 0;
+  for (const ch of text) {
+    if ((ch.codePointAt(0) ?? 0) < 0x2e80) latin++;
+    else wide++;
+  }
+  // latin / 4 + wide / 1.5, in integers so the result is exact.
+  return Math.max(1, Math.ceil((3 * latin + 8 * wide) / 12));
+};
 
 export interface AssembledRequest {
   customId: string;
@@ -53,19 +62,6 @@ export interface FrozenRequest {
   notes: string[];
 }
 
-// Only fields verified as DashScope chat-completions body parameters; other
-// generation-config keys are SDK/adapter options, not wire JSON.
-const FROZEN_SAMPLING_FIELDS = [
-  'temperature',
-  'top_p',
-  'top_k',
-  'presence_penalty',
-  'frequency_penalty',
-  'repetition_penalty',
-  'seed',
-  'max_tokens',
-] as const;
-
 export interface GenerationConfigLike {
   samplingParams?: Record<string, unknown>;
   extra_body?: Record<string, unknown>;
@@ -76,34 +72,30 @@ export interface GenerationConfigLike {
 export function freezeRequest(
   config: GenerationConfigLike | undefined,
 ): FrozenRequest {
-  const params: Record<string, unknown> = {};
   const notes: string[] = [];
-  const sampling = config?.samplingParams ?? {};
-  for (const field of FROZEN_SAMPLING_FIELDS) {
-    if (sampling[field] !== undefined && sampling[field] !== null) {
-      params[field] = sampling[field];
-    }
+  // Realtime sends samplingParams and extra_body to the wire verbatim, with
+  // extra_body merged last; Batch reproduces exactly that.
+  const params: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries({
+    ...config?.samplingParams,
+    ...config?.extra_body,
+  })) {
+    if (value !== undefined && value !== null) params[key] = value;
   }
-  // Same precedence the realtime DashScope adapter applies: an explicit
-  // sampling switch, then extra_body, then a disabled reasoning config.
-  const thinking =
-    typeof sampling['enable_thinking'] === 'boolean'
-      ? sampling['enable_thinking']
-      : typeof config?.extra_body?.['enable_thinking'] === 'boolean'
-        ? (config.extra_body['enable_thinking'] as boolean)
-        : config?.reasoning === false
-          ? false
-          : undefined;
-  if (thinking === false && config?.thinkingMandatory) {
+  if (params['enable_thinking'] === undefined && config?.reasoning === false) {
+    params['enable_thinking'] = false;
+  }
+  if (params['enable_thinking'] === false && config?.thinkingMandatory) {
+    delete params['enable_thinking'];
     notes.push('thinking cannot be disabled for this model; left on');
-  } else if (thinking !== undefined) {
-    params['enable_thinking'] = thinking;
   }
   if (
     config?.reasoning &&
     (config.reasoning.effort !== undefined ||
       config.reasoning.budget_tokens !== undefined) &&
-    thinking === undefined
+    params['enable_thinking'] === undefined &&
+    params['reasoning_effort'] === undefined &&
+    params['thinking_budget'] === undefined
   ) {
     notes.push(
       'the configured reasoning effort is not reproduced in Batch requests; the provider default thinking mode applies',

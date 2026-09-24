@@ -25,8 +25,7 @@ const state = {
   nextJob: 1,
   // job behavior: 'auto' completes after 2 status polls; 'stay' never does.
   behavior: 'auto',
-  failItem: null, // custom_id to fail with finish_reason=length once
-  failOnce: true,
+  failItem: null, // custom_id to fail with finish_reason=length
 };
 
 function readBody(req) {
@@ -42,7 +41,6 @@ function settle(job) {
   job.completed_at = Math.floor(Date.now() / 1000);
   const input = state.files.get(job.input_file_id);
   const outLines = [];
-  const errLines = [];
   // The upload is stored as the raw multipart body; the JSONL payload is
   // exactly the lines that start with '{'.
   for (const raw of input.split('\n')) {
@@ -97,11 +95,6 @@ function settle(job) {
   const outId = `file-${state.nextFile++}`;
   state.files.set(outId, outLines.join('\n') + '\n');
   job.output_file_id = outId;
-  if (errLines.length) {
-    const errId = `file-${state.nextFile++}`;
-    state.files.set(errId, errLines.join('\n') + '\n');
-    job.error_file_id = errId;
-  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -120,9 +113,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/v1/batches') {
     const body = JSON.parse((await readBody(req)).toString('utf8'));
     const id = `batch-${state.nextJob++}`;
-    // Multipart input file content arrives raw; extract the JSONL payload:
-    // the fake server stored the whole multipart body under the input id.
-    // Recover the inner JSONL by slicing out the file part boundary.
+    // The input file stays stored as the raw multipart body; settle() reads
+    // the JSONL lines out of it.
     const job = {
       id,
       status: 'in_progress',
@@ -211,9 +203,10 @@ const port = server.address().port;
 
 const project = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-project-'));
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-home-'));
-// Isolate settings: the CLI merges ~/.qwen/settings.json, whose provider
-// config would override the env endpoint — and point the command at a real,
-// billable API. An empty HOME keeps this test hermetic.
+// Isolate settings: user, QWEN_HOME and system settings would all merge in,
+// and a provider config there would override the env endpoint and point the
+// command at a real, billable API. Every settings source is redirected into
+// empty temp paths.
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-fakehome-'));
 fs.mkdirSync(path.join(project, 'docs', 'zh'), { recursive: true });
 fs.writeFileSync(path.join(project, 'docs', 'zh', 'a.md'), '# A\n\n甲文档。\n');
@@ -233,6 +226,10 @@ fs.writeFileSync(
 );
 const env = {
   HOME: fakeHome,
+  USERPROFILE: fakeHome,
+  QWEN_HOME: path.join(fakeHome, '.qwen'),
+  QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(fakeHome, 'system-settings.json'),
+  QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(fakeHome, 'system-defaults.json'),
   OPENAI_API_KEY: 'fake-key',
   OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
   OPENAI_MODEL: 'qwen-plus',
@@ -305,19 +302,27 @@ try {
 
   // 4. idempotent re-collect
   const attemptDir = path.join(home, 'tasks', taskId, 'attempt-001');
-  const filesBefore = fs.readdirSync(attemptDir).sort().join(',');
+  // Names and mtimes: a re-download rewrites a file under the same name.
+  const snapshot = () =>
+    fs
+      .readdirSync(attemptDir)
+      .sort()
+      .map((f) => `${f}:${fs.statSync(path.join(attemptDir, f)).mtimeMs}`)
+      .join(',');
+  const filesBefore = snapshot();
   const deletesBefore = state.deleted.length;
   const again = await run(project, env, ['collect', taskId]);
-  check('re-collect is a no-op success', /2 delivered/.test(again.stdout));
+  check(
+    're-collect is a no-op success',
+    again.code === 0 && /2 delivered/.test(again.stdout),
+    `exit ${again.code}`,
+  );
   check(
     'no extra remote deletes on re-collect',
     state.deleted.length === deletesBefore,
     state.deleted.join(','),
   );
-  check(
-    'no re-download on re-collect',
-    fs.readdirSync(attemptDir).sort().join(',') === filesBefore,
-  );
+  check('no re-download on re-collect', snapshot() === filesBefore);
 
   // 5. list
   const listOut = await run(project, env, ['list']);

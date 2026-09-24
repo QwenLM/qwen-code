@@ -177,7 +177,7 @@ export async function downloadRemoteFile(
   try {
     await pipeline(
       Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]),
-      fs.createWriteStream(partial),
+      fs.createWriteStream(partial, { mode: 0o600 }),
     );
   } catch (error) {
     fs.rmSync(partial, { force: true });

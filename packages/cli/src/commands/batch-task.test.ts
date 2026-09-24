@@ -80,7 +80,7 @@ describe('validatePlan', () => {
   });
 
   it('rejects item ids that cannot ride inside a provider custom_id', () => {
-    for (const id of ['has space', '-leading-dash', 'a'.repeat(65), '']) {
+    for (const id of ['has space', '-leading-dash', 'a'.repeat(61), '']) {
       expect(() =>
         validatePlan(
           { ...validPlan, items: [{ ...validPlan.items[0], id }] },
@@ -204,6 +204,20 @@ describe('BatchTaskStore', () => {
   it('keeps the ledger out of git', () => {
     store.create(validatePlan(validPlan, 'plan.json'), root, 'qwen-plus');
     expect(fs.readFileSync(path.join(root, '.gitignore'), 'utf8')).toBe('*\n');
+  });
+
+  it('treats a lock it cannot read as held instead of spinning', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    // A directory where the lock file should be: it exists, but reading it
+    // fails, which used to loop without ever reaching the wait deadline.
+    fs.mkdirSync(path.join(path.dirname(store.fileOf(task.id)), 'lock'));
+    await expect(
+      store.withLock(task.id, async () => 'ran', { waitMs: 0 }),
+    ).rejects.toThrow(/in use by another/);
   });
 
   it('refuses a second holder of the task lock and releases it after', async () => {

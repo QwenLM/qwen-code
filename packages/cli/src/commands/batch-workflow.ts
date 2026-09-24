@@ -151,6 +151,13 @@ function assembleAttempt(
   // Output estimate per item: the plan's figure, else the input size, never
   // above the output limit the requests carry (thinking is not included).
   const limit = outputLimitOf(task, maxOutputTokens);
+  // Provider limits are checked as early as they can be: the count before
+  // any source is read, the size while the file is built.
+  if (items.length > MAX_REQUESTS_PER_FILE) {
+    throw new Error(
+      `${items.length} items exceed the provider's ${MAX_REQUESTS_PER_FILE}-request per-file limit; split the plan.`,
+    );
+  }
   const assembled = assembleRequests(
     maxOutputTokens === undefined
       ? task.plan
@@ -162,6 +169,7 @@ function assembleAttempt(
     task.request,
   );
   let jsonl = '';
+  let fileBytes = 0;
   let inputTokens = 0;
   let outputTokens = 0;
   for (const request of assembled) {
@@ -173,6 +181,12 @@ function assembleAttempt(
           `provider's ${MAX_LINE_BYTES}-byte line limit; split the document.`,
       );
     }
+    fileBytes += bytes;
+    if (fileBytes > MAX_FILE_BYTES) {
+      throw new Error(
+        `assembled input is over the provider's ${MAX_FILE_BYTES}-byte per-file limit; split the plan.`,
+      );
+    }
     jsonl += encoded;
     inputTokens += request.inputTokens;
     const expected =
@@ -180,16 +194,6 @@ function assembleAttempt(
     outputTokens += limit === undefined ? expected : Math.min(expected, limit);
     const item = itemById.get(request.itemId);
     if (item) item.sourceSha256 = request.sourceSha256;
-  }
-  if (assembled.length > MAX_REQUESTS_PER_FILE) {
-    throw new Error(
-      `${assembled.length} items exceed the provider's ${MAX_REQUESTS_PER_FILE}-request per-file limit; split the plan.`,
-    );
-  }
-  if (Buffer.byteLength(jsonl) > MAX_FILE_BYTES) {
-    throw new Error(
-      `assembled input is over the provider's ${MAX_FILE_BYTES}-byte per-file limit; split the plan.`,
-    );
   }
   return { jsonl, inputTokens, outputTokens };
 }
@@ -720,13 +724,21 @@ async function collectLocked(
 
     const attemptDir = store.attemptDir(task.id, attempt.attempt);
     fs.mkdirSync(attemptDir, { recursive: true, mode: PRIVATE_DIR_MODE });
-    if (job?.output_file_id && !attempt.outputPath) {
+    // A recorded local copy that has since disappeared is downloaded again
+    // rather than read as "the batch produced nothing".
+    if (
+      job?.output_file_id &&
+      !(attempt.outputPath && fs.existsSync(attempt.outputPath))
+    ) {
       const target = path.join(attemptDir, 'output.jsonl');
       await api.downloadFile(deps.ep, job.output_file_id, target);
       attempt.outputPath = target;
       store.save(task);
     }
-    if (job?.error_file_id && !attempt.errorPath) {
+    if (
+      job?.error_file_id &&
+      !(attempt.errorPath && fs.existsSync(attempt.errorPath))
+    ) {
       const target = path.join(attemptDir, 'error.jsonl');
       await api.downloadFile(deps.ep, job.error_file_id, target);
       attempt.errorPath = target;
@@ -1062,9 +1074,15 @@ async function retryLocked(
       : candidates;
   if (retryItems.length === 0) {
     if (truncated.length > 0) return;
+    const awaiting = task.items.filter(
+      (item) => item.state === 'submitted',
+    ).length;
     deps.out(
-      `task ${taskId}: nothing to retry — no failed items ` +
-        `(held target conflicts need resolving; then run \`qwen batch collect ${taskId}\`).`,
+      `task ${taskId}: nothing to retry — no failed items` +
+        (awaiting > 0
+          ? `; ${awaiting} item(s) still await their batch (\`qwen batch collect ${taskId}\`)`
+          : '') +
+        ` (held target conflicts need resolving; then run \`qwen batch collect ${taskId}\`).`,
     );
     return;
   }

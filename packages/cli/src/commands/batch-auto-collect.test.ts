@@ -290,6 +290,22 @@ describe('batch auto-collect', () => {
     expect(h.notices).toEqual([]);
   });
 
+  it('says once when a task keeps failing to collect', async () => {
+    const h = setup();
+    const taskId = await submit(h);
+    h.api.getBatch.mockRejectedValue(new Error('HTTP 500: provider down'));
+    const ac = collector(h);
+    for (let pass = 0; pass < 5; pass++) {
+      await ac.tick();
+      h.clock.now += 10 * 60_000;
+    }
+    expect(h.notices).toEqual([
+      expect.stringMatching(
+        new RegExp(`Batch task ${taskId} cannot be collected automatically`),
+      ),
+    ]);
+  });
+
   it('announces what a partial collect delivered', async () => {
     const h = setup();
     const taskId = await submit(h);
@@ -391,6 +407,28 @@ describe('describeCollect', () => {
         jobErrors: [],
       }),
     ).toBeUndefined();
+  });
+
+  it('names held items and what still awaits the provider', () => {
+    const held = {
+      id: 'b',
+      source: 's',
+      target: 'docs/en/b.md',
+      state: 'held' as const,
+      heldReason: 'target "docs/en/b.md" already exists with different content',
+    };
+    const text = describeCollect({
+      taskId: 't',
+      settled: 1,
+      delivered: [],
+      held: [held],
+      failed: [],
+      awaiting: 3,
+      jobErrors: [],
+    });
+    expect(text).toMatch(/1 held \(target "docs\/en\/b.md" already exists/);
+    expect(text).toMatch(/qwen batch collect t/);
+    expect(text).toMatch(/3 still waiting on the provider/);
   });
 
   it('names the provider error of a batch rejected as a whole', () => {

@@ -104,7 +104,7 @@ kebab-case task name) with the write_file tool:
 
 Rules:
 
-- `id` must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` (1–64 characters) and be
+- `id` must match `[A-Za-z0-9][A-Za-z0-9_-]{0,59}` (1–60 characters) and be
   unique per item; it
   becomes part of the provider-side `custom_id`.
 - Paths are relative to the current working directory. Every `target` must

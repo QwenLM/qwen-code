@@ -23,18 +23,21 @@ export const BATCH_TASK_SCHEMA_VERSION = 1;
 // custom_id is the only handle the provider returns, so item ids ride inside
 // it (`<itemId>#<attempt>`); keep the charset to what safely survives every
 // layer in between.
-export const ITEM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+// 60 characters leaves room for `#<attempt>` within a 64-character custom_id.
+export const ITEM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,59}$/;
 
-const planItemSchema = z.object({
-  id: z
-    .string()
-    .regex(
-      ITEM_ID_PATTERN,
-      'item id must be 1-64 chars of [A-Za-z0-9_-] and start alphanumeric — it becomes part of the provider custom_id',
-    ),
-  source: z.string().min(1, 'item source path is required'),
-  target: z.string().min(1, 'item target path is required'),
-});
+const planItemSchema = z
+  .object({
+    id: z
+      .string()
+      .regex(
+        ITEM_ID_PATTERN,
+        'item id must be 1-60 chars of [A-Za-z0-9_-] and start alphanumeric — it becomes part of the provider custom_id',
+      ),
+    source: z.string().min(1, 'item source path is required'),
+    target: z.string().min(1, 'item target path is required'),
+  })
+  .strict();
 
 export const batchPlanSchema = z
   .object({
@@ -56,12 +59,14 @@ export const batchPlanSchema = z
     maxOutputTokens: z.number().int().positive().optional(),
     expectedOutputTokensPerItem: z.number().int().positive().optional(),
     enableThinking: z.boolean().optional(),
-    shared: z.object({
-      system: z.string().optional(),
-      instructions: z
-        .string()
-        .min(1, 'shared.instructions carries the transform rules'),
-    }),
+    shared: z
+      .object({
+        system: z.string().optional(),
+        instructions: z
+          .string()
+          .min(1, 'shared.instructions carries the transform rules'),
+      })
+      .strict(),
     items: z.array(planItemSchema).min(1, 'plan has no items'),
   })
   .strict();
@@ -380,7 +385,11 @@ export class BatchTaskStore {
       return await fn();
     } finally {
       // Never remove a lock someone else took over after a stale check.
-      if (readLock(lock) === token) fs.rmSync(lock, { force: true });
+      try {
+        if (readLock(lock) === token) fs.rmSync(lock, { force: true });
+      } catch {
+        // A lock left by this process is taken over as stale once it exits.
+      }
     }
   }
 
@@ -479,11 +488,13 @@ export function refreshTaskStatus(task: BatchTask): void {
   }
 }
 
+// undefined only when no lock exists; a lock that exists but cannot be read
+// is reported as unparseable content, i.e. held — never a tight retry loop.
 function readLock(lock: string): string | undefined {
   try {
     return fs.readFileSync(lock, 'utf8');
-  } catch {
-    return undefined;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : '';
   }
 }
 
