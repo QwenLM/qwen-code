@@ -18,6 +18,7 @@ import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
+import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -42,6 +43,19 @@ export function worktreeBranchForSlug(slug: string): string {
 export const WORKTREE_SESSION_FILE = '.qwen-session';
 
 const WORKTREE_SESSION_MARKER_MAX_BYTES = 512;
+
+/**
+ * Diff flags that stop the tree being diffed from choosing the program that
+ * renders it.
+ *
+ * A `.gitattributes` binding a `diff=<name>` driver travels with a tree
+ * obtained as files, and the `diff.<name>.textconv` or `diff.external` that
+ * goes with it was measured running through these very calls. They also keep
+ * the patch appliable, since a converted blob is no longer the pre-image
+ * `git apply` expects. `core.fsmonitor` is handled for every client in
+ * `loadSimpleGit`.
+ */
+const NO_EXEC_DIFF_FLAGS = ['--no-ext-diff', '--no-textconv'] as const;
 
 export type StrictWorktreeSessionMarker =
   | { state: 'missing' }
@@ -1371,7 +1385,7 @@ export class GitWorktreeService {
         baseBranch ??
         (await this.getCurrentBranch());
       return await this.withStagedChanges(worktreeGit, () =>
-        worktreeGit.diff(['--binary', '--cached', base]),
+        worktreeGit.diff([...NO_EXEC_DIFF_FLAGS, '--binary', '--cached', base]),
       );
     } catch (error) {
       return `Error getting diff: ${error instanceof Error ? error.message : 'Unknown error'}`;
@@ -1409,7 +1423,7 @@ export class GitWorktreeService {
       }
 
       const patch = await this.withStagedChanges(worktreeGit, () =>
-        worktreeGit.diff(['--binary', '--cached', base]),
+        worktreeGit.diff([...NO_EXEC_DIFF_FLAGS, '--binary', '--cached', base]),
       );
 
       if (!patch.trim()) {
@@ -2740,17 +2754,31 @@ export class GitWorktreeService {
    */
   async hasWorktreeChanges(worktreePath: string): Promise<boolean> {
     try {
-      const { simpleGit } = await loadSimpleGit();
-      const wtGit = simpleGit(worktreePath);
-      const status = await wtGit.status();
-      // Defensive: `status.isClean()` reads several status arrays, but
-      // we OR with `conflicted.length` explicitly so future simple-git
-      // versions that change the bookkeeping cannot silently let a
-      // mid-merge worktree appear clean to the agent cleanup path
-      // (which would then delete it and lose the resolution work).
-      // `not_added` covers untracked; `staged`/`modified`/etc. cover
-      // the rest.
-      return !status.isClean() || status.conflicted.length > 0;
+      // `--no-optional-locks` keeps the read from refreshing and writing the
+      // index, so a tree-shipped `.git/hooks/post-index-change` never runs and
+      // the probe stays a pure read. The flag is carried in argv — not via
+      // simple-git's `.env('GIT_OPTIONAL_LOCKS', '0')`, whose two-arg form
+      // *replaces* the child environment (dropping PATH/HOME and hiding the
+      // global `core.excludesFile` / `safe.directory`).
+      const { stdout } = await execFileAsync(
+        'git',
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+        ],
+        {
+          cwd: worktreePath,
+          encoding: 'utf8',
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+      // Porcelain v1 emits one line per change (`XY path`); any line — tracked
+      // (` M`), untracked (`??`), or conflicted (`UU`) — means the worktree is
+      // not clean.
+      return stdout.trim().length > 0;
     } catch {
       return true;
     }
@@ -2764,22 +2792,36 @@ export class GitWorktreeService {
     worktreePath: string,
   ): Promise<{ tracked: number; untracked: number } | null> {
     try {
-      const { simpleGit } = await loadSimpleGit();
-      const wtGit = simpleGit(worktreePath);
-      const status = await wtGit.status();
-      // `conflicted` is mutually exclusive with the other arrays in
-      // simple-git's status — a worktree mid-merge with no other
-      // edits would otherwise read as `{tracked: 0, untracked: 0}`
-      // and slip past the dirty-state guard in `exit_worktree`,
-      // discarding the merge resolution. Treat as tracked changes.
-      const tracked =
-        status.staged.length +
-        status.modified.length +
-        status.deleted.length +
-        status.renamed.length +
-        status.created.length +
-        status.conflicted.length;
-      const untracked = status.not_added.length;
+      const { stdout } = await execFileAsync(
+        'git',
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+        ],
+        {
+          cwd: worktreePath,
+          encoding: 'utf8',
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+      let tracked = 0;
+      let untracked = 0;
+      // Porcelain v1: each change line begins with a two-char status code.
+      // `??` is untracked; every other code is a tracked change — staged,
+      // unstaged, renamed, or conflicted (`UU` and friends, which porcelain v1
+      // emits as ordinary lines, so the mid-merge case the previous simple-git
+      // enumeration already covered stays covered).
+      for (const line of stdout.split('\n')) {
+        if (line.length === 0) continue;
+        if (line.startsWith('??')) {
+          untracked += 1;
+        } else {
+          tracked += 1;
+        }
+      }
       return { tracked, untracked };
     } catch {
       return null;

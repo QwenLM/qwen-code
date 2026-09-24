@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Qwen Code</string>
+    <string name="retry">Retry</string>
+    <string name="connections">Connections</string>
+    <string name="development_notice">Development client. Per-device credential revocation is not yet available.</string>
+    <string name="no_profiles">Add a daemon connection to get started.</string>
+    <string name="connect">Connect</string>
+    <string name="edit">Edit</string>
+    <string name="delete">Delete</string>
+    <string name="save">Save</string>
+    <string name="add_profile">Add connection</string>
+    <string name="edit_profile">Edit connection</string>
+    <string name="delete_profile">Delete connection?</string>
+    <string name="delete_profile_message">Remove %1$s and its saved credential from this device? This does not revoke the credential on the daemon.</string>
+    <string name="profile_name">Name</string>
+    <string name="daemon_address">Daemon address</string>
+    <string name="daemon_token">Bearer token</string>
+    <string name="keep_credential">Keep the saved credential</string>
+    <string name="credential_hint">Use HTTPS for remote daemons. A blank token without “Keep” uses no saved credential.</string>
+    <string name="changed_origin_credential">For a different address, enter its token or uncheck “Keep the saved credential”.</string>
+    <string name="save_failed">Could not save this connection. Retry before connecting.</string>
+    <string name="provider_update">Android System WebView update required</string>
+    <string name="provider_requirement">Connections require WebView 111 or later with isolated profiles. New or recovered browser profiles also require complete browsing-data deletion support. Update the WebView provider and retry.</string>
+    <string name="preparing_browser">Preparing isolated browser storage</string>
+    <string name="preparing_browser_hint">Wait for the WebView provider to finish clearing this connection’s previous browser data. No page or credential is loaded before completion. You can return to Connections and retry later.</string>
+    <string name="browser_preparation_failed">Could not prepare browser storage</string>
+    <string name="connection_controls">Connections · %1$s</string>
+    <string name="connection_failed">Cannot reach Qwen Code</string>
+    <string name="connection_failed_hint">Check the daemon address, connection and certificate, then retry.</string>
+    <string name="renderer_stopped">WebView stopped</string>
+    <string name="retry_connection">Reconnect to open a new browser session.</string>
+    <string name="storage_unavailable">Connection data unavailable</string>
+    <string name="storage_unavailable_hint">The saved data could not be opened or migrated safely. Retry, or reset it and enter your connection details again.</string>
+    <string name="reset_profiles">Reset connections</string>
+    <string name="reset_profiles_warning">Delete all saved connections and credentials on this device? You will need to enter them again. Daemon credentials are not revoked.</string>
+</resources>

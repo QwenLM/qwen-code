@@ -21,7 +21,10 @@ import {
   isShellCommandReadOnlyAST,
   isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  getShellConfiguration,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -47,7 +50,7 @@ const debugLogger = createDebugLogger('PERMISSIONS');
  *   request.
  * - `deferred`: registered but hidden from the eager model request — the
  *   same treatment `shouldDefer` tools get. The tool stays listed in
- *   `/tools`, discoverable and loadable via ToolSearch, and a call to it
+ *   `/tools`, discoverable via ToolSearch, callable through ToolCall, and a call to it
  *   goes through the normal approval flow. This is what happens to
  *   built-in tools not named in an active `settings.tools.eager`
  *   allowlist: their schemas stay out of the eager request (#9827) without
@@ -70,6 +73,72 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
 };
 
 /**
+ * Split a command for `Bash(...)` rule matching, recognising a trailing Bash
+ * comment when it is safe to do so (#11815).
+ *
+ * The fast path needs one property, not string equality: a `#` recognised
+ * here must still begin a comment in the text the shell executes. Equality is
+ * unachievable — `ShellTool.execute()` splices attribution trailers into a
+ * quoted `git commit -m` / `gh pr create --body` argument after this decision,
+ * and `cmd`/PowerShell execution prepends an `applyUtf8Prefix()` encoding
+ * prefix. The property survives the trailer splice only because both
+ * rewriters trim a trailing unquoted comment first, so the splice lands ahead
+ * of the `#`; a rewriter that spliced after it would insert a newline that
+ * ends the comment and revives the tail.
+ *
+ * `monitor` is excluded because its scanned string is not an invocation at
+ * all: `normalizePermissionContext()` substitutes the quote-stripped
+ * `normalizeMonitorCommand().safetyCommand` reconstruction while monitor
+ * spawns `spawnCommand`, so a `#` that the spawned shell sees inside the
+ * wrapper's inner quotes would be scanned here as an unquoted comment start
+ * and swallow a separator the spawned command really executes. Monitor
+ * therefore keeps the conservative splitter, and stays covered by `Bash(...)`
+ * rules through it.
+ */
+function splitCommandForRules(command: string, toolName: string): string[] {
+  if (
+    toolName !== 'run_shell_command' ||
+    getShellConfiguration().shell !== 'bash' ||
+    command.includes('\n') ||
+    command.includes('\r')
+  ) {
+    return splitCompoundCommand(command);
+  }
+
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (ch === '\\' || ch === '$' || ch === '`' || ';&|(){}<>'.includes(ch)) {
+      return splitCompoundCommand(command);
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+    } else if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+    } else if (
+      ch === '#' &&
+      !inSingle &&
+      !inDouble &&
+      // Bash only treats ASCII space and tab as word boundaries here. A line
+      // whose first non-whitespace character is `#` is deliberately not
+      // collapsed — at index 0 or behind leading spaces/tabs, and regardless
+      // of any later `#` in the comment text: the collapsed segment would
+      // start with `#`, so no `Bash(...)` rule could match it any more and an
+      // explicit user rule would silently stop applying. Testing the line
+      // rather than this `#` is what makes a second word-start `#` on an
+      // otherwise comment-only line split conservatively too.
+      (command[i - 1] === ' ' || command[i - 1] === '\t') &&
+      !command.trimStart().startsWith('#')
+    ) {
+      return [command];
+    }
+  }
+
+  return splitCompoundCommand(command);
+}
+
+/**
  * Minimal interface for the parts of Config used by PermissionManager.
  * Keeps the dependency explicit and avoids a circular import on the
  * full Config class.
@@ -79,6 +148,7 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
  * PermissionManager therefore only needs these three getters.
  */
 export interface PermissionManagerConfig {
+  getShellExecutionSandbox?(): unknown;
   /** Merged allow-rules (settings + coreTools + allowedTools). */
   getPermissionsAllow(): string[] | undefined;
   /** Merged ask-rules (settings only). */
@@ -334,7 +404,7 @@ export class PermissionManager {
     // most restrictive result. Priority: deny > ask > allow.
     let bashDecision: PermissionDecision;
     if (command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
         bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
       } else {
@@ -626,6 +696,7 @@ export class PermissionManager {
     command: string,
     cwd?: string,
   ): Promise<'allow' | 'ask'> {
+    if (this.config.getShellExecutionSandbox?.()) return 'ask';
     try {
       const isReadOnly = cwd
         ? await isShellCommandReadOnlyASTInDirectory(command, cwd)
@@ -735,8 +806,8 @@ export class PermissionManager {
    *
    * Returns `true` for `registered` AND `deferred` tools: a deferred tool
    * is still registered — it is merely hidden from the eager model request
-   * and loadable via ToolSearch — so a call to it must flow through the
-   * normal approval evaluation, not a permission error (#10075). Only
+   * and reachable via ToolSearch + ToolCall — so a call to it must flow
+   * through the normal approval evaluation, not a permission error (#10075). Only
    * `disabled` tools (whole-tool deny rule, or unlisted in the legacy
    * `coreTools` allowlist) return `false`.
    *
@@ -785,6 +856,7 @@ export class PermissionManager {
       canonicalName === ToolNames.STRUCTURED_OUTPUT ||
       PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) ||
       canonicalName === ToolNames.TASK_STOP ||
+      canonicalName === ToolNames.TOOL_CALL ||
       canonicalName === ToolNames.TOOL_SEARCH ||
       canonicalName.startsWith('mcp__') ||
       canonicalName.startsWith('computer_use__')
@@ -797,7 +869,7 @@ export class PermissionManager {
    * While the `settings.tools.eager` allowlist is active (see
    * `isEagerToolAllowListActive`), a built-in tool not named in it is
    * `deferred`, NOT `disabled`: it stays registered — listed in `/tools`,
-   * discoverable and loadable via ToolSearch — but its schema is kept out
+   * discoverable and callable through the ToolSearch + ToolCall bridge — but its schema is kept out
    * of the eager model request, which is the #9827 guarantee. Call-time
    * approval for such a tool falls back to the normal permission
    * evaluation (ask / approval-mode), so nothing loses capability
@@ -838,20 +910,20 @@ export class PermissionManager {
    *   goal and only strips capability, including ToolSearch
    *   discoverability. The legacy `tools.core` gate never dropped them
    *   either (non-core tools bypassed it) (#9827).
-   * - `tool_search`: the deferred-tool discovery surface itself. When
-   *   ToolSearch is absent from the registry, client.ts
+   * - `tool_search` and `tool_call`: the deferred-tool discovery and
+   *   invocation surfaces. When either bridge is absent from the registry,
+   *   client.ts
    *   (`resolveDeferredToolsForReminder`) eagerly force-reveals EVERY
    *   registered deferred tool — all `mcp__*` tools and the deferred
    *   `computer_use__*` family — into the eager model request, and
    *   `preloadDeferredToolsWithinBudget` early-returns without it, so
-   *   gating tool_search under a narrow allowlist inverts the
+   *   gating either bridge under a narrow allowlist inverts the
    *   schema-shrink goal into maximal schema bloat for exactly the
    *   deferred families the exemptions above preserve for ToolSearch
-   *   discoverability. tool_search itself is never `shouldDefer`
-   *   (tool-search.ts), so its own schema cost is unchanged by keeping
-   *   it listed. Pre-#9827 it always bypassed the legacy coreTools gate
-   *   as a non-core tool (#9827). ToolSearch is precisely what makes the
-   *   deferred-not-disabled semantic usable (#10075).
+   *   discoverability. The bridge tools are never `shouldDefer`, so their
+   *   own schema cost is unchanged by keeping them listed. ToolSearch and
+   *   ToolCall together make the deferred-not-disabled semantic usable
+   *   (#10075).
    *
    * `disabled` is reserved for the hard gates: a whole-tool deny rule
    * (deny always wins over eager-allowlist membership), or the legacy
@@ -961,7 +1033,7 @@ export class PermissionManager {
     // rule matching any segment is the deciding rule. Recurse per segment so
     // nested compounds and per-segment virtual ops are covered.
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
         for (const subCmd of subCommands) {
           const rule = this.findMatchingDenyRule({ ...ctx, command: subCmd });
@@ -1032,6 +1104,30 @@ export class PermissionManager {
 
   /**
    * Determine the permission decision for a specific shell command string.
+   *
+   * This hardcodes `toolName: 'run_shell_command'`, so the Bash comment fast
+   * path in `splitCommandForRules` applies to whatever string a caller passes,
+   * not only to text the shell will literally execute. Three production
+   * callers pass something other than the original command:
+   * `checkCommandPermissions` (utils/shell-utils.ts) and
+   * `ShellTool.getConfirmationDetails` (tools/shell.ts) pass
+   * `splitCommands()` fragments, while
+   * `packages/cli/src/services/prompt-processors/shellProcessor.ts` passes a
+   * whole un-split `!{...}` injection.
+   *
+   * The one-physical-line guard in `splitCommandForRules` is load-bearing, not
+   * unreachable, and must stay: `splitCommands` splits `\n`/`\r\n` only outside
+   * quotes, backticks and substitutions, so a fragment can still contain one —
+   * `splitCommands("git status # don't\nrm -rf /tmp/x")` returns a single
+   * fragment. `checkCommandPermissions` additionally normalizes with
+   * `trim().replace(/\s+/g, ' ')`, which folds a lone `\r`, `\v`, `\f`, NBSP or
+   * U+2028 into a space — so on that path the `\r` disjunct is not what keeps
+   * the result sound; its pre-split and `detectCommandSubstitution`'s hard
+   * denial are (see #12089). A future caller that passes a reconstruction
+   * which was NOT split that way — the `monitor` failure mode documented on
+   * `splitCommandForRules` — would inherit the comment fast path with no
+   * guard. Gate such a caller on the invocation instead of routing another
+   * reconstruction through here.
    *
    * @param command - The shell command to evaluate.
    * @returns The PermissionDecision for this command.
@@ -1151,7 +1247,7 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
           this.hasRelevantRules({ ...ctx, command: subCmd }),
@@ -1249,14 +1345,24 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      // Ask rules must see the same raw candidates deny rules escalate on:
-      // the projection strips heredoc bodies out of the segments, and an ask
-      // an explicit rule matches there must not stay invisible to the
-      // auto-approval gate that reads this method.
-      const rawCandidates = splitCompoundCommandSegmentsRaw(command);
-      if (rawCandidates.length > 1) {
+      const subCommands = splitCommandForRules(command, toolName);
+      if (subCommands.length > 1) {
+        if (
+          subCommands.some((subCmd) =>
+            this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+          )
+        ) {
+          return true;
+        }
+        // Ask rules must also see the same raw candidates deny rules
+        // escalate on: the projection strips heredoc bodies out of the
+        // segments, and an ask an explicit rule matches there must not stay
+        // invisible to the auto-approval gate that reads this method.
+        const rawCandidates = splitCompoundCommandSegmentsRaw(command);
         return rawCandidates.some((segment) =>
           this.hasMatchingAskRule({ ...ctx, command: segment.command }),
+        );
+      }
         );
       }
     }
@@ -1606,6 +1712,19 @@ export class PermissionManager {
       ];
     }
     this.strippedAllowRules = undefined;
+  }
+
+  /**
+   * Drop every session allow rule, including any stashed by AUTO mode.
+   * Called when the process swaps sessions: `PermissionManager` outlives the
+   * swap, so a skill's `allowedTools` granted for one session would otherwise
+   * keep auto-approving in the next.
+   */
+  clearSessionAllowRules(): void {
+    this.sessionRules.allow = [];
+    if (this.strippedAllowRules) {
+      this.strippedAllowRules.session = [];
+    }
   }
 
   /**

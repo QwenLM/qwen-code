@@ -1146,8 +1146,8 @@ describe('--round — the CLI bakes the round into the identity line and the key
   it('takes the round cap from the CLOCK as well, on a sized huge plan', () => {
     // Every other cap test here uses the unsized `PLAN` fixture, whose tier is
     // the LARGE fallback whatever the clock says, or forces a cap by storing
-    // one — so the `hasReviewDeadline(process.env)` argument at all four call
-    // sites was mutation-invisible: hardcoding it to either constant left the
+    // one — so the `hasReviewDeadline(process.env, plan, report)` argument at
+    // the cap sites was mutation-invisible: hardcoding it to either constant left the
     // whole suite green. A SIZED huge plan is the only shape where the flag
     // decides anything.
     const dir = mkdtempSync(join(tmpdir(), 'ap-clock-tier-'));
@@ -3647,6 +3647,37 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(buildRoleBrief(PR_PLAN, '7')).not.toContain('it is not clean');
   });
 
+  it('prints the worktree absolute path so agents do not read the main checkout', () => {
+    // #11895: `working_dir` only resolves relative paths. The brief's only
+    // absolute path used to be the diff under the main checkout, and agents
+    // extrapolated `<repoRoot>/packages/...` — origin/main, not the PR head.
+    const wtAbs = resolve(PR_PLAN.worktreePath);
+    const repoRoot = resolve('.');
+    const p = buildRoleBrief(PR_PLAN, '1a');
+    expect(p).toContain(`The PR worktree's absolute path is \`${wtAbs}\``);
+    expect(p).toContain(`Source files live under \`${wtAbs}\``);
+    expect(p).toContain(`\`${repoRoot}/packages/...\``);
+    expect(p).toContain('that is a different tree');
+    expect(p).toContain(`The diff at \`${PR_PLAN.diffPathAbsolute}\``);
+    expect(p).toContain('is an artifact in the main checkout');
+
+    // Chunk and whole-diff agents go through the same builder.
+    expect(buildChunkAgentPrompt({ ...PLAN, ...PR_PLAN }, 13)).toContain(wtAbs);
+    expect(buildWholeDiffBlock({ ...PLAN, ...PR_PLAN })).toContain(wtAbs);
+    // Agent 7 does not get the shared-tree reader rule, but it still needs
+    // the location: its commands are equally capable of targeting the main
+    // checkout once they have an absolute path. It must not be handed the
+    // diff — that is a file its job does not open.
+    expect(buildRoleBrief(PR_PLAN, '7')).toContain(wtAbs);
+    expect(buildRoleBrief(PR_PLAN, '7')).not.toContain(PLAN.diffPathAbsolute);
+
+    // No worktree: nothing to pin, so nothing is printed.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain(
+      "The PR worktree's absolute path is",
+    );
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain('Source files live under');
+  });
+
   it('carries the command-aware subprocess-injection correction into Agent 2', () => {
     // The all-role test sees only that Agent 2 gets the diff and the format; it
     // cannot see whether the `--` correction reached it. If a revert restores the
@@ -4994,6 +5025,182 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
   });
 });
 
+describe('the plan-recorded wall — a local run has a clock too', () => {
+  // Step 2 of the termination roadmap: without `QWEN_REVIEW_DEADLINE_EPOCH`
+  // the gates used to be inert, so a local loop that stopped converging had
+  // no bound but the round cap — and the cap counts rounds, not time. The
+  // capture now records a wall in the plan; these drive the real handler
+  // against such plans with NO env clock.
+  const dirs: string[] = [];
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+  });
+  afterEach(() => {
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    process.exitCode = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Write `plan` captured `agoSeconds` ago and run the handler on it. */
+  function callOn(
+    plan: Record<string, unknown>,
+    agoSeconds: number,
+    role: string,
+    extra: Record<string, unknown> = {},
+  ): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-wall-'));
+    dirs.push(dir);
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify(plan));
+    const capturedMs = Date.now() - agoSeconds * 1000;
+    utimesSync(planPath, capturedMs / 1000, capturedMs / 1000);
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '- x.test.ts:3 — off-by-one in retry cap\n');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan: planPath,
+      role,
+      findings,
+      ...extra,
+    });
+    return planPath;
+  }
+  const stderr = () =>
+    (writeStderrLine as unknown as Mock).mock.calls.map((c) => c[0]).join('\n');
+
+  it('refuses a reverse-audit round the plan’s default wall no longer holds — no env clock at all', () => {
+    // A 3,600s wall captured 1,000s ago: 2,600s remain, under the 1,200s
+    // reserve a wall that short implies plus the 1,800s round-1 estimate.
+    const planPath = callOn(
+      { ...PLAN, deadlineSeconds: 3600, deadlineSource: 'default' },
+      1000,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('BUDGET:');
+    expect(stderr()).toContain(
+      '`reverse audit — stopped before round 2 by the review time budget`',
+    );
+    expect(readBudgetStop(planPath)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    expect(readRoundStamps(planPath)).toHaveLength(0);
+  });
+
+  it('admits the round while the wall holds, and a `--deadline none` plan is unclocked', () => {
+    // 8 hours of wall captured an hour ago: plenty.
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      3600,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+
+    // No wall recorded (`--deadline none`) and no env: the gate is inert even
+    // for a plan captured long ago.
+    (writeStdoutLine as unknown as Mock).mockClear();
+    callOn({ ...PLAN }, 48 * 3600, 'reverse-audit', { round: 2 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('the env clock still wins over the plan’s wall when both are present', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      0,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect(stderr()).toContain('BUDGET:');
+  });
+
+  it('the default wall does not flip the huge tier; an explicit --deadline does', () => {
+    // A huge plan at the 3B cap of 5. Under the default wall round 4 is
+    // inside the cap; under a flag wall the cap is the huge tier's 3 and
+    // round 4 is past it — refused as a ROUND CAP, not a budget stop.
+    const huge = {
+      ...PLAN,
+      srcDiffLines: 9000,
+      diffLines: 9000,
+      budget: { reverseAuditRounds: 5 },
+    };
+    callOn(
+      { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: 'default' },
+      60,
+      'reverse-audit',
+      { round: 4 },
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    const flagged = callOn(
+      { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: 'flag' },
+      60,
+      'reverse-audit',
+      { round: 4 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('ROUND CAP:');
+    expect(readBudgetStop(flagged)?.cause).toBe('round-cap');
+
+    // The --all-chunks round builder and the per-chunk build each read the
+    // cap at their own site; pin all three.
+    for (const [source, exit] of [
+      ['default', undefined],
+      ['flag', 4],
+    ] as const) {
+      for (const form of [{ 'all-chunks': true }, { chunk: 13 }]) {
+        (writeStdoutLine as unknown as Mock).mockClear();
+        (writeStderrLine as unknown as Mock).mockClear();
+        process.exitCode = undefined;
+        callOn(
+          { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: source },
+          60,
+          'reverse-audit',
+          { ...form, round: 4 },
+        );
+        expect(process.exitCode).toBe(exit);
+        if (exit === 4) expect(stderr()).toContain('ROUND CAP:');
+        else expect(stderr()).not.toContain('ROUND CAP:');
+      }
+    }
+  });
+
+  it('the verifier’s compose floor reads the plan’s wall too', () => {
+    // 2,000s of wall captured 1,000s ago: 1,000s remain, under the 1,200s
+    // compose floor.
+    callOn(
+      { ...PLAN, deadlineSeconds: 2000, deadlineSource: 'default' },
+      1000,
+      'verify',
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('VERIFY BUDGET:');
+
+    (writeStderrLine as unknown as Mock).mockClear();
+    process.exitCode = undefined;
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      1000,
+      'verify',
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+});
+
 describe('the reverse-audit budget gate — the loop must end by reporting', () => {
   // Measured on CI run #8368 (+1699 lines): the audit loop ran to the 5-round
   // cap, spent 3.5 of the job's 4 budgeted hours, and the outer kill arrived
@@ -5589,7 +5796,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   });
 
   /** Run one --all-chunks round through the real handler; return its stdout. */
-  function runRound(round: number): string {
+  function runRound(round: number, batch = false): string {
     (writeStdoutLine as unknown as Mock).mockClear();
     (writeStderrLine as unknown as Mock).mockClear();
     (agentPromptCommand.handler as (a: unknown) => void)({
@@ -5598,9 +5805,17 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       findings,
       'all-chunks': true,
       round,
+      ...(batch ? { batch: true } : {}),
     });
     const calls = (writeStdoutLine as unknown as Mock).mock.calls;
     return calls.length > 0 ? (calls[0][0] as string) : '';
+  }
+
+  /** Everything the round wrote to stderr, joined — the batch path's notes. */
+  function roundStderr(): string {
+    return (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
   }
 
   /** The record the round's build wrote for one chunk — the launch text. */
@@ -5754,6 +5969,379 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .sort();
     expect(rounds).toContain(1);
     expect(rounds).toContain(2);
+  });
+
+  it('a fix-audit round narrows the wave and the note names it (#10104)', () => {
+    // Chunk 13 is the delta territory; 14 and 15 hold interaction files.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: YIELD, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    // 13 is delta (ordinary rules, yield+dry: hot); 15 yielded last wave;
+    // 14 is a non-delta territory whose latest audit is dry — narrowed out
+    // after ONE dry receipt, where plain retirement would need two.
+    expect(out).toContain('2 auditors required this round');
+    expect(out).toContain('— chunk 13 ─');
+    expect(out).toContain('— chunk 15 ─');
+    expect(out).not.toContain('— chunk 14 ─');
+    expect(out).toContain('posture-narrowed chunk(s) skipped');
+    // Nothing retired this round, so the clause names the one note there is.
+    expect(out).toContain(
+      '1 posture-narrowed chunk(s) skipped; the posture narrowing note after the end-of-round line says which',
+    );
+    expect(out).not.toMatch(/\(0 retired/);
+    expect(out).toContain('posture narrowing (#10104)');
+    expect(out).toContain('chunk 14 — not a delta territory, dry in round 2');
+    // The note states the scheduler's inclusion rule — a non-delta chunk
+    // whose latest receipt is uncertified stays hot too (#10136 R1-13) —
+    // and the preamble's tail grammar announces the note (R1-17).
+    expect(out).toContain(
+      'every non-delta chunk the previous waves could not certify dry',
+    );
+    expect(out).toContain('uncertified (unknown)');
+    expect(out).toContain(
+      'shares its launch with a yield or an uncertified receipt (rounds 1 and 2, the convergence pair, are one launch), was built on the same findings-list bytes as one, was built before one came back, or ran in a different session from some return on record that was not dry (or beside one no session stamped) returns to the ordinary retirement rules',
+    );
+    expect(out).toContain('under the ordinary retirement rules');
+    expect(out).toContain('returns to the ordinary retirement rules');
+    expect(out).toContain(
+      'followed by the retirement and posture-narrowing notes, when there are any',
+    );
+    // The reverse auditor's brief for chunk 15's interaction file.
+    const key15 = [...readRecordedPrompts(plan).keys()].find((k) =>
+      k.startsWith('reverse-audit--chunk-15--round-3--'),
+    );
+    if (key15 === undefined) throw new Error('chunk 15 was not built');
+    const brief = readFileSync(briefPath(plan, key15), 'utf8');
+    // The reverse auditor's brief carries the fix-audit framing too — the
+    // floor governs posting, never finding (#10136).
+    expect(brief).toContain('Fix-audit round (critical posting posture)');
+    expect(brief).toContain('the floor governs posting, never');
+
+    // The SAME round through `--batch`, which is how the workflow path
+    // dispatches it: stdout is the manifest, so both notes ride stderr —
+    // and the orchestrator relays them from there. A note built into a
+    // round nobody reads is a reduction nobody disclosed.
+    const manifest = runRound(3, true);
+    expect(manifest.trimStart().startsWith('{')).toBe(true);
+    const err = roundStderr();
+    expect(err).toContain('posture narrowing (#10104)');
+    expect(err).toContain('chunk 14 — not a delta territory, dry in round 2');
+  });
+
+  it('a round that converges through narrowing names the narrowed chunks in CONVERGED (#10136 R1-10)', () => {
+    // The cleanest fix-audit run: the delta chunk retires on two dry
+    // receipts, the interaction chunks narrow out on their single one, and
+    // round 3 builds nothing. No round output carries the `posture
+    // narrowing:` note for it, so the CONVERGED explanation must — chunk by
+    // chunk, exactly as a built round would have.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('Posture-narrowed this round (#10104):');
+    expect(msg).toContain('chunk 14 — not a delta territory, dry in round 2');
+    expect(msg).toContain('chunk 15 — not a delta territory, dry in round 2');
+    expect(msg).not.toContain('chunk 13 — not a delta territory');
+  });
+
+  it('a chunk the scope record never classified restores the ordinary schedule (#10136 R12-1)', () => {
+    // The scope covers chunk 13's delta file and names NO interaction
+    // files, yet chunks 14 and 15 hold files — a state an honest capture
+    // cannot produce (the published sections tile touched ∪ interaction).
+    // Narrowing would price 14 and 15 out of the wave on one dry receipt
+    // each; the containment check reads the plan as corrupted and runs the
+    // ordinary schedule instead: every chunk audited, nothing narrowed.
+    const corrupt = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(corrupt));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    // Two dry receipts each for 14 and 15 — the narrowing would price both
+    // out on the single receipt and the ordinary rules RETIRE them: both
+    // skip round 3, and only the note tells the two schedules apart. The
+    // containment gate is what makes it the retirement note.
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('1 auditors required this round');
+    expect(out).toContain('2 retired chunk(s) skipped');
+    expect(out).toContain('retirement: a chunk whose two most recent audits');
+    expect(out).not.toContain('posture narrowing');
+    expect(out).not.toContain('posture-narrowed');
+  });
+
+  it('a chunk file entry without a usable path is malformed input: ordinary schedule (#10136)', () => {
+    // The containment gate must not skip what it cannot read: a file entry
+    // whose path is not a non-empty string is a chunk the record cannot
+    // classify either way, and the schedule falls back to auditing it.
+    const corrupt = {
+      ...PLAN,
+      chunks: (PLAN.chunks as Array<{ id: number; files: unknown[] }>).map(
+        (c) => (c.id === 14 ? { ...c, files: [{ path: 7 }] } : c),
+      ),
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(corrupt));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    // Two dry receipts each: the narrowing would narrow, the ordinary
+    // rules retire — the note names which schedule ran.
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('2 retired chunk(s) skipped');
+    expect(out).not.toContain('posture-narrowed');
+  });
+
+  for (const [label, corruptFiles] of [
+    ['null', null],
+    ['absent', undefined],
+  ] as const) {
+    it(`a chunk whose files list is ${label} restores the ordinary schedule (#10136 R17-5)`, () => {
+      // An unreadable `files` list coerced to `[]` passes both of
+      // postureNarrowing's gates vacuously: the chunk is classified a
+      // NON-delta territory and priced out of the wave on its single
+      // latest dry receipt — the one malformed shape failing toward LESS
+      // coverage. It must return null like every sibling shape: an honest
+      // capture never emits a chunk without a files list.
+      const corrupt = {
+        ...PLAN,
+        chunks: (PLAN.chunks as Array<{ id: number; files?: unknown }>).map(
+          (c) =>
+            c.id === 14
+              ? label === 'absent'
+                ? (({ files: _files, ...rest }) => rest)(c)
+                : { ...c, files: corruptFiles }
+              : c,
+        ),
+        incremental: {
+          since: 'a'.repeat(40),
+          effective: true,
+          posture: 'critical',
+          postureCause: 'round',
+          scope: {
+            anchor: 'a'.repeat(40),
+            deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+            interaction: [
+              {
+                path: 'bundle.min.js',
+                importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+              },
+            ],
+          },
+        },
+      };
+      writeFileSync(plan, JSON.stringify(corrupt));
+      const old = new Date(2020, 0, 1);
+      utimesSync(plan, old, old);
+
+      // Two dry receipts each: the narrowing would narrow on the receipt,
+      // the ordinary rules retire — the note names which schedule ran.
+      answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+      answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+      const out = runRound(3);
+
+      expect(process.exitCode).toBeUndefined();
+      expect(out).toContain('1 auditors required this round');
+      expect(out).toContain('2 retired chunk(s) skipped');
+      expect(out).toContain('retirement: a chunk whose two most recent audits');
+      expect(out).not.toContain('posture narrowing');
+      expect(out).not.toContain('posture-narrowed');
+    });
+  }
+
+  it('the per-chunk path names the narrowed chunks in CONVERGED too (#10136 R1-10)', () => {
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+
+    // A single-chunk rebuild of a round nobody admitted: the schedule has
+    // converged, and the refusal must carry the same narrowed list the
+    // `--all-chunks` refusal does.
+    process.exitCode = undefined;
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      chunk: 14,
+      findings,
+      round: 3,
+    });
+    expect(process.exitCode).toBe(5);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('Posture-narrowed this round (#10104):');
+    expect(msg).toContain('chunk 14 — not a delta territory, dry in round 2');
+    expect(msg).toContain('chunk 15 — not a delta territory, dry in round 2');
+  });
+
+  it('a delta list no chunk covers degrades to the ordinary schedule, never an empty narrowing (#10104)', () => {
+    // A hand-edited plan can name delta files no chunk holds — an honest
+    // capture cannot produce the disjoint state, so the input class is the
+    // corrupted plan these gates exist for. An EMPTY delta-territory set
+    // would treat every chunk as non-delta: from round 3 each leaves after
+    // one dry receipt, the round exits 5 on a false "clean convergence",
+    // and the territory this round exists to audit was examined only in
+    // rounds 1-2. Every sibling reader fails malformed input toward MORE
+    // coverage; the schedule must too — null restores the byte-for-byte
+    // ordinary schedule.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['src/disjoint.ts'],
+          // Every chunk file IS classified (interaction), so the
+          // containment gate passes and the EMPTY delta-coverage guard is
+          // the one ruling here.
+          interaction: [
+            'packages/cli/src/commands/review/x.test.ts',
+            'a.ts',
+            'bundle.min.js',
+          ].map((path) => ({ path, importsChanged: ['src/disjoint.ts'] })),
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    // Chunk 13 yielded in round 2, so the ordinary rules keep it hot; 14
+    // and 15 retire on two dry rounds.
+    expect(out).toContain('1 auditors required this round');
+    expect(out).toContain('— chunk 13 ─');
+    expect(out).not.toContain('posture narrowing (#10104)');
   });
 
   it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
@@ -5994,6 +6582,40 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(clocked).toContain('certificate final');
     expect(clocked).toContain('3-round cap leaves');
     expect(clocked).not.toContain('next cold check round 4');
+
+    // The plan's own wall, no env: a `--deadline` flag is an explicit clock
+    // and closes the certificate; the default wall is not, and does not.
+    delete process.env[DEADLINE_ENV];
+    for (const [source, closes] of [
+      ['flag', true],
+      ['default', false],
+    ] as const) {
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          srcDiffLines: 5000,
+          diffLines: 5000,
+          deadlineSeconds: 16 * 3600,
+          deadlineSource: source,
+        }),
+      );
+      // Recent, so the wall has hours left, but before the round records.
+      const recent = new Date(Date.now() - 60_000);
+      utimesSync(plan, recent, recent);
+      answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+      answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+      const walled = runRound(3);
+      expect(process.exitCode).toBeUndefined();
+      expect(walled).toContain('chunk 13 — retired: dry in rounds 1 and 2');
+      if (closes) {
+        expect(walled).toContain('3-round cap leaves');
+        expect(walled).not.toContain('next cold check round 4');
+      } else {
+        expect(walled).toContain('next cold check round 4');
+        expect(walled).not.toContain('certificate final');
+      }
+    }
   });
 
   it('huge cap: a non-converging loop is refused past the reduced 3-round cap', () => {
@@ -7404,7 +8026,7 @@ describe('the verify gate — compose survives a budget stop', () => {
     expect(readRecordedPrompts(plan).size).toBe(1);
   });
 
-  it('builds the verifier when there is no deadline at all — every local run', () => {
+  it('builds the verifier when no clock resolves at all — no env epoch and no plan wall', () => {
     verifyCall();
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
@@ -7621,6 +8243,36 @@ describe('incremental-scope briefs', () => {
     expect(seam).toContain('cleared by the previous round');
     expect(seam).toContain('INTERACTION only');
     expect(seam).toContain('src/changed.ts');
+  });
+
+  it('a fix-audit round frames the brief (#10104)', () => {
+    const fixAudit = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        since: 'abc1234def5678900000',
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: { ...INCREMENTAL_PLAN.incremental.scope },
+      },
+    };
+    const delta = buildChunkAgentPrompt(fixAudit, 1);
+    expect(delta).toContain('Fix-audit round (critical posting posture)');
+    expect(delta).toContain('the floor governs posting, never');
+    // The banner's deferral claim carries the deterministic carve-out the
+    // reroute applies — an auditor trusting "never posted" unqualified
+    // could drop a `[test]` finding the floor keeps inline at any floor.
+    expect(delta).toContain('never posted — except pre-confirmed');
+
+    // The interaction file's brief is the ordinary incremental one: the
+    // posture changes the fan-out and the waves, never what a widened
+    // file displays.
+    const seam = buildChunkAgentPrompt(fixAudit, 2);
+    expect(seam).toContain('INTERACTION only');
+
+    // Without the posture, no fix-audit frame.
+    const plain = buildChunkAgentPrompt(INCREMENTAL_PLAN, 2);
+    expect(plain).not.toContain('Fix-audit round');
   });
 
   it('whole-diff role briefs carry the frame once, up front', () => {

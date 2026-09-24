@@ -19,6 +19,7 @@ import {
   type ReviewBudget,
 } from './budget.js';
 import type { RepositoryContext } from './repository-context.js';
+import { buildSelectionIdentity, type SelectionIdentity } from './selection.js';
 
 export interface FileMetric {
   path: string;
@@ -110,6 +111,34 @@ export interface PlanReport {
    * roster's job, and the roster reads `effort`.
    */
   budget: ReviewBudget;
+  /**
+   * What this plan was computed from, digested — see lib/selection.ts.
+   *
+   * Coverage re-reads the plan from its path long after the agents ran, and
+   * until this existed the only thing tying the two together was the plan
+   * file's mtime, which says nothing about the diff the chunk ranges index
+   * into.
+   */
+  selection: SelectionIdentity;
+  /**
+   * The review's wall, as a DURATION from the attempt's start, in seconds —
+   * written by every capture command unless it was told `--deadline none`.
+   * A duration rather than an epoch because the plan is never rewritten on
+   * `--resume` (its mtime is the run epoch every fence keys on), and an
+   * epoch stored at capture would be stale for every continuation; the
+   * readers add it to the CURRENT attempt's start instead, which the
+   * run-session ledger records afresh when a resume starts a new session (a
+   * same-session resume continues the attempt, and its wall). See lib/deadline.ts
+   * `resolveReviewDeadline` for precedence — the environment's epoch, when
+   * CI exports one, wins over this.
+   */
+  deadlineSeconds?: number;
+  /**
+   * Where `deadlineSeconds` came from: `flag` for `--deadline <minutes>`,
+   * `default` for the tier's own wall. The distinction is load-bearing for
+   * the huge round tier, which reduces only under an explicit clock.
+   */
+  deadlineSource?: 'flag' | 'default';
   repositoryContext?: RepositoryContext;
 }
 
@@ -122,7 +151,7 @@ export interface PlanReport {
  *
  * `context` carries the two facts about the machine that the round cap depends
  * on — the operator's `review.reverseAuditRounds` ceiling and whether this run
- * has a deadline — and is a **required** parameter, deliberately not resolved
+ * has an EXPLICIT deadline — and is a **required** parameter, deliberately not resolved
  * in here. Three capture commands build a plan; an optional parameter is one a
  * call site can quietly omit, and a policy that silently applies to two of the
  * three review entry points is worse than one that applies to none. Passing
@@ -134,6 +163,17 @@ export function buildPlanReport(
   plan: DiffPlan,
   postImageLines: ((path: string) => number) | null,
   context: BudgetContext,
+  /**
+   * The diff text `plan` was built from, so the report can record what its
+   * chunk ranges index into (see lib/selection.ts).
+   *
+   * Required, and positional, for exactly the reason `context` is: three
+   * capture commands build a plan, and an identity that two of them record is
+   * worse than one none of them do — a reader cannot tell a plan with no
+   * identity apart from a plan whose writer forgot. The type system asks all
+   * three.
+   */
+  diffText: string,
 ): PlanReport {
   const files = plan.files.map((f): FileMetric => {
     const changedLines = f.addedLines + f.removedLines;
@@ -187,6 +227,7 @@ export function buildPlanReport(
     wrapperSignal: plan.wrapperSignal,
     chunks: plan.chunks,
     files,
+    selection: buildSelectionIdentity(diffText, plan.chunks),
     budget: reviewBudget(
       {
         srcDiffLines: plan.srcDiffLines,

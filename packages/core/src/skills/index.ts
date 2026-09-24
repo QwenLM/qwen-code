@@ -29,7 +29,13 @@ export type {
   SkillErrorCode,
 } from './types.js';
 
-export { SkillError, validateSkillName } from './types.js';
+export {
+  SkillError,
+  validateSkillName,
+  qualifySkillName,
+  skillRestrictionNames,
+  authoredSkillName,
+} from './types.js';
 
 // Main management class
 export { SkillManager } from './skill-manager.js';
@@ -54,7 +60,7 @@ export {
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringRoute,
   resolveWorkflowAuthoringSurface,
-  toolSearchRevealSentence,
+  toolSearchBridgeSentence,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from './workflow-authoring-skill.js';
 export type {

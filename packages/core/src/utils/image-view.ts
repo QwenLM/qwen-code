@@ -6,6 +6,7 @@
 
 import fs from 'node:fs/promises';
 import type { Metadata, SharpConstructor } from 'sharp';
+import { sniffFileKind } from './binary-content.js';
 
 const IMAGE_VIEW_MAX_EDGE = 1568;
 const IMAGE_VIEW_MAX_PATCHES = 1568;
@@ -15,6 +16,12 @@ const IMAGE_JPEG_QUALITY = 92;
 export const IMAGE_MAX_SOURCE_BYTES = 100 * 1024 * 1024;
 const IMAGE_MAX_OUTPUT_BYTES = 9 * 1024 * 1024;
 const SUPPORTED_IMAGE_FORMATS = new Set(['jpeg', 'png', 'webp']);
+// The mime projection of SUPPORTED_IMAGE_FORMATS: edit the two together.
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 export interface NormalizedRegion {
   x1: number;
@@ -148,11 +155,7 @@ function boundedSize(
   return best;
 }
 
-async function prepareImage(
-  filePath: string,
-  signal: AbortSignal,
-): Promise<PreparedImage> {
-  signal.throwIfAborted();
+async function loadSharp(): Promise<SharpConstructor> {
   let sharp: SharpConstructor;
   try {
     sharp = (await import('sharp')).default;
@@ -162,6 +165,18 @@ async function prepareImage(
       'Image rendering is unavailable because the "sharp" image module could not be loaded.',
     );
   }
+  return sharp;
+}
+
+async function prepareImage(
+  filePath: string,
+  signal: AbortSignal,
+): Promise<PreparedImage> {
+  signal.throwIfAborted();
+  // Load the renderer before any file-level check: an unavailable sharp keeps
+  // priority over `file_not_found`, so a host without the native binary still
+  // reports the recoverable error (zoom-image.sharp-failure.test.ts).
+  await loadSharp();
 
   let stats: Awaited<ReturnType<typeof fs.stat>>;
   try {
@@ -194,11 +209,24 @@ async function prepareImage(
     );
   }
 
-  const bytes = await fs.readFile(filePath, { signal });
+  return prepareImageBuffer(
+    await fs.readFile(filePath, { signal }),
+    filePath,
+    signal,
+  );
+}
+
+async function prepareImageBuffer(
+  bytes: Buffer,
+  label: string,
+  signal: AbortSignal,
+): Promise<PreparedImage> {
+  signal.throwIfAborted();
+  const sharp = await loadSharp();
   if (bytes.length > IMAGE_MAX_SOURCE_BYTES) {
     throw new ImageViewError(
       'source_too_large',
-      `Image file exceeds the 100 MB source limit: ${filePath}`,
+      `Image exceeds the 100 MB source limit: ${label}`,
     );
   }
 
@@ -212,7 +240,7 @@ async function prepareImage(
     signal.throwIfAborted();
     throw new ImageViewError(
       'decode_failed',
-      `Failed to decode image (file may be corrupt or not a static PNG, JPEG, or WebP): ${filePath}`,
+      `Failed to decode image (may be corrupt or not a static PNG, JPEG, or WebP): ${label}`,
     );
   }
   signal.throwIfAborted();
@@ -220,13 +248,13 @@ async function prepareImage(
   if (!SUPPORTED_IMAGE_FORMATS.has(metadata.format)) {
     throw new ImageViewError(
       'unsupported_image',
-      `Unsupported image. Expected a static PNG, JPEG, or WebP file: ${filePath}`,
+      `Unsupported image. Expected a static PNG, JPEG, or WebP image: ${label}`,
     );
   }
   if ((metadata.pages ?? 1) > 1) {
     throw new ImageViewError(
       'animated_image',
-      `Only static images are supported: ${filePath}`,
+      `Only static images are supported: ${label}`,
     );
   }
 
@@ -234,7 +262,7 @@ async function prepareImage(
 }
 
 async function renderImageView(
-  filePath: string,
+  label: string,
   prepared: PreparedImage,
   selection: { left: number; top: number; width: number; height: number },
   outputSize: ImageSize,
@@ -267,14 +295,14 @@ async function renderImageView(
     signal.throwIfAborted();
     throw new ImageViewError(
       'decode_failed',
-      `Failed to render image overview: ${filePath}`,
+      `Failed to render image overview: ${label}`,
     );
   }
   signal.throwIfAborted();
   if (output.length > IMAGE_MAX_OUTPUT_BYTES) {
     throw new ImageViewError(
       'output_too_large',
-      `Rendered image exceeds the 9 MB output limit: ${filePath}`,
+      `Rendered image exceeds the 9 MB output limit: ${label}`,
     );
   }
 
@@ -290,22 +318,73 @@ async function renderImageView(
   };
 }
 
+/**
+ * Render the whole (oriented) frame under the shared visual budget. Both the
+ * file and the in-memory entry point below use it, so `read_file` and an MCP
+ * tool result cannot drift apart on overview geometry.
+ */
+async function renderFullFrameView(
+  label: string,
+  prepared: PreparedImage,
+  signal: AbortSignal,
+): Promise<ImageView> {
+  const { width: sourceWidth, height: sourceHeight } = orientedSize(
+    prepared.metadata,
+  );
+  return renderImageView(
+    label,
+    prepared,
+    { left: 0, top: 0, width: sourceWidth, height: sourceHeight },
+    boundedSize(sourceWidth, sourceHeight, 1),
+    signal,
+  );
+}
+
+/**
+ * The mime of an image the renderer can bound, read from its magic bytes
+ * (the first 12 are enough), or null. Callers decide from this rather than
+ * from a declared label, which can be missing, mis-cased or simply wrong.
+ */
+export function sniffBoundableImageMime(header: Buffer): string | null {
+  const kind = sniffFileKind(header, '', '', '');
+  return kind.magicMatched && SUPPORTED_IMAGE_MIME_TYPES.has(kind.mimeType)
+    ? kind.mimeType
+    : null;
+}
+
+/**
+ * Bound an in-memory image (an MCP tool result, say) to the same visual budget
+ * `read_file` applies. Returns null when the image already fits, so small
+ * images keep their original bytes, format and alpha channel.
+ *
+ * `maxBytes` is the caller's inline byte ceiling. Fitting the visual budget
+ * says nothing about file size — a 1200x800 PNG carrying a large ancillary
+ * chunk fits the geometry and still outweighs the ceiling — so a caller that
+ * would otherwise drop the part passes its ceiling here and gets a re-encode
+ * instead. Omit it to keep "fits" purely visual, as `read_file` does.
+ */
+export async function boundImageBuffer(
+  bytes: Buffer,
+  label: string,
+  signal: AbortSignal,
+  maxBytes?: number,
+): Promise<ImageView | null> {
+  const prepared = await prepareImageBuffer(bytes, label, signal);
+  if (
+    fitsVisualBudget(orientedSize(prepared.metadata)) &&
+    (maxBytes === undefined || prepared.bytes.length <= maxBytes)
+  ) {
+    return null;
+  }
+  return renderFullFrameView(label, prepared, signal);
+}
+
 export async function renderImageOverview(
   filePath: string,
   signal: AbortSignal,
 ): Promise<ImageView> {
   const prepared = await prepareImage(filePath, signal);
-  const { width: sourceWidth, height: sourceHeight } = orientedSize(
-    prepared.metadata,
-  );
-  const outputSize = boundedSize(sourceWidth, sourceHeight, 1);
-  return renderImageView(
-    filePath,
-    prepared,
-    { left: 0, top: 0, width: sourceWidth, height: sourceHeight },
-    outputSize,
-    signal,
-  );
+  return renderFullFrameView(filePath, prepared, signal);
 }
 
 export async function renderNormalizedImageCrop(

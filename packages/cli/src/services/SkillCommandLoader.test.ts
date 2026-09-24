@@ -9,7 +9,7 @@ import {
   recordAutoSkillCommandUsage,
   SkillCommandLoader,
 } from './SkillCommandLoader.js';
-import { skillArgsPath } from './skill-args-file.js';
+import { skillArgsPath, writeSkillArgs } from './skill-args-file.js';
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -87,6 +87,47 @@ describe('SkillCommandLoader', () => {
   });
 
   const signal = new AbortController().signal;
+
+  it('rejects sandbox skill invocation before side effects or argument writes and removal', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sandbox-skill-command-'));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue({
+        filesystem: 'read-only',
+      });
+      const skill = makeSkill({ level: 'project', allowedTools: ['Edit'] });
+      mockSkillManager.listSkills.mockImplementation(({ level }) =>
+        Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+      const invoke = (args: string) =>
+        command.action!(
+          { invocation: { raw: `/my-skill ${args}`, args } } as never,
+          args,
+        );
+      expect(await invoke('payload')).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('not yet supported'),
+      });
+      expect(existsSync(join(dir, '.qwen'))).toBe(false);
+      writeSkillArgs('my-skill', 'prior authority');
+      await invoke('');
+      expect(readFileSync(skillArgsPath('my-skill'), 'utf8')).toBe(
+        'prior authority',
+      );
+      await recordAutoSkillCommandUsage(mockConfig, command);
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('should return empty array when config is null', async () => {
     const loader = new SkillCommandLoader(null);
@@ -407,6 +448,33 @@ describe('SkillCommandLoader', () => {
       expect(commands[0].sourceLabel).toBe('Extension: Superpowers Lab');
       expect(commands[0].sourceDetail).toBe('extension');
       expect(commands[0].skillDetail).toMatchObject({
+        extensionName: 'superpowers-lab',
+      });
+    });
+
+    it('carries the authored spelling onto skillDetail so restriction matching sees both spellings', async () => {
+      // Downstream (the session snapshot, commandRestrictionNames) matches
+      // legacy bare settings entries through skillDetail.authoredName; if the
+      // loader stops propagating it, a bare `slashCommands.disabled` entry
+      // silently stops gating the qualified command.
+      const skill = makeSkill({
+        name: 'superpowers-lab:tmux',
+        authoredName: 'tmux',
+        level: 'extension',
+        extensionName: 'superpowers-lab',
+        description: 'Use tmux for interactive commands',
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'extension' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands[0].skillDetail).toMatchObject({
+        name: 'superpowers-lab:tmux',
+        authoredName: 'tmux',
         extensionName: 'superpowers-lab',
       });
     });

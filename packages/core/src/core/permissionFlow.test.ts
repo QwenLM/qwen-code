@@ -20,7 +20,23 @@ import {
 } from './permissionFlow.js';
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { ShellToolInvocation } from '../tools/shell.js';
 import { applySkillAllowedTools } from '../tools/skill-utils.js';
+
+// The comment fast path is Bash-only, so pin the shell type the way
+// `permission-manager.test.ts` does rather than depending on the host OS.
+const shellTypeMock = vi.hoisted(() => ({ value: 'bash' as const }));
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () => ({
+      ...actual.getShellConfiguration(),
+      shell: shellTypeMock.value,
+    }),
+  };
+});
 
 // Mock types for testing
 const mockConfig = (overrides: Partial<Config> = {}): Config =>
@@ -46,6 +62,21 @@ const mockInvocation = (
   }) as unknown as AnyToolInvocation;
 
 describe('evaluatePermissionFlow', () => {
+  it('passes caller cancellation to intrinsic permission evaluation', async () => {
+    const invocation = mockInvocation();
+    const controller = new AbortController();
+    await evaluatePermissionFlow(
+      mockConfig(),
+      invocation,
+      'Read',
+      {},
+      controller.signal,
+    );
+    expect(invocation.getDefaultPermission).toHaveBeenCalledWith(
+      controller.signal,
+    );
+  });
+
   it('should return deny result with correct message when defaultPermission is deny', async () => {
     const invocation = mockInvocation({
       getDefaultPermission: vi.fn().mockResolvedValue('deny'),
@@ -214,6 +245,47 @@ describe('evaluatePermissionFlow', () => {
     );
   });
 
+  // A rule pinned to a derived value (the Workflow tool's script digest) must
+  // be checked against the value the invocation computed, never a same-named
+  // parameter the model supplied.
+  it('matches rules against the parameters the invocation derives', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const order: string[] = [];
+    const modelParams = { name: 'audit', sha256: 'model-chosen' };
+    const invocation = mockInvocation({
+      params: modelParams,
+      getDefaultPermission: vi.fn(async () => {
+        order.push('default');
+        return 'ask' as const;
+      }),
+      getPermissionMatchParams: vi.fn(() => {
+        order.push('match');
+        return { name: 'audit', sha256: 'derived' };
+      }),
+    });
+
+    await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+      }),
+      invocation,
+      ToolNames.WORKFLOW,
+      modelParams,
+    );
+
+    // Derived after the L3 check, which is where the value is computed.
+    expect(order).toEqual(['default', 'match']);
+    expect(mockPm.evaluate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolParams: { name: 'audit', sha256: 'derived' },
+      }),
+    );
+  });
+
   it('forces interaction even when PM allows the tool', async () => {
     const mockPm = {
       hasRelevantRules: vi.fn().mockReturnValue(true),
@@ -273,6 +345,47 @@ describe('evaluatePermissionFlow', () => {
 
     expect(result.finalPermission).toBe('deny');
     expect(result.denyMessage).toContain('denied by permission rules');
+  });
+
+  // The deny-only criterion in docs/design/safe-bash-comment-splitting.md is
+  // pinned one layer below where production decides it. `evaluatePermissionRules`
+  // calls `pm.evaluate()` only when `pm.hasRelevantRules()` is true, and the
+  // comment fast path makes that gate false for a comment-bearing command — so
+  // the shipped verdict is L3's `ShellToolInvocation.getDefaultPermission()`.
+  // That method gates substitution on the raw command but classifies
+  // `stripShellWrapper(command)`, and for a wrapper shape the strip discards the
+  // comment along with the wrapper: `bash -c "ls" # ; rm -rf /tmp/x` strips to
+  // `ls`, the AST reads it as read-only, and L3 returns `allow` where the merge
+  // base returned `deny` citing `Bash(rm *)`. Not a bypass — Bash never executes
+  // the post-`#` text — but it is the layer that decides, and `pm.evaluate`
+  // structurally cannot observe it. Reverting `splitCommandForRules` to
+  // `splitCompoundCommand` restores `deny` and reds this test.
+  it('collapses a wrapper-shaped commented command to the L3 read-only allow under a deny rule', async () => {
+    const command = 'bash -c "ls" # ; rm -rf /tmp/x';
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => undefined,
+      getPermissionsAsk: () => undefined,
+      getPermissionsDeny: () => ['Bash(rm *)'],
+    });
+    pm.initialize();
+
+    // What the design doc's criterion describes, and all this layer can see.
+    expect(await pm.evaluate({ toolName: ToolNames.SHELL, command })).toBe(
+      'ask',
+    );
+
+    const config = mockConfig({
+      getPermissionManager: vi.fn().mockReturnValue(pm),
+    });
+    const result = await evaluatePermissionFlow(
+      config,
+      new ShellToolInvocation(config, { command, is_background: false }),
+      ToolNames.SHELL,
+      { command },
+    );
+
+    expect(result.defaultPermission).toBe('allow');
+    expect(result.finalPermission).toBe('allow');
   });
 });
 

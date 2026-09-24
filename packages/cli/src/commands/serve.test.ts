@@ -429,6 +429,9 @@ describe('serve rate limit env parsing', () => {
     );
 
     await startServeHandlerWithArgs('--open-with-auth');
+    // Wait out the fire-and-forget handler's browser-open phase so its
+    // openBrowserSecurely call cannot land in the next test.
+    await vi.waitFor(() => expect(mockOpenBrowserSecurely).toHaveBeenCalled());
 
     expect(mockApplyOpenWithAuth).toHaveBeenCalledWith(expect.any(Object));
     expect(tokenAtBoot).toBe('generated-token');
@@ -821,20 +824,23 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
-  it('passes --child-heap-mode to runQwenServe', async () => {
-    mockRunQwenServe.mockResolvedValueOnce({
-      url: 'http://127.0.0.1:4170/',
-      webShellMounted: false,
-    });
+  it.each(['off', 'admit', 'enforce'])(
+    'passes --child-heap-mode %s to runQwenServe',
+    async (mode) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
 
-    await startServeHandlerWithArgs('--no-web --child-heap-mode off');
+      await startServeHandlerWithArgs(`--no-web --child-heap-mode ${mode}`);
 
-    expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ childHeapMode: 'off' }),
-    );
-  });
+      expect(mockRunQwenServe).toHaveBeenCalledWith(
+        expect.objectContaining({ childHeapMode: mode }),
+      );
+    },
+  );
 
-  it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
+  it('defaults the child heap mode to observe, and rejects an unknown mode', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
       webShellMounted: false,
@@ -845,9 +851,7 @@ describe('serve rate limit env parsing', () => {
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ childHeapMode: 'observe' }),
     );
-    // `enforce` is not a value yet, and boot must say so rather than accept
-    // it: applying the partition needs an observation this daemon cannot make.
-    expect(() => buildParser().parseSync('--child-heap-mode enforce')).toThrow(
+    expect(() => buildParser().parseSync('--child-heap-mode unknown')).toThrow(
       /Invalid values/,
     );
   });
@@ -1232,4 +1236,54 @@ describe('serve startup import boundary', () => {
     },
     testMs,
   );
+});
+
+describe('serve tokenQr resolution', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = {
+      ...originalEnv,
+      QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
+    };
+    mockRunQwenServe.mockResolvedValue({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  async function startWith(args: string) {
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(args);
+    void handler(argv as Parameters<typeof handler>[0]);
+    await vi.waitFor(() => {
+      expect(mockRunQwenServe).toHaveBeenCalled();
+    });
+  }
+
+  it('sets tokenQr from the --token-qr flag', async () => {
+    await startWith('--token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: true }),
+    );
+  });
+
+  it('passes an explicit --no-token-qr through as false', async () => {
+    await startWith('--no-token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: false }),
+    );
+  });
+
+  it('leaves tokenQr unset by default', async () => {
+    await startWith('--no-web');
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty('tokenQr');
+  });
 });

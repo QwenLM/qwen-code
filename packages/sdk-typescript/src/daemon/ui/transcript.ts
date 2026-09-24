@@ -6,6 +6,7 @@
 
 import type {
   DaemonPromptCancelledTranscriptBlock,
+  DaemonResourceLink,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextDeltaMeta,
@@ -256,7 +257,9 @@ function userBlockForAttachment(
   next: DaemonTranscriptState,
   event: Extract<
     DaemonUiEvent,
-    { type: 'user.image.delta' | 'user.file.delta' }
+    {
+      type: 'user.image.delta' | 'user.file.delta' | 'user.resource_link.delta';
+    }
   >,
 ): DaemonTextTranscriptBlock {
   const activeUserIndex = next.activeUserBlockId
@@ -266,10 +269,20 @@ function userBlockForAttachment(
     activeUserIndex !== undefined ? next.blocks[activeUserIndex] : undefined;
   if (
     activeUser?.kind === 'user' &&
-    stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds)
+    stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds) &&
+    (activeUser.promptId === undefined ||
+      event.promptId === undefined ||
+      activeUser.promptId === event.promptId)
   ) {
     const block = getWritableBlockById(next, activeUser.id);
-    if (block?.kind === 'user') return block;
+    if (block?.kind === 'user') {
+      if (block.promptId === undefined && event.promptId !== undefined) {
+        const bytesBefore = estimateBlockBytes(block);
+        block.promptId = event.promptId;
+        next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+      }
+      return block;
+    }
   }
   const block = createTextBlock(
     next,
@@ -365,6 +378,26 @@ function applyDaemonTranscriptEvent(
       next.retainedBytes += estimateBlockBytes(fileBlock) - fileBytesBefore;
       break;
     }
+    case 'user.resource_link.delta': {
+      const block = userBlockForAttachment(next, event);
+      const bytesBefore = estimateBlockBytes(block);
+      if (event.meta) block.meta = { ...block.meta, ...event.meta };
+      const links = block.resourceLinks ?? [];
+      const index = links.findIndex(
+        (link) => link.uri === event.resourceLink.uri,
+      );
+      const resourceLink = mergeResourceLink(links[index], event.resourceLink);
+      block.resourceLinks =
+        index < 0
+          ? [...links, resourceLink]
+          : links.map((link, position) =>
+              position === index ? resourceLink : link,
+            );
+      block.updatedAt = next.now;
+      if (event.eventId !== undefined) block.eventId = event.eventId;
+      next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+      break;
+    }
     case 'assistant.text.delta':
       if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
@@ -412,6 +445,7 @@ function applyDaemonTranscriptEvent(
       }
       break;
     case 'assistant.usage':
+      if (isSubagentUsageDuplicate(next, event)) break;
       if (event.parentToolCallId && !next.retainSubagentBlocks) {
         applySubagentUsageToParentTool(next, event);
       } else {
@@ -651,7 +685,6 @@ function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  if (isLegacySubagentUsageDuplicate(state, event)) return;
   const activeBlockId =
     state.activeAssistantBlockId ??
     (event.parentToolCallId
@@ -668,11 +701,11 @@ function applyAssistantUsage(
   block.updatedAt = state.now;
 }
 
-function isLegacySubagentUsageDuplicate(
+function isSubagentUsageDuplicate(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): boolean {
-  if (event.parentToolCallId || !event.sourceRecordIds?.length) return false;
+  if (!event.sourceRecordIds?.length) return false;
   const sourceRecordIds = new Set(event.sourceRecordIds);
   for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
     const block = state.blocks[i]!;
@@ -688,6 +721,9 @@ function isLegacySubagentUsageDuplicate(
       rawOutput && isRecord(rawOutput['executionSummary'])
         ? rawOutput['executionSummary']
         : undefined;
+    // The same record and parent identify an aggregate already on the card,
+    // even when merging live usage retained larger counts than this snapshot.
+    if (summary && event.parentToolCallId === block.toolCallId) return true;
     return (
       summary?.['inputTokens'] === event.usage.inputTokens &&
       summary['outputTokens'] === event.usage.outputTokens &&
@@ -1160,6 +1196,12 @@ function upsertToolBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1377,6 +1419,12 @@ function appendShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1423,6 +1471,12 @@ function appendUserShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1470,6 +1524,12 @@ function upsertPermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1526,6 +1586,12 @@ function resolvePermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1594,6 +1660,12 @@ function appendUnrecognizedDiagnostic(
       ? { originatorClientId: event.originatorClientId }
       : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1621,6 +1693,12 @@ function appendStatusBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event?.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1703,6 +1781,12 @@ function appendPromptCancelledBlock(
       : {}),
     ...(event.reason ? { reason: event.reason } : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -2052,7 +2136,13 @@ function rewindTranscriptToUserTurn(
   let lastUserIndex = -1;
 
   for (let index = 0; index < state.blocks.length; index += 1) {
-    if (state.blocks[index]?.kind !== 'user') continue;
+    const block = state.blocks[index];
+    if (
+      block?.kind !== 'user' ||
+      block.meta?.['source'] === 'background_notification'
+    ) {
+      continue;
+    }
     lastUserIndex = index;
     if (userTurnIndex === targetTurnIndex) {
       truncateTranscriptBeforeBlock(state, index);
@@ -2184,7 +2274,47 @@ function cloneBlockForWrite(
       rawOutput: cloneJsonLike(block.rawOutput),
     };
   }
+  if (block.kind === 'user' && block.resourceLinks) {
+    return { ...block, resourceLinks: cloneJsonLike(block.resourceLinks) };
+  }
   return { ...block };
+}
+
+function mergeResourceLink(
+  existing: DaemonResourceLink | undefined,
+  incoming: DaemonResourceLink,
+): DaemonResourceLink {
+  if (!existing) return cloneJsonLike(incoming);
+  const merged = { ...incoming, ...existing };
+  for (const key of [
+    'mimeType',
+    'size',
+    'description',
+    'title',
+    'annotations',
+    '_meta',
+  ] as const) {
+    if (existing[key] == null && incoming[key] !== undefined) {
+      Object.assign(merged, { [key]: incoming[key] });
+    }
+  }
+  for (const key of ['annotations', '_meta'] as const) {
+    const previous = existing[key];
+    const next = incoming[key];
+    if (previous && next) {
+      Object.assign(merged, {
+        [key]: {
+          ...next,
+          ...Object.fromEntries(
+            Object.entries(previous).filter(
+              ([field, value]) => value != null || !(field in next),
+            ),
+          ),
+        },
+      });
+    }
+  }
+  return cloneJsonLike(merged);
 }
 
 function allocateBlockId(state: DaemonTranscriptState, prefix: string): string {

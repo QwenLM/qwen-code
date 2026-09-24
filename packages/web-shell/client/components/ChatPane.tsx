@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
+import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
 import {
   useCallback,
   useEffect,
@@ -55,6 +57,11 @@ import type {
   EditorHandle,
 } from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
+import {
+  isModelSetupCommand,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from '../modelManagement';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -73,6 +80,10 @@ import {
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
+import {
+  useContextUsageControls,
+  type RegisterContextUsageControls,
+} from '../hooks/useContextUsageControls';
 import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -100,6 +111,7 @@ import type { MessageListHandle } from './MessageList';
 import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { SessionRecoveryBanner } from './SessionRecoveryBanner';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
@@ -180,8 +192,8 @@ export interface ChatPaneProps {
   onApprovalChange?: (sessionId: string, pending: boolean) => void;
   /**
    * The workspace this pane's session lives in. Passed explicitly by the split
-   * view (which knows it per session) and shown as a composer-toolbar chip on a
-   * multi-workspace daemon; falls back to the connection's own workspace.
+   * view (which knows it per session); falls back to the connection's own
+   * workspace.
    */
   workspaceCwd?: string;
   /**
@@ -215,10 +227,17 @@ export interface ChatPaneProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
+  modelManagement?: WebShellModelManagementOptions;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
     task: DaemonSessionMonitorTaskStatus,
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
+  registerContextUsageControls?: RegisterContextUsageControls;
+  onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
     sessionId: string,
     sessionActions: DaemonSessionActions,
   ) => void;
@@ -261,10 +280,14 @@ export function ChatPane({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  modelManagement,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
+  registerContextUsageControls,
+  onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
   onFirstPromptAdmitted,
@@ -283,6 +306,12 @@ export function ChatPane({
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const capacityRecovery = useCapacityRecovery(
+    workspace.client,
+    workspace.capabilities?.features,
+    connection,
+    actions,
+  );
   const attachmentWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
@@ -291,11 +320,13 @@ export function ChatPane({
   );
   // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
   // live prompt state into its own provider (#9487).
-  const sessionHasActivePrompt = useDaemonActivePromptBridge(
+  const daemonHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePrompt =
+    daemonHasActivePrompt || !!connection.backgroundTurn;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
@@ -554,6 +585,9 @@ export function ChatPane({
     },
     [onError],
   );
+  const modelManagementPolicy = resolveModelManagement(modelManagement);
+  const modelManagementRef = useRef(modelManagementPolicy);
+  modelManagementRef.current = modelManagementPolicy;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
   const pendingApproval = useMemo(
@@ -659,7 +693,14 @@ export function ChatPane({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   } = useQueuedPrompts({
+    getPromptDispatchError: (text) =>
+      !modelManagementRef.current.allowAdd &&
+      isModelSetupCommand(text, connectionRef.current.commands)
+        ? t('settings.models.addDisabled')
+        : undefined,
     connected: connection.status === 'connected',
+    writeBlocked: connection.runtimeStopped,
+    runtimeStopped: connection.runtimeStopped,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
@@ -680,13 +721,14 @@ export function ChatPane({
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
   // pane opened mid-turn shows the real elapsed time, not a reset-to-zero clock.
   const activeTurnStartedAt = useMemo(() => {
+    if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (message?.role === 'user') return message.timestamp;
     }
     return undefined;
-  }, [messages, isResponding]);
+  }, [messages, isResponding, connection.backgroundTurn]);
 
   const controlGoal = useCallback(
     async (
@@ -883,6 +925,14 @@ export function ChatPane({
         return false;
       if (admissionPayloadLocked || planPreparationRef.current?.isCurrent())
         return false;
+      // Same fence as App's composer: a stopped runtime keeps the draft in
+      // the composer (the pane banner offers Resume); a submit here would
+      // only race the dead runtime. The parked state retains sessionId, so
+      // shouldBlockComposerSubmit alone cannot catch it.
+      if (connectionRef.current.runtimeStopped) {
+        onImageIngestionNotice?.('warning', t('capacityChoice.stopped'));
+        return false;
+      }
       transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
@@ -891,6 +941,16 @@ export function ChatPane({
         trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
+        return true;
+      }
+      // Only when the host declines does the policy consume a model-setup
+      // command — below the runtimeStopped fence so a stopped runtime keeps
+      // the draft instead of toasting, and ahead of any daemon dispatch.
+      if (
+        !modelManagementRef.current.allowAdd &&
+        isModelSetupCommand(text, connectionRef.current.commands)
+      ) {
+        onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
         return true;
       }
       const planCommand = trimmed.match(/^\/plan(?:\s+(.*))?$/is);
@@ -923,6 +983,13 @@ export function ChatPane({
         )
           return false;
         trimmed = planOperation.prompt;
+        if (
+          !modelManagementRef.current.allowAdd &&
+          isModelSetupCommand(trimmed, connectionRef.current.commands)
+        ) {
+          onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+          return true;
+        }
       }
       if (!planOperation && /^\/goal(?:\s|$)/i.test(trimmed)) {
         // The same guard App.tsx applies before any slash handling: a control
@@ -1011,8 +1078,18 @@ export function ChatPane({
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
         let admitted = false;
-        const submit = () =>
-          actions
+        const submit = () => {
+          if (
+            !modelManagementRef.current.allowAdd &&
+            isModelSetupCommand(trimmed, connectionRef.current.commands)
+          ) {
+            onImageIngestionNotice?.(
+              'warning',
+              t('settings.models.addDisabled'),
+            );
+            return;
+          }
+          return actions
             .sendPrompt(trimmed, {
               submittedPrompt: text,
               ...(images && images.length ? { images } : {}),
@@ -1059,6 +1136,7 @@ export function ChatPane({
                 error,
               );
             });
+        };
         if (planOperation) {
           const owner = sessionOwnerGuard.capture();
           planPreparationRef.current = owner;
@@ -1070,6 +1148,7 @@ export function ChatPane({
               if (
                 !applied ||
                 !owner.isCurrent() ||
+                current.runtimeStopped ||
                 current.loadingTranscript ||
                 shouldBlockComposerSubmit({
                   connectionStatus: current.status,
@@ -1314,16 +1393,22 @@ export function ChatPane({
     return localizeBuiltinDescriptions(
       mergeCommands(connection.commands ?? [], getLocalCommands(t)),
       t,
-    ).map((command) => {
-      const skillKey = skillDescriptionKey(command.name);
-      if (!skillKey) return command;
-      return {
-        ...command,
-        displayCategory: 'skill' as const,
-        description: t(skillKey),
-      };
-    });
-  }, [connection.commands, t]);
+    )
+      .filter(
+        (command) =>
+          modelManagementPolicy.allowAdd ||
+          !isModelSetupCommand(`/${command.name}`, connection.commands),
+      )
+      .map((command) => {
+        const skillKey = skillDescriptionKey(command.name);
+        if (!skillKey) return command;
+        return {
+          ...command,
+          displayCategory: 'skill' as const,
+          description: t(skillKey),
+        };
+      });
+  }, [connection.commands, modelManagementPolicy.allowAdd, t]);
   const skills = useMemo(() => {
     const commandsByName = new Map(
       commands.map((command) => [command.name.toLowerCase(), command]),
@@ -1413,21 +1498,44 @@ export function ChatPane({
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
   const sessionStamp = sessionSummary?.updatedAt || sessionSummary?.createdAt;
 
-  // On a multi-workspace daemon, surface this pane's workspace as a composer-
-  // toolbar chip (next to where the git-branch chip sits), so it's clear which
-  // workspace a message goes to. Multi-workspace-ness comes from the shared
-  // workspace provider (the pane's own session connection may not carry it).
+  // Multi-workspace-ness comes from the shared workspace provider (the
+  // pane's own session connection may not carry it).
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
+  const prepareContextCompression = useCallback(() => {
+    clearFollowup();
+    if (connection.sessionId) onBeforeContextCompress?.(connection.sessionId);
+  }, [clearFollowup, connection.sessionId, onBeforeContextCompress]);
+  const handleOpenContextUsage = useCallback(() => {
+    if (connection.sessionId)
+      onOpenContextUsage?.(connection.sessionId, actions);
+  }, [actions, connection.sessionId, onOpenContextUsage]);
+  const contextUsageControls = useContextUsageControls({
+    connection,
+    actions,
+    ownerGuard: sessionOwnerGuard,
+    onBeforeCompress: prepareContextCompression,
+    busy: streamingState !== 'idle' || sessionHasActivePrompt,
+    writeBlocked:
+      Boolean(connection.loadingTranscript) ||
+      admissionPayloadLocked ||
+      approvalActive ||
+      modeControlsBusy,
+  });
+  useEffect(() => {
+    if (contextUsageControls)
+      return registerContextUsageControls?.(contextUsageControls);
+  }, [contextUsageControls, registerContextUsageControls]);
+
   // Memoized so the array identity is stable across renders — `ChatEditor` is
   // `React.memo`, and a fresh `[...]` each render would defeat it.
   const paneToolbarActions = useMemo(
     () =>
-      (showWorkspaceChip
+      (embedded && showWorkspaceChip
         ? [...PANE_TOOLBAR_ACTIONS, 'workspace' as const]
         : PANE_TOOLBAR_ACTIONS
       ).filter((action) => action !== 'plan' || planControlVisible),
-    [showWorkspaceChip, planControlVisible],
+    [embedded, showWorkspaceChip, planControlVisible],
   );
   const headerActions =
     connection.sessionId && renderHeaderActions
@@ -1438,12 +1546,8 @@ export function ChatPane({
         })
       : null;
 
-  // Also surface the workspace in the pane HEADER (always visible at the top),
-  // not just the composer chip at the bottom — on a narrow split the composer
-  // chip collapses to a bare folder icon, so the header is where you tell panes
-  // apart. A stable per-workspace accent color (same palette as the sidebar
-  // session-group dots) lets same-workspace panes read as a group at a glance,
-  // and keeps them distinguishable even when the header name ellipsizes.
+  // The header identifies each split pane's workspace; only embedded panes
+  // without a header need the composer chip. The accent matches sidebar dots.
   const workspaceLabel =
     showWorkspaceChip && paneWorkspaceCwd
       ? workspaceLabelForCwd(
@@ -1592,7 +1696,25 @@ export function ChatPane({
           enabled={monitorDetailsSupported}
           onOpen={openMonitorDetails}
         >
-          <SubagentDetailsProvider onOpen={openSubagentDetails}>
+          <SubagentDetailsProvider
+            onOpen={openSubagentDetails}
+            onOpenBackground={
+              onRightPanelOpen && connection.sessionId
+                ? (turn) => {
+                    if (!connection.sessionId) return;
+                    onRightPanelOpen({
+                      id: `background:${connection.sessionId}:${turn.taskId}`,
+                      kind: 'background_task',
+                      title: turn.label ?? turn.kind,
+                      turnId: turn.turnId,
+                      backgroundTurn: turn,
+                      sourceSessionId: connection.sessionId,
+                      workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
+                    });
+                  }
+                : undefined
+            }
+          >
             <WorkflowDetailsProvider tasks={sessionTasks}>
               <TranscriptViewport
                 ref={transcriptViewportRef}
@@ -1680,7 +1802,38 @@ export function ChatPane({
             />
           </div>
         )}
+        {capacityRecovery.intent && (
+          <CapacityRecoveryDialog
+            intent={capacityRecovery.intent}
+            onClose={capacityRecovery.dismiss}
+          />
+        )}
         <div className={approvalActive ? styles.composerHidden : undefined}>
+          {connection.runtimeStopped && (
+            <div role="status" data-testid="workspace-runtime-stopped">
+              <span>
+                {t('capacityChoice.stopped')}{' '}
+                {connection.runtimeStopPersistenceUnconfirmed
+                  ? t('capacityChoice.persistenceUnconfirmed')
+                  : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (connection.sessionId)
+                    void actions
+                      .loadSession(connection.sessionId, {
+                        sessionContext: connection.sessionContext,
+                      })
+                      .catch((error: unknown) =>
+                        reportError(error, 'Failed to resume session'),
+                      );
+                }}
+              >
+                {t('capacityChoice.resume')}
+              </button>
+            </div>
+          )}
           {/* Panes keep the composer status compact: spinner + elapsed time +
               token count + cancel hint, but no rotating "witty" loading
               phrase. */}
@@ -1688,6 +1841,10 @@ export function ChatPane({
             startedAt={activeTurnStartedAt}
             showPhrase={false}
             hasActivePrompt={sessionHasActivePrompt}
+            backgroundLabel={
+              connection.backgroundTurn?.label ??
+              connection.backgroundTurn?.kind
+            }
           />
           {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
             <div
@@ -1741,6 +1898,11 @@ export function ChatPane({
               )}
             </div>
           )}
+          <SessionRecoveryBanner
+            blocked={
+              approvalActive || admissionPayloadLocked || sessionHasActivePrompt
+            }
+          />
           <ChatEditor
             ref={editorRef}
             onSubmit={handleSubmit}
@@ -1760,6 +1922,14 @@ export function ChatPane({
             }
             onShowContextUsage={
               contextUsageAvailable ? handleShowContextUsage : undefined
+            }
+            contextUsageControls={
+              onOpenContextUsage ? contextUsageControls : undefined
+            }
+            onOpenContextUsage={
+              contextUsageAvailable && onOpenContextUsage
+                ? handleOpenContextUsage
+                : undefined
             }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}

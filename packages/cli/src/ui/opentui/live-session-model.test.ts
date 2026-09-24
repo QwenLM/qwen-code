@@ -15,6 +15,7 @@ import {
   describeGoalCard,
   describeLegacyGoalCard,
   foldLiveEvent,
+  type LiveAssistantItem,
   type LiveHistoryItem,
   type LiveToolItem,
 } from './live-session-model.js';
@@ -143,6 +144,67 @@ describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
       outcome: 'rejected',
     });
     expect(items[0]).toMatchObject({ confirm: 'approved' });
+  });
+});
+
+describe('foldLiveEvent tool-queued (approved but not started)', () => {
+  it('records the queued status and clears it again', () => {
+    const queued = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(queued[0]).toMatchObject({ confirm: 'approved', queued: true });
+    const running = foldLiveEvent(queued, {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: false,
+    });
+    expect(running[0]).toMatchObject({ queued: false });
+  });
+
+  it('ignores a status for a call with no card', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(items).toHaveLength(1);
+  });
+});
+
+describe('foldLiveEvent task card (subagent roster parity)', () => {
+  const started = foldLiveEvent([assistant('hi')], {
+    type: 'task-start',
+    id: 's1',
+    name: 'researcher',
+    description: 'bench frames',
+  });
+
+  it('opens a card and appends progress lines', () => {
+    const items = foldLiveEvent(started, {
+      type: 'task-progress',
+      id: 's1',
+      line: '↳ grep',
+    });
+    expect(items[1]).toMatchObject({
+      kind: 'task',
+      name: 'researcher',
+      progress: ['↳ grep'],
+    });
+  });
+
+  it('drops the card once the subagent settles', () => {
+    const items = foldLiveEvent(started, { type: 'task-end', id: 's1' });
+    expect(items).toEqual([{ ...assistant('hi'), streaming: false }]);
+  });
+
+  it('ignores task-end for a card that is not there', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'task-end',
+      id: 'ghost',
+    });
+    expect(items).toHaveLength(1);
   });
 });
 
@@ -328,6 +390,48 @@ describe('foldLiveEvent tool-result ansi', () => {
       totalLines: 30,
       totalBytes: 4096,
     });
+  });
+
+  it('drops the grid when a later chunk carries plain text', () => {
+    // A shell run that streams ANSI and then trips binary detection replaces
+    // the grid with a plain string, and ToolCardBody prefers the grid
+    // unconditionally — a stale one would hide the notice for good, including
+    // in the settled card.
+    const grid = [
+      [
+        {
+          text: 'partial',
+          bold: false,
+          italic: false,
+          underline: false,
+          dim: false,
+          inverse: false,
+          fg: '',
+          bg: '',
+        },
+      ],
+    ];
+    let items = foldLiveEvent([], {
+      type: 'tool-start',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'run_shell_command',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: '',
+      ansi: { grid },
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-output',
+      id: 'tool1',
+      output: '[Binary output detected. Halting stream...]',
+    });
+    const tool = items[0];
+    if (tool.kind !== 'tool') throw new Error('expected tool item');
+    expect(tool.ansi).toBeUndefined();
+    expect(tool.output).toBe('[Binary output detected. Halting stream...]');
   });
 });
 
@@ -775,6 +879,44 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     ).toMatchObject({ subtitle: '2 turns · 1m 1s' });
   });
 
+  it.each([
+    [3, 20, 723_000, 1_800_000, '3/20 turns · 12m 3s/30m'],
+    [1, 20, 0, undefined, '1/20 turns'],
+    [1, 1, 0, undefined, '1/1 turn'],
+    [3, undefined, 723_000, undefined, '3 turns · 12m 3s'],
+  ])(
+    'shows turn and active-time budgets (%s/%s)',
+    (turnCount, turnBudget, activeTimeMs, activeTimeBudgetMs, expected) => {
+      expect(
+        describeGoalCard(
+          snap({
+            objective: 'o',
+            status: 'paused',
+            turnCount,
+            turnBudget,
+            activeTimeMs,
+            activeTimeBudgetMs,
+          }),
+        ),
+      ).toMatchObject({ subtitle: expected });
+    },
+  );
+
+  it('hides unused turn and active-time budgets', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: null });
+  });
+
   it('carries spend in the subtitle, matching the ink card', () => {
     expect(
       describeGoalCard(
@@ -895,5 +1037,46 @@ describe('describeLegacyGoalCard (ink kind form)', () => {
         lastReason: 'nope',
       }),
     ).toMatchObject({ lastCheck: undefined });
+  });
+});
+
+describe('foldLiveEvent assistant timestamps (#76)', () => {
+  const stampOf = (items: readonly LiveHistoryItem[]): number | undefined =>
+    (items[0] as LiveAssistantItem).timestamp;
+
+  it('opens the block at the replayed record time', () => {
+    const items = foldLiveEvent([], {
+      type: 'text',
+      delta: 'hi',
+      timestamp: 1_700_000_000_000,
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'hi',
+      timestamp: 1_700_000_000_000,
+    });
+  });
+
+  it('keeps the opening stamp as later deltas append to the same block', () => {
+    let items = foldLiveEvent([], {
+      type: 'text',
+      delta: 'a',
+      timestamp: 1_700_000_000_000,
+    });
+    items = foldLiveEvent(items, {
+      type: 'text',
+      delta: 'b',
+      timestamp: 1_800_000_000_000,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ text: 'ab' });
+    expect(stampOf(items)).toBe(1_700_000_000_000);
+  });
+
+  it('falls back to the fold time for a live delta', () => {
+    const before = Date.now();
+    const items = foldLiveEvent([], { type: 'text', delta: 'live' });
+    expect(stampOf(items)).toBeGreaterThanOrEqual(before);
+    expect(stampOf(items)).toBeLessThanOrEqual(Date.now());
   });
 });

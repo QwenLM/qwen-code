@@ -60,11 +60,23 @@ export interface BudgetContext {
    */
   operatorRoundCap?: number;
   /**
-   * Is `QWEN_REVIEW_DEADLINE_EPOCH` set to something the gates will honour?
-   * This decides whether the huge tier's finishability reduction applies at
-   * all; see `HUGE_REVERSE_AUDIT_ROUNDS`.
+   * Does this run have an EXPLICIT clock — `QWEN_REVIEW_DEADLINE_EPOCH` set
+   * to something the gates will honour, or a `--deadline <minutes>` the
+   * capture recorded? This decides whether the huge tier's finishability
+   * reduction applies at all; see `HUGE_REVERSE_AUDIT_ROUNDS`. The DEFAULT
+   * wall a capture writes on its own (lib/deadline.ts) is deliberately not
+   * one: it is a liveness bound the round gate enforces, not a kill the
+   * reduction was sized against, and it must not cut a healthy local run's
+   * recall at plan time. `hasReviewDeadline` answers this question.
    */
   hasDeadline?: boolean;
+  /**
+   * The capture command's incremental ruling, when it made one — so the
+   * recorded round cap reads the SAME topology the fix-audit posture flips
+   * (`isFixAuditRound`), instead of stamping the small tier's ten rounds on
+   * a plan whose builder will enforce the territory tier's five.
+   */
+  incremental?: unknown;
 }
 
 export interface ReviewBudget {
@@ -145,12 +157,15 @@ export interface ReviewBudget {
    * the fan-out and tail are even counted. That spread is why this is not
    * one number: the same cap cannot price a single agent and a 19-way
    * fan-out. In a time-budgeted CI run the deadline gate already refuses a
-   * round that will not fit; this static cap is the belt it works under and
-   * the ONLY bound a local run (no deadline) has — which is also why the huge
-   * tier's reduction does not apply to such a run at all: with no ceiling to
-   * fit inside there is nothing for it to answer, so a huge diff without a
-   * deadline reads the 3B tier. Where a deadline does exist the huge tier is
-   * reduced to three, not two — not because two cannot converge (the all-dry
+   * round that will not fit; this static cap is the belt it works under.
+   * A local run has a wall too — the plan's default (`lib/deadline.ts`) —
+   * but that wall is a liveness bound sized ABOVE what a healthy run at this
+   * cap spends, so on such a run the cap is still what ends a loop that has
+   * NOT converged by the cap round, and the huge tier's reduction does not apply: the
+   * reduction answers a ceiling the run must fit inside, and a default wall
+   * is not one, so a huge diff without an explicit clock reads the 3B tier.
+   * Where an explicit deadline does exist the huge tier is reduced to
+   * three, not two — not because two cannot converge (the all-dry
    * rounds-1-and-2 shape reaches CONVERGED at the round-3 build under any
    * cap of two or more, since the convergence check runs before the cap
    * gate) but to buy hot chunks one extra audit round before the cap.
@@ -200,15 +215,18 @@ export const LARGE_REVERSE_AUDIT_ROUNDS = 5;
  * reaches CONVERGED under any cap of two or more, because the reverse
  * audit's convergence check runs before the round-cap gate.
  *
- * **Applied only when the run has a deadline.** This is not a claim that a
+ * **Applied only when the run has an EXPLICIT deadline** — the CI epoch or
+ * `--deadline <minutes>`, never the plan's default wall. This is not a claim that a
  * huge diff converges sooner — it plainly does not; it has more defects and
  * more territory, and on the recall axis it deserves MORE rounds than a small
  * one, not fewer. It is a claim about a wall: five ~90-minute rounds do not
  * fit a six-hour CI ceiling, and a review killed mid-flight posts nothing at
  * all, so three rounds reported beat five rounds lost (measured; DESIGN.md —
- * The six-hour timeouts). Where no wall exists — a local run with no
- * `QWEN_REVIEW_DEADLINE_EPOCH` — the premise is absent and so is the
- * reduction: a huge diff is then just a large 3B diff and gets the 3B tier.
+ * The six-hour timeouts). Where no such ceiling exists — a local run with
+ * no `QWEN_REVIEW_DEADLINE_EPOCH` and no flag, whose only wall is the
+ * plan's default, sized above a healthy run rather than below it — the
+ * premise is absent and so is the reduction: a huge diff is then just a
+ * large 3B diff and gets the 3B tier.
  * Trading recall away to fit a ceiling that is not there is a pure loss, and
  * the tier this reduction cuts from is the one where recall matters most.
  */
@@ -239,6 +257,97 @@ const FAN_OUT_TOTAL_FLOOR = 3200;
 export interface DiffSize {
   srcDiffLines?: unknown;
   diffLines?: unknown;
+  /**
+   * The capture command's incremental ruling, carried so the fix-audit
+   * posture can reach the topology gate — see `isFixAuditRound`.
+   */
+  incremental?: unknown;
+}
+
+/**
+ * Is this plan a critical-posture **fix-audit round** — an incremental
+ * re-review whose capture resolved the round's posting posture to
+ * critical-only (issue #10104)?
+ *
+ * The fact is read from the plan, never from a caller argument, for the
+ * reason `effort` is: a shape the caller could assert is a shape that gets
+ * asserted. The capture command (`fetch-pr`) writes `incremental.posture`
+ * exactly when the posture resolved AND the round scoped to the anchor, and
+ * this reader additionally requires the scope to be present — a hand-edited
+ * plan claiming the posture over a full-range diff must not shrink the
+ * roster below what the full range is owed. Everything malformed reads as
+ * "not a fix-audit round", which is the ordinary full shape — the safe
+ * direction.
+ *
+ * It lives here beside `isTerritoryFanOut` because this module must stay
+ * import-free; the topology gate and the round-cap tier read it here, and
+ * the floor's fix-audit arm plus the brief builder's posture frame read it
+ * back directly.
+ */
+export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
+  const inc = plan?.incremental;
+  if (typeof inc !== 'object' || inc === null) return false;
+  const rec = inc as {
+    posture?: unknown;
+    effective?: unknown;
+    scope?: unknown;
+  };
+  if (rec.posture !== 'critical' || rec.effective !== true) return false;
+  // The scope must pass the bar the brief builder applies — a non-empty
+  // anchor and a delta list that IS one — or a posture beside a scope
+  // `incrementalScopeOf` rejects would shrink the roster while the briefs
+  // degrade to full-scope, two readers disagreeing about one plan. The bar
+  // meets the builder's OWN reading of that list: `incrementalScopeOf`
+  // rejects only non-string elements and filters '' AFTER admission, so a
+  // list mixing a valid path with an empty string renders an incremental
+  // frame there and must engage the posture here (an all-or-nothing bar let
+  // the briefs narrow while every reader below went full). The bar is
+  // stricter than the builder's only where the builder would still render
+  // an incremental frame (an interaction-only scope): that then reads as
+  // the ordinary full shape — the safe direction, as always here.
+  const scope = rec.scope as
+    | { anchor?: unknown; deltaFiles?: unknown }
+    | null
+    | undefined;
+  return (
+    typeof scope === 'object' &&
+    scope !== null &&
+    typeof scope.anchor === 'string' &&
+    scope.anchor !== '' &&
+    Array.isArray(scope.deltaFiles) &&
+    scope.deltaFiles.every((p) => typeof p === 'string') &&
+    scope.deltaFiles.some((p) => typeof p === 'string' && p !== '')
+  );
+}
+
+/**
+ * One admission for a plan's `incremental.scope.interaction[]` entry,
+ * shared by every reader of it (#10136): the brief builder (which renders
+ * the entry's scope class) and `compose-review`'s round-shape disclosure.
+ * Two readers with two bars let the body count an entry the briefs never
+ * rendered. (The roster reads the plan through `isFixAuditRound` alone and
+ * never opens the entries.)
+ *
+ * `null` for anything the briefs would not render: no path, no surviving
+ * `importsChanged` edge (an entry IS its edge — "because it imports ,
+ * which changed" is a seam pointing at nothing). Lives here beside
+ * `isFixAuditRound` for the same reason it does: this module is
+ * import-free, so every reader can reach it without a cycle.
+ */
+export function interactionEntryOf(raw: unknown): {
+  path: string;
+  importsChanged: string[];
+} | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const e = raw as { path?: unknown; importsChanged?: unknown };
+  if (typeof e.path !== 'string' || e.path === '') return null;
+  const importsChanged = Array.isArray(e.importsChanged)
+    ? e.importsChanged.filter(
+        (p): p is string => typeof p === 'string' && p !== '',
+      )
+    : [];
+  if (importsChanged.length === 0) return null;
+  return { path: e.path, importsChanged };
 }
 
 /**
@@ -253,6 +362,16 @@ export interface DiffSize {
  * own, so the direction cannot cycle).
  */
 export function isTerritoryFanOut(plan: DiffSize): boolean {
+  // A fix-audit round keeps the territory shape whatever its size: the
+  // narrowed delta is usually 3A-sized, but the round's whole point is one
+  // accountable auditor per territory of the fix commits, not fourteen
+  // dimension lenses re-walking a delta the posture defers all but Critical
+  // findings on. Ruling it HERE keeps the one-predicate contract — the
+  // roster and the topology-mismatch note read this gate, and the round-cap
+  // tier reads the same posture beside `sizeTier` (which never sees it, so
+  // the default wall stays a size ruling) — so none of them can disagree
+  // about which fan-out the round owed.
+  if (isFixAuditRound(plan)) return true;
   const src = Number(plan?.srcDiffLines ?? 0);
   const total = Number(plan?.diffLines ?? 0);
   return !(src <= FAN_OUT_SRC_FLOOR && total <= FAN_OUT_TOTAL_FLOOR);
@@ -293,26 +412,60 @@ export function reverseAuditRoundTier(
   size: DiffSize,
   hasDeadline: boolean,
 ): number {
+  switch (sizeTier(size)) {
+    case 'small':
+      // A fix-audit round is priced at the territory tier it flips to
+      // (`isTerritoryFanOut`), whatever its narrowed delta measures. The
+      // posture is read HERE and not inside `sizeTier`: that reading is a
+      // size ruling the default wall shares, and a posture is not a size — the
+      // same plan must read the same size whether or not its incremental
+      // block rides along. Huge and large need no override: large is
+      // already the territory tier, and huge is a finishability ruling that
+      // still wins.
+      return isFixAuditRound(size)
+        ? LARGE_REVERSE_AUDIT_ROUNDS
+        : SMALL_REVERSE_AUDIT_ROUNDS;
+    case 'huge':
+      // The huge reduction is a ruling about fitting inside a wall, so it
+      // applies only where there is one — an EXPLICIT clock; the plan's
+      // default wall is not one. Without that a huge diff is simply a large
+      // 3B diff and gets the 3B tier — see `HUGE_REVERSE_AUDIT_ROUNDS`.
+      return hasDeadline
+        ? HUGE_REVERSE_AUDIT_ROUNDS
+        : LARGE_REVERSE_AUDIT_ROUNDS;
+    case 'large':
+    default:
+      // `sizeTier` is exhaustive; the default is the lint rule's, and reads
+      // the same tier the unsized fallback does.
+      return LARGE_REVERSE_AUDIT_ROUNDS;
+  }
+}
+
+/** The three topologies a plan's size selects — see `sizeTier`. */
+export type SizeTier = 'small' | 'large' | 'huge';
+
+/**
+ * A plan's topology tier, from its validated line counts and nothing else.
+ *
+ * The ONE derivation every size-keyed ruling in this module reads — the
+ * round cap above and the default review deadline (lib/deadline.ts) — so
+ * that two rulings about the same plan cannot disagree about its size. It
+ * was factored out of `reverseAuditRoundTier` for exactly the defect that
+ * function was once repaired for: two independent derivations of the same
+ * two numbers, one of which laundered garbage the other rejected.
+ *
+ * An unusable pair (a corrupted plan, a `null` where `JSON.stringify` wrote a
+ * `NaN`) reads as LARGE — the tier the flat, pre-tiering cap belonged to.
+ */
+export function sizeTier(size: DiffSize): SizeTier {
   const src = size?.srcDiffLines;
   const total = size?.diffLines;
-  if (!usableLineCount(src) || !usableLineCount(total)) {
-    return LARGE_REVERSE_AUDIT_ROUNDS;
-  }
-  const effective = effectiveLines(src, total);
-  // The huge reduction is a ruling about fitting inside a wall, so it applies
-  // only where there is one. Without a clock a huge diff is simply a large 3B
-  // diff and gets the 3B tier — see `HUGE_REVERSE_AUDIT_ROUNDS`.
-  if (effective >= HUGE_DIFF_FLOOR) {
-    return hasDeadline ? HUGE_REVERSE_AUDIT_ROUNDS : LARGE_REVERSE_AUDIT_ROUNDS;
-  }
-  // The validated pair, not `size` again. Re-reading the raw object here would
-  // give the huge gate and the topology gate two independent derivations of
-  // the same two numbers inside one function — which is exactly the shape of
-  // the defect this function was just repaired for, where one derivation
-  // laundered garbage the other rejected.
+  if (!usableLineCount(src) || !usableLineCount(total)) return 'large';
+  if (effectiveLines(src, total) >= HUGE_DIFF_FLOOR) return 'huge';
+  // The validated pair, not `size` again — see the note above.
   return isTerritoryFanOut({ srcDiffLines: src, diffLines: total })
-    ? LARGE_REVERSE_AUDIT_ROUNDS
-    : SMALL_REVERSE_AUDIT_ROUNDS;
+    ? 'large'
+    : 'small';
 }
 
 /**
@@ -465,7 +618,7 @@ export function reviewBudget(
     // size failed to arrive, where the flat cap recorded five. The tier does
     // its own usability check precisely so this call can hand it the truth.
     reverseAuditRounds: cappedRoundTier(
-      input,
+      { ...input, incremental: context.incremental },
       context.operatorRoundCap,
       context.hasDeadline === true,
     ),
@@ -481,8 +634,8 @@ export function reviewBudget(
  *
  * It takes the whole plan, not `plan.budget`, because the accepted range is
  * now the plan's **own topology tier** rather than a global band — and
- * `hasDeadline` because that tier is clock-dependent on a huge diff (3 with a
- * deadline, 5 without). A reader that sees a different clock than the capture
+ * `hasDeadline` because that tier is clock-dependent on a huge diff (3 with an
+ * explicit deadline, 5 without). A reader that sees a different clock than the capture
  * did therefore clamps against a different band, which is safe in the
  * direction that matters: a plan captured without a clock and read under one
  * is cut to the shorter tier, never the reverse. What that
@@ -506,8 +659,8 @@ export function reviewBudget(
  *    a CLI-written field must not do.
  *  - It does **not** always err toward more auditing. A field-less **huge**
  *    plan reads 3 where the flat fallback read 5 — deliberately less — but
- *    only in a run that has a deadline; without one the huge tier is 5 and the
- *    fallback is unchanged. The reduction is a finishability ruling, and the
+ *    only in a run with an explicit deadline; without one the huge tier is 5
+ *    and the fallback is unchanged. The reduction is a finishability ruling, and the
  *    reviews it exists for are the ones that ran six hours and posted nothing.
  *
  * The range stays floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the smallest cap

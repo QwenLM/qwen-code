@@ -4,11 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { basename, dirname, join, resolve } from 'node:path';
-import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
+  assertWritableOutPath,
   repoRelativeOf,
   inertPath,
   lastReviewEffortPath,
@@ -19,7 +27,129 @@ import {
   scratchWorktreePrefix,
   worktreePath,
   PARSE_ARGS_REPORT,
+  REVIEW_TRUST_STATE_DIR,
+  reviewRepositoryRootForWorktree,
+  reviewTrustStateDir,
 } from './paths.js';
+
+describe('trusted review state paths', () => {
+  let home: string;
+  let repo: string;
+
+  beforeEach(() => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'review-state-home-')));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-state-repo-')));
+    vi.stubEnv('QWEN_HOME', home);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('keeps repository authority under the global protected root', () => {
+    const state = reviewTrustStateDir(repo);
+    expect(state.startsWith(join(home, REVIEW_TRUST_STATE_DIR) + sep)).toBe(
+      true,
+    );
+    expect(state.startsWith(repo + sep)).toBe(false);
+  });
+
+  it('shares one lock scope across nested review worktrees', () => {
+    const outer = join(repo, '.qwen', 'tmp', 'review-pr-9');
+    const inner = join(outer, '.qwen', 'tmp', 'review-pr-1');
+    expect(reviewTrustStateDir(outer)).toBe(reviewTrustStateDir(repo));
+    expect(reviewRepositoryRootForWorktree(inner)).toBe(repo);
+  });
+
+  it('separates different repositories', () => {
+    const other = realpathSync(
+      mkdtempSync(join(tmpdir(), 'review-state-other-')),
+    );
+    try {
+      expect(reviewTrustStateDir(other)).not.toBe(reviewTrustStateDir(repo));
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps case-distinct repositories separate when the filesystem does', () => {
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'review-state-case-')),
+    );
+    const upper = join(parent, 'Repository');
+    const lower = join(parent, 'repository');
+    try {
+      mkdirSync(upper);
+      try {
+        mkdirSync(lower);
+      } catch {
+        return;
+      }
+      if (realpathSync(upper) === realpathSync(lower)) return;
+      expect(reviewTrustStateDir(upper)).not.toBe(reviewTrustStateDir(lower));
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one namespace for case variants of the same repository', () => {
+    const variant = join(dirname(repo), basename(repo).toUpperCase());
+    let sameRepository = false;
+    try {
+      const actual = statSync(repo);
+      const alternate = statSync(variant);
+      sameRepository =
+        actual.dev === alternate.dev && actual.ino === alternate.ino;
+    } catch {
+      return;
+    }
+    if (sameRepository) {
+      expect(reviewTrustStateDir(variant)).toBe(reviewTrustStateDir(repo));
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'uses one namespace for symlink and canonical repository spellings',
+    () => {
+      const links = realpathSync(
+        mkdtempSync(join(tmpdir(), 'review-state-links-')),
+      );
+      const alias = join(links, 'repository');
+      try {
+        symlinkSync(repo, alias, 'dir');
+        expect(reviewTrustStateDir(alias)).toBe(reviewTrustStateDir(repo));
+      } finally {
+        rmSync(links, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'recognizes a nested review worktree reached through a symlink',
+    () => {
+      const nested = join(repo, '.qwen', 'tmp', 'review-pr-9');
+      const links = realpathSync(
+        mkdtempSync(join(tmpdir(), 'review-state-nested-links-')),
+      );
+      const alias = join(links, 'repository');
+      try {
+        mkdirSync(nested, { recursive: true });
+        symlinkSync(nested, alias, 'dir');
+        expect(reviewTrustStateDir(alias)).toBe(reviewTrustStateDir(repo));
+      } finally {
+        rmSync(links, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a worktree outside the review geometry', () => {
+    expect(() =>
+      reviewRepositoryRootForWorktree(join(repo, 'arbitrary-worktree')),
+    ).toThrow(/not shaped like <root>\/\.qwen\/tmp\/<name>/);
+  });
+});
 
 describe('lastReviewEffortPath', () => {
   it('uses the project storage owner exported by the parent session', () => {
@@ -242,4 +372,43 @@ describe('canonicalise walk-up — backslash is a POSIX filename byte', () => {
       }
     },
   );
+});
+
+describe('assertWritableOutPath — the up-front --out ruling', () => {
+  it('refuses a repeated --out, which yargs hands over as an array, with a message that says so', () => {
+    // Not `out.trim is not a function`: that reads as a crash in the
+    // command, and the operator cannot tell it is their argument.
+    expect(() => assertWritableOutPath(['a.json', 'b.json'])).toThrow(
+      TypeError,
+    );
+    expect(() => assertWritableOutPath(['a.json', 'b.json'])).toThrow(
+      '--out must be given once, as a file path',
+    );
+    // `--no-out` arrives as `false`; nothing was given twice, so the message
+    // is the blank value's.
+    for (const shape of [false, true, undefined]) {
+      expect(() => assertWritableOutPath(shape)).toThrow(TypeError);
+      expect(() => assertWritableOutPath(shape)).toThrow(
+        '--out must name a file path',
+      );
+    }
+  });
+
+  it('refuses a blank value, a trailing separator and an existing directory, and admits a file path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'out-path-'));
+    try {
+      expect(() => assertWritableOutPath('  ')).toThrow(
+        '--out must name a file path',
+      );
+      expect(() => assertWritableOutPath(join(dir, 'later') + '/')).toThrow(
+        '--out names a directory, not a file',
+      );
+      expect(() => assertWritableOutPath(dir)).toThrow(
+        '--out names a directory, not a file',
+      );
+      expect(() => assertWritableOutPath(join(dir, 'plan.json'))).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

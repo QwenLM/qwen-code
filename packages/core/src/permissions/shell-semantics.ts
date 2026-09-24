@@ -302,7 +302,7 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
+      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
       if (m) {
         const op = m[1]!;
         const target = m[2]!;
@@ -2261,7 +2261,7 @@ function hasAbsolutePathTokenForOperation(
 ): boolean {
   for (const token of tokenize(command)) {
     const redirectTarget = token.match(
-      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/,
+      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
     )?.[1];
     const candidate = redirectTarget ?? token;
     if (
