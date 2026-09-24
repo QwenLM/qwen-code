@@ -449,6 +449,23 @@ function filterMcpConfig(original: MCPServerConfig): MCPServerConfig {
   return Object.freeze(rest);
 }
 
+/**
+ * `fs.existsSync` folds every failure into `false`, laundering resource
+ * exhaustion into "absent" — the guarded resource would silently drop out of
+ * a load reported as successful, and the pre-load fingerprint would stamp the
+ * truncation as up to date (R1-3). Keep the existsSync contract for genuine
+ * absence, but let EMFILE/ENFILE/… propagate.
+ */
+function existsSyncOrThrow(target: string): boolean {
+  try {
+    fs.accessSync(target);
+    return true;
+  } catch (error) {
+    if (isResourceExhaustion(error)) throw error;
+    return false;
+  }
+}
+
 function getContextFileNames(config: ExtensionConfig): string[] {
   if (!config.contextFileName || config.contextFileName.length === 0) {
     return ['QWEN.md'];
@@ -1505,116 +1522,57 @@ export class ExtensionManager {
     const dirFingerprintBeforeLoad =
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
     // The ledger is meaningful within this one refresh attempt: recorded by
-    // loadExtension as the attempt scans, merged into the cache by the catch
-    // below if the refresh rejects. Its lifetime spans the lock release —
-    // the merge runs after `readConsistent` settles — so it must not be
-    // instance state an overlapping refresh can clear.
+    // loadExtension as the attempt scans, folded into the cache by the
+    // rejection callback below if the refresh rejects. The callback runs
+    // before `readConsistent` releases the store lock, so the merge is atomic
+    // with every other store mutation — a merge running after the release
+    // would let a concurrent uninstall or successful refresh commit in the
+    // gap and then be overwritten by the stale records (R9-1).
     const scanRefusals: ScanRefusalCollector = new Map();
-    let refreshed: { value: Extension[]; snapshot: ExtensionStoreSnapshot };
-    try {
-      refreshed = await this.extensionStore.readConsistent(async () => {
-        let loaded: Extension[];
-        if (requestedNames.length > 0) {
-          loaded = (
-            await Promise.all(
-              requestedNames.map((name) =>
-                this.loadExtensionByName(name, undefined, scanRefusals),
-              ),
-            )
-          ).filter((extension): extension is Extension => extension !== null);
-        } else {
-          // Default: load all extensions from QWEN_HOME-aware user extensions dir.
-          loaded = await this.loadExtensionsFromExtensionsDir(
-            this.configDir,
-            this.workspaceDir,
-            { scanRefusals },
-          );
-        }
-        return {
-          value: loaded,
-          extensions: loaded.map((extension) => ({
-            id: extension.id,
-            name: extension.name,
-          })),
-        };
-      });
-    } catch (error) {
-      // A rejected refresh never commits: the previous cache and fingerprint
-      // baseline stay in place so the next call retries. But the executor
-      // refusals the failed attempt did record must survive — merged for ANY
-      // rejection, not only resource-exhaustion ones: the batch rethrows the
-      // lowest-index rejection, which need not be the errno that killed the
-      // scan. Without them a by-name dispatch of a refused name falls through
-      // to a same-named builtin while its extension is absent (R10-2). An
-      // extension already in the cache keeps its previous, complete entry
-      // and gains the fresh refusals (cloned — never mutate the shared
-      // cached object); an absent one gets a subresource-free tombstone.
-      if (scanRefusals.size > 0) {
-        // The rejected load's isActive came from the enablement projection,
-        // whose read failure defaults to "enabled" — copying it onto a
-        // tombstone would report a store-disabled extension as active. The
-        // committed path's authority is the store snapshot
-        // (applyStoreActivation), so derive activation from it the same way,
-        // falling back to the head-load value only when the snapshot itself
-        // is unreadable.
-        const storeSnapshot = await this.getExtensionStoreSnapshot().catch(
-          () => undefined,
-        );
-        const cache = new Map(this.extensionCache ?? []);
-        for (const [name, { extension, refusals }] of scanRefusals) {
-          const cached = cache.get(name);
-          if (cached !== undefined) {
-            cache.set(name, {
-              ...cached,
-              agentExecutorRefusals: new Map([
-                ...(cached.agentExecutorRefusals ?? []),
-                ...refusals,
-              ]),
-            });
+    const { value: extensions, snapshot } =
+      await this.extensionStore.readConsistent(
+        async () => {
+          let loaded: Extension[];
+          if (requestedNames.length > 0) {
+            loaded = (
+              await Promise.all(
+                requestedNames.map((name) =>
+                  this.loadExtensionByName(name, undefined, scanRefusals),
+                ),
+              )
+            ).filter((extension): extension is Extension => extension !== null);
           } else {
-            // A tombstone must not advertise subresources the failed refresh
-            // never committed — it exists to carry the refusals. Build it as
-            // an allowlist, never by spreading the rejected load: the runtime
-            // reads MCP servers through `config.mcpServers`
-            // (Config.getMergedMcpServers) and language servers through
-            // `config.lspServers` (LspConfigLoader), both of which a spread
-            // would carry onto a refused extension, and `isActive` passes
-            // getActiveExtensions. `config` keeps only the required
-            // name/version so the cache key and by-name lookups still work.
-            const tombstone: Extension = {
+            // Default: load all extensions from QWEN_HOME-aware user extensions dir.
+            loaded = await this.loadExtensionsFromExtensionsDir(
+              this.configDir,
+              this.workspaceDir,
+              { scanRefusals },
+            );
+          }
+          return {
+            value: loaded,
+            extensions: loaded.map((extension) => ({
               id: extension.id,
               name: extension.name,
-              displayName: extension.displayName,
-              version: extension.version,
-              isActive: storeSnapshot
-                ? this.getExtensionActivationForNameFromSnapshot(
-                    extension.name,
-                    storeSnapshot,
-                    this.workspaceDir,
-                  ).effective === 'enabled'
-                : extension.isActive,
-              path: extension.path,
-              format: extension.format,
-              installMetadata: extension.installMetadata,
-              config: {
-                name: extension.config.name,
-                version: extension.config.version,
-              },
-              contextFiles: [],
-              commands: [],
-              skills: [],
-              agents: [],
-              workflows: [],
-              agentExecutorRefusals: refusals,
-            };
-            cache.set(name, tombstone);
-          }
-        }
-        this.extensionCache = cache;
-      }
-      throw error;
-    }
-    const { value: extensions, snapshot } = refreshed;
+            })),
+          };
+        },
+        async (readSnapshot) => {
+          // A rejected refresh never commits: the previous cache and
+          // fingerprint baseline stay in place so the next call retries. But
+          // the executor refusals the failed attempt did record must survive
+          // — merged for ANY rejection, not only resource-exhaustion ones:
+          // the batch rethrows the lowest-index rejection, which need not be
+          // the errno that killed the scan. Without them a by-name dispatch
+          // of a refused name falls through to a same-named builtin while its
+          // extension is absent (R10-2).
+          if (scanRefusals.size === 0) return;
+          this.mergeScanRefusalsIntoCache(
+            scanRefusals,
+            await readSnapshot().catch(() => undefined),
+          );
+        },
+      );
     const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
       nextCache.set(extension.name, extension);
@@ -1630,6 +1588,79 @@ export class ExtensionManager {
       );
     }
     return snapshot;
+  }
+
+  /**
+   * Folds the executor refusals a rejected refresh recorded into the cache.
+   * An extension already in the cache keeps its previous, complete entry and
+   * gains the fresh refusals (cloned — never mutate the shared cached
+   * object); an absent one gets a subresource-free tombstone.
+   *
+   * Must be called with the store lock held (the `readConsistent` rejection
+   * callback), so the merge cannot interleave with a concurrent mutation.
+   *
+   * `storeSnapshot` is undefined when the snapshot read itself failed: the
+   * rejected load's own isActive came from the enablement projection, whose
+   * read failure defaults to "enabled", so with no store verdict left the
+   * tombstone must fail closed rather than copy it (R8-1).
+   */
+  private mergeScanRefusalsIntoCache(
+    scanRefusals: ScanRefusalCollector,
+    storeSnapshot: ExtensionStoreSnapshot | undefined,
+  ): void {
+    const cache = new Map(this.extensionCache ?? []);
+    for (const [name, { extension, refusals }] of scanRefusals) {
+      const cached = cache.get(name);
+      if (cached !== undefined) {
+        cache.set(name, {
+          ...cached,
+          agentExecutorRefusals: new Map([
+            ...(cached.agentExecutorRefusals ?? []),
+            ...refusals,
+          ]),
+        });
+      } else {
+        // A tombstone must not advertise subresources the failed refresh
+        // never committed — it exists to carry the refusals. Build it as
+        // an allowlist, never by spreading the rejected load: the runtime
+        // reads MCP servers through `config.mcpServers`
+        // (Config.getMergedMcpServers) and language servers through
+        // `config.lspServers` (LspConfigLoader), both of which a spread
+        // would carry onto a refused extension, and `isActive` passes
+        // getActiveExtensions. `config` keeps only the required
+        // name/version so the cache key and by-name lookups still work.
+        const tombstone: Extension = {
+          id: extension.id,
+          name: extension.name,
+          displayName: extension.displayName,
+          version: extension.version,
+          // The committed path's activation authority is the store snapshot
+          // (applyStoreActivation), so derive from it the same way.
+          isActive: storeSnapshot
+            ? this.getExtensionActivationForNameFromSnapshot(
+                extension.name,
+                storeSnapshot,
+                this.workspaceDir,
+              ).effective === 'enabled'
+            : false,
+          path: extension.path,
+          format: extension.format,
+          installMetadata: extension.installMetadata,
+          config: {
+            name: extension.config.name,
+            version: extension.config.version,
+          },
+          contextFiles: [],
+          commands: [],
+          skills: [],
+          agents: [],
+          workflows: [],
+          agentExecutorRefusals: refusals,
+        };
+        cache.set(name, tombstone);
+      }
+    }
+    this.extensionCache = cache;
   }
 
   /**
@@ -2102,7 +2133,7 @@ export class ExtensionManager {
           .map((contextFileName) =>
             path.join(effectiveExtensionPath, contextFileName),
           )
-          .filter((contextFilePath) => fs.existsSync(contextFilePath));
+          .filter((contextFilePath) => existsSyncOrThrow(contextFilePath));
         agentExecutorRefusals = new Map<string, SubagentError>();
         // commands / skills / agents live in disjoint directories with no
         // shared state, so their directory scans run concurrently; each
@@ -2176,11 +2207,11 @@ export class ExtensionManager {
             : null;
 
         if (
-          fs.existsSync(hooksJsonPath) ||
-          (configHooksPath && fs.existsSync(configHooksPath))
+          existsSyncOrThrow(hooksJsonPath) ||
+          (configHooksPath && existsSyncOrThrow(configHooksPath))
         ) {
           const hooksFilePath =
-            configHooksPath && fs.existsSync(configHooksPath)
+            configHooksPath && existsSyncOrThrow(configHooksPath)
               ? configHooksPath
               : hooksJsonPath;
 
@@ -2313,7 +2344,7 @@ export class ExtensionManager {
     }
 
     const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-    if (!fs.existsSync(configFilePath)) {
+    if (!existsSyncOrThrow(configFilePath)) {
       throw new Error(`Configuration file not found at ${configFilePath}`);
     }
     try {

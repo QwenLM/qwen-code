@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_PLUGIN_MCP_SCHEMA,
   loadAgentPluginMcpServers,
@@ -119,6 +119,24 @@ describe('Agent Plugins v1 MCP', () => {
     expect(await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot)).toEqual(
       {},
     );
+  });
+
+  it('fails closed when the mcp.json read hits resource exhaustion', async () => {
+    // The blanket non-ENOENT catch would launder an EMFILE into `{}`,
+    // letting the extension load commit as active with zero MCP servers.
+    writeMcp({ local: { type: 'stdio', command: './bin/server' } });
+    const spy = vi.spyOn(fs.promises, 'readFile').mockRejectedValue(
+      Object.assign(new Error('EMFILE: too many open files'), {
+        code: 'EMFILE',
+      }),
+    );
+    try {
+      await expect(
+        loadAgentPluginMcpServers(pluginRoot, pluginDataRoot),
+      ).rejects.toThrow('EMFILE');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('rejects unsafe HTTP endpoints and reserved environment variables', async () => {

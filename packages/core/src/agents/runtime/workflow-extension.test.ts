@@ -86,6 +86,49 @@ describe('loadExtensionWorkflows', () => {
     }
   });
 
+  it('fails closed when the workflows path stat hits resource exhaustion', async () => {
+    // The candidate stat's blanket catch would read an ENOMEM as "not found"
+    // and commit the extension with its workflows silently dropped.
+    await write('workflows/audit.js', workflowSource('audit'));
+    const spy = vi.spyOn(fs, 'lstat').mockRejectedValue(
+      Object.assign(new Error('ENOMEM: not enough memory'), {
+        code: 'ENOMEM',
+      }),
+    );
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('ENOMEM');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('fails closed when a workflow file stat hits resource exhaustion', async () => {
+    // collectFile's `.catch(() => null)` would read an ENOMEM as "not a
+    // regular file" and skip the script in a load reported as successful.
+    await write('workflows/audit.js', workflowSource('audit'));
+    const realLstat = fs.lstat;
+    const spy = vi.spyOn(fs, 'lstat').mockImplementation(((
+      target: string,
+      ...rest: unknown[]
+    ) =>
+      String(target).endsWith(`${path.sep}audit.js`)
+        ? Promise.reject(
+            Object.assign(new Error('ENOMEM: not enough memory'), {
+              code: 'ENOMEM',
+            }),
+          )
+        : realLstat(target, ...(rest as []))) as typeof fs.lstat);
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('ENOMEM');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('reads the default directory, qualified and sorted by name', async () => {
     await write('workflows/b-audit.js', workflowSource('b-audit'));
     await write(

@@ -229,7 +229,10 @@ async function collectCandidate(
     stat = followSymlinks
       ? await fs.stat(candidate)
       : await fs.lstat(candidate);
-  } catch {
+  } catch (error) {
+    // Same fail-closed carve-out as the readFile legs: an ENOMEM here must
+    // not read as "not found" (R1-3).
+    if (isResourceExhaustion(error)) throw error;
     if (explicit) {
       debugLogger.warn(
         `declared workflows path of extension "${owner.name}" not found: ${candidate}`,
@@ -287,7 +290,10 @@ async function collectFile(
   }
   const stat = await (
     followSymlinks ? fs.stat(filePath) : fs.lstat(filePath)
-  ).catch(() => null);
+  ).catch((error) => {
+    if (isResourceExhaustion(error)) throw error;
+    return null;
+  });
   if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
     debugLogger.warn(
       `skipping workflow of extension "${owner.name}" that is not a regular file: ${filePath}`,

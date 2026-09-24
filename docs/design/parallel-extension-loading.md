@@ -54,7 +54,11 @@ like parse failures — at every entrance that used to swallow them: the
 per-entry loaders, each loader's directory enumeration (the commands
 enumeration included), the per-extension manifest config read, the hooks
 sidecar read, the extensions-root `readdirSync`, the install-metadata
-sidecar read, `loadExtensionWorkflows`, and `loadExtension`'s catch-all. The refresh then rejects, the previous
+sidecar read, `loadExtensionWorkflows` (including its candidate and
+per-file stat legs), the Agent Plugins `mcp.json` read, the load path's
+existence checks (manifest, context files, hooks — `fs.existsSync` folds
+every errno into `false`, so those go through an `accessSync`-based
+variant that rethrows exhaustion), and `loadExtension`'s catch-all. The refresh then rejects, the previous
 cache and fingerprint baseline stay in place, and the next
 `refreshCacheIfSourcesChanged` retries — instead of committing a truncated
 (or empty) extension set stamped as up to date.
@@ -68,7 +72,12 @@ before the exhaustion error is rethrown, and `loadExtension` records the
 attempt's refusals for `refreshCacheWithSnapshot` to merge into the cache
 when it rethrows: an absent extension gets a subresource-free tombstone,
 an already-cached one keeps its complete entry and gains the fresh
-refusals — so the refusal gates dispatch either way.
+refusals — so the refusal gates dispatch either way. The merge runs in
+`readConsistent`'s rejection callback while the store lock is still held,
+so a concurrent uninstall or refresh cannot commit between the failed
+scan and the merge and be overwritten by it. The tombstone's `isActive`
+derives from the store snapshot like the committed path's does, failing
+closed when even that read is exhausted.
 
 ### Outside the descriptor budget
 

@@ -388,14 +388,38 @@ export class ExtensionStore {
     );
   }
 
+  /**
+   * When `readArtifacts` rejects, `onArtifactsRejected` runs before the lock
+   * is released and receives a snapshot reader that does not re-acquire it.
+   * A caller folding the failed attempt's records into shared state (e.g. the
+   * extension manager's refusal merge) stays atomic with every other store
+   * mutation that way; reading the snapshot after the release would leave a
+   * window a concurrent commit can interleave into.
+   */
   async readConsistent<T>(
     readArtifacts: () => Promise<{
       value: T;
       extensions: readonly ExtensionIdentity[];
     }>,
+    onArtifactsRejected?: (
+      readSnapshot: () => Promise<ExtensionStoreSnapshot>,
+    ) => Promise<void>,
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
-      const { value, extensions } = await readArtifacts();
+      let artifacts: {
+        value: T;
+        extensions: readonly ExtensionIdentity[];
+      };
+      try {
+        artifacts = await readArtifacts();
+      } catch (error) {
+        await onArtifactsRejected?.(
+          async () =>
+            (await this.readSnapshotUnlocked()) ?? this.emptySnapshot(),
+        );
+        throw error;
+      }
+      const { value, extensions } = artifacts;
       const snapshot = await this.ensureInitializedUnlocked(extensions);
       return { value, snapshot };
     });

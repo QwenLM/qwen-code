@@ -47,7 +47,11 @@ commands/skills/agents 目录。在安装了较多扩展的机器上，这主导
 像解析失败一样被吞掉——在每个曾经吞掉它们的入口：各单条目加载器、
 每个加载器的目录枚举（含 commands 枚举）、每扩展 manifest config
 读取、hooks sidecar 读取、扩展根目录的 `readdirSync`、
-install-metadata sidecar 读取、`loadExtensionWorkflows`，以及
+install-metadata sidecar 读取、`loadExtensionWorkflows`（含其候选路径与
+逐文件 stat 分支）、Agent Plugins 的 `mcp.json`
+读取、加载路径上的存在性检查（manifest、上下文文件、hooks——
+`fs.existsSync` 会把所有 errno 折叠成 `false`，因此这些地方改用一个基于
+`accessSync`、会对资源耗尽重抛的变体），以及
 `loadExtension` 的兜底 catch。refresh 随之拒绝，既有缓存与指纹基线保持不动，下一次
 `refreshCacheIfSourcesChanged` 会重试——而不是把一个被截断（或为空）的
 扩展集提交并盖上"已是最新"的戳。
@@ -59,7 +63,12 @@ install-metadata sidecar 读取、`loadExtensionWorkflows`，以及
 的 map，且 `loadExtension` 会把本次尝试记录的 refusal 交给
 `refreshCacheWithSnapshot`，在重抛 refresh 拒绝时并入缓存：缺席的扩展
 得到一个不含子资源的 tombstone，已在缓存中的扩展保留其完整条目并并入
-新的 refusal——因此 refusal 在两种情况下都拦截分派。
+新的 refusal——因此 refusal
+在两种情况下都拦截分派。该合并在
+`readConsistent` 的拒绝回调中、仍持有 store 锁时执行，因此并发的卸载或
+refresh 无法在扫描失败与合并之间抢先提交而被陈旧记录覆盖。tombstone 的
+`isActive` 与已提交路径一样从 store 快照推导，当连该读取也因耗尽失败时
+按关闭处理（fail closed）。
 
 ### 描述符预算之外
 

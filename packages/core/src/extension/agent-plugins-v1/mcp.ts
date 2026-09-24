@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { MCPServerConfig } from '../../config/config.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { isResourceExhaustion } from '../../skills/skill-load.js';
 import {
   isPathWithin,
   resolveContainedExistingPath,
@@ -56,6 +57,9 @@ export async function loadAgentPluginMcpServers(
     contents = await fs.promises.readFile(resolvedMcpPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    // Resource exhaustion fails the load closed — laundering it into `{}`
+    // would commit the plugin as active with zero MCP servers (R1-3).
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(
       `Disabling Agent Plugins MCP: ${error instanceof Error ? error.message : String(error)}`,
     );

@@ -144,11 +144,14 @@ vi.mock('os', async (importOriginal) => {
 // node:fs namespace is non-configurable.)
 const fsProbe = vi.hoisted(() => ({
   failReadFileFor: undefined as string | undefined,
+  failReadFileSkip: 0,
   delayReadFileFor: undefined as string | undefined,
   failReadFileSyncFor: undefined as string | undefined,
   failReadFileSyncSkip: 0,
   failReaddirSyncFor: undefined as string | undefined,
   failReaddirFor: undefined as string | undefined,
+  failAccessSyncFor: undefined as string | undefined,
+  falseExistsSyncFor: undefined as string | undefined,
   untypedDirentsFor: undefined as string | undefined,
   readdirSyncCalls: 0,
 }));
@@ -186,6 +189,26 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.readdirSync(...args);
     },
+    existsSync: (...args: Parameters<typeof actual.existsSync>) => {
+      if (
+        fsProbe.falseExistsSyncFor !== undefined &&
+        String(args[0]).includes(fsProbe.falseExistsSyncFor)
+      ) {
+        // What fs.existsSync itself returns when its stat hits
+        // EMFILE/ENOMEM — its catch-all folds every errno into `false`.
+        return false;
+      }
+      return actual.existsSync(...args);
+    },
+    accessSync: (...args: Parameters<typeof actual.accessSync>) => {
+      if (
+        fsProbe.failAccessSyncFor !== undefined &&
+        String(args[0]).includes(fsProbe.failAccessSyncFor)
+      ) {
+        throw emfileError();
+      }
+      return actual.accessSync(...args);
+    },
     promises: {
       ...actual.promises,
       readFile: async (
@@ -201,7 +224,14 @@ vi.mock('node:fs', async (importOriginal) => {
           fsProbe.failReadFileFor !== undefined &&
           String(args[0]).includes(fsProbe.failReadFileFor)
         ) {
-          throw emfileError();
+          // Armed reads may be let through first (the store's recovery reads
+          // state.json before the scan runs) so a test can fault a specific
+          // read in the sequence.
+          if (fsProbe.failReadFileSkip > 0) {
+            fsProbe.failReadFileSkip -= 1;
+          } else {
+            throw emfileError();
+          }
         }
         return actual.promises.readFile(...args);
       },
@@ -251,7 +281,11 @@ vi.mock('fs/promises', async (importOriginal) => {
         fsProbe.failReadFileFor !== undefined &&
         String(args[0]).includes(fsProbe.failReadFileFor)
       ) {
-        throw emfileError();
+        if (fsProbe.failReadFileSkip > 0) {
+          fsProbe.failReadFileSkip -= 1;
+        } else {
+          throw emfileError();
+        }
       }
       return actual.readFile(...args);
     },
@@ -4777,6 +4811,206 @@ describe('extension tests', () => {
         expect(
           manager.getLoadedExtensions().map((extension) => extension.name),
         ).not.toContain('aaa-broken');
+      });
+
+      it('fails the refresh closed when an Agent Plugins mcp.json read hits resource exhaustion', async () => {
+        // The mcp.json load is awaited inside the manifest head, so its
+        // blanket non-ENOENT catch would launder an EMFILE into `{}` —
+        // committing the plugin as active with zero MCP servers, stamped up
+        // to date by the pre-load fingerprint.
+        const pluginRoot = path.join(userExtensionsDir, 'plugin-ext');
+        createAgentPlugin(pluginRoot, { name: 'plugin-ext' });
+
+        const disarm = armReadFileProbe('mcp.json');
+        const manager = createExtensionManager();
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          disarm();
+        }
+
+        // The rejection committed nothing, so the next refresh loads the
+        // plugin with its servers.
+        await manager.refreshCache();
+        const [extension] = manager.getLoadedExtensions();
+        expect(extension.name).toBe('plugin-ext');
+        expect(Object.keys(extension.mcpServers ?? {}).sort()).toEqual([
+          'local',
+          'remote',
+        ]);
+      });
+
+      it('fails the refresh closed when the manifest existence check hits resource exhaustion', async () => {
+        // fs.existsSync folds every failure into `false`: an EMFILE here
+        // would read as "Configuration file not found" and skip the
+        // extension from a refresh reported as successful. The existsSync
+        // probe forces exactly the false existsSync produces under EMFILE;
+        // the accessSync probe exercises the errno-classified replacement.
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'probe-ext',
+        });
+
+        fsProbe.falseExistsSyncFor = EXTENSIONS_CONFIG_FILENAME;
+        fsProbe.failAccessSyncFor = EXTENSIONS_CONFIG_FILENAME;
+        const manager = createExtensionManager();
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.falseExistsSyncFor = undefined;
+          fsProbe.failAccessSyncFor = undefined;
+        }
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'probe-ext',
+        ]);
+      });
+
+      it('fails the refresh closed when the context-file existence check hits resource exhaustion', async () => {
+        // Same existsSync fold: an EMFILE would silently strip the context
+        // file from the committed load.
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'probe-ext',
+          contextFileName: 'CONTEXT.md',
+        });
+
+        fsProbe.falseExistsSyncFor = 'CONTEXT.md';
+        fsProbe.failAccessSyncFor = 'CONTEXT.md';
+        const manager = createExtensionManager();
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.falseExistsSyncFor = undefined;
+          fsProbe.failAccessSyncFor = undefined;
+        }
+        await manager.refreshCache();
+        const [extension] = manager.getLoadedExtensions();
+        expect(
+          extension.contextFiles?.some((file) => file.endsWith('CONTEXT.md')),
+        ).toBe(true);
+      });
+
+      it('fails the refresh closed when the hooks existence check hits resource exhaustion', async () => {
+        // Same existsSync fold: an EMFILE would silently drop the hooks the
+        // extension ships from the committed load.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'probe-ext',
+        });
+        const hooksDir = path.join(extDir, 'hooks');
+        fs.mkdirSync(hooksDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(hooksDir, 'hooks.json'),
+          JSON.stringify({ hooks: {} }),
+        );
+
+        fsProbe.falseExistsSyncFor = 'hooks.json';
+        fsProbe.failAccessSyncFor = 'hooks.json';
+        const manager = createExtensionManager();
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.falseExistsSyncFor = undefined;
+          fsProbe.failAccessSyncFor = undefined;
+        }
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'probe-ext',
+        ]);
+      });
+
+      it('fails a failed-scan tombstone closed when the store snapshot read also dies of exhaustion', async () => {
+        // The tombstone's isActive derives from the store snapshot; when
+        // that read itself fails — under the same exhaustion that killed the
+        // scan — no activation authority is left. The tombstone must fail
+        // closed rather than copy the head load's value, which the
+        // projection's own read failure has already defaulted to "enabled".
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'aaa-refusal',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+
+        // Disable through the store while the extension still loads cleanly,
+        // so the store's verdict records the disable.
+        const enabler = createExtensionManager();
+        await enabler.refreshCache();
+        await enabler.disableExtension('aaa-refusal', SettingScope.User);
+
+        // A dangling symlink at the extensions root rejects the next refresh
+        // after aaa-refusal's scan recorded its refusal.
+        fs.symlinkSync(
+          path.join(userExtensionsDir, 'missing-target'),
+          path.join(userExtensionsDir, 'zzz-dangling'),
+        );
+
+        // The projection read fails (head load defaults to enabled) and the
+        // store's state.json read fails once the scan is running — the two
+        // recovery reads withLock runs before the scan are let through.
+        fsProbe.failReadFileSyncFor = 'extension-enablement.json';
+        fsProbe.failReadFileFor = 'state.json';
+        fsProbe.failReadFileSkip = 2;
+        try {
+          const manager = createExtensionManager();
+          await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
+
+          const tombstone = manager
+            .getLoadedExtensions()
+            .find((extension) => extension.name === 'aaa-refusal');
+          expect(
+            tombstone?.agentExecutorRefusals?.get('explore'),
+          ).toBeInstanceOf(SubagentError);
+          expect(tombstone?.isActive).toBe(false);
+        } finally {
+          fsProbe.failReadFileSyncFor = undefined;
+          fsProbe.failReadFileFor = undefined;
+          fsProbe.failReadFileSkip = 0;
+        }
+      });
+
+      it('does not resurrect an extension whose uninstall overlaps a refresh that rejects after recording a refusal', async () => {
+        // The failed refresh's refusal merge must commit while the store
+        // lock is still held: an uninstall committing in the gap between the
+        // rejection and the merge otherwise has its cache delete overwritten
+        // by the merge, resurrecting the uninstalled extension as an
+        // active-but-empty tombstone for the rest of the session.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'race-ext',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+        fs.writeFileSync(
+          path.join(agentsDir, 'other.md'),
+          '---\nname: other\ndescription: Other agent\n---\nYou are a benchmark agent prompt.',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'race-ext',
+        ]);
+
+        const disarm = armReadFileProbe('other.md');
+        try {
+          const refresh = manager.refreshCache();
+          const uninstall = manager.uninstallExtension('race-ext', false);
+          await expect(refresh).rejects.toThrow('EMFILE');
+          await uninstall;
+        } finally {
+          disarm();
+        }
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([]);
       });
     });
   });
