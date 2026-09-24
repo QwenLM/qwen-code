@@ -958,7 +958,7 @@ function AgentIcon() {
   );
 }
 
-function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
+export function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
   const kind = getToolHeaderKind(tool);
   if (kind === 'agent') return <AgentIcon />;
   if (kind === 'ask') return <AskUserIcon />;
