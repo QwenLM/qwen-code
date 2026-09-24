@@ -81,6 +81,8 @@ export interface ThreadViewProps {
     enabled: boolean;
     /** Retired identities stay in the list and are never offered new work. */
     retiredAt?: number;
+    status?: string;
+    runtime?: { label: string; status: string };
   }[];
   /** Server-computed routing for the current draft. */
   preview?: readonly RoutingPreviewTarget[];
@@ -109,10 +111,12 @@ function formatTime(at: number): string {
 
 export function RunRowView({
   row,
+  agent,
   onOpenAgentSession,
   onCancelRun,
 }: {
   row: RunRow;
+  agent?: { status?: string; runtime?: { label: string; status: string } };
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
 }) {
@@ -136,7 +140,9 @@ export function RunRowView({
   };
   const state =
     row.run.status === 'queued'
-      ? '消息已接收，排队等待启动'
+      ? agent?.status === 'offline' || agent?.runtime?.status === 'offline'
+        ? `执行主机 ${agent.runtime?.label ?? ''} 离线，等待恢复`
+        : '消息已接收，排队等待启动'
       : row.run.status === 'running'
         ? progress
           ? stale
@@ -565,6 +571,7 @@ export function ThreadView({
               <RunRowView
                 key={row.run.id}
                 row={row}
+                agent={agents.find((agent) => agent.name === row.run.agentName)}
                 {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
                 {...(onCancelRun ? { onCancelRun } : {})}
               />

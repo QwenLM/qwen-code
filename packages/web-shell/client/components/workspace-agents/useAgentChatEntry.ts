@@ -116,6 +116,17 @@ export function useAgentChatEntry({
                   .map((agent) => ({
                     id: agent.id,
                     label: agent.name,
+                    // "Program · Runtime", as on the Agents page.
+                    subtitle: `${
+                      agent.execution?.mode === 'managed-host' &&
+                      agent.execution.provider === 'codex'
+                        ? 'Codex'
+                        : 'Qwen Code'
+                    } · ${
+                      agent.runtime.kind === 'local'
+                        ? t('collab.agent.thisComputer')
+                        : agent.runtime.label
+                    }`,
                     description: t(`collab.agentStatus.${agent.status}`),
                     ...(agent.color ? { iconColor: agent.color } : {}),
                     insertText: `@${agent.name} `,

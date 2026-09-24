@@ -1,5 +1,7 @@
 # Workspace agents implementation — step-by-step acceptance criteria
 
+> **Development handoff (2026-09-09):** Future work follows the [successor plan](./2026-09-09-agent-service-collaboration-plan.md), beginning with P0, and the [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md). Keep the observations below as historical evidence, not as acceptance of A2A, remote Codex, or feature-off compatibility. Delivery remains one PR, #11206; no local CI loop or new child PR is required.
+
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) §5.2 (ten steps, as numbered on the `codex/multi-agent-mesh-foundation` branch) and [`2026-09-07-workspace-agents-review-round2-handoff.md`](./2026-09-07-workspace-agents-review-round2-handoff.md).
 > Delivery shape: **one implementation and delivery PR** (#11206). Runtime changes #11200 / #11202 / #11204 are merged into its branch. Because that branch was their PR base, GitHub records them as merged draft references; their review history remains available and none is merged separately to `main`.
 > Nothing in this file was executed by its author. "Evidence" means what the implementer reports, with observed values, in the PR description or a `docs/verification/workspace agents/` package.
@@ -424,12 +426,13 @@ instead of leading with reusable subagent definition files. New Agent reuses the
 existing manual/model-assisted builder but writes one roster identity directly;
 Definitions and linking an existing definition remain secondary compatibility
 paths.
-The same entry now separates Agents and Tasks into two views. Browser HMR
-confirmed the view switch, task-detail return preserving the Tasks view, and
-the task-scoped transcript entry staying on the run rather than the Agent row.
-The already-running daemon was not restarted, so the idle-without-session
-status was source checked but not claimed as a browser observation. No test
-suite, build, lint, typecheck or CI ran.
+The same entry now separates Agents, Tasks and Runtime into three views. Browser
+HMR confirmed the view switch, task-detail return preserving the Tasks view,
+the task-scoped transcript entry staying on the run rather than the Agent row,
+and the local Runtime card. The already-running daemon was not restarted, so
+its new `runtime: online` response and idle-without-session status were source
+checked but not claimed as a browser observation. No test suite, build, lint,
+typecheck or CI ran.
 
 **Product-linking observation (2026-09-08).** The primary New Agent action now
 starts with model-assisted or manual creation and no longer competes with a
@@ -445,10 +448,16 @@ titles, and manual-title preservation is enforced by the adapter but was not
 changed in this browser pass. No local test suite, build, lint, typecheck or CI
 ran.
 
-**Local host observation (2026-09-08).** After a daemon restart, the non-empty
-roster restored the host without a task mutation and reused host session
-`f210855f-45ab-4624-a858-bf11785e22d0`. No build, lint, typecheck, test suite
-or CI was run.
+**Local Runtime observation (2026-09-08).** The Runtime view now reads the
+selected workspace Runtime, persisted host-session claim and bridge heartbeat;
+it no longer fills a constant `local` card in the browser. After a daemon
+restart, the non-empty roster restored the host without a task mutation and
+reused host session `f210855f-45ab-4624-a858-bf11785e22d0`. The browser showed
+provider `Qwen Code ACP`, three Agents, zero restored task sessions, zero
+running/queued tasks, and a heartbeat advancing from 20:29:10 to 20:29:19.
+Bindings not registered in this daemon read offline and remain queued with a
+typed `runtime_unavailable` dispatch observation. No remote registration,
+placement, build, lint, typecheck, test suite or CI was run.
 
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state

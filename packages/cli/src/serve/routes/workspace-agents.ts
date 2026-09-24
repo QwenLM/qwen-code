@@ -24,10 +24,12 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
+import { randomBytes } from 'node:crypto';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
   ThreadPriority,
   WorkspaceAgent,
+  WorkspaceAgentExecution,
   Thread,
   ThreadRun,
 } from '@qwen-code/qwen-code-core';
@@ -42,20 +44,25 @@ import {
   generateEventId,
   isValidAgentName,
   listThreads,
+  issueAgentHostEnrollment,
+  readAgentHosts,
   readWorkspaceAgents,
   readAgentWorkspace,
   readThread,
   releaseAgentHostSession,
   retireWorkspaceAgent,
   isAgentAddressable,
+  isAgentLocal,
   maxConcurrentRunsFor,
   setWorkspaceAgentEnabled,
+  setWorkspaceAgentExecution,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import {
   THREAD_PRIORITY_ORDER,
   DEFAULT_THREAD_PRIORITY,
+  LOCAL_AGENT_RUNTIME_ID,
   HUMAN_AUTHOR_ID,
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
@@ -75,13 +82,20 @@ import {
   AGENT_TOOL_CLASSIFICATION,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { resolveThreadStatus } from '@qwen-code/qwen-code-core/agents/workspace-agents/thread-status.js';
+import {
+  issueA2AGrant,
+  listA2AGrants,
+  revokeA2AGrant,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
 import {
+  AGENT_HOST_ONLINE_WINDOW_MS,
   subscribeAgentEvents,
   type AgentLiveEvent,
 } from '../workspace-agents/agent-events.js';
+import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -198,6 +212,33 @@ function readAgentConfigPatch(payload: {
   };
 }
 
+function readAgentExecution(
+  value: unknown,
+): WorkspaceAgentExecution | undefined | 'invalid' {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null) return 'invalid';
+  const input = value as Record<string, unknown>;
+  if (input['mode'] === 'local') return { mode: 'local' };
+  const hostIds = input['hostIds'];
+  const provider = input['provider'];
+  if (
+    input['mode'] !== 'managed-host' ||
+    !Array.isArray(hostIds) ||
+    hostIds.length === 0 ||
+    !hostIds.every(
+      (hostId) => typeof hostId === 'string' && hostId.length > 0,
+    ) ||
+    (provider !== undefined && provider !== 'qwen' && provider !== 'codex')
+  ) {
+    return 'invalid';
+  }
+  return {
+    mode: 'managed-host',
+    hostIds: [...new Set(hostIds)],
+    ...(provider ? { provider } : {}),
+  };
+}
+
 /**
  * The most threads one agent may be set to work at once.
  *
@@ -304,6 +345,8 @@ export function registerWorkspaceAgentRoutes(
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     return runtime;
   };
+
+  registerAgentHostConnectionRoutes(app, prefix, runtimeFor, deps.mutate);
 
   const dispatch = async (runtime: WorkspaceRuntime): Promise<void> => {
     runtime.generationGuard?.assertOpen();
@@ -479,14 +522,105 @@ export function registerWorkspaceAgentRoutes(
     if (!runtime) return;
     const root = runtime.workspaceCwd;
     try {
-      const [agents, { threads }] = await Promise.all([
+      const [agents, { threads }, workspace, hosts] = await Promise.all([
         readWorkspaceAgents(root),
         listThreads(root),
+        readAgentWorkspace(root),
+        readAgentHosts(root),
       ]);
       const sessions = runtime.bridge.listWorkspaceSessions(root);
       const agentSessions = sessions.filter(
         (candidate) => candidate.sourceType === AGENT_SESSION_SOURCE_TYPE,
       );
+      const lastSeenAt = workspace.hostSessionId
+        ? runtime.bridge.getHeartbeatState(workspace.hostSessionId)
+            ?.sessionLastSeenAt
+        : undefined;
+      const localAgentIds = new Set(
+        agents
+          .filter(
+            (agent) => agent.retiredAt === undefined && isAgentLocal(agent),
+          )
+          .map((agent) => agent.id),
+      );
+      const localRuntime = {
+        id: LOCAL_AGENT_RUNTIME_ID,
+        kind: 'local' as const,
+        label: 'Local daemon',
+        provider: 'Qwen Code ACP',
+        status: 'online' as const,
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: root,
+        ...(workspace.hostSessionId
+          ? { hostSessionId: workspace.hostSessionId }
+          : {}),
+        ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+        agentCount: localAgentIds.size,
+        sessionCount: agentSessions.length,
+        runningTaskCount: threads.filter((thread) =>
+          thread.runs.some(
+            (run) =>
+              localAgentIds.has(run.agentId) &&
+              ACTIVE_RUN_STATUSES.has(run.status),
+          ),
+        ).length,
+        queuedTaskCount: threads.reduce(
+          (count, thread) =>
+            count +
+            thread.runs.filter(
+              (run) =>
+                localAgentIds.has(run.agentId) && run.status === 'queued',
+            ).length,
+          0,
+        ),
+      };
+      const now = Date.now();
+      const hostRuntimes = hosts.map((host) => {
+        const agentIds = new Set(
+          agents
+            .filter(
+              (agent) =>
+                agent.retiredAt === undefined &&
+                agent.execution?.mode === 'managed-host' &&
+                agent.execution.hostIds.includes(host.id),
+            )
+            .map((agent) => agent.id),
+        );
+        return {
+          id: host.id,
+          kind: 'external' as const,
+          label: host.name,
+          provider: host.providers.join(', '),
+          status:
+            host.lastSeenAt !== undefined &&
+            now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
+              ? ('online' as const)
+              : ('offline' as const),
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: host.workspaceCwd,
+          ...(host.lastSeenAt !== undefined
+            ? { lastSeenAt: host.lastSeenAt }
+            : {}),
+          agentCount: agentIds.size,
+          sessionCount: 0,
+          runningTaskCount: threads.filter((thread) =>
+            thread.runs.some(
+              (run) =>
+                agentIds.has(run.agentId) &&
+                run.lease?.hostId === host.id &&
+                ACTIVE_RUN_STATUSES.has(run.status),
+            ),
+          ).length,
+          queuedTaskCount: threads.reduce(
+            (count, thread) =>
+              count +
+              thread.runs.filter(
+                (run) => agentIds.has(run.agentId) && run.status === 'queued',
+              ).length,
+            0,
+          ),
+        };
+      });
       res.json({
         agents: agents.map((agent) => {
           const active = threads.find((thread) =>
@@ -510,6 +644,21 @@ export function registerWorkspaceAgentRoutes(
           const sessionsForAgent = agentSessions.filter(
             (candidate) => candidate.sourceId === agent.id,
           );
+          const execution = agent.execution ?? { mode: 'local' as const };
+          const selectedHostId =
+            activeRun?.lease?.hostId ??
+            (execution.mode === 'managed-host'
+              ? execution.hostIds[0]
+              : undefined);
+          const selectedHost = hostRuntimes.find(
+            (host) => host.id === selectedHostId,
+          );
+          const runtimeAvailable =
+            execution.mode === 'local' ||
+            hostRuntimes.some(
+              (host) =>
+                execution.hostIds.includes(host.id) && host.status === 'online',
+            );
           const blocked = threads.some(
             (thread) =>
               resolve(thread, threads).status === 'blocked' &&
@@ -529,7 +678,9 @@ export function registerWorkspaceAgentRoutes(
             ),
           );
           const status =
-            agent.retiredAt !== undefined || agent.enabled === false
+            agent.retiredAt !== undefined ||
+            agent.enabled === false ||
+            !runtimeAvailable
               ? 'offline'
               : active ||
                   sessionsForAgent.some((entry) => entry.hasActivePrompt)
@@ -549,8 +700,19 @@ export function registerWorkspaceAgentRoutes(
             ...(agent.model ? { model: agent.model } : {}),
             ...(agent.instructions ? { instructions: agent.instructions } : {}),
             maxConcurrentRuns: maxConcurrentRunsFor(agent),
+            execution,
             enabled: agent.enabled !== false,
             status,
+            runtime:
+              execution.mode === 'local'
+                ? localRuntime
+                : (selectedHost ?? {
+                    id: selectedHostId ?? 'managed-host',
+                    kind: 'external' as const,
+                    label: 'Managed Host',
+                    provider: 'Unregistered',
+                    status: 'offline' as const,
+                  }),
             // A retired agent is listed, not hidden. Its posts are still on
             // the threads, and a reader who meets its name needs somewhere to
             // look it up. `enabled` stays a separate answer: a retired agent
@@ -575,6 +737,8 @@ export function registerWorkspaceAgentRoutes(
             waiting,
           };
         }),
+        runtime: localRuntime,
+        runtimes: [localRuntime, ...hostRuntimes],
         // What every agent may do, sent once rather than per agent because it
         // is a property of the subsystem and not of an identity. Shown so the
         // boundary is something a person can read before trusting an agent
@@ -589,6 +753,23 @@ export function registerWorkspaceAgentRoutes(
       fail(res, error);
     }
   });
+
+  app.post(
+    `${prefix}/hosts/enrollment`,
+    deps.mutate(),
+    async (req: Request, res: Response) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      try {
+        res.status(201).json({
+          ...(await issueAgentHostEnrollment(runtime.workspaceCwd)),
+          workspaceId: runtime.workspaceId,
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
 
   app.get(`${prefix}/threads`, async (req: Request, res: Response) => {
     const runtime = runtimeFor(req, res);
@@ -1094,6 +1275,7 @@ export function registerWorkspaceAgentRoutes(
           model?: unknown;
           instructions?: unknown;
           maxConcurrentRuns?: unknown;
+          execution?: unknown;
         };
         const name = String(payload.name ?? '').trim();
         if (!name) {
@@ -1111,6 +1293,20 @@ export function registerWorkspaceAgentRoutes(
         if (config.error) {
           res.status(400).json({ error: config.error });
           return;
+        }
+        const execution = readAgentExecution(payload.execution);
+        if (execution === 'invalid') {
+          res.status(400).json({ error: 'execution_invalid' });
+          return;
+        }
+        if (execution?.mode === 'managed-host') {
+          const knownHosts = new Set(
+            (await readAgentHosts(root)).map((host) => host.id),
+          );
+          if (execution.hostIds.some((hostId) => !knownHosts.has(hostId))) {
+            res.status(400).json({ error: 'agent_host_not_found' });
+            return;
+          }
         }
         // Narrowed on `apply` rather than on `error`: the success branch types
         // `error` as an optional undefined, which never discriminated the
@@ -1140,6 +1336,7 @@ export function registerWorkspaceAgentRoutes(
             id: generateAgentId(),
             name,
             createdAt: Date.now(),
+            ...(execution ? { execution } : {}),
           });
           return [...agents, created];
         });
@@ -1232,6 +1429,103 @@ export function registerWorkspaceAgentRoutes(
     },
   );
 
+  /**
+   * Shares: A2A grants for one agent, so a caller outside this workspace can
+   * message it. Each share is its own caller id, so revoking one leaves the
+   * others working; the secret is returned once and only its hash is kept.
+   */
+  const SHARE_TTL_MS = 7 * 24 * 60 * 60_000;
+  const knownAgent = async (runtime: WorkspaceRuntime, agentId: string) =>
+    (await readWorkspaceAgents(runtime.workspaceCwd)).some(
+      (agent) => agent.id === agentId && isAgentAddressable(agent),
+    );
+
+  app.get(`${prefix}/agents/:id/shares`, async (req, res) => {
+    const runtime = runtimeFor(req, res);
+    if (!runtime) return;
+    const agentId = String(req.params['id']);
+    try {
+      const now = Date.now();
+      const shares = (await listA2AGrants(runtime.workspaceCwd))
+        .filter(
+          (grant) =>
+            grant.agentId === agentId &&
+            (grant.expiresAt === undefined || grant.expiresAt > now),
+        )
+        .map(({ callerId, scope, createdAt, expiresAt }) => ({
+          callerId,
+          scope,
+          createdAt,
+          ...(expiresAt !== undefined ? { expiresAt } : {}),
+        }));
+      res.json({ shares });
+    } catch (error) {
+      fail(res, error);
+    }
+  });
+
+  app.post(
+    `${prefix}/agents/:id/shares`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const agentId = String(req.params['id']);
+      const scope = (req.body as { scope?: unknown } | undefined)?.scope;
+      if (scope !== 'analysis' && scope !== 'full') {
+        res.status(400).json({ error: 'share_scope_invalid' });
+        return;
+      }
+      try {
+        if (!(await knownAgent(runtime, agentId))) {
+          res.status(404).json({ error: 'agent_not_found' });
+          return;
+        }
+        const callerId = `share_${randomBytes(6).toString('hex')}`;
+        const expiresAt = Date.now() + SHARE_TTL_MS;
+        const { secret } = await issueA2AGrant(runtime.workspaceCwd, {
+          callerId,
+          agentId,
+          scope,
+          expiresAt,
+        });
+        res.status(201).json({
+          endpoint: `${req.protocol}://${req.get('host') ?? '127.0.0.1'}/a2a/v1`,
+          workspaceId: runtime.workspaceId,
+          callerId,
+          agentId,
+          secret,
+          scope,
+          expiresAt,
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  app.delete(
+    `${prefix}/agents/:id/shares/:callerId`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      try {
+        const removed = await revokeA2AGrant(runtime.workspaceCwd, {
+          agentId: String(req.params['id']),
+          callerId: String(req.params['callerId']),
+        });
+        if (!removed) {
+          res.status(404).json({ error: 'share_not_found' });
+          return;
+        }
+        res.json({ revoked: true });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
   app.patch(
     `${prefix}/agents/:id`,
     deps.mutate({ strict: true }),
@@ -1246,6 +1540,7 @@ export function registerWorkspaceAgentRoutes(
         instructions?: unknown;
         agentType?: unknown;
         maxConcurrentRuns?: unknown;
+        execution?: unknown;
       };
       const enabled = payload.enabled;
       if (enabled !== undefined && typeof enabled !== 'boolean') {
@@ -1260,7 +1555,12 @@ export function registerWorkspaceAgentRoutes(
         res.status(400).json({ error: config.error });
         return;
       }
-      if (enabled === undefined && !config.touched) {
+      const execution = readAgentExecution(payload.execution);
+      if (execution === 'invalid') {
+        res.status(400).json({ error: 'execution_invalid' });
+        return;
+      }
+      if (enabled === undefined && !config.touched && execution === undefined) {
         res.status(400).json({ error: 'nothing_to_update' });
         return;
       }
@@ -1268,6 +1568,25 @@ export function registerWorkspaceAgentRoutes(
         const agentId = String(req.params['id']);
         let missing = false;
         let retired = false;
+        if (execution !== undefined) {
+          const result = await setWorkspaceAgentExecution(
+            runtime.workspaceCwd,
+            agentId,
+            execution,
+          );
+          if (result !== 'updated') {
+            const [status, error] =
+              result === 'not_found'
+                ? ([404, 'agent_not_found'] as const)
+                : result === 'retired'
+                  ? ([409, 'agent_retired'] as const)
+                  : result === 'host_not_found'
+                    ? ([400, 'agent_host_not_found'] as const)
+                    : ([409, 'agent_has_live_work'] as const);
+            res.status(status).json({ error });
+            return;
+          }
+        }
         if (config.touched) {
           await updateWorkspaceAgents(runtime.workspaceCwd, (agents) => {
             const existing = agents.find((agent) => agent.id === agentId);

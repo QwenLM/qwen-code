@@ -51,6 +51,15 @@ interface AgentCreatePageProps {
   agent?: DaemonWorkspaceAgentDetail;
   onCancel: () => void;
   onCreated: (name: string) => void;
+  executionHosts?: readonly {
+    id: string;
+    label: string;
+    status: 'online' | 'offline';
+    provider?: string;
+    workspaceCwd?: string;
+  }[];
+  /** Preselects the runtime, e.g. right after it joined. */
+  initialHostId?: string;
   onSaveWorkspaceAgent?: (input: {
     name: string;
     description?: string;
@@ -58,6 +67,13 @@ interface AgentCreatePageProps {
     agentType?: string;
     model?: string;
     maxConcurrentRuns: number;
+    execution?:
+      | { mode: 'local' }
+      | {
+          mode: 'managed-host';
+          hostIds: string[];
+          provider?: 'qwen' | 'codex';
+        };
   }) => Promise<void>;
 }
 
@@ -104,7 +120,9 @@ export function AgentCreatePage({
   agent,
   onCancel,
   onCreated,
+  executionHosts = [],
   workspaceCwd,
+  initialHostId,
   onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
@@ -150,6 +168,12 @@ export function AgentCreatePage({
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
+  const [executionProvider, setExecutionProvider] = useState<'qwen' | 'codex'>(
+    'qwen',
+  );
+  const [executionHostIds, setExecutionHostIds] = useState(
+    () => new Set<string>(initialHostId ? [initialHostId] : []),
+  );
   const [role, setRole] = useState('');
   const [color, setColor] = useState(agent?.color ?? 'inherit');
   const [selectedMcpServers, setSelectedMcpServers] = useState(
@@ -499,6 +523,15 @@ export function AgentCreatePage({
           ...(role ? { agentType: role } : {}),
           ...(model.trim() ? { model: model.trim() } : {}),
           maxConcurrentRuns: concurrency,
+          ...(executionHostIds.size > 0
+            ? {
+                execution: {
+                  mode: 'managed-host' as const,
+                  hostIds: [...executionHostIds],
+                  provider: executionProvider,
+                },
+              }
+            : {}),
         });
         onCreated(trimmedName);
         return;
@@ -751,6 +784,109 @@ export function AgentCreatePage({
                     }
                   />
                 </Field>
+                <Field className="lg:col-span-2">
+                  <FieldLabel>{t('collab.agent.runsOn')}</FieldLabel>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="flex items-start gap-2 rounded-md border border-border p-3 text-sm">
+                      <input
+                        type="radio"
+                        name="agent-execution-location"
+                        checked={executionHostIds.size === 0}
+                        onChange={() => {
+                          setExecutionHostIds(new Set());
+                          setExecutionProvider('qwen');
+                        }}
+                      />
+                      <span>
+                        {t('collab.agent.thisComputer')}
+                        <span className="block break-all text-xs text-muted-foreground">
+                          {workspaceCwd}
+                        </span>
+                      </span>
+                    </label>
+                    {executionHosts.map((host) => (
+                      <label
+                        key={host.id}
+                        className="flex items-start gap-2 rounded-md border border-border p-3 text-sm"
+                      >
+                        <input
+                          type="radio"
+                          name="agent-execution-location"
+                          checked={executionHostIds.has(host.id)}
+                          onChange={() => {
+                            setExecutionHostIds(new Set([host.id]));
+                            setExecutionProvider('qwen');
+                          }}
+                        />
+                        <span>
+                          {host.label}
+                          {host.status === 'offline' && (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              {t('collab.agentStatus.offline')}
+                            </span>
+                          )}
+                          <span className="block break-all text-xs text-muted-foreground">
+                            {host.workspaceCwd ?? t('collab.agent.cwdUnknown')}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <FieldDescription>
+                    {t('collab.agent.runsOnHint')}
+                  </FieldDescription>
+                </Field>
+                {(() => {
+                  // Only what the chosen runtime reported it can run is
+                  // selectable; the rest say why not.
+                  const host = executionHosts.find((entry) =>
+                    executionHostIds.has(entry.id),
+                  );
+                  const missing = (provider: 'qwen' | 'codex') =>
+                    provider === 'qwen'
+                      ? undefined
+                      : !host
+                        ? t('collab.agent.programLocal')
+                        : /codex/i.test(host.provider ?? '')
+                          ? undefined
+                          : t('collab.agent.programMissing');
+                  return (
+                    <Field className="lg:col-span-2">
+                      <FieldLabel>{t('collab.runtime.program')}</FieldLabel>
+                      <div
+                        role="radiogroup"
+                        aria-label={t('collab.runtime.program')}
+                        className="grid gap-2 sm:grid-cols-2"
+                      >
+                        {(['qwen', 'codex'] as const).map((provider) => {
+                          const reason = missing(provider);
+                          return (
+                            <label
+                              key={provider}
+                              className="flex items-start gap-2 rounded-md border border-border p-3 text-sm has-[:disabled]:opacity-60"
+                            >
+                              <input
+                                type="radio"
+                                name="agent-execution-provider"
+                                disabled={reason !== undefined}
+                                checked={executionProvider === provider}
+                                onChange={() => setExecutionProvider(provider)}
+                              />
+                              <span>
+                                {provider === 'qwen' ? 'Qwen Code' : 'Codex'}
+                                {reason && (
+                                  <span className="block text-xs text-muted-foreground">
+                                    {reason}
+                                  </span>
+                                )}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </Field>
+                  );
+                })()}
                 <Field className="lg:col-span-2">
                   <FieldDescription>
                     {t('collab.agent.afterCreate')}
