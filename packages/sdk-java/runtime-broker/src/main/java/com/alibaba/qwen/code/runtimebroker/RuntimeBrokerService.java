@@ -1034,6 +1034,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return mapFailure(safeStage(() -> transport.attest(lease, request,
                 seed)), "runtime_broker_recovery_failed",
                 "Managed Runtime attestation failed")
+                .whenComplete((ignored, error) -> {
+                    Throwable cause = unwrap(error);
+                    if (cause instanceof RuntimeBrokerException failure
+                            && !failure.isRetryable()) {
+                        blockRecovery(bindingId, operationGeneration);
+                    }
+                })
                 .thenCompose(attestation -> {
                     if (!validAttestation(attestation, lease, seed,
                             request)) {

@@ -264,6 +264,38 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void nonRetryableAttestationFailureBlocksRecovery() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner restored = new DurableProvisioner();
+        TestTransport transport = new TestTransport(
+                new RuntimeBrokerException(409,
+                        "managed_runtime_identity_conflict", "conflict",
+                        false));
+        try (RuntimeBrokerService service = service(restored, transport,
+                bindings, new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-two")) {
+            assertThrows(Exception.class, () -> service.warm("harness")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findActive(request(restored)).getState());
+
+            assertThrows(Exception.class, () -> service.warm("harness")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals(1, transport.attestations.get());
+        }
+    }
+
+    @Test
     void conflictObservationRetainsTheLastTrustedResourceHandle()
             throws Exception {
         InMemoryRuntimeBindingRepository bindings =
@@ -568,18 +600,30 @@ class DurableRuntimeRecoveryTest {
 
     private static final class TestTransport implements RuntimeTransport {
         private final CompletableFuture<Void> attestationGate;
+        private final RuntimeException attestationFailure;
         private volatile boolean mismatch;
         private final AtomicInteger attestations = new AtomicInteger();
         private final AtomicInteger acquisitions = new AtomicInteger();
 
         TestTransport() {
-            this(CompletableFuture.completedFuture(null), false);
+            this(CompletableFuture.completedFuture(null), false, null);
         }
 
         TestTransport(CompletableFuture<Void> attestationGate,
                 boolean mismatch) {
+            this(attestationGate, mismatch, null);
+        }
+
+        TestTransport(RuntimeException attestationFailure) {
+            this(CompletableFuture.completedFuture(null), false,
+                    attestationFailure);
+        }
+
+        private TestTransport(CompletableFuture<Void> attestationGate,
+                boolean mismatch, RuntimeException attestationFailure) {
             this.attestationGate = attestationGate;
             this.mismatch = mismatch;
+            this.attestationFailure = attestationFailure;
         }
 
         @Override
@@ -587,6 +631,9 @@ class DurableRuntimeRecoveryTest {
                 RuntimeLease lease, RuntimeProvisionRequest request,
                 RuntimeProvisionSeed seed) {
             attestations.incrementAndGet();
+            if (attestationFailure != null) {
+                return CompletableFuture.failedFuture(attestationFailure);
+            }
             return attestationGate.thenApply(ignored ->
                     new RuntimeAttestation(
                             mismatch ? "wrong-runtime"
