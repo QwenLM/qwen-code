@@ -15399,6 +15399,67 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('reports a boot startup failure to every workspace that listed the name', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-boot-start-fanout-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const other = path.join(tmpDir, 'other');
+    // The primary defines and asks for it; the other workspace asks too, so
+    // the startup failure belongs to both of them.
+    writeWorkspaceSettings(primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    writeWorkspaceSettings(other, { serve: { channels: ['telegram'] } });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const worker = makeWorker({ enabled: true, state: 'failed', channels: [] });
+    worker.start.mockRejectedValue(new Error('telegram gateway is down'));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, other],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const status = (await (
+        await fetch(`${handle.url}/daemon/status`, {
+          headers: { Authorization: 'Bearer secret' },
+        })
+      ).json()) as { issues: Array<{ code: string; message: string }> };
+      expect(
+        status.issues
+          .filter((issue) => issue.code === 'channel_restore_failed')
+          .map((issue) => issue.message),
+      ).toEqual([
+        `serve.channels for workspace ${canonicalizeWorkspace(primary)} were not restored: telegram (telegram gateway is down).`,
+        `serve.channels for workspace ${canonicalizeWorkspace(other)} were not restored: telegram (telegram gateway is down).`,
+      ]);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('reports a dropped boot name to every workspace that listed it, before the runtime mounts', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-boot-fanout-')),
