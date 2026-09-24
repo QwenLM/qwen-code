@@ -134,8 +134,7 @@ Run exactly this with the shell tool:
 
 Then report to the user, verbatim from the command output: the task id, item
 count, the frozen model/thinking/output-limit line, the cost estimate, and
-any `[batch]` warning (a batch rejected during validation is reported here —
-relay it and stop). The `collect later with` line is only the manual
+any `[batch]` warning. The `collect later with` line is only the manual
 fallback: collection is automatic (§5). If the command fails, relay its error
 and stop. The single exception: when the error names a field of the plan
 file itself (an invalid id, a duplicate target, an unknown field), fix that
@@ -149,8 +148,8 @@ loop on status. Tell the user:
 - While this session stays open, Qwen Code collects the task automatically
   when the batch finishes and posts a one-line notice: results written,
   failures and how to retry. A task that finishes while no session is open
-  is collected the next time they start `qwen` in this project. (The
-  `general.batchAutoCollect` setting can switch this to notify-only or off.)
+  is collected the next time they start `qwen` in this project
+  (`general.batchAutoCollect: false` turns this off).
 - To check or collect by hand, everything below is a plain command that needs
   no model: typed with the `!` prefix (for example
   `!qwen batch collect <task-id>`) it runs without spending a model turn, and
@@ -162,7 +161,7 @@ loop on status. Tell the user:
   billed request.
 - Held results (source changed / target conflict) are delivered by re-running
   `qwen batch collect <task-id>` after the conflict is resolved.
-- `qwen batch list`, `cancel --task <task-id>` and `clean <task-id>` are
+- `qwen batch list`, `cancel <task-id>` and `clean <task-id>` are
   described in `docs/users/features/batch.md`.
 - Estimates never include what this session spent preparing; do not
   describe the Batch estimate as the task's total cost or as a saving.

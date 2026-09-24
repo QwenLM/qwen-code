@@ -46,22 +46,21 @@ of items.
 
 ### 2.2 `qwen batch` subcommands (deterministic executor)
 
-| Command                   | Behavior                                                                                   |
-| ------------------------- | ------------------------------------------------------------------------------------------ |
-| `check`                   | Verify credentials, endpoint and Batch route; show what `run` would freeze; nothing billed |
-| `run <plan>`              | Validate plan → assemble → estimate → budget gate → submit → record                        |
-| `collect <task-id>`       | Reconcile → poll (optional `--wait`) → download → validate → deliver → report              |
-| `retry <task-id>`         | Resubmit only `failed` items as a new attempt; truncated ones need `--max-output-tokens`   |
-| `list`                    | List recorded tasks (local only, no credentials)                                           |
-| `cancel --task <task-id>` | Cancel the task's active batch (finished requests are still billed)                        |
-| `clean <task-id>`         | Delete the local record; cancels nothing; refuses while a batch may be open unless forced  |
+| Command             | Behavior                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------ |
+| `check`             | Verify credentials, endpoint and Batch route; show what `run` would freeze; nothing billed |
+| `run <plan>`        | Validate plan → assemble → estimate → budget gate → submit → record                        |
+| `collect <task-id>` | Reconcile → poll (optional `--wait`) → download → validate → deliver → report              |
+| `retry <task-id>`   | Resubmit only `failed` items as a new attempt; truncated ones need `--max-output-tokens`   |
+| `list`              | List recorded tasks (local only, no credentials)                                           |
+| `cancel <task-id>`  | Cancel the task's active batch (finished requests are still billed)                        |
+| `clean <task-id>`   | Delete the local record; cancels nothing; refuses while a batch may be open unless forced  |
 
 `run` prints the task id and exits, so waiting never costs agent turns.
 `collect` can run any number of times.
 
-The raw transport verbs `submit` / `status` / `fetch` / `cancel <id>` (from
-#11874) stay as the lower-level path for anything outside the
-document-transform contract (lines over 1 MB, hand-built request files).
+There are no raw `submit` / `status` / `fetch` verbs: anything outside the
+document-transform contract belongs to a new plan kind, not a side channel.
 
 ## 3. Architecture
 
@@ -78,7 +77,7 @@ executor batch-workflow.ts: run / collect / retry / cancel / clean / check / lis
   └─ batch-client.ts  HTTP primitives; errors carry the HTTP status
         │
         ▼
-batch.ts: endpoint / auth resolution, CLI registration, raw transport verbs
+batch.ts: endpoint / auth resolution, CLI registration
 
 interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches)
   → runs the same collectTask for this project's open tasks
@@ -168,19 +167,19 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
 
 ## 5. Boundary behaviors
 
-| Case                                                                        | Behavior                                                                          |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Source path escapes the project root (incl. via symlink)                    | Refused at assembly; nothing is uploaded                                          |
-| Assembled line over 1 MB                                                    | Refused, pointing at `qwen batch submit`                                          |
-| Create returns a definite 4xx                                               | Orphan upload deleted, items `failed`, `retry` is safe                            |
-| Create answer lost (5xx / dropped socket)                                   | `submit-unknown`; `collect` reconciles via the provider list; no resubmit         |
-| Reconcile finds 0 or 2+ candidates                                          | Report and stop; the provider list is the source of truth                         |
-| Batch not settled at collect                                                | Report status; `--wait` polls with 10s → 60s backoff up to `--timeout`            |
-| Result truncated / tool calls / empty                                       | Item `failed` with the reason; a truncated item needs a larger limit to retry     |
-| Result custom_id unknown or duplicated                                      | Ignored with a warning                                                            |
-| Item missing from all result files                                          | `failed` ("no result line", or the provider's reason when the whole batch failed) |
-| Source changed / target exists with other content / target symlinks outside | `held`; re-collect after resolving delivers from the local record, no new cost    |
-| After collect                                                               | Remote input/output/error files deleted; `--keep-remote` keeps them               |
+| Case                                                                        | Behavior                                                                                  |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Source path escapes the project root (incl. via symlink)                    | Refused at assembly; nothing is uploaded                                                  |
+| Assembled line over 1 MB                                                    | Refused before upload; split the document                                                 |
+| Create returns a definite 4xx                                               | Orphan upload deleted, items `failed`, `retry` is safe                                    |
+| Create answer lost (5xx / dropped socket)                                   | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                 |
+| Reconcile finds 0 or 2+ candidates                                          | Report and stop; the provider list is the source of truth                                 |
+| Batch not settled at collect                                                | Report status; `--wait` polls with 10s → 60s backoff up to `--timeout`                    |
+| Result truncated / tool calls / empty                                       | Item `failed` with the reason; a truncated item needs a larger limit to retry             |
+| Result custom_id unknown or duplicated                                      | Ignored with a warning                                                                    |
+| Item missing from all result files                                          | `failed` ("no result line", or the provider's reason when the whole batch failed)         |
+| Source changed / target exists with other content / target symlinks outside | `held`; re-collect after resolving delivers from the local record, no new cost            |
+| After collect                                                               | Remote input/output/error files deleted; a failed deletion is retried by the next collect |
 
 Retry semantics:
 
@@ -208,7 +207,7 @@ Retry semantics:
   - What it cannot collect is said once: no usable Batch credentials, or a
     submission with no matching provider batch. A task pinned to another
     endpoint backs off until the session switches back.
-- `general.batchAutoCollect`: `deliver` (default) / `notify` / `off`.
+- `general.batchAutoCollect` (default `true`) turns it off.
 - Not covered: headless, `qwen serve`, ACP, web-shell — no model-free notice
   channel there; use `qwen batch collect`.
 
