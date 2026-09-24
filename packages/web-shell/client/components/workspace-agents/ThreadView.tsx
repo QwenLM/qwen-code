@@ -9,6 +9,7 @@ import { ArrowLeftIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Markdown } from '../messages/Markdown';
+import { useI18n } from '../../i18n';
 import {
   buildRunRows,
   explainSkip,
@@ -109,6 +110,15 @@ function formatTime(at: number): string {
   });
 }
 
+const RUN_STAGES = new Set([
+  'starting',
+  'resuming',
+  'waiting',
+  'thinking',
+  'tool',
+  'responding',
+]);
+
 export function RunRowView({
   row,
   agent,
@@ -120,6 +130,7 @@ export function RunRowView({
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
 }) {
+  const { t } = useI18n();
   const sessionId = row.run.sessionId;
   const progress = row.run.progress;
   const [now, setNow] = useState(Date.now);
@@ -128,29 +139,26 @@ export function RunRowView({
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [row.live]);
-  const stale = progress && now - progress.receivedAt > 20000;
+  // Liveness is judged by the agent's own activity, not by when the last
+  // snapshot arrived: a long tool call writes nothing and is still working.
   const quiet = progress && now - progress.activityAt > 15000;
-  const stages: Record<string, string> = {
-    starting: '正在启动',
-    resuming: '继续会话中',
-    waiting: '等待模型',
-    thinking: '思考中',
-    tool: '调用工具中',
-    responding: '正在回复',
-  };
+  const secondsSince = (at: number) =>
+    Math.max(0, Math.floor((now - at) / 1000));
   const state =
     row.run.status === 'queued'
       ? agent?.status === 'offline' || agent?.runtime?.status === 'offline'
-        ? `执行主机 ${agent.runtime?.label ?? ''} 离线，等待恢复`
-        : '消息已接收，排队等待启动'
+        ? t('collab.runRow.hostOffline', { host: agent.runtime?.label ?? '' })
+        : t('collab.runRow.queued')
       : row.run.status === 'running'
         ? progress
-          ? stale
-            ? '连接中断待确认'
+          ? progress.stage === 'awaiting_approval'
+            ? t('collab.runRow.stage.awaiting_approval')
             : quiet
-              ? '等待新输出'
-              : (stages[progress.stage] ?? '执行中')
-          : '等待执行端确认'
+              ? t('collab.runRow.quiet')
+              : RUN_STAGES.has(progress.stage)
+                ? t(`collab.runRow.stage.${progress.stage}`)
+                : t('collab.runRow.working')
+          : t('collab.runRow.unconfirmed')
         : row.state;
   const stateClass = row.outstanding
     ? `${styles.runState} ${styles.runStateOutstanding}`
@@ -175,7 +183,7 @@ export function RunRowView({
             className={styles.runCancel}
             onClick={() => onCancelRun(row.run.id)}
           >
-            取消
+            {t('collab.runRow.cancel')}
           </button>
         ) : null}
       </span>
@@ -183,63 +191,52 @@ export function RunRowView({
         <div className={styles.runProgress} role="status">
           {row.run.startedAt && (
             <div>
-              已等待 {Math.max(0, Math.floor((now - row.run.startedAt) / 1000))}{' '}
-              秒
+              {t('collab.runRow.elapsed', {
+                seconds: secondsSince(row.run.startedAt),
+              })}
             </div>
           )}
           {progress ? (
-            <>
-              <div>
-                {stale
-                  ? '执行端超过 20 秒未响应，不能确认仍在工作'
-                  : '执行端连接正常'}{' '}
-                · {Math.max(0, Math.floor((now - progress.receivedAt) / 1000))}{' '}
-                秒前响应
-              </div>
-              <div>
-                最近活动：
-                {Math.max(
-                  0,
-                  Math.floor((now - progress.activityAt) / 1000),
-                )}{' '}
-                秒前
-              </div>
-            </>
+            <div>
+              {t('collab.runRow.lastActivity', {
+                seconds: secondsSince(progress.activityAt),
+              })}
+            </div>
           ) : (
             <div>
               {row.run.status === 'queued'
-                ? '尚未启动模型，不是在思考。任务保留在队列中，无需重发。'
-                : '尚未收到启动或输出信号，暂不能确认模型已开始工作。无需重复发送。'}
+                ? t('collab.runRow.queuedHint')
+                : t('collab.runRow.unconfirmedHint')}
             </div>
           )}
         </div>
       )}
       {progress?.detail && (
         <details className={styles.runProgress} open={row.live}>
-          <summary>最近执行活动</summary>
+          <summary>{t('collab.runRow.activity')}</summary>
           <div>{progress.detail}</div>
         </details>
       )}
       {progress?.thoughtText && (
         <details className={styles.runProgress} open={row.live}>
-          <summary>思考过程（执行器提供）</summary>
+          <summary>{t('collab.runRow.thinking')}</summary>
           <div className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
             {progress.thoughtText}
           </div>
           {progress.thoughtText.length >= 65536 && (
-            <p>思考预览已达长度上限。</p>
+            <p>{t('collab.runRow.thinkingCap')}</p>
           )}
         </details>
       )}
       {progress?.outputText && (
         <details className={styles.runProgress}>
-          <summary>执行输出（含中间回复）</summary>
+          <summary>{t('collab.runRow.output')}</summary>
           <Markdown
             content={progress.outputText}
             isStreaming={row.run.status === 'running'}
           />
           {progress.outputText.length >= 262144 && (
-            <p>实时预览已达长度上限；完整最终回复见对话正文。</p>
+            <p>{t('collab.runRow.outputCap')}</p>
           )}
         </details>
       )}
@@ -253,13 +250,17 @@ export function RunRowView({
               className={styles.runLink}
               onClick={() => onOpenAgentSession(sessionId)}
             >
-              open {row.run.agentName}&rsquo;s session
+              {t('collab.runRow.openSession', { agent: row.run.agentName })}
             </button>
           </>
         ) : null}
       </span>
       {row.run.error ? (
-        <span className={styles.runError}>{row.run.error}</span>
+        <span className={styles.runError}>
+          {row.run.error === 'agent_run_stalled'
+            ? t('collab.runRow.stalled')
+            : row.run.error}
+        </span>
       ) : null}
     </div>
   );

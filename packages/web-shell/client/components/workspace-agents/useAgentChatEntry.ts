@@ -7,8 +7,9 @@ import {
 } from 'react';
 import type { ChatEditor } from '../ChatEditor';
 import type { WebShellAtProvider } from '../../customization';
-import { useI18n } from '../../i18n';
+import type { useI18n } from '../../i18n';
 import { createThreadsHttpApi } from './ThreadsRoute';
+import { CONVERSATION_CONTEXT_PREFIX } from './agents-view-logic';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
 
 type Submit = ComponentProps<typeof ChatEditor>['onSubmit'];
@@ -51,6 +52,7 @@ export function useAgentChatEntry({
   onError,
   getContext,
   onCreateAgent,
+  t,
 }: {
   enabled: boolean;
   cwd?: string;
@@ -63,8 +65,12 @@ export function useAgentChatEntry({
   getContext?: () => string;
   /** Offered as the picker's last item: open the New agent page. */
   onCreateAgent?: () => void;
+  /**
+   * The caller's translator. App calls this hook above its I18nProvider, where
+   * useI18n() would hand back the default that echoes keys.
+   */
+  t: ReturnType<typeof useI18n>['t'];
 }) {
-  const { t } = useI18n();
   // Read through a ref so a new handler each render keeps `providers` stable.
   const createAgentRef = useRef(onCreateAgent);
   createAgentRef.current = onCreateAgent;
@@ -206,9 +212,7 @@ export function useAgentChatEntry({
             const context = getContext?.() ?? '';
             const created = await api.createThread({
               title: text.trim().slice(0, 80),
-              body: context
-                ? `Context from the conversation this was sent from:\n\n${context}`
-                : '',
+              body: context ? `${CONVERSATION_CONTEXT_PREFIX}${context}` : '',
               assignee: lead.name,
             });
             id = created.id;
