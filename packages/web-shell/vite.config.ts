@@ -142,6 +142,26 @@ export default defineConfig(({ command }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    // The Live Voice capture worklet is loaded with audioWorklet.addModule(),
+    // which the Web Shell CSP (`script-src 'self'`, no `data:`) only allows
+    // from a same-origin URL. At ~2 KB it is under Vite's default inline
+    // limit and would be turned into a `data:` URL — silently, because the
+    // client then falls back to the main-thread capture node. Keep it a file.
+    assetsInlineLimit: (filePath) =>
+      /[\\/]live[\\/]capture-worklet\.js$/.test(filePath) ? false : undefined,
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'client/index.html'),
+        // This import-free worker must remain at the origin root so it can
+        // control all Web Shell navigation.
+        sw: resolve(__dirname, 'client/sw.js'),
+      },
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
+        format: 'es',
+      },
+    },
   },
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
@@ -172,6 +192,12 @@ export default defineConfig(({ command }) => ({
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
+      // Remote-daemon browse/register proxies. Keys are path-prefix matches,
+      // so the `/workspace` entry above cannot reach these; without them the
+      // SPA fallback returns index.html in dev and the Add-workspace dialog
+      // fails JSON parsing on the browse leg.
+      '/remote-workspace-path-suggestions': daemonProxy,
+      '/remote-workspaces': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,

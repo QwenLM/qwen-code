@@ -27,6 +27,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stateIdOf } from './lib/local-anchor.js';
+import { cacheCommitCommand } from './cache-commit.js';
 import { captureLocalCommand } from './capture-local.js';
 import { buildChunkAgentPrompt } from './agent-prompt.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
@@ -63,7 +64,14 @@ function write(rel: string, content: string): void {
   writeFileSync(abs, content);
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
+  // A candidate anchors only under a published identity (without one it
+  // promotes as the findings ledger alone), so the fixtures publish one;
+  // `capture` overrides it per test through its `model` argument.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-loc-inc-')));
   cwd = process.cwd();
@@ -77,6 +85,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();
@@ -107,6 +118,7 @@ type Plan = Record<string, unknown> & {
   files: Array<{ path: string }>;
   incremental?: { scope?: IncrementalScope };
   cacheCandidatePath: string;
+  cacheCandidateStateId: string;
   diffPath: string;
 };
 
@@ -212,6 +224,34 @@ describe('capture-local — incremental local rounds', () => {
     expect(
       readFileSync(plan.incremental!.scope!.fullDiffPath!, 'utf8'),
     ).toContain('bystander');
+  });
+
+  it('records the identity of the SLICE it wrote, not of the full capture', () => {
+    // Here the command holds two diff texts at once — the full capture and
+    // the slice — and only the slice is what lands at `diffPathAbsolute`, and
+    // the coverage reader re-hashes that path and nothing else. An identity
+    // over the full capture type-checks, passes every un-sliced fixture, and
+    // reports drift on every incrementally-scoped round of a plan nothing
+    // touched.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    // Not ASCII, so the writer's decoding is pinned too: the reader decodes
+    // the file as utf8, and any other decoding here agrees only on ASCII.
+    write(CHANGED, 'export const v = "变更 é";\n');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+
+    const sha = (text: string): string =>
+      createHash('sha256').update(text, 'utf8').digest('hex');
+    const slice = readFileSync(join(repo, plan.diffPath), 'utf8');
+    const full = readFileSync(plan.incremental!.scope!.fullDiffPath!, 'utf8');
+    // The slice genuinely dropped a section, or this pins nothing.
+    expect(full).toContain('bystander');
+    expect(slice).not.toContain('bystander');
+
+    const recorded = (plan['selection'] as { sourceArtifactSha256: string })
+      .sourceArtifactSha256;
+    expect(recorded).toBe(sha(slice));
+    expect(recorded).not.toBe(sha(full));
   });
 
   it('an attribute flip re-reviews the file — including with NO worktree change', () => {
@@ -650,6 +690,94 @@ describe('capture-local — round-2 regressions from the stop work', () => {
     ).toBe(false);
   });
 });
+describe('capture-local — promotion through the REAL cache-commit', () => {
+  it("keeps a file review's anchor across the promotion", () => {
+    // The unit tests either side of this seam both passed while the seam
+    // itself was broken: `cache-commit`'s allowlist dropped `source`, and
+    // this suite's own `promoteCandidate` helper spreads the whole candidate
+    // instead of running the command — so the field survived in every test
+    // and in no real round. Drive the actual command.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
+    );
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    // `--state-id` exactly as Step 8 passes it: off the plan, not off the
+    // candidate file — the point of the flag is that the command re-reads
+    // that file and a concurrent round may have replaced it since.
+    (cacheCommitCommand.handler as (argv: unknown) => void)({
+      candidate: first.cacheCandidatePath,
+      ledger: ledgerPath,
+      out: first['cachePath'],
+      stateId: first['cacheCandidateStateId'],
+    });
+
+    write('src/foo.ts', 'export const real = 2;\n');
+    const second = capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
+  });
+
+  it('bootstraps on a checkout with no .qwen/review-cache yet (R26-2)', () => {
+    // Step 1 passes the DIRECTORY on every high round, including the first
+    // one on a fresh clone, where it does not exist. The plan published it
+    // unchanged as `cachePath`, `cache-commit --out <that directory>` was
+    // refused as a cross-target promotion, and nothing ever created it — so
+    // no round on that checkout ever persisted an anchor or a ledger.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+    const cacheDir = join(repo, '.qwen/review-cache');
+    for (const file of [undefined, 'src/foo.ts']) {
+      rmSync(cacheDir, { recursive: true, force: true });
+      const first = capture({ file, cache: cacheDir, model: 'model-a' });
+      expect(first['cachePath']).toMatch(/\.json$/);
+      const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+      writeFileSync(
+        ledgerPath,
+        JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
+      );
+      (cacheCommitCommand.handler as (argv: unknown) => void)({
+        candidate: first.cacheCandidatePath,
+        ledger: ledgerPath,
+        out: first['cachePath'],
+        stateId: first['cacheCandidateStateId'],
+      });
+      stderrLines.length = 0;
+      const second = capture({ file, cache: cacheDir, model: 'model-a' });
+      // Nothing moved since the promotion: the anchor holds and scopes the
+      // round to an empty delta instead of full-reviewing.
+      expect(stderrLines.join('\n')).not.toContain(
+        'Incremental anchor not used',
+      );
+      expect(second.incremental?.scope?.deltaFiles).toEqual([]);
+    }
+    // A ledger-only cache (a round with no identity) is named as such, not
+    // as "missing or unreadable" — the skill relays that line to the user.
+    writeFileSync(
+      join(cacheDir, 'local.json'),
+      JSON.stringify({ v: 1, target: 'local', round: 1, findings: [] }),
+    );
+    stderrLines.length = 0;
+    capture({ cache: cacheDir, model: 'model-a' });
+    expect(stderrLines.join('\n')).toContain(
+      'the cache holds the findings ledger only',
+    );
+    // A caller-named cache FILE that does not exist yet stays that file —
+    // only a non-`.json` name is read as the directory.
+    const named = join(repo, 'caches', 'local.json');
+    expect(capture({ cache: named, model: 'model-a' })['cachePath']).toBe(
+      named,
+    );
+  });
+});
 
 describe('capture-local — a narrower round cannot certify a wider one', () => {
   it('refuses the anchor when this round excludes untracked files', () => {
@@ -1017,8 +1145,10 @@ describe('capture-local — the decided stops are machine-readable', () => {
     const second = capture({ cache: cachePath, model: 'model-a' });
     expect(second['incremental']).toBeUndefined();
     expect(stderrLines.join('\n')).toContain('still on disk');
-    expect(second['cacheCandidatePath']).toBeDefined();
-    expect(existsSync(second['cacheCandidatePath'] as string)).toBe(false);
+    // THIS branch's withhold contract: the field itself stays off the plan
+    // (Step 8 branches on presence), where the base publishes the path and
+    // removes the file.
+    expect(second['cacheCandidatePath']).toBeUndefined();
     expect(stderrLines.join('\n')).toContain(
       'candidate would record their absence as reviewed state',
     );

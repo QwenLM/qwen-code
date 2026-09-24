@@ -469,6 +469,19 @@ describe('Desktop OSS mirror workflow', () => {
 });
 
 describe('Desktop release event', () => {
+  it('installs historical Qwen Code refs with their available lockfile', () => {
+    const install = getWorkflowStep(
+      getWorkflowJob(releaseWorkflow, 'build'),
+      'Install Qwen Code dependencies',
+    );
+    expect(install).toContain("shell: 'bash'");
+    expect(install).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(install).toContain(
+      'corepack pnpm install --frozen-lockfile --prefer-offline',
+    );
+    expect(install).toContain('npm ci --no-audit --progress=false');
+  });
+
   it('gates automatic publishing like the VS Code release workflow', () => {
     expect(releaseWorkflow).toContain("release:\n    types: ['published']");
     const prepare = getWorkflowJob(releaseWorkflow, 'prepare');

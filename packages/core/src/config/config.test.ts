@@ -34,18 +34,11 @@ import {
   normalizeGoalMaxTurns,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-  normalizeGoalCheckpointTimeoutSeconds,
-  isValidGoalCheckpointTimeoutSeconds,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
-import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -97,7 +90,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { applySkillSideEffects } from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
-import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -141,10 +134,13 @@ import {
   type Extension,
 } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import * as sandboxPolicy from '../sandbox/runtime-shell-policy.js';
 import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { createHookOutput, HookSystem } from '../hooks/index.js';
+import { HookRegistry } from '../hooks/hookRegistry.js';
+import { HookPlanner } from '../hooks/hookPlanner.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -168,6 +164,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
+  Object.defineProperty(ToolMock.prototype, 'name', { value: toolName });
   Object.defineProperty(ToolMock, 'Name', {
     value: toolName,
     writable: true,
@@ -466,16 +463,6 @@ function mockAutoMemoryIndexRead(content: string) {
 }
 
 vi.mock('../core/baseLlmClient.js');
-vi.mock('../goals/goal-checkpoint-verifier.js', async (importOriginal) => {
-  const original =
-    await importOriginal<
-      typeof import('../goals/goal-checkpoint-verifier.js')
-    >();
-  return {
-    ...original,
-    createGoalCheckpointVerifier: vi.fn(original.createGoalCheckpointVerifier),
-  };
-});
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
@@ -930,6 +917,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('setHooksFromSettings', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
     const userHooks = {
       PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
     };
@@ -981,13 +971,312 @@ describe('Server Config (config.ts)', () => {
       expect(config.getProjectHooks()).toBeUndefined();
     });
 
-    it('keeps the folder trust gate for project hooks after replacing hooks', () => {
-      const config = new Config({ ...baseParams, trustedFolder: false });
+    it.each([false, undefined])(
+      'keeps the project hook gate when folder trust is %s',
+      (trustedFolder) => {
+        const config = new Config({
+          ...baseParams,
+          folderTrust: true,
+          trustedFolder,
+        });
 
-      config.setHooksFromSettings({ userHooks, projectHooks });
+        config.setHooksFromSettings({ userHooks, projectHooks });
 
-      expect(config.getProjectHooks()).toBeUndefined();
+        expect(config.getProjectHooks()).toBeUndefined();
+        expect(config.getUserHooks()).toBe(userHooks);
+      },
+    );
+
+    it('replaces system hooks together with the other fields', () => {
+      const config = new Config({ ...baseParams, systemHooks });
+
+      config.setHooksFromSettings({ userHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
       expect(config.getUserHooks()).toBe(userHooks);
+    });
+  });
+
+  describe('per-scope hooks and the legacy merged fallback', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
+    const userHooks = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    const projectHooks = {
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'echo project' }] }],
+    };
+    const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+
+    it('does not read the merged hooks as project hooks when only user hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        userHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getUserHooks()).toBe(userHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('does not read the merged hooks as user hooks when only project hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        projectHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBeUndefined();
+    });
+
+    it('still serves the merged hooks as user and project hooks when no scope is supplied', () => {
+      const config = new Config({ ...baseParams, hooks: mergedHooks });
+
+      expect(config.getUserHooks()).toBe(mergedHooks);
+      expect(config.getProjectHooks()).toBe(mergedHooks);
+    });
+
+    it('serves system hooks without promoting the merged hooks to system hooks', () => {
+      const withSystem = new Config({
+        ...baseParams,
+        systemHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(withSystem.getSystemHooks()).toBe(systemHooks);
+      expect(withSystem.getUserHooks()).toBeUndefined();
+      expect(withSystem.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['safe mode', { safeMode: true }],
+      ['bare mode', { bareMode: true }],
+    ])('loads no system hooks in %s', (_label, mode) => {
+      const config = new Config({ ...baseParams, ...mode, systemHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+    });
+
+    describe('registration through the hook registry', () => {
+      // What the CLI handed Config before system hooks had their own channel:
+      // a user settings hook, no workspace hooks, and the merged settings
+      // (which then held only that user hook) as the legacy field.
+      const lintHook = {
+        PreToolUse: [
+          {
+            hooks: [{ type: 'command', command: './lint.sh', name: 'lint' }],
+          },
+        ],
+      };
+
+      async function registryFor(params: Partial<ConfigParameters>) {
+        const config = new Config({ ...baseParams, ...params });
+        const registry = new HookRegistry(config);
+        await registry.initialize();
+        return registry;
+      }
+
+      it('registers a user settings hook once, under the user source', async () => {
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        expect(
+          registry.getAllHooks().map(({ eventName, source }) => ({
+            eventName,
+            source,
+          })),
+        ).toEqual([{ eventName: HookEventName.PreToolUse, source: 'user' }]);
+      });
+
+      it('runs that hook once per event, as it did while it was registered twice', async () => {
+        // The planner dedups by hook identity regardless of source, so the
+        // double registration never doubled execution; this pins that the
+        // change above does not alter how many times the hook runs.
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+
+      it('runs a hook registered under two sources once, because the planner dedups by identity', async () => {
+        // A Config built from merged settings alone still registers the hook
+        // under both the user and project sources. The planner is what keeps
+        // that from running it twice.
+        const registry = await registryFor({ hooks: lintHook });
+        expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
+          'user',
+          'project',
+        ]);
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+    });
+
+    it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
+      const config = new Config({
+        ...baseParams,
+        trustedFolder: false,
+        systemHooks,
+        projectHooks,
+      });
+
+      expect(config.getSystemHooks()).toBe(systemHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+  });
+
+  describe('onMessageBusChange', () => {
+    it('calls a listener at once when a bus already exists', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('waits for initialize when no bus exists yet', async () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+      expect(listener).not.toHaveBeenCalled();
+
+      await config.initialize();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('announces the bus only once it can run hooks', async () => {
+      const config = new Config({ ...baseParams });
+      const requestListenerCounts: number[] = [];
+      config.onMessageBusChange((bus) => {
+        requestListenerCounts.push(
+          bus.listenerCount(MessageBusType.HOOK_EXECUTION_REQUEST),
+        );
+      });
+
+      await config.initialize();
+
+      expect(requestListenerCounts).toHaveLength(1);
+      expect(requestListenerCounts[0]).toBeGreaterThanOrEqual(1);
+    });
+
+    it('stops notifying a disposed listener', () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+      const dispose = config.onMessageBusChange(listener);
+
+      dispose();
+      config.setMessageBus(new MessageBus());
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('keeps initializing and notifying others when a listener throws', async () => {
+      const config = new Config({ ...baseParams });
+      config.onMessageBusChange(() => {
+        throw new Error('observer broke');
+      });
+      const other = vi.fn();
+      config.onMessageBusChange(other);
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(other).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles a rejection from an async listener', async () => {
+      const config = new Config({ ...baseParams });
+      let catchSpy: ReturnType<typeof vi.fn> | undefined;
+      config.onMessageBusChange(() => {
+        // Created while notified, so the only chance to handle it is the
+        // caller's: nothing else attaches a handler before it settles.
+        const rejection = Promise.reject(new Error('async observer broke'));
+        catchSpy = vi.spyOn(rejection, 'catch') as unknown as ReturnType<
+          typeof vi.fn
+        >;
+        return rejection;
+      });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(catchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets a listener dispose itself while it is notified', () => {
+      const config = new Config({ ...baseParams });
+      const calls: string[] = [];
+      const dispose = config.onMessageBusChange(() => {
+        calls.push('self-disposing');
+        dispose();
+      });
+      config.onMessageBusChange(() => {
+        calls.push('other');
+      });
+
+      expect(() => config.setMessageBus(new MessageBus())).not.toThrow();
+      config.setMessageBus(new MessageBus());
+
+      expect(calls).toEqual(['self-disposing', 'other', 'other']);
+    });
+
+    it('notifies a listener added during notification exactly once', () => {
+      const config = new Config({ ...baseParams });
+      const late = vi.fn();
+      const dispose = config.onMessageBusChange(() => {
+        dispose();
+        config.onMessageBusChange(late);
+      });
+
+      config.setMessageBus(new MessageBus());
+
+      // Once from its own registration, which sees the bus already set; the
+      // announcement in progress must not reach it a second time.
+      expect(late).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-announce the bus it already has', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      config.setMessageBus(bus);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces nothing when all hooks are disabled', async () => {
+      const config = new Config({ ...baseParams, disableAllHooks: true });
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      await config.initialize();
+
+      expect(config.getMessageBus()).toBeUndefined();
+      expect(listener).not.toHaveBeenCalled();
     });
   });
 
@@ -2696,7 +2985,209 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  describe('tool sandbox initialization', () => {
+    const parameters = () => ({
+      ...baseParams,
+      sandbox: undefined,
+      cwd: TARGET_DIR,
+      interactive: true,
+      bareMode: false,
+      enableAutoSkill: true,
+      shellExecutionSandbox: {
+        workspace: path.resolve(TARGET_DIR),
+        installation: path.resolve('/installation'),
+        state: path.resolve('/sandbox-state'),
+        filesystem: 'workspace-write' as const,
+        network: 'closed' as const,
+      },
+    });
+
+    it('stops before recording, hooks, skills and registry setup when probing fails', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockRejectedValue(new Error('probe unavailable'));
+      try {
+        const config = new Config(parameters());
+        const record = vi.spyOn(
+          config as unknown as { activateChatRecording: () => unknown },
+          'activateChatRecording',
+        );
+        await expect(config.initialize()).rejects.toThrow('probe unavailable');
+        expect(record).not.toHaveBeenCalled();
+        expect(HookSystem).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+        expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalled();
+      } finally {
+        probe.mockRestore();
+      }
+    });
+
+    it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue();
+      try {
+        const config = new Config(parameters());
+        const refreshExtensions = vi.spyOn(
+          config.getExtensionManager(),
+          'refreshCache',
+        );
+        await config.initialize();
+        expect(probe).toHaveBeenCalledWith(
+          config.getShellExecutionSandbox(),
+          undefined,
+        );
+        expect(HookSystem).not.toHaveBeenCalled();
+        expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+        expect(refreshExtensions).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.refreshCache).toHaveBeenCalled();
+        expect(
+          (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual([
+          ToolNames.SHELL,
+          ToolNames.TASK_STOP,
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+          ToolNames.MONITOR,
+          ToolNames.AGENT,
+          ToolNames.GLOB,
+          ToolNames.LS,
+          ToolNames.ASK_USER_QUESTION,
+        ]);
+        expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+      } finally {
+        probe.mockRestore();
+      }
+    });
+
+    it('omits user-interaction tools from the admitted headless registry', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue();
+      try {
+        const config = new Config({
+          ...parameters(),
+          interactive: false,
+          bareMode: true,
+        });
+        await config.initialize();
+        expect(
+          (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual([
+          ToolNames.SHELL,
+          ToolNames.TASK_STOP,
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+          ToolNames.MONITOR,
+          ToolNames.AGENT,
+          ToolNames.GLOB,
+          ToolNames.LS,
+        ]);
+      } finally {
+        probe.mockRestore();
+      }
+    });
+  });
+
   describe('derived Config ownership', () => {
+    it('preserves the shell sandbox ceiling and rejects relocation before state mutation', async () => {
+      const policy = {
+        workspace: path.resolve(TARGET_DIR),
+        installation: path.resolve('/installation'),
+        state: path.resolve('/sandbox-state'),
+        filesystem: 'workspace-write' as const,
+        network: 'closed' as 'closed' | 'open',
+      };
+      const parent = new Config({
+        ...baseParams,
+        sandbox: undefined,
+        cwd: TARGET_DIR,
+        bareMode: false,
+        interactive: true,
+        fileCheckpointingEnabled: true,
+        ideMode: true,
+        enableManagedAutoMemory: true,
+        enableManagedAutoDream: true,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+        agentTeamEnabled: true,
+        workflowsEnabled: true,
+        sessionWorkflowEnabled: true,
+        cronEnabled: true,
+        shellExecutionSandbox: policy,
+      });
+      const snapshot = parent.getShellExecutionSandbox();
+      policy.network = 'open';
+      expect(snapshot?.network).toBe('closed');
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(parent.getCoreTools()).toEqual([
+        ToolNames.SHELL,
+        ToolNames.TASK_STOP,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+        ToolNames.MONITOR,
+        ToolNames.AGENT,
+        ToolNames.EXEC,
+        ToolNames.GLOB,
+        ToolNames.LS,
+        ToolNames.ASK_USER_QUESTION,
+        ToolNames.STRUCTURED_OUTPUT,
+      ]);
+      expect(parent.getBareMode()).toBe(false);
+      expect(parent.getIdeMode()).toBe(false);
+      expect(() => parent.setIdeMode(true)).toThrow('does not support IDE');
+      expect(parent.getDisableAllHooks()).toBe(true);
+      expect(parent.getHookSystem()).toBeUndefined();
+      expect(parent.getManagedAutoMemoryEnabled()).toBe(false);
+      expect(parent.isManagedMemoryAvailable()).toBe(false);
+      expect(parent.getManagedAutoDreamEnabled()).toBe(false);
+      expect(parent.getTeamMemoryEnabled()).toBe(false);
+      expect(parent.getTeamMemorySyncEnabled()).toBe(false);
+      expect(parent.getAutoSkillEnabled()).toBe(false);
+      expect(parent.isAgentTeamEnabled()).toBe(false);
+      expect(parent.isWorkflowsEnabled()).toBe(false);
+      expect(parent.isSessionWorkflowEnabled()).toBe(false);
+      expect(parent.isCronEnabled()).toBe(false);
+      expect(parent.isLspEnabled()).toBe(false);
+      expect(parent.getFileCheckpointingEnabled()).toBe(false);
+      expect(() => parent.enableFileCheckpointing()).toThrow('unavailable');
+      expect(() =>
+        parent.addMcpServers({ remote: { command: 'node' } }),
+      ).toThrow('does not support MCP');
+      expect(() =>
+        parent.addRuntimeMcpServer('remote', { command: 'node' }),
+      ).toThrow('does not support MCP');
+      await expect(
+        parent.reinitializeMcpServers({ remote: { command: 'node' } }),
+      ).rejects.toThrow('does not support MCP');
+      expect(parent.getMcpServers()).toEqual({});
+      expect(parent.getExtensions()).toEqual([]);
+      const fileService = parent.getFileSystemService();
+      expect(() => parent.setFileSystemService(fileService)).toThrow(
+        'delegated filesystem',
+      );
+      expect(parent.getFileSystemService()).toBe(fileService);
+      const child = deriveWorktreeConfig(
+        parent,
+        path.join(TARGET_DIR, 'child'),
+      );
+      expect(child.getShellExecutionSandbox()).toBe(snapshot);
+      expect(() => deriveWorktreeConfig(parent, '/other')).toThrow(
+        'admitted workspace',
+      );
+      await expect(parent.relocateWorkingDirectory('/other')).rejects.toThrow(
+        'admitted workspace',
+      );
+      expect(parent.getTargetDir()).toBe(path.resolve(TARGET_DIR));
+    });
     it('keeps session approval independent of nested agent and worktree modes', () => {
       const parent = new Config({
         ...baseParams,
@@ -3930,25 +4421,39 @@ describe('Server Config (config.ts)', () => {
       };
     };
 
-    // A pre-canonical transcript whose newest Goal record is a legacy
-    // `goal_status` card. Recovering it is the one restore path that has to
-    // *write*: it journals a migrated `goal_state` record.
-    const legacyGoalSession = (): ResumedSessionData => {
+    // A transcript whose newest Goal record is a paused Goal. Restoring it
+    // reads the record and writes nothing; what the deferred restore has to
+    // get right is the ordering against the session writer.
+    const pausedGoalSession = (): ResumedSessionData => {
       const record = {
-        uuid: 'legacy-goal',
+        uuid: 'paused-goal',
         parentUuid: null,
         sessionId: 'resumed-session',
         timestamp: new Date(0).toISOString(),
         type: 'system',
-        subtype: 'slash_command',
+        subtype: 'goal_state',
         provenance: 'goal_control',
         cwd: '/tmp',
         version: 'test',
         systemPayload: {
-          phase: 'result',
-          outputHistoryItems: [
-            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
-          ],
+          v: 2,
+          cause: 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'ship the thing',
+              status: 'paused',
+              evidenceCursor: { recordId: 'paused-goal' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          },
         },
       } as unknown as ChatRecord;
       return {
@@ -3965,19 +4470,19 @@ describe('Server Config (config.ts)', () => {
     };
 
     // Under a writer lease the recorder is `inactive` until it is handed the
-    // lease, and rejects every write until then. Kicking the legacy
-    // migration off from the constructor drove that write into the guard,
-    // and `restore()` latches the failure as `recoveryError` permanently:
-    // the migrated goal was dropped and the whole resumed session lost goal
-    // persistence. Ordering is the deciding variable, so this asserts the
-    // deferred restore lands the goal rather than bricking the runtime.
-    it('waits for the session writer before migrating a legacy Goal', async () => {
+    // lease, and rejects every write until then. Restore waits for the
+    // lease so that the first Goal turn a restored active Goal starts does
+    // not write into that guard, and so that `restore()` cannot latch a
+    // lease-timing failure as `recoveryError` for the whole session.
+    // Ordering is the deciding variable, so this asserts the deferred
+    // restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before restoring a Goal', async () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const recorder = config.getChatRecordingService();
       if (!recorder) throw new Error('expected a chat recording service');
@@ -4009,7 +4514,8 @@ describe('Server Config (config.ts)', () => {
       ).startPendingGoalRestore();
 
       const runtime = await ready;
-      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      // Restoring reads the journal and writes nothing to it.
+      expect(recordGoalState).not.toHaveBeenCalled();
       expect(runtime.getSnapshot().goal).toMatchObject({
         objective: 'ship the thing',
         status: 'paused',
@@ -4026,7 +4532,7 @@ describe('Server Config (config.ts)', () => {
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const ready = config.getGoalRuntimeReady();
       config.startNewSession('replacement-session');
@@ -4518,76 +5024,6 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('arms the checkpoint verifier with the configured timeout', () => {
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalCheckpointTimeoutSeconds: 45,
-      });
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
-
-      config.getGoalRuntime();
-
-      // Assert the call, not only the getter: the options argument is the
-      // one line that carries the setting into the verifier, and the
-      // getter-only checks above stay green if it is dropped.
-      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.[0]).toBe(config);
-      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
-    });
-
-    it('caps the checkpoint ceiling at a wait the default wire honours', () => {
-      // The checkpoint call is streamed, so past the stream lifetime guard it
-      // is the guard that ends the call and the verifier's own timer never
-      // fires. A cap above it would let the setting validate, and the getter
-      // report, a ceiling no default deployment can reach.
-      expect(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000).toBeLessThanOrEqual(
-        DEFAULT_STREAM_MAX_LIFETIME_MS,
-      );
-    });
-
-    it('normalizes the goalCheckpointTimeoutSeconds setting', () => {
-      expect(normalizeGoalCheckpointTimeoutSeconds(undefined)).toBe(
-        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-      );
-      expect(normalizeGoalCheckpointTimeoutSeconds(1)).toBe(1_000);
-      // The cap is a typo guard, accepted itself and refused one past.
-      expect(
-        normalizeGoalCheckpointTimeoutSeconds(
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-        ),
-      ).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000);
-      expect(
-        isValidGoalCheckpointTimeoutSeconds(
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-        ),
-      ).toBe(false);
-      for (const invalid of [
-        0,
-        -1,
-        1.5,
-        Number.NaN,
-        Number.POSITIVE_INFINITY,
-        '30',
-        null,
-        GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-      ]) {
-        expect(isValidGoalCheckpointTimeoutSeconds(invalid)).toBe(false);
-        expect(
-          normalizeGoalCheckpointTimeoutSeconds(invalid as number | undefined),
-        ).toBe(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS);
-      }
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalCheckpointTimeoutSeconds: 0,
-      });
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(
-        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-      );
-    });
-
     it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
       // The fallback notice lives in the debug log file (enabled via
       // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
@@ -4660,115 +5096,6 @@ describe('Server Config (config.ts)', () => {
           expect(appendFileSpy).toHaveBeenCalledWith(
             Storage.getDebugLogPath(sessionId),
             expect.stringContaining('Ignoring invalid goalTokenBudget -5'),
-            'utf8',
-          ),
-        );
-      } finally {
-        mkdirSpy.mockRestore();
-        appendFileSpy.mockRestore();
-        resetDebugLoggingState();
-        setDebugLogSession(null);
-        if (previousDebugLogFileEnv === undefined) {
-          delete process.env['QWEN_DEBUG_LOG_FILE'];
-        } else {
-          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-        }
-      }
-    });
-
-    it('records the invalid-goalCheckpointTimeoutSeconds fallback in the debug log', async () => {
-      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
-      const sessionId = 'goal-checkpoint-warning-session';
-      const mkdirSpy = vi
-        .spyOn(fs.promises, 'mkdir')
-        .mockResolvedValue(undefined);
-      const appendFileSpy = vi
-        .spyOn(fs.promises, 'appendFile')
-        .mockResolvedValue(undefined);
-
-      try {
-        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-        resetDebugLoggingState();
-
-        new Config({
-          ...baseParams,
-          sessionId,
-          goalCheckpointTimeoutSeconds: 0,
-        });
-
-        await vi.waitFor(() =>
-          expect(appendFileSpy).toHaveBeenCalledWith(
-            Storage.getDebugLogPath(sessionId),
-            expect.stringMatching(
-              new RegExp(
-                `Ignoring invalid goalCheckpointTimeoutSeconds 0:.*using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}\\.`,
-              ),
-            ),
-            'utf8',
-          ),
-        );
-      } finally {
-        mkdirSpy.mockRestore();
-        appendFileSpy.mockRestore();
-        resetDebugLoggingState();
-        setDebugLogSession(null);
-        if (previousDebugLogFileEnv === undefined) {
-          delete process.env['QWEN_DEBUG_LOG_FILE'];
-        } else {
-          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-        }
-      }
-    });
-
-    it('keeps the goalCheckpointTimeoutSeconds debug warning silent for absent and valid values', async () => {
-      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
-      const sessionId = 'goal-checkpoint-warning-session';
-      const mkdirSpy = vi
-        .spyOn(fs.promises, 'mkdir')
-        .mockResolvedValue(undefined);
-      const appendFileSpy = vi
-        .spyOn(fs.promises, 'appendFile')
-        .mockResolvedValue(undefined);
-
-      try {
-        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-        resetDebugLoggingState();
-
-        for (const goalCheckpointTimeoutSeconds of [
-          undefined,
-          1,
-          180,
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-        ]) {
-          new Config({
-            ...baseParams,
-            sessionId,
-            goalCheckpointTimeoutSeconds,
-          });
-          // Let any fire-and-forget debug write settle before the next case.
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-        expect(
-          appendFileSpy.mock.calls.filter((call) =>
-            String(call[1]).includes(
-              'Ignoring invalid goalCheckpointTimeoutSeconds',
-            ),
-          ),
-        ).toHaveLength(0);
-
-        // Control case: the channel is live in this test, so the silence
-        // above is meaningful.
-        new Config({
-          ...baseParams,
-          sessionId,
-          goalCheckpointTimeoutSeconds: 0,
-        });
-        await vi.waitFor(() =>
-          expect(appendFileSpy).toHaveBeenCalledWith(
-            Storage.getDebugLogPath(sessionId),
-            expect.stringContaining(
-              'Ignoring invalid goalCheckpointTimeoutSeconds 0',
-            ),
             'utf8',
           ),
         );
@@ -5128,6 +5455,69 @@ describe('Server Config (config.ts)', () => {
       ],
     });
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  describe('isWorkflowNameOnly', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('is off by default, and on from the setting or the environment', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: true,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(true);
+      // The environment only turns the lock on.
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: false,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+    });
+
+    // Notifications read the lock from the registry the config owns, so the
+    // two cannot disagree about which resume call to offer.
+    it('hands the lock to its workflow run registry', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      for (const workflowNameOnly of [true, false]) {
+        const registry = new Config({
+          ...baseParams,
+          workflowNameOnly,
+        }).getWorkflowRunRegistry();
+        const completion = vi.fn();
+        registry.setCompletionCallback(completion);
+        const entry = registry.register({
+          runId: 'wf_lock',
+          meta: null,
+          status: 'running',
+          startTime: 1,
+          outputFile: '',
+          abortController: new AbortController(),
+          isBackgrounded: true,
+          scriptPath: '/runtime/workflows/generated/inline/wf_lock.js',
+          // A resume call is offered only beside a journal to replay.
+          journalPath: '/runtime/workflows/wf_lock/journal.jsonl',
+        } as never);
+        registry.fail(entry.runId, 'boom', 2);
+        const text = completion.mock.calls[0][1] as string;
+        expect(text.includes('only whoever started it')).toBe(workflowNameOnly);
+        expect(text.includes('Workflow({ scriptPath')).toBe(!workflowNameOnly);
+      }
+    });
+
+    it('is decided when the session starts', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      const config = new Config(baseParams);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(config.isWorkflowNameOnly()).toBe(false);
+    });
   });
 
   it('keeps project-derived features disabled for a provisional workspace', () => {
@@ -7879,6 +8269,148 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('refreshAuth', () => {
+    it('creates the initial generator with the model API resolved from raw OpenAI settings', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'responses-model',
+        modelProvidersConfig: {
+          openai: [{ id: 'responses-model', wireApi: 'responses' }],
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'responses-model', authType },
+          sources: {},
+        }),
+      );
+
+      await config.refreshAuth(AuthType.USE_OPENAI, true);
+
+      expect(resolveContentGeneratorConfigWithSources).toHaveBeenLastCalledWith(
+        config,
+        AuthType.USE_OPENAI_RESPONSES,
+        expect.objectContaining({ model: 'responses-model' }),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(createContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+        config,
+        true,
+      );
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+    });
+
+    it.each(['retry', 'install', 'switch', 'invalid-switch'] as const)(
+      'honors %s after initial Responses authentication fails',
+      async (action) => {
+        const baseUrl = 'https://gateway.example/v1';
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'same',
+          modelProvidersConfig: {
+            openai: [{ id: 'same', baseUrl, wireApi: 'responses' }],
+          },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          (_config, authType, generationConfig) => ({
+            config: { ...generationConfig, model: 'same', authType },
+            sources: {},
+          }),
+        );
+        vi.mocked(createContentGenerator).mockRejectedValueOnce(
+          new Error('missing key'),
+        );
+        await expect(
+          config.refreshAuth(AuthType.USE_OPENAI, true),
+        ).rejects.toThrow('missing key');
+        config.reloadModelProvidersConfig({
+          openai: [
+            { id: 'same', baseUrl },
+            { id: 'same', baseUrl, wireApi: 'responses' },
+          ],
+        });
+        if (action === 'install') {
+          config.syncModelSelection(AuthType.USE_OPENAI, 'same', baseUrl);
+        } else if (action === 'switch') {
+          await config.switchModel(AuthType.USE_OPENAI, 'same', { baseUrl });
+        } else if (action === 'invalid-switch') {
+          await expect(
+            config.switchModel(AuthType.USE_OPENAI, 'missing', { baseUrl }),
+          ).rejects.toThrow();
+        }
+        await config.refreshAuth(AuthType.USE_OPENAI, true);
+        const expectedAuth =
+          action === 'install' || action === 'switch'
+            ? AuthType.USE_OPENAI
+            : AuthType.USE_OPENAI_RESPONSES;
+        expect(createContentGenerator).toHaveBeenLastCalledWith(
+          expect.objectContaining({ model: 'same', authType: expectedAuth }),
+          config,
+          true,
+        );
+        expect(config.getAuthType()).toBe(expectedAuth);
+      },
+    );
+
+    it('does not redirect an OpenAI retry after the first Gemini refresh fails', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'test-model', authType },
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockRejectedValueOnce(
+        new Error('test generator failure'),
+      );
+      await expect(config.refreshAuth(AuthType.USE_GEMINI)).rejects.toThrow(
+        'test generator failure',
+      );
+      await config.refreshAuth(AuthType.USE_OPENAI, true);
+      expect(createContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+        config,
+        true,
+      );
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('requires explicit selection after hot reload removes the selected API route', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        model: 'shared',
+        modelProvidersConfig: {
+          openai: [{ id: 'shared', wireApi: 'responses' }],
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'shared', authType },
+          sources: {},
+        }),
+      );
+      await config.refreshAuth(AuthType.USE_OPENAI_RESPONSES);
+      vi.mocked(createContentGenerator).mockClear();
+      config.reloadModelProvidersConfig({ openai: [{ id: 'shared' }] });
+
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      expect(createContentGenerator).not.toHaveBeenCalled();
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(config.getModel()).toBe('shared');
+    });
+
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);
       const authType = AuthType.USE_GEMINI;
@@ -9186,6 +9718,90 @@ describe('Server Config (config.ts)', () => {
     expect(config.getWarnings()).toContainEqual(
       expect.stringContaining('is git-ignored'),
     );
+  });
+
+  // #12029: the ratio alone means a large window never warns. 15% of a 1M
+  // window is 150,000 tokens of always-on context — an absolute ceiling is what
+  // makes the warning fire where the cost is actually paid.
+  it('warns about a large always-on context on a large window, naming the token bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(48_000), // ~12,000 tokens
+      generationConfig: { contextWindowSize: 1_000_000 },
+    });
+
+    const warnings = config.getWarnings();
+
+    expect(warnings).toContainEqual(
+      expect.stringContaining('uses about 12,000 tokens'),
+    );
+    // The bound that actually fired leads, and the window is still named so a
+    // reader can see how the budget was derived.
+    expect(warnings).toContainEqual(
+      expect.stringContaining(
+        "more than 10,000 tokens — the smaller of that and 15% of this model's 1,000,000 token context window",
+      ),
+    );
+    expect(warnings.join('\n')).not.toContain('more than 15%');
+  });
+
+  it('keeps naming the percentage when the ratio is the binding bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800), // 200 tokens, against 15% of 1,000
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("more than 15% of this model's 1,000 token"),
+    );
+  });
+
+  // The author of an extension rule that was dropped has to be told, or the
+  // documented mechanism silently does nothing for them (#12030).
+  it('warns for each extension rule skipped for having no paths', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining(
+        'Extension rule charts:rules/always.md has no `paths:` and was skipped',
+      ),
+    );
+  });
+
+  // A refresh replaces the list rather than appending to it, or a session that
+  // reloads memory a few times shows the same warning several times over.
+  it('does not accumulate the same extension-rule warning across refreshes', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .filter((warning) => warning.includes('charts:rules/always.md')),
+    ).toHaveLength(1);
   });
 
   it('refreshHierarchicalMemory should expose loaded context file paths', async () => {
@@ -11122,6 +11738,68 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('uses a main-session execution environment and disposes it once', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const dispose = vi
+        .spyOn(environment, 'dispose')
+        .mockResolvedValue(undefined);
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+        todoWriteEnabled: true,
+        mcpServers: { local: { command: 'must-not-start' } },
+      });
+      expect(config.getExecutionEnvironment()).toBe(environment);
+      expect(config.getMcpServers()).toEqual({});
+      await config.createToolRegistry();
+      const registered = vi
+        .mocked(ToolRegistry.prototype.registerFactory)
+        .mock.calls.map(([name]) => name);
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.SHELL);
+      for (const name of [
+        ToolNames.STRUCTURED_OUTPUT,
+        ToolNames.WEB_FETCH,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
+        ToolNames.TODO_WRITE,
+      ])
+        expect(registered).toContain(name);
+      expect(registered).not.toContain(ToolNames.TASK_STOP);
+      expect(registered).not.toContain(ToolNames.NOTEBOOK_EDIT);
+      expect(registered).not.toContain(ToolNames.CREATE_SUB_SESSION);
+      await config.shutdownExecutionEnvironments();
+      await config.shutdownExecutionEnvironments();
+      expect(dispose).toHaveBeenCalledOnce();
+    });
+    it('skips host project hooks, skills, extensions and memory during SSH initialization', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        enableAutoSkill: true,
+      });
+      const refreshExtensions = vi.spyOn(
+        config.getExtensionManager(),
+        'refreshCache',
+      );
+      await config.initialize({ skipLlmInitialization: true });
+      await config.refreshHierarchicalMemory();
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.refreshCache).not.toHaveBeenCalled();
+      expect(refreshExtensions).not.toHaveBeenCalled();
+      expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+      await config.shutdown();
+    });
+
     it('registers zoom_image unconditionally so it survives model switches', async () => {
       const config = new Config(baseParams);
       // A first-run / text-only session reports no image modality, yet the tool
@@ -11907,8 +12585,8 @@ describe('Server Config (config.ts)', () => {
       // Unlisted built-ins are NOT registered eagerly — their schemas are
       // never sent in the eager model request (#9827). But since #10075 they
       // are demoted to deferred rather than dropped: still registered, so
-      // they stay listed in /tools and loadable via ToolSearch instead of
-      // silently disappearing.
+      // they stay listed in /tools and reachable via ToolSearch + ToolCall
+      // instead of silently disappearing.
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
       expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
       expect(registered).not.toContain(ToolNames.GET_GOAL);
@@ -12700,13 +13378,19 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
-  it('should NOT throw an error when setting any mode if trustedFolder is undefined', () => {
+  it('allows privileged modes when folder trust is disabled and no decision is supplied', () => {
     const config = new Config(baseParams);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true); // isTrustedFolder defaults to true
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
+  it('rejects privileged modes before an enabled folder trust decision', () => {
+    const config = new Config({ ...baseParams, folderTrust: true });
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
   });
 
   describe('DAC plan workflow', () => {

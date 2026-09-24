@@ -34,6 +34,7 @@ packages/cua-driver/
 scripts/codemod/fixtures/
 packages/live-host/
 packages/desktop-shell/runtime/
+packages/core/src/skills/bundled/browser-use/runtime/
 # Vendored from mobile-next/mobile-mcp and carries its own eslint config, so
 # reformatting it to house style only widens the diff against upstream on the
 # next sync. eslint.config.js already ignores packages/mobile-mcp/** for the

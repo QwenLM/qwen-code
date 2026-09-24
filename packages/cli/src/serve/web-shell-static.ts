@@ -9,7 +9,11 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import { isDocumentNavigation } from './web-shell-preauth.js';
+import {
+  isDocumentNavigation,
+  WEB_SHELL_PWA_ASSETS,
+  WEB_SHELL_PAGE_PATHS,
+} from './web-shell-preauth.js';
 export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
@@ -28,8 +32,9 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  */
 const WEB_SHELL_CSP_DIRECTIVES = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
+  // Export previews embed SRI-verified assets as data URLs; child frames stay offline.
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data:",
+  "style-src 'self' 'unsafe-inline' data:",
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
   "media-src 'self' data:",
@@ -67,7 +72,11 @@ export function buildWebShellCsp(
     : "frame-ancestors 'none'";
   // PDF attachments use blob URLs; live previews pin their own child source.
   const frameSrc = 'frame-src http: https: blob:';
-  const connectSrc = `connect-src 'self' ${connectOrigins.join(' ')}`.trim();
+  const connectSrc = [
+    "connect-src 'self'",
+    ...connectOrigins,
+    'https://unpkg.com/@qwen-code/',
+  ].join(' ');
   return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
 }
 
@@ -185,10 +194,9 @@ function createSendIndex(
       { cacheControl: false, dotfiles: 'allow' },
       (err) => {
         if (!err) return;
-        // Only 5xx path in the serve app that would otherwise emit nothing —
-        // log it so an operator can see why the shell stopped loading
-        // (EACCES/ESTALE on a network mount, a perms change, a partial
-        // deploy).
+        // Log filesystem failures so an operator can see why the shell stopped
+        // loading (EACCES/ESTALE on a network mount, a permissions change, or
+        // a partial deploy).
         writeStderrLine(
           `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -214,8 +222,11 @@ function createSendIndex(
  *
  *  - `GET /assets/*` — hashed, immutable build chunks (long-cache).
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
- *  - `GET /session/:id` document navigations — the HTML shell, so a browser
+ *  - `GET /session/:id` and exact page paths in `WEB_SHELL_PAGE_PATHS`
+ *    document navigations — the HTML shell, so a browser
  *    refresh can load before the front-end adds its bearer header.
+ *  - `GET /manifest.webmanifest` and `GET /sw.js` — public PWA metadata and
+ *    the origin-scoped worker, revalidated on every request.
  *
  * `GET /mcp-app-sandbox` is a separate pre-auth route mounted by
  * `mountMcpAppSandbox` (the iframe proxy, not the shell HTML).
@@ -235,8 +246,18 @@ export function mountWebShellAssets(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
       index: false,
-      immutable: true,
-      maxAge: '1y',
+      maxAge: 0,
+      setHeaders(res, filePath) {
+        const fileName = path.basename(filePath);
+        // Vite content hashes are the only safe basis for immutable caching.
+        // Future unhashed assets therefore revalidate by default instead of
+        // silently inheriting a one-year lifetime.
+        const contentAddressed = /-[a-zA-Z0-9_-]{8,}\.[^.]+$/u.test(fileName);
+        res.setHeader(
+          'Cache-Control',
+          contentAddressed ? 'public, max-age=31536000, immutable' : 'no-cache',
+        );
+      },
     }),
   );
   // A request still under /assets here is a missing chunk (e.g. a stale hashed
@@ -256,10 +277,50 @@ export function mountWebShellAssets(
     res.status(404).type('text/plain').send('Not found');
   });
   app.get('/', (req: Request, res: Response) => sendIndex(req, res));
-  app.get('/session/:id', (req: Request, res: Response, next: NextFunction) => {
-    if (!isDocumentNavigation(req)) return next();
-    sendIndex(req, res);
-  });
+  app.get(
+    [...WEB_SHELL_PAGE_PATHS, '/session/:id'],
+    (req: Request, res: Response, next: NextFunction) => {
+      if (!isDocumentNavigation(req)) return next();
+      sendIndex(req, res);
+    },
+  );
+  // Process-global public PWA files carry no daemon credentials or workspace data.
+  for (const {
+    route,
+    contentType,
+    serviceWorkerAllowed,
+  } of WEB_SHELL_PWA_ASSETS) {
+    app.get(route, (_req: Request, res: Response) => {
+      res
+        .set('Content-Type', contentType)
+        .set('Cache-Control', 'no-cache')
+        .set('X-Content-Type-Options', 'nosniff');
+      if (serviceWorkerAllowed) res.set('Service-Worker-Allowed', '/');
+      res.sendFile(
+        path.join(webShellDir, route.slice(1)),
+        { cacheControl: false, dotfiles: 'allow' },
+        (err) => {
+          if (!err) return;
+          if (res.headersSent) {
+            res.end();
+            return;
+          }
+          const status = 'status' in err && err.status === 404 ? 404 : 500;
+          if (status === 500) {
+            writeStderrLine(
+              `qwen serve: Web Shell asset send failed (${route}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          res
+            .status(status)
+            .type('text/plain')
+            .send(
+              status === 404 ? 'Not found' : 'Failed to load Web Shell asset',
+            );
+        },
+      );
+    });
+  }
 }
 
 /**
@@ -272,11 +333,11 @@ export function mountWebShellAssets(
  * attacker-controlled `Accept: text/html` to an authed route (e.g.
  * `/capabilities`, `/health` on a non-loopback bind) hits that route's real
  * response / 401, not this shell. Because real routes run first, no per-path
- * denylist is needed. The one exception is exact `/session/:id` document
+ * denylist is needed. The exceptions are exact page and `/session/:id` document
  * navigations, which `mountWebShellAssets` claims BEFORE auth so a browser
  * refresh can load the shell. That stays safe because the route matches a
- * single path segment only, serves only document navigations, and there is no
- * `GET /session/:id` API route for it to shadow — API subpaths like
+ * exact page or single session path segment, serves only document navigations,
+ * and never claims JSON API fetches (including `/goals`). API subpaths like
  * `/session/:id/status` still hit `bearerAuth`.
  *
  * Only GET/HEAD document navigations are claimed; API fetches send
