@@ -160,9 +160,13 @@ public final class LocalProcessRuntimeProvisioner
                     || !Long.valueOf(1L).equals(number(ready.get("epoch")))) {
                 throw failed("Managed Runtime ready record is invalid.");
             }
+            URI endpoint = URI.create(String.valueOf(ready.get("url")));
+            if (!"http".equals(endpoint.getScheme())
+                    || !"127.0.0.1".equals(endpoint.getHost())) {
+                throw failed("Managed Runtime ready record is invalid.");
+            }
             RuntimeLease lease = new RuntimeLease(runtimeInstanceId,
-                    URI.create(String.valueOf(ready.get("url"))), token,
-                    leaseId, 1);
+                    endpoint, token, leaseId, 1);
             attest(request, ownedProcess.seed, lease);
             owned.put(runtimeInstanceId, ownedProcess);
             adopted = true;

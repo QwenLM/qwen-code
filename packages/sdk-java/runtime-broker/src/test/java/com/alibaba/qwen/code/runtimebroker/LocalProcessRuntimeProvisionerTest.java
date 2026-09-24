@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
@@ -199,6 +200,49 @@ class LocalProcessRuntimeProvisionerTest {
             } finally {
                 service.close();
             }
+        }
+    }
+
+    @Test
+    void rejectsANonLoopbackReadyUrlBeforeSendingTheToken()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        Path probe = Files.createTempDirectory("runtime-ready-probe");
+        Path hits = probe.resolve("hits");
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), "--foreign-url",
+                                "--probe=" + hits),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner
+                                    .provision(new RuntimeProvisionRequest(
+                                            scope, null))
+                                    .toCompletableFuture()
+                                    .get(30, TimeUnit.SECONDS));
+            RuntimeBrokerException error =
+                    (RuntimeBrokerException) failure.getCause();
+            assertEquals("Managed Runtime ready record is invalid.",
+                    error.getMessage());
+            assertFalse(Files.exists(hits));
+            assertNoNewChildren(before);
+        } finally {
+            Files.walk(probe).sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (Exception ignored) {
+                            // Best-effort cleanup of the probe directory.
+                        }
+                    });
         }
     }
 

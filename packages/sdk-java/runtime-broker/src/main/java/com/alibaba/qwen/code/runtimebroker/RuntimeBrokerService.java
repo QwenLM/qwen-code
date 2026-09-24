@@ -338,7 +338,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<Boolean> releaseSession(
             SessionContext context) {
-        requireUsableLease(context);
+        if (!provisioner.isUsable(context.lease())) {
+            return releaseUnusableSession(context);
+        }
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
         synchronized (context) {
@@ -383,6 +385,36 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                 });
         return result;
+    }
+
+    /**
+     * A session whose worker is already dead cannot reach the transport.
+     * Retire the binding and finish the release locally. An in-flight
+     * execution still reports busy; an in-flight release is joined.
+     */
+    private CompletionStage<Boolean> releaseUnusableSession(
+            SessionContext context) {
+        invalidateBinding(context.binding());
+        synchronized (context) {
+            CompletableFuture<Boolean> inFlight = context.release();
+            if (inFlight != null) {
+                return inFlight;
+            }
+            if (context.hasActiveControl()
+                    || executionRepository.hasActiveByRuntimeSession(
+                            context.session().getRuntimeSessionId())) {
+                throw conflict("runtime_session_busy",
+                        "Runtime Session has an active operation");
+            }
+            RuntimeSessionRecord releasing =
+                    transitionSessionToReleasing(context);
+            if (releasing.getState()
+                    != RuntimeSessionRecord.State.RELEASED) {
+                finishSessionRelease(releasing);
+            }
+            sessions.remove(context.session().getRuntimeSessionId());
+            return CompletableFuture.completedFuture(true);
+        }
     }
 
     private CompletionStage<RuntimeSessionRecord> acquireSession(
@@ -947,10 +979,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
     /**
      * Retires a binding whose lease just failed liveness or attestation so
      * the next caller mints a fresh generation instead of retrying a dead
-     * record forever.
+     * record forever. The retired lease is released so its worker stops
+     * listening.
      */
     private void invalidateBinding(RuntimeBindingRecord record) {
         liveBindings.remove(record.getBindingId());
+        if (record.getLease() != null) {
+            releaseQuietly(record.getRequest(), record.getLease());
+        }
         RuntimeBindingRecord claimed = bindingRepository.claimOperation(
                 record.getBindingId(), brokerOwnerId, operationLeaseDuration);
         if (claimed != null) {

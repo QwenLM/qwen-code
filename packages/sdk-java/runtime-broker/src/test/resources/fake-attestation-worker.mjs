@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { appendFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import process from 'node:process';
 
@@ -15,6 +16,9 @@ const boot = JSON.parse(
 
 const args = process.argv.slice(2);
 const chatty = args.includes('--chatty');
+const foreignUrl = args.includes('--foreign-url');
+const probeArg = args.find((arg) => arg.startsWith('--probe='));
+const probePath = probeArg ? probeArg.slice('--probe='.length) : '';
 if (args.includes('--big-ready')) {
   process.stdout.write(`${'a'.repeat(40 * 1024)}\n`);
   process.exit(1);
@@ -28,6 +32,9 @@ const server = createServer((request, response) => {
   const chunks = [];
   request.on('data', (chunk) => chunks.push(chunk));
   request.on('end', () => {
+    if (probePath) {
+      appendFileSync(probePath, 'hit\n');
+    }
     const path = request.url.split('?')[0];
     if (
       request.method === 'POST' &&
@@ -67,6 +74,7 @@ const server = createServer((request, response) => {
 
 server.listen(0, '127.0.0.1', () => {
   const address = server.address();
+  const host = foreignUrl ? '172.16.1.234' : '127.0.0.1';
   process.stdout.write(
     `${JSON.stringify({
       type: 'ready',
@@ -75,7 +83,7 @@ server.listen(0, '127.0.0.1', () => {
       runtimeIncarnation: boot.runtimeIncarnation,
       leaseId: boot.leaseId,
       epoch: boot.epoch,
-      url: `http://127.0.0.1:${address.port}`,
+      url: `http://${host}:${address.port}`,
     })}\n`,
   );
 });

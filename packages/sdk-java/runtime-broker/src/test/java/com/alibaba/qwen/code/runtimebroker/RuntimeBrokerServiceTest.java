@@ -969,6 +969,59 @@ class RuntimeBrokerServiceTest {
             assertEquals(2, fixture.provisioner.calls.get());
             assertNotEquals(ready.getLease().getRuntimeInstanceId(),
                     again.getLease().getRuntimeInstanceId());
+            assertEquals(1, fixture.provisioner.releaseCalls.get());
+            assertEquals(ready.getLease().getRuntimeInstanceId(),
+                    fixture.provisioner.releasedLease
+                            .getRuntimeInstanceId());
+        }
+    }
+
+    @Test
+    void deadLeaseReleasesTheSessionWithoutCallingTransport() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.provisioner.usable = false;
+
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(1, fixture.provisioner.releaseCalls.get());
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE,
+                            "runtime").getState());
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    fixture.bindingRepository.findById("binding-1")
+                            .getState());
+
+            fixture.provisioner.usable = true;
+            assertEquals("runtime_session_conflict",
+                    failure(fixture.service.acquire("harness", "runtime",
+                            "bootstrap")).getCode());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    join(fixture.service.acquire("harness", "runtime-2",
+                            "bootstrap")).getState());
+        }
+    }
+
+    @Test
+    void deadLeaseReleaseStaysBusyWhileAnExecutionIsUnsettled() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.transport.executeResult = CompletableFuture.failedFuture(
+                    new IllegalStateException("connection lost"));
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            join(fixture.service.createExecution("harness", "runtime",
+                    "idempotency", reference("runtime", "digest")));
+            awaitExecution(fixture.executionRepository, "execution-1",
+                    ToolExecutionRecord.State.UNKNOWN);
+            fixture.provisioner.usable = false;
+
+            RuntimeBrokerException busy = failure(
+                    fixture.service.release("harness", "runtime"));
+
+            assertEquals("runtime_session_busy", busy.getCode());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE,
+                            "runtime").getState());
         }
     }
 
@@ -1081,8 +1134,10 @@ class RuntimeBrokerServiceTest {
             implements RuntimeProvisioner {
         final AtomicInteger calls = new AtomicInteger();
         final AtomicInteger confirmCalls = new AtomicInteger();
+        final AtomicInteger releaseCalls = new AtomicInteger();
         volatile CompletableFuture<RuntimeLease> provisionResult;
         volatile RuntimeLease issuedLease;
+        volatile RuntimeLease releasedLease;
         volatile CompletableFuture<Void> confirmResult =
                 CompletableFuture.completedFuture(null);
         volatile boolean usable = true;
@@ -1104,6 +1159,14 @@ class RuntimeBrokerServiceTest {
                 RuntimeLease lease) {
             confirmCalls.incrementAndGet();
             return confirmResult;
+        }
+
+        @Override
+        public CompletionStage<Void> release(RuntimeProvisionRequest request,
+                RuntimeLease lease) {
+            releaseCalls.incrementAndGet();
+            releasedLease = lease;
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override
