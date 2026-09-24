@@ -20,6 +20,7 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { runCodexAppServer } from '../external-agents/codex-subagent-executor.js';
+import { selectRejectOption } from '../external-agents/acp-subagent-executor.js';
 import { streamAgentTurn } from './workspace-agents/stream-agent-turn.js';
 import type { AgentRunStep } from './workspace-agents/agent-events.js';
 import { codexHostSession } from './workspace-agents/codex-host-session.js';
@@ -151,11 +152,26 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
     error?: string;
   } & T;
   if (!response.ok) {
-    throw new Error(
-      result.error ?? `Agent Host request failed (${response.status}).`,
+    throw Object.assign(
+      new Error(
+        result.error ?? `Agent Host request failed (${response.status}).`,
+      ),
+      { status: response.status },
     );
   }
   return result;
+}
+
+/** A 4xx the same request will get again; 408 and 429 are worth a retry. */
+function isPermanentRejection(error: unknown): boolean {
+  const status = (error as { status?: number }).status;
+  return (
+    status !== undefined &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 429
+  );
 }
 
 async function pickup(
@@ -222,6 +238,9 @@ async function executeAssignment(
   const promptId = `agent-host:${assignment.runId}:${assignment.attempt}`;
   const execution = new AbortController();
   let finished = false;
+  // Measured on this host's clock: the coordinator's may disagree.
+  const leaseMs = assignment.lease.expiresAt - assignment.lease.acquiredAt;
+  let renewedAt = Date.now();
   const renewLease = async () => {
     try {
       const response = await requestJson<{ lease?: { leaseId: string } }>(
@@ -246,12 +265,28 @@ async function executeAssignment(
         },
       );
       if (response.lease?.leaseId !== assignment.lease.leaseId) {
-        throw new Error(
-          'Coordinator did not confirm the run lease. Upgrade the coordinator.',
+        throw Object.assign(
+          new Error(
+            'Coordinator did not confirm the run lease. Upgrade the coordinator.',
+          ),
+          { status: 409 },
         );
       }
+      renewedAt = Date.now();
     } catch (error) {
-      if (!finished) execution.abort(error);
+      // A timeout or a busy store leaves most of the lease; the next renewal
+      // may land. Only a lost credential or lease, or a lease that has run
+      // out, ends the run.
+      const status = (error as { status?: number }).status;
+      if (
+        !finished &&
+        (status === 401 ||
+          status === 404 ||
+          status === 409 ||
+          Date.now() - renewedAt >= leaseMs)
+      ) {
+        execution.abort(error);
+      }
     }
   };
   await renewLease();
@@ -413,14 +448,33 @@ async function executeAssignment(
         sessionId,
         promptId,
         AbortSignal.any([updates.signal, execution.signal]),
-        (update) =>
+        (update) => {
+          if (update.permission) {
+            // Nobody on this host can approve, and the turn would wait on it
+            // for good. Refuse, as the Codex and Claude paths do.
+            const optionId = selectRejectOption(
+              update.permission.options.map((option) => ({
+                optionId: option.optionId,
+                kind: option.kind,
+              })),
+            );
+            options.bridge.respondToSessionPermission(
+              sessionId,
+              update.permission.requestId,
+              optionId
+                ? { outcome: { outcome: 'selected', optionId } }
+                : { outcome: { outcome: 'cancelled' } },
+            );
+            return;
+          }
           report(
             update.stage,
             update.detail ?? '',
             update.outputText,
             update.thoughtText,
             update.steps,
-          ),
+          );
+        },
       ).catch((error: unknown) => {
         if (!updates.signal.aborted) execution.abort(error);
       });
@@ -481,8 +535,9 @@ async function executeAssignment(
 async function returnResult(
   serverUrl: string,
   credential: AgentHostCredential,
-  result: HostRunResult,
+  initial: HostRunResult,
 ): Promise<void> {
+  let result = initial;
   for (;;) {
     try {
       await requestJson(
@@ -504,6 +559,24 @@ async function returnResult(
           `qwen serve: discarded managed Agent result (${message}).`,
         );
         return;
+      }
+      if (isPermanentRejection(error)) {
+        // Retrying would get the same answer and hold this host forever. A
+        // rejected answer becomes a failure the thread can show; a rejected
+        // failure is dropped and the lease runs out.
+        if (result.status === 'failed') {
+          writeStderrLine(
+            `qwen serve: managed Agent result rejected; giving up: ${message}`,
+          );
+          return;
+        }
+        const { close: _close, ...rest } = result;
+        result = {
+          ...rest,
+          status: 'failed',
+          error: `The coordinator rejected this result: ${message}`,
+        };
+        continue;
       }
       writeStderrLine(
         `qwen serve: managed Agent result upload failed; retrying: ${message}`,

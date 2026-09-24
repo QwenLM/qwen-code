@@ -569,6 +569,39 @@ describe('dispatchOnce', () => {
     ).toHaveLength(1);
   });
 
+  it('ends a remote cancel once no host holds the lease', async () => {
+    // Only a host renewing its lease confirms a cancel. With the host gone
+    // the run would stay cancelling and keep the agent busy for good.
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      ALICE,
+      {
+        ...BOB,
+        execution: { mode: 'managed-host', hostIds: ['ho_gone'] },
+      },
+    ]);
+    const lease = {
+      hostId: 'ho_gone',
+      leaseId: 'ls_1',
+      attempt: 1,
+      acquiredAt: 1_000,
+      expiresAt: 2_000,
+    };
+    const thread = await seedQueued({
+      runs: [
+        run({ agentId: BOB.id, status: 'cancelling', attempts: 1, lease }),
+      ],
+    });
+
+    await dispatchOnce(PROJECT_ROOT, port(), { now: 1_500 });
+    expect((await readThread(PROJECT_ROOT, thread.id))!.runs[0]!.status).toBe(
+      'cancelling',
+    );
+    await dispatchOnce(PROJECT_ROOT, port(), { now: 2_500 });
+    expect((await readThread(PROJECT_ROOT, thread.id))!.runs[0]!.status).toBe(
+      'cancelled',
+    );
+  });
+
   it('keeps cancellation pending until the body stops and charges its usage', async () => {
     const thread = await seedQueued({
       runs: [

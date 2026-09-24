@@ -61,6 +61,8 @@ export interface A2ATaskView {
   contextId: string;
   status: { state: A2ATaskState; timestamp: string };
   metadata: Record<string, QwenA2ATaskMetadata>;
+  /** The latest agent post: what the caller asked for. */
+  answer?: string;
 }
 
 export interface A2ACaller {
@@ -69,6 +71,9 @@ export interface A2ACaller {
 }
 
 function taskView(thread: Thread): A2ATaskView {
+  const answer = thread.messages.findLast(
+    (message) => message.authorKind === 'agent',
+  )?.text;
   return {
     id: thread.id,
     // The thread tree, not the thread: A2A calls contextId "the contextual
@@ -81,6 +86,7 @@ function taskView(thread: Thread): A2ATaskView {
     // Namespaced by the extension URI so a client that does not implement the
     // extension has no reason to read it, and two extensions cannot collide.
     metadata: { [QWEN_A2A_EXTENSION_URI]: toQwenA2ATaskMetadata(thread) },
+    ...(answer ? { answer } : {}),
   };
 }
 

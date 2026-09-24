@@ -361,7 +361,8 @@ export function registerAgentHostTransportRoutes(
 
   app.post(
     '/agent-hosts/:workspaceId/:hostId/result',
-    json,
+    // Carries the whole answer, which easily passes 16 KB.
+    express.json({ limit: '2mb' }),
     async (req: Request, res: Response) => {
       const workspaceId = req.params['workspaceId'];
       const hostId = req.params['hostId'];

@@ -409,7 +409,12 @@ export async function pickupRunForHost(
         expiresAt: now + DEFAULT_RUN_LEASE_MS,
       };
       const stored = await transaction.writeThread(
-        withRun(held.thread, held.run.id, (run) => ({ ...run, lease })),
+        // The host restarted the turn, so its progress restarts too.
+        withRun(held.thread, held.run.id, (run) => ({
+          ...run,
+          lease,
+          progress: undefined,
+        })),
       );
       const run = stored.runs.find(
         (candidate) => candidate.id === held.run.id,
@@ -512,6 +517,9 @@ export async function pickupRunForHost(
     const nextRun = {
       ...run,
       lease,
+      // A new holder counts its progress from 1; a higher sequence left by
+      // the last one would hide every update it sends.
+      progress: undefined,
       acceptedMessageIds: Array.from(
         new Set([...run.acceptedMessageIds, ...delivered]),
       ),

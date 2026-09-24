@@ -145,10 +145,13 @@ export async function acceptExternalSubmission(
     // The message is what books a run, so it lands in the same write as the
     // intake record: a thread accepted but never dispatched would report
     // `SUBMITTED` forever with nothing behind it.
-    const posted = await postMessageInTransaction(transaction, created.id, {
-      from: HUMAN_AUTHOR_ID,
-      text: submission.body,
-    });
+    const posted = await postMessageInTransaction(
+      transaction,
+      created.id,
+      { from: HUMAN_AUTHOR_ID, text: submission.body },
+      // The grant is for this agent alone; an @name in the text is not.
+      { targets: [submission.targetAgentId] },
+    );
     return { outcome: 'accepted' as const, thread: posted.thread };
   });
 }

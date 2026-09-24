@@ -170,7 +170,26 @@ function task(view: A2ATaskView): Task {
       message: undefined,
       timestamp: view.status.timestamp,
     },
-    artifacts: [],
+    // The agent's latest post, replaced as the thread moves on.
+    artifacts: view.answer
+      ? [
+          {
+            artifactId: 'answer',
+            name: 'answer',
+            description: '',
+            parts: [
+              {
+                content: { $case: 'text', value: view.answer },
+                metadata: undefined,
+                filename: '',
+                mediaType: 'text/plain',
+              },
+            ],
+            metadata: undefined,
+            extensions: [],
+          },
+        ]
+      : [],
     history: [],
     metadata: view.metadata,
   };

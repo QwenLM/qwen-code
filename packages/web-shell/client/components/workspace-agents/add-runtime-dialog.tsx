@@ -202,9 +202,20 @@ export function AddRuntimeDialog({
   const minutesLeft = join
     ? Math.max(0, Math.ceil((join.expiresAt - now) / 60_000))
     : 0;
+  // An expired link is no use to copy; offer a new one instead.
+  const live = join && minutesLeft > 0 ? join : undefined;
+  // Once a machine has joined, the next opening starts over, so a second
+  // one can be added.
+  const close = (next: boolean) => {
+    if (!next && connected) {
+      setJoin(undefined);
+      setWatch(undefined);
+    }
+    onOpenChange(next);
+  };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={close}>
       {/* One track as wide as the dialog: long commands and tokens must
           truncate inside it instead of widening the dialog past the screen. */}
       <DialogContent className="grid-cols-[minmax(0,1fr)] sm:max-w-xl">
@@ -278,7 +289,7 @@ export function AddRuntimeDialog({
             </label>
 
             {method === 'command' ? (
-              join && commands ? (
+              live && commands ? (
                 <div className="flex flex-col gap-3 text-sm">
                   <p className="font-medium">{t('collab.runtime.runThis')}</p>
                   <CommandLine text={commands.qwen} />
@@ -371,17 +382,22 @@ export function AddRuntimeDialog({
         <DialogFooter>
           {connected ? (
             <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
+              <Button variant="outline" onClick={() => close(false)}>
                 {t('collab.runtime.done')}
               </Button>
               {onCreateAgentOn && (
-                <Button onClick={() => onCreateAgentOn(connected.id)}>
+                <Button
+                  onClick={() => {
+                    close(false);
+                    onCreateAgentOn(connected.id);
+                  }}
+                >
                   {t('collab.runtime.createAgentOn', { name: connected.label })}
                 </Button>
               )}
             </>
           ) : method === 'command' ? (
-            join ? (
+            live ? (
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 {t('collab.runtime.closeKeepLink')}
               </Button>
