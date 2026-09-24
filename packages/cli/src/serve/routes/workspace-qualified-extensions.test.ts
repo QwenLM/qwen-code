@@ -559,6 +559,7 @@ describe('extension management v2 REST', () => {
             extensionId: linked.id,
             name: 'linked',
             version: '2.0.0',
+            extensionSource: 'user',
             defaultActivation: 'enabled',
             workspaceActivation: 'disabled',
             effectiveActivation: 'disabled',
