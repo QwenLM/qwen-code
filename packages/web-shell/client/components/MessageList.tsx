@@ -171,6 +171,7 @@ export interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  timelineAction?: ReactNode;
   hideFirstUserMessage?: boolean;
   firstTurnMetrics?: {
     durationMs?: number;
@@ -2373,6 +2374,11 @@ export interface MessageListHandle {
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** 定位持久化历史搜索结果；调用方可取消仍在加载的选择。 */
+  scrollToSearchHit?: (
+    hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean | 'cancelled'>;
   /** Resume bottom-follow mode and scroll to the latest output. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
@@ -2636,7 +2642,9 @@ const SessionTimeline = memo(function SessionTimeline({
   currentRange,
   hidden,
   onSelect,
+  action,
 }: {
+  action?: ReactNode;
   entries: readonly SessionTimelineEntry[];
   currentTurnId: string | null;
   currentRange: SessionTimelineRange | null;
@@ -2906,6 +2914,7 @@ const SessionTimeline = memo(function SessionTimeline({
             })}
           </ol>
         </div>
+        {action}
         {tooltip &&
           typeof document !== 'undefined' &&
           createPortal(
@@ -3028,6 +3037,7 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      timelineAction,
       hideFirstUserMessage = false,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics = true,
@@ -6131,6 +6141,7 @@ export const MessageList = memo(
             </div>
           )}
         <SessionTimeline
+          action={timelineAction}
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
           currentRange={sessionTimelineRange}

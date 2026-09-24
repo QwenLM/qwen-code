@@ -41898,7 +41898,7 @@ describe('Live conversation runtime lifecycle', () => {
       expect(
         setup.registry.getManagedByWorkspaceCwd(setup.root.canonicalRoot),
       ).toBe(setup.liveRuntime);
-      expect(capabilities.body.features).toContain('realtime_voice');
+      expect(capabilities.body.features).toContain('realtime_voice_web');
       expect(capabilities.body.workspaces).toContainEqual(
         expect.objectContaining({
           id: 'live-conversations',
@@ -42472,7 +42472,7 @@ describe('Live conversation runtime lifecycle', () => {
       const enabledCapabilities = await request(setup.app)
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(enabledCapabilities.body.features).toContain('realtime_voice');
+      expect(enabledCapabilities.body.features).toContain('realtime_voice_web');
 
       await setEnabled(false);
       expect(setup.app.locals['liveVoiceEnabled']).toBe(false);
@@ -42480,7 +42480,7 @@ describe('Live conversation runtime lifecycle', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(disabledCapabilities.body.features).not.toContain(
-        'realtime_voice',
+        'realtime_voice_web',
       );
     } finally {
       await (
@@ -43734,11 +43734,13 @@ describe('Live Appshot server integration', () => {
   });
 
   it.each([
-    { runtimePlatform: 'linux' as const, native: false },
-    { runtimePlatform: 'darwin' as const, native: true },
+    { runtimePlatform: 'linux' as const, optIn: false, native: false },
+    { runtimePlatform: 'linux' as const, optIn: true, native: false },
+    { runtimePlatform: 'darwin' as const, optIn: false, native: false },
+    { runtimePlatform: 'darwin' as const, optIn: true, native: true },
   ])(
-    'advertises the browser Host on $runtimePlatform and the native Host only on macOS',
-    async ({ runtimePlatform, native }) => {
+    'advertises the browser Host on $runtimePlatform and the native Host only on opted-in macOS (opt-in: $optIn)',
+    async ({ runtimePlatform, optIn, native }) => {
       const tmp = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-live-browser-host-'),
       );
@@ -43760,7 +43762,7 @@ describe('Live Appshot server integration', () => {
         app = createServeApp(baseOpts, undefined, {
           bridge: fakeBridge(),
           persistSetting: vi.fn(async () => undefined),
-          daemonEnv: {},
+          daemonEnv: optIn ? { QWEN_SERVE_LIVE_NATIVE_HOST: '1' } : {},
           runtimePlatform,
           webShellDir: path.join(tmp, 'web-shell'),
         });
@@ -43790,6 +43792,22 @@ describe('Live Appshot server integration', () => {
           .get('/live/setup')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(setup.body.nativeHost).toBe(native);
+        if (!native) {
+          // Nothing to install: no probe, and the routes refuse rather than
+          // download or start the Host behind the Web Shell's back.
+          expect(setup.body.install).toMatchObject({
+            state: 'error',
+            retryable: false,
+          });
+          for (const route of ['/live/setup/install', '/live/setup/launch']) {
+            const response = await request(app)
+              .post(route)
+              .set('Host', `127.0.0.1:${baseOpts.port}`)
+              .send({});
+            expect(response.status).toBe(409);
+            expect(response.body.code).toBe('live_native_host_unavailable');
+          }
+        }
       } finally {
         (app?.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
         restoreEnv('QWEN_HOME', previousQwenHome);
@@ -44175,7 +44193,7 @@ describe('Live Appshot server integration', () => {
       const capabilities = await request(app)
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(capabilities.body.features).toContain('realtime_voice');
+      expect(capabilities.body.features).toContain('realtime_voice_web');
       expect(loadSettings).toHaveBeenCalledWith(
         (app.locals as { boundWorkspace: string }).boundWorkspace,
         expect.objectContaining({

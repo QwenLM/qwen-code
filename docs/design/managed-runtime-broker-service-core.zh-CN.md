@@ -53,9 +53,9 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 创建操作保存 `PREPARED` 记录，其不可变身份包含 binding generation、Harness Session、Runtime Session、prompt、Tool call、参数摘要以及 invocation reference。`findOrCreate` 通过 idempotency key 收敛；同一 key 对应的请求内容变化会在再次物理分发前被拒绝。
 
-dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并在调用结束前持续续租 dispatch lease。有效结果会结算当前已 claim 的记录。物理分发可能已经开始，因此 transport 失败、缺少结果或无效结果均属于不确定状态；服务会尝试把 execution 转为 `UNKNOWN`，而不是制造 error result 或重放 Tool call。同一幂等键的重试会重新驱动尚未发送的 `DISPATCHING` 记录，并通过 repository takeover 把已过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 隔离为 `UNKNOWN`；dispatch lease 仍有效时绝不会重放 Tool call。如果 claim 过期或被其他 owner 接管，repository fencing 仍是最终权威。
+dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并在调用结束前持续续租 dispatch lease。有效结果会结算当前已 claim 的记录。物理分发可能已经开始，因此 transport 失败、缺少结果或无效结果均属于不确定状态；服务会尝试把 execution 转为 `UNKNOWN`，而不是制造 error result 或重放 Tool call。同一幂等键的重试会重新驱动尚未发送的 `DISPATCHING` 记录，并通过 repository takeover 把已过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 隔离为 `UNKNOWN`；dispatch lease 仍有效时绝不会重放 Tool call。如果 claim 过期或被其他 owner 接管，repository fencing 仍是最终权威。claim 是否过期由 repository 的时钟判断，服务不会用自己的时钟比较租约。如果 dispatch lease 在 Runtime 返回前已过期，结果无法再通过该 claim 写入，dispatcher 会经同一 takeover 路径把记录隔离为 `UNKNOWN`。
 
-取消操作首先使用开放的 repository 路径。尚未分发的 execution 会直接结算为 cancelled；`DISPATCHING` execution 为 owner 保留粘性取消意图；`EXECUTING` execution 会在服务发送物理取消信号前变为 `CANCEL_REQUESTED`。只有取消响应同时提供 Runtime 的 `state: settled` 证据和有效终态结果时，服务才结算记录；非终态确认会保留粘性请求，等待 dispatch result 或后续 reconciliation。
+取消操作首先使用开放的 repository 路径。尚未分发的 execution 会直接结算为 cancelled；`DISPATCHING` execution 为 owner 保留粘性取消意图；`EXECUTING` execution 会在服务发送物理取消信号前变为 `CANCEL_REQUESTED`。只有取消响应同时提供 Runtime 的 `state: settled` 证据和有效终态结果时，服务才结算记录；非终态确认会保留粘性请求，等待 dispatch result 或后续 reconciliation。dispatch lease 过期后，取消仍能送达本进程正在运行的调用。本进程未在运行、已过期的 `CANCEL_REQUESTED` claim 会改为隔离成 `UNKNOWN`；仍然有效的 claim 无论由哪个 Broker 持有，都会收到物理取消信号。租约过期后才到达的已结算确认同样会把记录隔离为 `UNKNOWN`，而不是报告冲突。
 
 ## 并发与所有权
 
