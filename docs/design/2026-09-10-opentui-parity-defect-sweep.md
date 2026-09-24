@@ -3083,7 +3083,9 @@ What was verified, and how far the verification reaches:
   own size paints past the region's bottom edge rather than being cut, and its
   border lands off the terminal's last row or over the row below when one
   exists. Either way a tail the region cannot show — an unwindowed list such as
-  `/mcp` on a short terminal, footer hint included — has no reveal path.
+  `/mcp` on a short terminal, footer hint included, or the settings dialog's
+  eight-item list, which receives the budget and reads no height at all — has no
+  reveal path.
   Recorded rather than matched: this renderer owns the whole viewport and
   cannot let content grow past it, so the fix is windowing those lists from the
   region budget, the way the theme and model dialogs already do.

@@ -132,8 +132,10 @@ export interface OpenTuiDialogMountProps {
   onSelectSetting?: (name: string, scope: SettingScope) => void;
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
-  /** Row budget for the dialog bodies that window themselves (model,
-   * settings, theme, approval mode). */
+  /** Row budget for the dialog bodies that window themselves (model, theme,
+   * approval mode). The settings dialog receives it and reads no height: its
+   * window is a constant, recorded among the unwindowed bodies the parity doc
+   * defers. */
   availableTerminalHeight?: number;
 }
 
