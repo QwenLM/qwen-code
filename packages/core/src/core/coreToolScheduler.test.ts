@@ -2175,6 +2175,61 @@ describe('CoreToolScheduler', () => {
     });
   });
 
+  it.each([
+    [
+      'success',
+      () => Promise.resolve({ llmContent: 'ok', returnDisplay: 'ok' }),
+    ],
+    ['error', () => Promise.reject(new Error('read failed'))],
+  ] as const)(
+    'keeps when a %s call started on its terminal state',
+    async (status, execute) => {
+      // Telemetry reads the start off the completed call, and a batch is only
+      // logged once every call in it has settled — so the terminal state is
+      // the last place the start still exists.
+      const onAllToolCallsComplete = vi.fn();
+      const { scheduler } = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'timed_tool',
+            new MockTool({ name: 'timed_tool', execute: vi.fn(execute) }),
+          ],
+        ]),
+        onAllToolCallsComplete,
+      });
+
+      const before = Date.now();
+      await scheduler.schedule(
+        [
+          {
+            callId: `started-${status}`,
+            name: 'timed_tool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-started',
+          },
+        ],
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+      });
+      const after = Date.now();
+
+      const [completed] = onAllToolCallsComplete.mock.calls[0]![0] as Array<{
+        status: string;
+        startTime?: number;
+        durationMs?: number;
+      }>;
+      expect(completed?.status).toBe(status);
+      expect(completed?.startTime).toBeGreaterThanOrEqual(before);
+      expect(completed?.startTime).toBeLessThanOrEqual(after);
+      expect(
+        completed!.startTime! + completed!.durationMs!,
+      ).toBeLessThanOrEqual(after);
+    },
+  );
+
   it('marks the budget-exempt plan reminder unchanged in the scheduler pass', async () => {
     boundaryDiagnosticsEnabled.value = true;
     const reminder = getPlanModeSystemReminder(false);

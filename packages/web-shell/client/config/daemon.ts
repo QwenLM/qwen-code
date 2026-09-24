@@ -230,7 +230,7 @@ export function removeDaemonTokenFromUrl(): void {
       changed = true;
     }
   }
-  if (changed) window.history.replaceState(null, '', url);
+  if (changed) window.history.replaceState(window.history.state, '', url);
 }
 
 export function getDaemonAuthHeaders(): HeadersInit | undefined {
@@ -367,7 +367,7 @@ export function navigateToDaemon(
     if (continuation) {
       const currentUrl = new URL(window.location.href);
       currentUrl.searchParams.set(continuation[0], continuation[1]);
-      window.history.replaceState(null, '', currentUrl);
+      window.history.replaceState(window.history.state, '', currentUrl);
     }
     window.location.reload();
     return true;
