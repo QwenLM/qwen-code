@@ -30,6 +30,13 @@ export interface CreateChannelRestoreFailuresOptions {
    * name, and a workspace can be disposed while its own restore is still on
    * the channel-control lane. A predicate over current state answers both
    * without an event to hook, and cannot leave a stale record behind.
+   *
+   * Reads filter; they never delete. The predicate reads live state that can
+   * dip — a workspace is briefly absent from the registry while its runtime
+   * is replaced — and deleting on a dip would destroy a failure that is still
+   * true, which is the defect this whole surface exists to prevent. Records
+   * are bounded by the channels a daemon has tried to restore, so keeping a
+   * retired one costs nothing worth that risk.
    */
   readonly isStale?: (failure: ChannelRestoreFailure) => boolean;
 }
@@ -62,18 +69,6 @@ export function createChannelRestoreFailures(
 ): ChannelRestoreFailures {
   const byWorkspace = new Map<string, Map<string, ChannelRestoreFailure>>();
   const isStale = options.isStale ?? (() => false);
-  // Reads prune, so a record that went stale does not sit in memory for the
-  // rest of the daemon's life either.
-  const dropIfStale = (
-    channels: Map<string, ChannelRestoreFailure>,
-    workspaceCwd: string,
-    failure: ChannelRestoreFailure,
-  ): boolean => {
-    if (!isStale(failure)) return false;
-    channels.delete(failure.channel);
-    if (channels.size === 0) byWorkspace.delete(workspaceCwd);
-    return true;
-  };
   return {
     record(failures) {
       for (const failure of failures) {
@@ -90,19 +85,13 @@ export function createChannelRestoreFailures(
       }
     },
     get(workspaceCwd, channel) {
-      const channels = byWorkspace.get(workspaceCwd);
-      const failure = channels?.get(channel);
-      if (!channels || !failure) return undefined;
-      return dropIfStale(channels, workspaceCwd, failure) ? undefined : failure;
+      const failure = byWorkspace.get(workspaceCwd)?.get(channel);
+      return failure && !isStale(failure) ? failure : undefined;
     },
     list() {
-      const live: ChannelRestoreFailure[] = [];
-      for (const [workspaceCwd, channels] of [...byWorkspace]) {
-        for (const failure of [...channels.values()]) {
-          if (!dropIfStale(channels, workspaceCwd, failure)) live.push(failure);
-        }
-      }
-      return live;
+      return [...byWorkspace.values()]
+        .flatMap((channels) => [...channels.values()])
+        .filter((failure) => !isStale(failure));
     },
     clear(workspaceCwd, channel) {
       const channels = byWorkspace.get(workspaceCwd);

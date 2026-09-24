@@ -59,7 +59,7 @@ describe('createChannelRestoreFailures', () => {
     expect(message.length).toBeLessThanOrEqual(512);
   });
 
-  it('hides a record that went stale, on both read paths, and prunes it', () => {
+  it('hides a record that went stale, on both read paths, without deleting it', () => {
     const stale = new Set<string>();
     const failures = createChannelRestoreFailures({
       isStale: (failure) => stale.has(key(failure)),
@@ -74,12 +74,12 @@ describe('createChannelRestoreFailures', () => {
     expect(failures.get('/ws/a', 'x')).toBeUndefined();
     expect(failures.list().map(key)).toEqual(['/ws/a:y', '/ws/b:x']);
 
-    // Dropped, not merely filtered out of one answer: a record that stopped
-    // standing must not come back if the predicate changes its mind, and must
-    // not sit in memory for the rest of the daemon's life.
+    // Filtered, not deleted. The predicate reads live state that can dip —
+    // a workspace is briefly absent from the registry while its runtime is
+    // replaced — and a dip must not destroy a failure that is still true.
     stale.clear();
-    expect(failures.get('/ws/a', 'x')).toBeUndefined();
-    expect(failures.list().map(key)).toEqual(['/ws/a:y', '/ws/b:x']);
+    expect(failures.get('/ws/a', 'x')).toMatchObject({ message: 'm' });
+    expect(failures.list().map(key)).toEqual(['/ws/a:x', '/ws/a:y', '/ws/b:x']);
   });
 
   it('clears one channel or everything', () => {
