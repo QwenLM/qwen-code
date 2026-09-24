@@ -221,6 +221,7 @@ describe('relaunchAppInChildProcess', () => {
   });
 
   it('continues in place when the replacement would boot an identical image', async () => {
+    resetEnvironmentTrackingForTesting();
     process.argv = ['/usr/bin/node', '/app/cli.js', '-p', 'hi'];
     const execveSpy = vi.fn((): never => {
       throw new Error('UNEXPECTED_EXECVE');
@@ -243,10 +244,14 @@ describe('relaunchAppInChildProcess', () => {
     expect(process.env['QWEN_TEST_CHILD']).toBeUndefined();
   });
 
-  it('still replaces the process when a Node boot variable changed after startup', async () => {
+  it('still replaces the process when .env or settings.env injected values', async () => {
+    // Modules imported before the load (e.g. a provider's module-level
+    // DASHSCOPE_PROXY_BASE_URL) and Node itself (NODE_EXTRA_CA_CERTS) only
+    // see these values in a fresh image.
+    resetEnvironmentTrackingForTesting();
+    delete process.env['TRACK_B_FILE_VALUE'];
+    loadEnvironment({ env: { TRACK_B_FILE_VALUE: 'from-settings' } });
     process.argv = ['/usr/bin/node', '/app/cli.js', '-p', 'hi'];
-    // e.g. NODE_OPTIONS loaded from `.env`: only a fresh image applies it.
-    process.env['NODE_OPTIONS'] = '--max-semi-space-size=64';
     const execveSpy = vi.fn(() => undefined as never);
     process.execve = execveSpy;
 
@@ -256,10 +261,11 @@ describe('relaunchAppInChildProcess', () => {
       '/usr/bin/node',
       expect.arrayContaining(['/app/cli.js', '-p', 'hi']),
       expect.objectContaining({
-        NODE_OPTIONS: '--max-semi-space-size=64',
+        TRACK_B_FILE_VALUE: 'from-settings',
         QWEN_CODE_NO_RELAUNCH: 'true',
       }),
     );
+    resetEnvironmentTrackingForTesting();
   });
 
   it('falls back to supervised spawn when process replacement fails', async () => {
