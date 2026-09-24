@@ -874,8 +874,7 @@ channels the daemon already hosts. A worker that never becomes ready therefore
 delays only the channel work queued behind it, never another registration or a
 trust reconcile. The flip side is that a `201` from `POST /workspaces` does not
 mean that workspace's channels are up, or that an already-hosted channel it
-owns has finished restarting; read `GET /workspace/channel`, or that
-workspace's `GET /workspaces/:workspace/channels`, for that.
+owns has finished restarting; read `GET /workspace/channel` for that.
 
 Without an explicit selection, a boot-time `serve.channels` restore, or a
 registration like the one above, channel runtime loading stays lazy.
@@ -894,25 +893,49 @@ unconfirmed worker stops follow the existing startup-failure path; the lease
 remains held while worker termination is unconfirmed. Channel management
 reports persisted startup settings and actual runtime state.
 
-A `serve.channels` name the daemon did not bring up is reported, not only
-logged. That covers a name the boot restore dropped and every name of a late
-restore that failed. Such a name never joins the committed selection, so the
-worker snapshots do not show it; instead:
+Some `serve.channels` names the daemon did not bring up are reported rather
+than only logged. Such a name never joins the committed selection, so no
+worker snapshot carries it. Three cases are reported:
 
+- a configured startup selection whose worker failed to start, on the boot
+  path that keeps the daemon serving without its channels;
+- a name the boot ownership resolver dropped while attributing it to a
+  workspace, reported against every workspace that listed it;
+- every name still unhosted after a late registration's restore failed.
+
+They surface in two places:
+
+- `/daemon/status` reports one `channel_restore_failed` warning per workspace,
+  naming each channel with its error. This is the complete surface, and it is
+  present on the bootstrap response as well, which is the only one that exists
+  while boot records are being written. At most 64 channels are named per
+  workspace, each name bounded to 128 characters, with `and <n> more` when the
+  list is longer;
 - that workspace's `GET /workspaces/:workspace/channels` lists the channel with
   `runtime: { state: "error", lastError }` instead of `stopped`, where
   `lastError` is the adapter's own startup error when the worker reported one
-  for that channel, otherwise the restore's error;
-- `/daemon/status` reports one `channel_restore_failed` warning per workspace,
-  naming each channel with the same error.
+  for that channel, otherwise the attempt's error. This surface is built from
+  the workspace's own channel settings scope, so it can only carry a name that
+  scope defines — a name no registered workspace configures, or one whose
+  config lives in another workspace, has no row here and is reported on
+  `/daemon/status` alone.
 
-A boot name several workspaces listed is reported against each of them. The
-report lasts until an operator acts on the channel (start, stop, a
-configuration write or removal) or on the whole selection (`PUT` or
-`DELETE /workspace/channel`), or until its workspace is removed. It is kept
-in memory: a restarted daemon restores again and reports what that attempt
-did. The error text is credential-redacted and bounded the way the daemon log
-renders it.
+Everything else that leaves a `serve.channels` name unhosted is diagnosed in
+the daemon log only: a name lost because the whole list was unreadable or
+invalid, a non-primary workspace's list discarded because the primary selected
+`all`, a late restore skipped because the committed selection is `all`, and a
+remote (SSH) workspace's list. Inspect daemon logs for those.
+
+A report lasts until the channel is hosted — by this workspace or by a later
+restore from another one — until its workspace is no longer registered, or
+until an operator acts: `POST` start, stop or restart on the channel,
+`PUT`/`DELETE /workspace/channels/:name`, or a `PUT`/`DELETE
+/workspace/channel` that changes the selection. `PUT
+/workspace/channels/:name/startup` does not clear it: it rewrites
+`serve.channels` without saying anything about the attempt that failed. The
+report is kept in memory: a restarted daemon restores again and reports what
+that attempt did. The error text is credential-redacted and bounded the way
+the daemon log renders it.
 
 After a worker has reached ready, unexpected exits are restarted by the serve
 supervisor within a bounded policy: up to 3 restart attempts in a 5 minute
