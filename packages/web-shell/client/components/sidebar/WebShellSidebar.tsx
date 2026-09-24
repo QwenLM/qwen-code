@@ -37,6 +37,7 @@ import {
   ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
+  LoaderCircleIcon,
   ListTodoIcon,
   MessageCircleIcon,
   EllipsisVerticalIcon,
@@ -107,6 +108,7 @@ import {
   sessionMatchesSource as matchesSessionSource,
 } from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
+import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
@@ -984,6 +986,7 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const livePresence = useLivePresence(workspace.client);
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -1142,7 +1145,10 @@ export function WebShellSidebar({
   const liveStateWorkspaceCwds = useMemo(
     () =>
       displayedWorkspaces
-        .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+        .filter(
+          (entry) =>
+            entry.kind !== 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+        )
         .map((entry) => entry.cwd),
     [displayedWorkspaces],
   );
@@ -2817,6 +2823,37 @@ export function WebShellSidebar({
     ],
   );
 
+  const livePendingContent = livePresence ? (
+    <>
+      <LoaderCircleIcon aria-hidden="true" />
+      <span>{t('sidebar.liveVoicePending')}</span>
+    </>
+  ) : null;
+  const liveCoordinator = livePresence?.coordinator;
+  const livePendingRow = liveCoordinator ? (
+    <button
+      type="button"
+      className={styles.livePendingSession}
+      data-live-pending-session
+      onClick={() =>
+        handleLoadSession(
+          liveCoordinator.sessionId,
+          liveCoordinator.workspaceCwd,
+        )
+      }
+    >
+      {livePendingContent}
+    </button>
+  ) : livePresence ? (
+    <div
+      className={styles.livePendingSession}
+      role="status"
+      data-live-pending-session
+    >
+      {livePendingContent}
+    </div>
+  ) : null;
+
   const startRename = useCallback(
     (session: DaemonSessionSummary) => {
       if (!canRenameSession(session)) return;
@@ -4193,6 +4230,11 @@ export function WebShellSidebar({
         standalone,
       } = options;
       const sessionIdentity = getIdentityForSession(session);
+      const liveStarting =
+        livePresence?.state === 'starting' &&
+        (livePresence.coordinator?.sessionId === session.sessionId ||
+          (livePresence.callId !== undefined &&
+            session.sourceId === `realtime_voice:${livePresence.callId}`));
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
       // Rows stay text-only; the precise date lives in the hover popover.
@@ -4486,14 +4528,21 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {completedUnread && !backgroundRunning ? (
+            {liveStarting ? (
+              <LoaderCircleIcon
+                className={styles.liveSessionSpinner}
+                aria-label={t('live.state.starting')}
+                data-live-starting-session
+              />
+            ) : null}
+            {!liveStarting && completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
-            {backgroundRunning && (
+            {!liveStarting && backgroundRunning && (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4505,7 +4554,7 @@ export function WebShellSidebar({
                 title={t('background.running')}
               />
             )}
-            {session.hasActivePrompt && !completedUnread ? (
+            {!liveStarting && session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4514,7 +4563,10 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !completedUnread && !backgroundRunning ? (
+            ) : !liveStarting &&
+              sessionWorkActive &&
+              !completedUnread &&
+              !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
@@ -4853,6 +4905,7 @@ export function WebShellSidebar({
       searchQuery,
       sessionActionItems,
       inlineActionItems,
+      livePresence,
       startRename,
       t,
     ],
@@ -5726,6 +5779,22 @@ export function WebShellSidebar({
                   )}
                 </>
               )}
+            {showLive && livePresence && liveWorkspaces.length === 0 && (
+              <div
+                className={styles.livePendingWorkspace}
+                data-live-pending-workspace
+              >
+                <div className={styles.livePendingHeader}>
+                  <RadioTowerIcon
+                    size={16}
+                    strokeWidth={1.2}
+                    aria-hidden="true"
+                  />
+                  <span>{t('sidebar.live')}</span>
+                </div>
+                {livePendingRow}
+              </div>
+            )}
             {liveWorkspaces.map((ws) => (
               <WorkspaceSection
                 key={ws.id}
@@ -5756,6 +5825,20 @@ export function WebShellSidebar({
                   </>
                 )}
                 client={workspace.client}
+                pendingSession={
+                  livePresence &&
+                  (!livePresence.coordinator ||
+                    livePresence.coordinator.workspaceCwd === ws.cwd)
+                    ? {
+                        key: livePresence.callId ?? 'connecting',
+                        sessionId: livePresence.coordinator?.sessionId,
+                        sourceId: livePresence.callId
+                          ? `realtime_voice:${livePresence.callId}`
+                          : undefined,
+                        node: livePendingRow,
+                      }
+                    : undefined
+                }
                 reloadToken={workspaceSessionsReloadToken}
                 untrustedLabel={t('sidebar.workspaceUntrusted')}
                 readOnlyLabel={t('sidebar.workspaceReadOnly')}
@@ -5776,10 +5859,15 @@ export function WebShellSidebar({
                 limitSessions={editingSessionIdentity === null}
                 isPinnedSectionMember={isPinnedSectionMember}
                 autoExpandKey={
-                  autoExpandWorkspace?.id === ws.id
-                    ? autoExpandWorkspace.key
-                    : undefined
+                  livePresence &&
+                  (!livePresence.coordinator ||
+                    livePresence.coordinator.workspaceCwd === ws.cwd)
+                    ? `live:${livePresence.callId ?? 'connecting'}`
+                    : autoExpandWorkspace?.id === ws.id
+                      ? autoExpandWorkspace.key
+                      : undefined
                 }
+                forceAutoExpand={Boolean(livePresence)}
                 renderSession={(session, options) =>
                   renderSessionRow(
                     { ...session, workspaceCwd: ws.cwd },
