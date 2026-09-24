@@ -229,7 +229,7 @@ describe('Managed Runtime attestation worker', () => {
 
     // Which extra loopback and interface addresses reach a wildcard
     // listener differs by platform, so probe only those that do here.
-    const wildcard = createServer();
+    const wildcard = createServer((socket) => socket.destroy());
     await new Promise<void>((resolve, reject) => {
       wildcard.once('error', reject);
       wildcard.listen(0, '0.0.0.0', resolve);
