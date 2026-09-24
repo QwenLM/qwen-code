@@ -225,6 +225,7 @@ import {
 import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
+  ArtifactFilter,
   TurnOutputKind,
   TurnOutputOpenRequest,
   TurnOutputScheduledTask,
@@ -1269,8 +1270,11 @@ export interface WebShellProps {
   /**
    * Called instead of the built-in right panel open behavior when a user clicks
    * a turn output such as review changes, an artifact, or a scheduled task.
+   * Return false to use the built-in behavior; true or undefined claims the open.
    */
-  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onRightPanelOpen?:
+    | ((request: TurnOutputOpenRequest) => void)
+    | ((request: TurnOutputOpenRequest) => boolean);
   /** Override file-review links without replacing the other right panels. */
   onFileReviewOpen?: (
     request: Extract<TurnOutputOpenRequest, { kind: 'review' }>,
@@ -1285,6 +1289,7 @@ export interface WebShellProps {
    * Controls which turn output cards appear below messages. Defaults to all.
    */
   messageTurnOutputs?: readonly TurnOutputKind[];
+  filterArtifact?: ArtifactFilter;
   /** Imperative handle for externally opening WebShell surfaces. */
   shellRef?: React.Ref<WebShellApi>;
   /**
@@ -3216,6 +3221,7 @@ export function App({
   onInsightReportOpen,
   onContextUsageOpen,
   messageTurnOutputs,
+  filterArtifact,
   shellRef,
   composerToolbarActions,
   mainModelFilter,
@@ -3459,6 +3465,7 @@ export function App({
   const customization = useMemo(
     () => ({
       artifact,
+      filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
@@ -3492,6 +3499,7 @@ export function App({
     }),
     [
       artifact,
+      filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
@@ -6931,8 +6939,7 @@ export function App({
         onFileReviewOpen(request);
         return;
       }
-      if (onRightPanelOpen) {
-        onRightPanelOpen(request);
+      if (onRightPanelOpen && onRightPanelOpen(request) !== false) {
         return;
       }
       if (request.kind === 'background_task') {

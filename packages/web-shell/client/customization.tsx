@@ -1,3 +1,4 @@
+import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
   useContext,
@@ -692,6 +693,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
