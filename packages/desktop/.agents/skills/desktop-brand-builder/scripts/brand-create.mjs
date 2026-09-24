@@ -3,8 +3,9 @@
  * Brand creation script for the Tauri desktop shell.
  *
  * Patches packages/desktop so a branded desktop app can be built from
- * a minimal brand.json. Replaces the Electron-era brand-create.ts that was
- * removed together with packages/desktop.
+ * a minimal brand.json. Replaces the Electron-era brand-create.ts, removed
+ * together with the former Electron packages/desktop (PR 9085); this Tauri
+ * shell has since taken over that path.
  *
  * Usage:
  *   node brand-create.mjs --shell-root /path/to/packages/desktop \

@@ -20,10 +20,11 @@ website: https://acme.ai
 copyright, or updater endpoints unless the user explicitly asks to override
 them.
 
-This skill replaces the Electron-era brand builder that lived in the removed
-`packages/desktop`. The Tauri shell is the only desktop implementation now;
-branding hooks are `src-tauri/tauri.conf.json`, `src-tauri/icons/`, and the
-`bootstrap/` startup UI.
+This skill replaces the Electron-era brand builder that lived in the older,
+since-deleted Electron `packages/desktop` (removed in PR 9085, before this
+Tauri shell took over that path). The Tauri shell is the only desktop
+implementation now; branding hooks are `src-tauri/tauri.conf.json`,
+`src-tauri/icons/`, and the `bootstrap/` startup UI.
 
 ## Input Rules
 

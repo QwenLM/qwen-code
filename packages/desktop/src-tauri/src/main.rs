@@ -31,8 +31,8 @@ static FULLSCREEN_HIDE_PENDING: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // Keep the default first-launch workspace aligned with the Electron shell's
-// getDefaultConversationWorkspacePath() in
-// packages/desktop/packages/shared/src/config/storage.ts: ~/Documents/Qwen,
+// getDefaultConversationWorkspacePath(), in the removed Electron package's
+// packages/shared/src/config/storage.ts (PR 9085): ~/Documents/Qwen,
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);

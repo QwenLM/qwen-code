@@ -2328,9 +2328,13 @@ jobs:
       # packages/desktop-shell (since renamed to packages/desktop), so every
       # branch older than it saw 78 phantom desktop paths, ran this job, and
       # failed in a checkout of refs/pull/N/head that has no such directory.
-      # The Cargo.toml existence guard below is what keeps branches from
-      # either side of the rename green: a head without the new path simply
-      # has no crate to compile.
+      # The rename cuts the other way and is not caught by the guard below: a
+      # pre-rename head's files sit under packages/desktop-shell, which the
+      # path filter no longer matches, so the job skips and reports green
+      # having compiled nothing. Such a branch needs a rebase to be gated
+      # again. The Cargo.toml guard covers the remaining case -- a head the
+      # filter matched because ci.yml itself changed, with no crate at the
+      # new path.
       - name: 'Detect desktop changes'
         id: 'filter'
         env:
