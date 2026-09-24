@@ -153,10 +153,6 @@ export class ComputerUseApp {
       this.#generation = this.#computer.connectionGeneration;
     }
     const windows = await this.#computer.listWindows({ pid: this.#pid, onScreenOnly: false, appContext: true, signal });
-    if (this.#generation !== this.#computer.connectionGeneration) {
-      this.#invalidate();
-      this.#generation = this.#computer.connectionGeneration;
-    }
     const nativeWindow = currentWindow(windows, { allowNone: allowNoWindow });
     let window = nativeWindow;
     if (window && windows.some((candidate) => candidate.pid === window.pid &&
@@ -167,6 +163,10 @@ export class ComputerUseApp {
       const visibleTarget = visible.find((candidate) => candidate.is_app_target === true &&
         (candidate.window_id ?? candidate.windowId) === (window.window_id ?? window.windowId));
       window = currentPopup(visible, visibleTarget ?? window) ?? window;
+    }
+    if (this.#generation !== this.#computer.connectionGeneration) {
+      this.#invalidate();
+      this.#generation = this.#computer.connectionGeneration;
     }
     if (!window) return { pid: this.#pid };
     return { window, pid: window.pid ?? this.#pid, windowId: window.window_id ?? window.windowId,
