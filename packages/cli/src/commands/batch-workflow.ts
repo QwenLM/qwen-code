@@ -144,7 +144,12 @@ function assembleAttempt(
   itemIds: string[],
   maxOutputTokens?: number,
 ): AttemptAssembly {
-  const items = task.items.filter((item) => itemIds.includes(item.id));
+  const wanted = new Set(itemIds);
+  const items = task.items.filter((item) => wanted.has(item.id));
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  // Output estimate per item: the plan's figure, else the input size, never
+  // above the output limit the requests carry (thinking is not included).
+  const limit = outputLimitOf(task, maxOutputTokens);
   const assembled = assembleRequests(
     maxOutputTokens === undefined
       ? task.plan
@@ -169,11 +174,10 @@ function assembleAttempt(
     }
     jsonl += encoded;
     inputTokens += request.inputTokens;
-    outputTokens +=
+    const expected =
       task.plan.expectedOutputTokensPerItem ?? request.inputTokens;
-    const item = task.items.find(
-      (candidate) => candidate.id === request.itemId,
-    );
+    outputTokens += limit === undefined ? expected : Math.min(expected, limit);
+    const item = itemById.get(request.itemId);
     if (item) item.sourceSha256 = request.sourceSha256;
   }
   if (assembled.length > MAX_REQUESTS_PER_FILE) {
@@ -264,25 +268,27 @@ function assertSameEndpoint(task: BatchTask, ep: BatchEndpoint): void {
 
 /** The attempt now owns these items: only its result lines count. */
 function markSubmitted(task: BatchTask, attempt: TaskAttempt): void {
+  const ids = new Set(attempt.itemIds);
   for (const item of task.items) {
-    if (attempt.itemIds.includes(item.id)) {
+    if (ids.has(item.id)) {
       item.state = 'submitted';
       item.lastAttempt = attempt.attempt;
       item.lastError = undefined;
       item.heldReason = undefined;
       item.truncated = undefined;
+      item.sourceChanged = undefined;
     }
   }
 }
 
-/** The output limit an attempt's requests carried, if one was set. */
+/** The output limit requests carry, given an attempt's own override. */
 function outputLimitOf(
   task: BatchTask,
-  attempt: TaskAttempt | undefined,
+  attemptLimit: number | undefined,
 ): number | undefined {
   const frozen = task.request?.params['max_tokens'];
   return (
-    attempt?.maxOutputTokens ??
+    attemptLimit ??
     task.plan.maxOutputTokens ??
     (typeof frozen === 'number' ? frozen : undefined)
   );
@@ -446,7 +452,7 @@ export async function runPlan(
         : { enable_thinking: plan.enableThinking }),
     },
   };
-  const limit = outputLimitOf(task, attempt);
+  const limit = outputLimitOf(task, attempt.maxOutputTokens);
   deps.out(
     `model ${task.model}, ${describeThinking(effective)}, ` +
       `max output ${limit === undefined ? 'provider default' : `${limit} tokens`} ` +
@@ -596,18 +602,34 @@ export async function collectTask(
   options: CollectOptions = {},
 ): Promise<CollectSummary> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
-  return store.withLock(
-    taskId,
-    () => collectLocked(deps, store, taskId, options),
-    { waitMs: deps.lockWaitMs },
-  );
+  if (options.wait) {
+    // Wait without the task lock: a batch can take hours, and cancel, retry
+    // and the session's auto-collector must stay usable meanwhile.
+    const task = store.load(taskId);
+    assertSameEndpoint(task, deps.ep);
+    const deadline =
+      options.timeoutSeconds === undefined
+        ? Infinity
+        : Date.now() + options.timeoutSeconds * 1000;
+    for (const attempt of task.attempts) {
+      if (
+        attempt.submitState === 'created' &&
+        attempt.batchId &&
+        !attempt.collected
+      ) {
+        await waitForSettled(deps, attempt.batchId, deadline);
+      }
+    }
+  }
+  return store.withLock(taskId, () => collectLocked(deps, store, taskId), {
+    waitMs: deps.lockWaitMs,
+  });
 }
 
 async function collectLocked(
   deps: WorkflowDeps,
   store: BatchTaskStore,
   taskId: string,
-  options: CollectOptions,
 ): Promise<CollectSummary> {
   const api = deps.api ?? liveApi;
   const task = store.load(taskId);
@@ -619,7 +641,7 @@ async function collectLocked(
   );
   let settledNow = 0;
   const settledErrors: string[] = [];
-  const deadline = Date.now() + (options.timeoutSeconds ?? 3600) * 1000;
+  const itemById = new Map(task.items.map((item) => [item.id, item]));
 
   for (const attempt of task.attempts) {
     if (isAmbiguous(attempt)) {
@@ -654,29 +676,31 @@ async function collectLocked(
     if (!attempt.collected) {
       job = await api.getBatch(deps.ep, batchId);
       if (!SETTLED_STATUSES.has(job.status)) {
-        if (!options.wait) {
-          deps.out(
-            `${batchId} is ${job.status} (${job.request_counts?.completed ?? 0}/${job.request_counts?.total ?? attempt.itemIds.length}); ` +
-              `re-run \`qwen batch collect ${taskId}\` later or add --wait.`,
-          );
-          return;
-        }
-        job = await waitForSettled(deps, batchId, deadline);
+        deps.out(
+          `${batchId} is ${job.status} (${job.request_counts?.completed ?? 0}/${job.request_counts?.total ?? attempt.itemIds.length}); ` +
+            `re-run \`qwen batch collect ${taskId}\` later or add --wait.`,
+        );
+        return;
       }
     }
 
     // Settled but its result file not published yet: collecting now would
-    // fail every item as "no result line" and invite a paid retry. A
-    // provider that omits request_counts is treated as "results expected"
-    // (fail closed): defer the collection rather than condemn the items.
+    // fail every item as "no result line" and invite a paid retry of
+    // requests that were already billed. For `completed`, a provider that
+    // omits request_counts is treated as "results expected" (fail closed); a
+    // cancelled or expired batch defers only when it reports finished work.
+    const finished = job?.request_counts?.completed;
     if (
-      job?.status === 'completed' &&
+      job &&
       !job.output_file_id &&
       !job.error_file_id &&
-      job.request_counts?.completed !== 0
+      (job.status === 'completed'
+        ? finished !== 0
+        : (job.status === 'cancelled' || job.status === 'expired') &&
+          (finished ?? 0) > 0)
     ) {
       deps.out(
-        `${batchId} is completed but its result file is not available yet; collect again shortly.`,
+        `${batchId} is ${job.status} but its result file is not available yet; collect again shortly.`,
       );
       return;
     }
@@ -716,7 +740,7 @@ async function collectLocked(
     const itemOf = (customId: string | undefined) => {
       const identity = customId ? parseCustomId(customId) : undefined;
       return identity?.attempt === attempt.attempt
-        ? task.items.find((candidate) => candidate.id === identity.itemId)
+        ? itemById.get(identity.itemId)
         : undefined;
     };
     if (attempt.outputPath && fs.existsSync(attempt.outputPath)) {
@@ -777,6 +801,7 @@ async function collectLocked(
         } else {
           item.state = 'held';
           item.heldReason = outcome.reason;
+          item.sourceChanged = outcome.sourceChanged;
           item.lastError = undefined;
         }
       }
@@ -798,7 +823,7 @@ async function collectLocked(
       }
     }
     for (const itemId of attempt.itemIds) {
-      const item = task.items.find((candidate) => candidate.id === itemId);
+      const item = itemById.get(itemId);
       if (item && item.state === 'submitted' && ownedBy(item, attempt)) {
         item.state = 'failed';
         // A batch rejected as a whole leaves no per-line output: name the
@@ -829,6 +854,8 @@ async function collectLocked(
         try {
           await api.deleteFile(deps.ep, fileId);
         } catch (error) {
+          // Already gone (deleted by an earlier pass, or expired): done.
+          if ((error as BatchApiError).status === 404) continue;
           failed += 1;
           deps.err(
             `[batch] warning: could not delete remote file ${fileId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -959,9 +986,12 @@ async function retryLocked(
       .filter((attempt) => attempt.submitState === 'created')
       .flatMap((attempt) => attempt.itemIds),
   );
+  // Items held because their source changed since submission need a new
+  // request against the new source; other held items need the user.
   const candidates = task.items.filter(
     (item) =>
       item.state === 'failed' ||
+      (item.state === 'held' && item.sourceChanged) ||
       (item.state === 'pending' && !createdIds.has(item.id)),
   );
   // A truncated item resent with the same output limit fails the same way
@@ -972,7 +1002,8 @@ async function retryLocked(
     for (const item of truncated) {
       const previous = outputLimitOf(
         task,
-        task.attempts.find((a) => a.attempt === item.lastAttempt),
+        task.attempts.find((a) => a.attempt === item.lastAttempt)
+          ?.maxOutputTokens,
       );
       if (previous !== undefined && newLimit <= previous) {
         throw new Error(
@@ -996,7 +1027,7 @@ async function retryLocked(
     if (truncated.length > 0) return;
     deps.out(
       `task ${taskId}: nothing to retry — no failed items ` +
-        `(held items need their conflicts resolved; then run \`qwen batch collect ${taskId}\`).`,
+        `(held target conflicts need resolving; then run \`qwen batch collect ${taskId}\`).`,
     );
     return;
   }

@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { isPidAlive } from '@qwen-code/qwen-code-core/utils/process-liveness.js';
 import type { FrozenRequest } from './batch-docs.js';
 
 export const BATCH_TASK_SCHEMA_VERSION = 1;
@@ -132,6 +133,9 @@ export interface TaskItem {
   /** Last failure was truncation at the output limit; retrying needs a
    * larger limit, not the same request billed again. */
   truncated?: boolean;
+  /** Held because the source changed since submission: `retry` resubmits
+   * it against the new source. */
+  sourceChanged?: boolean;
 }
 
 /** Where one upload+create cycle stands. `unknown` means the create request
@@ -256,11 +260,21 @@ export class BatchTaskStore {
 
   create(plan: BatchPlan, projectRoot: string, model: string): BatchTask {
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    fs.mkdirSync(path.join(this.homeDir, 'tasks'), {
+      recursive: true,
+      mode: PRIVATE_DIR_MODE,
+    });
+    // Claim the id with an exclusive mkdir: two runs of one plan in the same
+    // second must not share (and overwrite) one task record.
     let id = `${plan.name}-${stamp}`;
-    let suffix = 2;
-    while (fs.existsSync(this.dirOf(id))) {
-      id = `${plan.name}-${stamp}-${suffix}`;
-      suffix += 1;
+    for (let suffix = 2; ; suffix++) {
+      try {
+        fs.mkdirSync(this.dirOf(id), { mode: PRIVATE_DIR_MODE });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        id = `${plan.name}-${stamp}-${suffix}`;
+      }
     }
     const now = new Date().toISOString();
     const task: BatchTask = {
@@ -334,7 +348,7 @@ export class BatchTaskStore {
       // well-formed lock from this host whose pid is gone is stale.
       const wellFormed = /^\d+$/.test(pidText ?? '') && pid > 0;
       const elsewhere = Boolean(holderHost) && holderHost !== host;
-      if (!tookOver && wellFormed && !elsewhere && !isProcessAlive(pid)) {
+      if (!tookOver && wellFormed && !elsewhere && !isPidAlive(pid)) {
         tookOver = true;
         if (readLock(lock) === content) fs.rmSync(lock, { force: true });
         continue;
@@ -459,16 +473,5 @@ function renameWithRetry(from: string, to: string): void {
       if (attempt >= 4 || (code !== 'EPERM' && code !== 'EBUSY')) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM: it exists but belongs to someone else.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }

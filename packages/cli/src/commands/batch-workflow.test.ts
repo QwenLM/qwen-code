@@ -754,8 +754,8 @@ describe('collectTask', () => {
     let polls = 0;
     h.api.getBatch.mockImplementation(async () => {
       polls += 1;
-      // collectTask checks once before entering the wait loop; settle on
-      // the third loop poll so the backoff sequence shows two sleeps.
+      // Settle on the fourth poll of the wait loop, so the backoff sequence
+      // shows three sleeps.
       if (polls >= 4) {
         job.status = 'completed';
         job.output_file_id = 'file-out-1';
@@ -767,7 +767,7 @@ describe('collectTask', () => {
       return job;
     });
     await collectTask(h.deps, taskIdOf(h), { wait: true });
-    expect(h.sleeps).toEqual([10_000, 20_000]);
+    expect(h.sleeps).toEqual([10_000, 20_000, 40_000]);
     expect(fs.existsSync(path.join(h.root, 'docs', 'en', 'a.md'))).toBe(true);
   });
 
@@ -1141,5 +1141,74 @@ describe('listTasks', () => {
     const h = (harness = setup());
     await listTasks(h.deps);
     expect(h.out.join('\n')).toMatch(/no batch tasks/);
+  });
+});
+
+describe('review fixes', () => {
+  it('treats an already-deleted remote file as cleaned up', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    h.api.deleteFile.mockRejectedValueOnce(
+      Object.assign(new Error('HTTP 404'), { status: 404 }),
+    );
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).attempts[0].collected).toBe(true);
+  });
+
+  it('holds no task lock while --wait polls, so cancel still works', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    const taskId = taskIdOf(h);
+    let cancelled = false;
+    h.deps.sleep = async () => {
+      if (cancelled) return;
+      cancelled = true;
+      await cancelTask(h.deps, taskId); // lockWaitMs is 0: a held lock throws
+    };
+    await collectTask(h.deps, taskId, { wait: true });
+    expect(h.api.cancelBatch).toHaveBeenCalledWith(h.deps.ep, 'batch-1');
+  });
+
+  it('waits for the partial results of a cancelled batch instead of failing every item', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    const job = h.jobs.get('batch-1') as BatchJob;
+    job.status = 'cancelled'; // 2 requests finished, output not attached yet
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual([
+      'submitted',
+      'submitted',
+    ]);
+    expect(task.attempts[0].collected).toBeFalsy();
+    expect(h.out.join('\n')).toMatch(
+      /cancelled but its result file is not available yet/,
+    );
+  });
+
+  it('lets retry resubmit an item held because its source changed', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    fs.writeFileSync(
+      path.join(h.root, 'docs', 'zh', 'a.md'),
+      '# A\n\n改过了。\n',
+    );
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).items[0]).toMatchObject({
+      state: 'held',
+      sourceChanged: true,
+    });
+    await retryTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.attempts[1].itemIds).toEqual(['a']);
+    expect(task.items[0]).toMatchObject({ state: 'submitted', lastAttempt: 2 });
+    expect(task.items[0].sourceChanged).toBeUndefined();
   });
 });

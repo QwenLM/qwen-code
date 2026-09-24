@@ -335,21 +335,16 @@ export function classifyResult(line: OutputLine): ResultVerdict {
   }
   // Deliver exactly what the model returned: leading whitespace and the
   // trailing newline can be meaningful (an indented code block), so trim()
-  // only guards emptiness, never edits the document.
-  const content = message.content;
-  // A truncated markdown transform most visibly breaks fence pairing; it is
-  // a cheap structural signal, not a quality claim.
-  if ((content.match(/```/g)?.length ?? 0) % 2 !== 0) {
-    return { kind: 'failed', reason: 'unbalanced markdown code fences' };
-  }
-  return { kind: 'ok', content };
+  // only guards emptiness, never edits the document. Truncation is caught by
+  // finish_reason above.
+  return { kind: 'ok', content: message.content };
 }
 
 const summarize = (value: unknown) => JSON.stringify(value)?.slice(0, 300);
 
 export type DeliveryOutcome =
   | { kind: 'delivered'; targetPath: string }
-  | { kind: 'held'; reason: string };
+  | { kind: 'held'; reason: string; sourceChanged?: true };
 
 /**
  * Publish one validated result. No-overwrite is the contract: a target that
@@ -390,7 +385,8 @@ export function deliverResult(
     if (current !== expectedSourceSha256) {
       return {
         kind: 'held',
-        reason: `source "${item.source}" changed since submission; review before overwriting its transform`,
+        reason: `source "${item.source}" changed since submission; \`qwen batch retry\` resubmits it against the new source`,
+        sourceChanged: true,
       };
     }
   }

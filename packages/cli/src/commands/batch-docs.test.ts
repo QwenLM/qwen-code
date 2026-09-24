@@ -335,12 +335,15 @@ describe('classifyResult', () => {
     expect(verdict.kind).toBe('failed');
   });
 
-  it('rejects unbalanced code fences as a truncation signal', () => {
+  it('accepts content with an odd number of ``` (truncation is finish_reason)', () => {
     const verdict = classifyResult({
       custom_id: 'a#1',
-      response: { status_code: 200, body: okBody('text\n```ts\ncode\n') },
+      response: {
+        status_code: 200,
+        body: okBody('Type ``` on its own line to open a fence.\n'),
+      },
     });
-    expect(verdict.kind).toBe('failed');
+    expect(verdict.kind).toBe('ok');
   });
 });
 

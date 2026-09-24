@@ -128,6 +128,14 @@ describe('BatchTaskStore', () => {
     expect(loaded.attempts).toEqual([]);
   });
 
+  it('gives two tasks of one plan created in the same second distinct ids', () => {
+    const plan = validatePlan(validPlan, 'plan.json');
+    const first = store.create(plan, root, 'qwen-plus');
+    const second = store.create(plan, root, 'qwen-plus');
+    expect(second.id).not.toBe(first.id);
+    expect(store.load(first.id).id).toBe(first.id);
+  });
+
   it('refuses to load a task from a future schema version', () => {
     const plan = validatePlan(validPlan, 'plan.json');
     const task = store.create(plan, root, 'qwen-plus');

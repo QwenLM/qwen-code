@@ -236,11 +236,15 @@ export function createBatchAutoCollector(
       }
     }
 
-    const pending = tasks
+    // Only future polls of tasks still being polled shorten the wait; a
+    // stale timestamp (a warned task, a pass with no endpoint) must not.
+    const upcoming = tasks
+      .filter((task) => !warnedAmbiguous.has(task.id))
       .map((task) => nextPollAt.get(task.id))
-      .filter((at): at is number => at !== undefined);
-    const soonest = pending.length > 0 ? Math.min(...pending) - now() : 0;
-    return Math.max(1_000, Math.min(IDLE_SCAN_MS, soonest || IDLE_SCAN_MS));
+      .filter((at): at is number => at !== undefined && at > now());
+    const soonest =
+      upcoming.length > 0 ? Math.min(...upcoming) - now() : IDLE_SCAN_MS;
+    return Math.max(1_000, Math.min(IDLE_SCAN_MS, soonest));
   };
 
   return { tick };

@@ -234,7 +234,8 @@ describe('batch auto-collect', () => {
     ]);
     const lists = h.api.listBatches.mock.calls.length;
     h.clock.now += 10 * 60_000;
-    await ac.tick();
+    // Its stale poll time must not shrink the scan interval to the minimum.
+    expect(await ac.tick()).toBe(60_000);
     expect(h.notices).toHaveLength(1);
     expect(h.api.listBatches.mock.calls.length).toBe(lists);
   });
