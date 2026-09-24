@@ -49,6 +49,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             sessions = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, CompletableFuture<Void>> dispatches =
             new ConcurrentHashMap<>();
+    // Executions whose transport.execute call is in flight in this process,
+    // as opposed to dispatches, which also covers a claim being fenced.
+    private final Set<String> invocations = ConcurrentHashMap.newKeySet();
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport,
@@ -207,9 +210,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         ToolExecutionRecord current = requireExecution(
                                 context, executionId);
                         requested = requestCancel(current);
+                        // An UNKNOWN record may still have an invocation
+                        // running in this process; it gets the physical
+                        // cancel below but is never settled from here.
                         if (requested.isSettled()
-                                || requested.getState()
-                                        == ToolExecutionRecord.State.UNKNOWN) {
+                                || (requested.getState()
+                                        == ToolExecutionRecord.State.UNKNOWN
+                                        && !invocations.contains(
+                                                executionId))) {
                             return CompletableFuture.completedFuture(
                                     requested);
                         }
@@ -221,8 +229,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                     .CANCEL_REQUESTED
                                     && !requested.hasLiveDispatchAt(
                                             clock.instant())
-                                    && !dispatches.containsKey(executionId))) {
-                        // Fence only a claim nothing here is serving; an
+                                    && !invocations.contains(executionId))) {
+                        // Fence only a claim nothing here is running; an
                         // invocation still running in this process gets the
                         // physical cancel below.
                         beginDispatch(context, requested);
@@ -232,7 +240,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 latest == null ? requested : latest);
                     }
                     if (requested.getState()
-                            != ToolExecutionRecord.State.CANCEL_REQUESTED) {
+                                    != ToolExecutionRecord.State
+                                            .CANCEL_REQUESTED
+                            && requested.getState()
+                                    != ToolExecutionRecord.State.UNKNOWN) {
                         return CompletableFuture.completedFuture(requested);
                     }
                     return mapFailure(safeStage(() -> transport.cancel(
@@ -682,9 +693,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     executing.getDispatchGeneration());
             throw exception;
         }
+        invocations.add(executing.getExecutionCallId());
         return safeStage(() -> transport.execute(context.lease(),
                 context.session(), executing.getReference()))
                 .<Void>handle((result, error) -> {
+                    // Stop counting as running before the outcome is
+                    // written, so a cancel that reads that outcome does not
+                    // treat this finished invocation as still running.
+                    invocations.remove(executing.getExecutionCallId());
                     if (error != null || result == null) {
                         markUnknown(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration());
