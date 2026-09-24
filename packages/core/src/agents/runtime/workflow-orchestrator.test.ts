@@ -4928,6 +4928,41 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       ]);
     });
 
+    // The other side of that ternary: with no `mcpServers` of its own the agent
+    // type's tools ARE in this session's registry, so the resolver answers and a
+    // deny written in a legacy spelling still narrows. This is the only place
+    // the positive branch is exercised — replacing the resolver with
+    // `undefined` unconditionally must redden it.
+    it('refuses up front when a legacy-spelled deny covers every requested tool', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: [{ name: 'mcp__srv__get_data_04b75xd' }],
+        findSubagentByName: async () => ({
+          name: 'Legacy',
+          description: 'legacy denies',
+          systemPrompt: 'legacy',
+          level: 'project',
+          // The pre-normalization spelling of `mcp__srv__get+data`. It is not
+          // the registered name, so only the alias channel can match it.
+          disallowedTools: ['mcp__srv__get_data'],
+        }),
+        permissionAliases: {
+          mcp__srv__get_data_04b75xd: [
+            'mcp__srv__get+data',
+            'mcp__srv__get_data',
+          ],
+        },
+        onCreate: ok,
+      });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          agentType: 'Legacy',
+          tools: ['mcp__srv__get_data_04b75xd'],
+        }),
+      ).rejects.toThrow(/every tool in .* is denied/);
+      expect(calls).toHaveLength(0);
+    });
+
     // A deny is resolved the way the agent's own config resolves it, so a
     // display name in the agent type's denies removes that tool here too.
     it('removes a tool the agent type denies by display name', async () => {

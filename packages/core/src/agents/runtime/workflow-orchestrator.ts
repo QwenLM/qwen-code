@@ -1235,6 +1235,21 @@ async function runOverridePath(
         // their aliases — deny narrowing for those names is left to the
         // agent's own declaration filter, which resolves aliases from the
         // per-agent registry.
+        //
+        // Knowingly given up with it, for own-MCP agents only: the up-front
+        // "every requested tool is denied" refusal in `narrowAgentTools` no
+        // longer fires for a deny written in a legacy spelling, because
+        // matching that spelling needs the aliases this deliberately does not
+        // consult. Such a dispatch now runs and the agent's own declaration
+        // filter strips the tool, so the author gets a tool-less step instead
+        // of a named refusal. Nothing forbidden executes — the declaration
+        // filter, `isToolDisallowedByAgentConfig` and the scheduler's L1 gate
+        // all resolve aliases from the per-agent registry — and restoring the
+        // refusal here would mean matching the deny's server segment against
+        // `Object.keys(baseConfig.mcpServers)` through
+        // `sanitizeToolNameForProvider`, i.e. reintroducing the reduction the
+        // design doc forbids in matching. That is the alias-threading policy
+        // question, not something to settle in this narrowing.
         toolAliasesFor: agentHasOwnMcpServers
           ? undefined
           : (toolName) =>
