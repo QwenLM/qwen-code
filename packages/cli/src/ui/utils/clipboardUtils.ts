@@ -245,10 +245,14 @@ async function saveFromCommand(
  * Check if the clipboard contains an image using the specified tool.
  * Merged function replacing checkWlPasteForImage and checkXclipForImage.
  * For wl-paste, caches the result for reuse by saveClipboardImage.
+ * @param onUnavailable Called when the query itself fails (non-zero exit,
+ *   spawn error/throw, timeout) — as opposed to a successful query that
+ *   simply finds no image, which stays quiet.
  */
 async function checkClipboardForImage(
   command: string,
   args: string[],
+  onUnavailable?: () => void,
 ): Promise<boolean> {
   // For wl-paste --list-types, cache the result
   if (
@@ -256,7 +260,7 @@ async function checkClipboardForImage(
     args.length === 1 &&
     args[0] === '--list-types'
   ) {
-    const types = await getWlPasteImageTypes();
+    const types = await getWlPasteImageTypes(onUnavailable);
     return types.length > 0;
   }
 
@@ -273,6 +277,7 @@ async function checkClipboardForImage(
         } catch {
           /* ignore */
         }
+        onUnavailable?.();
         resolve(false);
       }, PROCESS_TIMEOUT_MS);
 
@@ -281,20 +286,28 @@ async function checkClipboardForImage(
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        if (code !== 0) {
+          // The query itself failed (e.g. the X server is stale or dead), so
+          // this is "clipboard unreachable", not "clipboard holds no image".
+          onUnavailable?.();
+          resolve(false);
+          return;
+        }
         resolve(
-          code === 0 &&
-            stdout
-              .split('\n')
-              // WSL2 Wayland: Windows clipboard exposes images as BMP (image/bmp),
-              // which we convert to PNG via python3 PIL. Both formats must be detected.
-              .some((line) => line === 'image/png' || line === 'image/bmp'),
+          stdout
+            .split('\n')
+            // WSL2 Wayland: Windows clipboard exposes images as BMP (image/bmp),
+            // which we convert to PNG via python3 PIL. Both formats must be detected.
+            .some((line) => line === 'image/png' || line === 'image/bmp'),
         );
       });
       child.on('error', () => {
         clearTimeout(timer);
+        onUnavailable?.();
         resolve(false);
       });
     } catch {
+      onUnavailable?.();
       resolve(false);
     }
   });
@@ -304,7 +317,9 @@ async function checkClipboardForImage(
  * Checks if the system clipboard contains an image.
  * Uses platform-native tools (wl-paste/xclip) on Linux.
  * @param onUnavailable Called when no clipboard backend can be reached: the
- *   macOS/Windows native module cannot load, or Linux has no wl-paste/xclip.
+ *   macOS/Windows native module cannot load, Linux has no wl-paste/xclip, or
+ *   the detected Linux tool's clipboard query fails. Not called when the
+ *   query succeeds and the clipboard simply holds no image.
  * @returns true if clipboard contains an image
  */
 export async function clipboardHasImage(
@@ -315,16 +330,18 @@ export async function clipboardHasImage(
     try {
       const tool = getLinuxClipboardTool();
       if (tool === 'wl-paste') {
-        return checkClipboardForImage('wl-paste', ['--list-types']);
+        return checkClipboardForImage(
+          'wl-paste',
+          ['--list-types'],
+          onUnavailable,
+        );
       }
       if (tool === 'xclip') {
-        return checkClipboardForImage('xclip', [
-          '-selection',
-          'clipboard',
-          '-t',
-          'TARGETS',
-          '-o',
-        ]);
+        return checkClipboardForImage(
+          'xclip',
+          ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+          onUnavailable,
+        );
       }
       // No usable clipboard tool: either there is no display server to reach
       // one through, or the wl-paste/xclip probe failed. Report it instead of
@@ -356,17 +373,29 @@ export async function clipboardHasImage(
 /**
  * Get the available image MIME types from wl-paste.
  * Uses cached result if available to avoid redundant calls.
+ * @param onUnavailable Called when the wl-paste query fails (non-zero exit,
+ *   spawn error, timeout). A successful query with no image types stays quiet.
  */
-async function getWlPasteImageTypes(): Promise<string[]> {
+async function getWlPasteImageTypes(
+  onUnavailable?: () => void,
+): Promise<string[]> {
   // Return cached result if available
   if (cachedWlPasteImageTypes !== null) {
     return cachedWlPasteImageTypes;
   }
 
   return new Promise<string[]>((resolve) => {
-    const child = spawn('wl-paste', ['--list-types'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    let child;
+    try {
+      child = spawn('wl-paste', ['--list-types'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      // Do NOT cache failed result (spawn throw)
+      onUnavailable?.();
+      resolve([]);
+      return;
+    }
     let stdout = '';
 
     const timer = setTimeout(() => {
@@ -376,6 +405,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
         /* ignore */
       }
       // Do NOT cache failed result (timeout)
+      onUnavailable?.();
       resolve([]);
     }, PROCESS_TIMEOUT_MS);
 
@@ -386,6 +416,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
       clearTimeout(timer);
       if (code !== 0) {
         // Do NOT cache failed result
+        onUnavailable?.();
         resolve([]);
         return;
       }
@@ -399,6 +430,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
     child.on('error', () => {
       clearTimeout(timer);
       // Do NOT cache failed result (error)
+      onUnavailable?.();
       resolve([]);
     });
   });

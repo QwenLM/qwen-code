@@ -132,6 +132,50 @@ function createMockChild(stdoutData: string, exitCode: number = 0) {
 }
 
 /**
+ * Create a mock child process that fails to spawn: emits error, never closes.
+ */
+function createSpawnErrorChild() {
+  const stdout = new EventEmitter() as EventEmitter & {
+    pipe: (dest: EventEmitter) => EventEmitter;
+  };
+  stdout.pipe = (dest: EventEmitter) => dest;
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: typeof stdout;
+    kill: ReturnType<typeof vi.fn>;
+    killed: boolean;
+  };
+  child.stdout = stdout;
+  child.kill = vi.fn();
+  child.killed = false;
+
+  process.nextTick(() => {
+    child.emit('error', new Error('spawn ENOENT'));
+  });
+
+  return child;
+}
+
+/**
+ * Create a mock child process that never completes, driving the timeout path.
+ */
+function createHangingChild() {
+  const stdout = new EventEmitter() as EventEmitter & {
+    pipe: (dest: EventEmitter) => EventEmitter;
+  };
+  stdout.pipe = (dest: EventEmitter) => dest;
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: typeof stdout;
+    kill: ReturnType<typeof vi.fn>;
+    killed: boolean;
+  };
+  child.stdout = stdout;
+  child.kill = vi.fn();
+  child.killed = false;
+
+  return child;
+}
+
+/**
  * Create a mock stdout with a pipe method.
  */
 function createMockStdout() {
@@ -355,6 +399,113 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+  });
+
+  // ─── Linux tool found but its query fails (#12505 finding 1) ──
+  // getLinuxClipboardTool() only probes `command -v`; it never touches the
+  // display server, so the probe can pass while the actual clipboard query
+  // fails (dead/stale X server, compositor socket gone). Those failures must
+  // notify — only a successful query that finds no image may stay quiet.
+
+  describe('clipboardHasImage Linux query failures', () => {
+    it('notifies when wl-paste --list-types exits non-zero', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('', 1));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when wl-paste fails to spawn', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createSpawnErrorChild());
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the wl-paste query times out', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createHangingChild());
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    }, 10000);
+
+    it('notifies when spawning wl-paste itself throws', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockImplementation(() => {
+        throw new Error('spawn error');
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when xclip exits non-zero on X11', async () => {
+      // The issue's regression case: X11 session with DISPLAY set and xclip
+      // installed, but the X server is stale/dead — the probe passes while
+      // `xclip -selection clipboard -t TARGETS -o` exits non-zero.
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(createMockChild('', 1));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when xclip fails to spawn on X11', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(createSpawnErrorChild());
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the xclip query times out on X11', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(createHangingChild());
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    }, 10000);
+
+    it('notifies when spawning xclip itself throws on X11', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockImplementation(() => {
+        throw new Error('spawn error');
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('stays quiet when xclip succeeds and the clipboard holds only text', async () => {
+      // Anti-nag: a successful query that finds no image is benign and must
+      // not warn. The pre-existing xclip tests called clipboardHasImage()
+      // with no argument, so a misplaced notification could not fail there —
+      // this closes that coverage gap.
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(
+        createMockChild('text/plain\nUTF8_STRING\n', 0),
+      );
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
     });
   });
 
