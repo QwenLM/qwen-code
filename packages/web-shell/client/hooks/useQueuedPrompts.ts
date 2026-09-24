@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -55,6 +56,9 @@ interface RefBox<T> {
 }
 
 interface UseQueuedPromptsArgs {
+  /** Synchronous caller policy, checked again immediately before SDK dispatch.
+   * Return a message to reject locally; undefined permits dispatch. */
+  getPromptDispatchError?: (text: string) => string | undefined;
   connected: boolean;
   writeBlocked?: boolean;
   runtimeStopped?: boolean;
@@ -93,6 +97,8 @@ interface UseQueuedPromptsArgs {
   reportError: (error: unknown, fallback: string) => void;
   t: ReturnType<typeof getTranslator>;
 }
+
+class PromptDispatchBlockedError extends Error {}
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
@@ -499,6 +505,7 @@ export interface UseQueuedPromptsResult {
 }
 
 export function useQueuedPrompts({
+  getPromptDispatchError,
   connected,
   writeBlocked = false,
   runtimeStopped = false,
@@ -512,12 +519,34 @@ export function useQueuedPrompts({
   streamingState,
   sessionHasActivePrompt = false,
   holdQueuedPromptsLocally = false,
-  sessionActions,
+  sessionActions: unguardedSessionActions,
   store,
   editorRef,
   reportError,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
+  const dispatchPolicyRef = useRef(getPromptDispatchError);
+  dispatchPolicyRef.current = getPromptDispatchError;
+  const sessionActions = useMemo<DaemonSessionActions>(
+    () => ({
+      ...unguardedSessionActions,
+      submitPrompt: (text, options) => {
+        const error = dispatchPolicyRef.current?.(text);
+        if (error !== undefined) {
+          return Promise.reject(new PromptDispatchBlockedError(error));
+        }
+        return unguardedSessionActions.submitPrompt(text, options);
+      },
+      enqueueMidTurnMessage: (text, options) => {
+        const error = dispatchPolicyRef.current?.(text);
+        if (error !== undefined) {
+          return Promise.reject(new PromptDispatchBlockedError(error));
+        }
+        return unguardedSessionActions.enqueueMidTurnMessage(text, options);
+      },
+    }),
+    [unguardedSessionActions],
+  );
   const writeBlockedRef = useRef(writeBlocked);
   writeBlockedRef.current = writeBlocked;
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
@@ -2881,7 +2910,10 @@ export function useQueuedPrompts({
           );
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
-          if (!admissionStarted) {
+          if (
+            !admissionStarted &&
+            !(error instanceof PromptDispatchBlockedError)
+          ) {
             restoreQueuedPromptsToEditor([prompt], targetSessionId);
           }
           // A message now visible in the transcript was admitted and started,
@@ -3112,7 +3144,7 @@ export function useQueuedPrompts({
         let uploadedAttachmentReferences: DaemonSessionAttachmentReference[] =
           [];
         const removeUploadedAttachments = async () => {
-          await Promise.allSettled(
+          const removals = await Promise.allSettled(
             uploadedAttachmentReferences.map((reference) =>
               sessionActions.removeAttachment(reference.attachmentId, {
                 sessionId: targetSessionId,
@@ -3120,53 +3152,84 @@ export function useQueuedPrompts({
             ),
           );
           uploadedAttachmentReferences = [];
+          // A failed compensating delete leaves the refused prompt's bytes
+          // in the session attachment store; surface it instead of dropping.
+          // A fulfilled `false` — the daemon refused the unlink — counts too,
+          // even though it can also mean both copies were already gone.
+          const failedRemoval = removals.find(
+            (result) => result.status === 'rejected' || result.value === false,
+          );
+          // Every sibling report in this chain is gated on still owning the
+          // work; a toast about a session the user already left is noise.
+          if (failedRemoval && targetIsCurrent()) {
+            const message = t('queue.attachmentCleanupFailed');
+            reportError(
+              new Error(message, {
+                cause:
+                  failedRemoval.status === 'rejected'
+                    ? failedRemoval.reason
+                    : 'removeAttachment returned false',
+              }),
+              message,
+            );
+          }
         };
-        void Promise.allSettled([
-          ...imageList.map(
-            async (image) =>
-              await sessionActions.uploadAttachment(
-                {
-                  data: image.data,
-                  mimeType: image.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...fileList.map(
-            async (file) =>
-              await sessionActions.uploadAttachment(
-                {
-                  name: file.name,
-                  data: file.data,
-                  text: file.text,
-                  mimeType: file.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...annotatedFileList.map(async (file, index) => {
-            const filePath = annotated!.paths[index]!;
-            const data = await readWorkspaceFileAsBlob(
-              (path, options) =>
-                workspaceFileActions!.readFileBytes(path, options),
-              filePath,
-              file.media_type,
-              {
-                statFile: (path) => workspaceFileActions!.stat(path),
-                isCancelled: () => abort.signal.aborted,
-                maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
-              },
+        // Check the caller policy before paying for reads and uploads; the
+        // SDK wrapper still re-checks the latest policy at dispatch time.
+        void Promise.resolve()
+          .then(() => {
+            const blocked = dispatchPolicyRef.current?.(
+              annotated?.displayText ?? trimmed,
             );
-            return await sessionActions.uploadAttachment(
-              {
-                name: file.name,
-                data,
-                mimeType: file.media_type,
-              },
-              { signal: abort.signal, sessionId: targetSessionId },
-            );
-          }),
-        ])
+            if (blocked !== undefined)
+              throw new PromptDispatchBlockedError(blocked);
+            return Promise.allSettled([
+              ...imageList.map(
+                async (image) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      data: image.data,
+                      mimeType: image.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...fileList.map(
+                async (file) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      name: file.name,
+                      data: file.data,
+                      text: file.text,
+                      mimeType: file.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...annotatedFileList.map(async (file, index) => {
+                const filePath = annotated!.paths[index]!;
+                const data = await readWorkspaceFileAsBlob(
+                  (path, options) =>
+                    workspaceFileActions!.readFileBytes(path, options),
+                  filePath,
+                  file.media_type,
+                  {
+                    statFile: (path) => workspaceFileActions!.stat(path),
+                    isCancelled: () => abort.signal.aborted,
+                    maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
+                  },
+                );
+                return await sessionActions.uploadAttachment(
+                  {
+                    name: file.name,
+                    data,
+                    mimeType: file.media_type,
+                  },
+                  { signal: abort.signal, sessionId: targetSessionId },
+                );
+              }),
+            ]);
+          })
           .then(async (results) => {
             uploadedAttachmentReferences = results.flatMap((result) =>
               result.status === 'fulfilled' ? [result.value] : [],
@@ -3304,6 +3367,8 @@ export function useQueuedPrompts({
             }
           })
           .catch(async (error: unknown) => {
+            if (error instanceof PromptDispatchBlockedError)
+              enqueueStarted = false;
             if (!enqueueStarted) await removeUploadedAttachments();
             if (!targetIsCurrent()) {
               completionCallbacksRef.current.delete(midTurnMessageId);
@@ -3314,7 +3379,9 @@ export function useQueuedPrompts({
                 // return: restore it to the current editor instead of
                 // leaking it across the session switch.
                 if (pendingAdmissionStillOwned) {
-                  restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  if (!(error instanceof PromptDispatchBlockedError)) {
+                    restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  }
                   reportError(error, t('queue.queueFailed'));
                 }
               }
@@ -3335,7 +3402,12 @@ export function useQueuedPrompts({
               );
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
-              restoreQueuedPromptsToEditor([restoreAdmission], targetSessionId);
+              if (!(error instanceof PromptDispatchBlockedError)) {
+                restoreQueuedPromptsToEditor(
+                  [restoreAdmission],
+                  targetSessionId,
+                );
+              }
               reportError(error, t('queue.queueFailed'));
               return;
             }

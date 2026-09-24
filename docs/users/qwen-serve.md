@@ -80,7 +80,7 @@ qwen serve
 
 The default bind is `127.0.0.1:4170`. Bearer auth is **off** and the primary listener is trusted, so any local process that can reach the port can use the full operator API, including executing code as the daemon user. Route-specific workspace trust, session ownership, `X-Qwen-Client-Id`, permission, feature, validation, and resource checks still apply. The daemon registers the current working directory as its primary workspace; use an absolute `--workspace /path/to/dir` to override it, and repeat the flag to register additional isolated runtimes.
 
-For an API-only daemon, disable the Web Shell. The session, prompt, workspace, permission and SSE routes are unchanged; the surfaces bound to the Web Shell go with it — Local Control enablement fails closed on every platform, and on macOS the `/live/*` routes and the `/live/host` WebSocket are not registered:
+For an API-only daemon, disable the Web Shell. The session, prompt, workspace, permission and SSE routes are unchanged; the surfaces bound to the Web Shell go with it — Local Control enablement fails closed on every platform, and the `/live/*` routes (plus, on macOS with `QWEN_SERVE_LIVE_NATIVE_HOST=1`, the `/live/host` WebSocket) are not registered:
 
 ```bash
 qwen serve --no-web
@@ -508,6 +508,10 @@ branding still applies inside the Web Shell. Embedded library consumers do not
 register the worker. To remove the installation, use your browser or operating
 system's app management; to remove its service worker and stored site data,
 use the browser's site settings.
+
+## Qwen Live (experimental)
+
+Qwen Live runs through the Web Shell on every platform: the browser tab is the microphone and speaker (WS `/live/web`), so open the Web Shell over `https` or `localhost` for microphone access. The native macOS `Qwen Live Host` app is off by default; to try it, start a macOS daemon with `QWEN_SERVE_LIVE_NATIVE_HOST=1`, which restores the `/live/host` WebSocket, the `realtime_voice` capability and the Host download when Live is turned on. Without it, a `Qwen Live Host.app` that is already installed stays unable to connect (the daemon does not register `/live/host`); quit it and use the Web Shell.
 
 ## CLI flags
 
