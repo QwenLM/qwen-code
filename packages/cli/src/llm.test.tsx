@@ -1402,6 +1402,70 @@ describe('llm.tsx main function', () => {
     );
   });
 
+  // The synchronous 'auto' baseline runs `defaults read` on macOS, which
+  // blocks the event loop; piped headless output never renders theme colors.
+  it.each([
+    { stdoutIsTTY: false, expectAuto: false },
+    { stdoutIsTTY: true, expectAuto: true },
+  ])(
+    'resolves the auto theme baseline only when stdout is a terminal ($stdoutIsTTY)',
+    async ({ stdoutIsTTY, expectAuto }) => {
+      const originalIsTTY = Object.getOwnPropertyDescriptor(
+        process.stdout,
+        'isTTY',
+      );
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: stdoutIsTTY,
+        configurable: true,
+      });
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+      const { themeManager, AUTO_THEME_NAME } = await import(
+        './ui/themes/theme-manager.js'
+      );
+      const setActiveTheme = vi
+        .spyOn(themeManager, 'setActiveTheme')
+        .mockReturnValue(true);
+      vi.mocked(parseArguments).mockResolvedValue({
+        prompt: 'hi',
+        outputFormat: 'json',
+      } as CliArgs);
+      vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: { advanced: {}, security: { auth: {} }, ui: {} },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
+        throw new Error('stop after theme baseline');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow('stop after theme baseline');
+        expect(
+          setActiveTheme.mock.calls.some(([name]) => name === AUTO_THEME_NAME),
+        ).toBe(expectAuto);
+      } finally {
+        setActiveTheme.mockRestore();
+        vi.unstubAllEnvs();
+        if (originalIsTTY) {
+          Object.defineProperty(process.stdout, 'isTTY', originalIsTTY);
+        } else {
+          delete (process.stdout as { isTTY?: unknown }).isTTY;
+        }
+      }
+    },
+  );
+
   // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
   // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
   // stage of a daemon-spawned ACP child must still scrub.

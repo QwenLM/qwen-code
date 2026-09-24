@@ -617,13 +617,16 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
-  } else {
+  } else if (process.stdout.isTTY) {
     // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
     // so non-interactive runs and any pre-render UI (e.g. the --resume
     // session picker) already have a sensible theme. The interactive
     // startup block refines this with an OSC 11 probe later on, which is
     // intentionally deferred to run inside the early-capture window so
     // terminal response bytes cannot leak into the TUI input.
+    // Piped output (headless automation, `--output-format json`) renders no
+    // theme colors, so it keeps the default theme instead of blocking the
+    // event loop on the macOS `defaults read` probe.
     themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 

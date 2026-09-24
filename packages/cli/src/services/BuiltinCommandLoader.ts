@@ -101,9 +101,13 @@ export class BuiltinCommandLoader implements ICommandLoader {
     // prevent ALL built-in commands from loading.
     let resolvedIdeCommand: SlashCommand | null = null;
     try {
+      // `/ide` is interactive-only, and building it walks the process tree
+      // with one `ps` per ancestor; headless and ACP runs would filter it out
+      // after paying for that on the way to their first request.
       if (
         !this.config?.getExecutionEnvironment?.() &&
-        !this.config?.getShellExecutionSandbox?.()
+        !this.config?.getShellExecutionSandbox?.() &&
+        this.config?.isInteractive?.() !== false
       ) {
         resolvedIdeCommand = await ideCommand();
       }
