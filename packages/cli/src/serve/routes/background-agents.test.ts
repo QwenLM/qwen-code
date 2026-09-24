@@ -7,6 +7,7 @@
 import express from 'express';
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
+import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core/services/session-registry.js';
 import type { AgentViewSessionSnapshot } from '../../agent-view/protocol.js';
 import { registerBackgroundAgentRoutes } from './background-agents.js';
 
@@ -41,10 +42,34 @@ function snapshot(
   return { sessionId: base.sessionId, state: base, ...over };
 }
 
-function appWith(listSnapshots: () => Promise<AgentViewSessionSnapshot[]>) {
+/** A live-session registry record; the pid is live for the reason above. */
+function record(
+  over: Partial<SessionRegistryRecord> = {},
+): SessionRegistryRecord {
+  return {
+    schemaVersion: 1,
+    pid: LIVE_PID,
+    procStart: null,
+    pidNs: null,
+    sessionId: SESSION,
+    cwd: '/w/app',
+    name: 'app-ab',
+    startedAt: Date.parse('2026-09-04T11:58:00Z'),
+    qwenVersion: '1.0.0',
+    ...over,
+  };
+}
+
+function appWith(
+  listSnapshots: () => Promise<AgentViewSessionSnapshot[]>,
+  // Empty by default, so a case that does not care about the registry
+  // cannot pick up sessions live on the machine running the suite.
+  listRecords: () => Promise<SessionRegistryRecord[]> = async () => [],
+) {
   const app = express();
   registerBackgroundAgentRoutes(app, {
     listSnapshots: listSnapshots as never,
+    listRecords: listRecords as never,
   });
   return app;
 }
@@ -111,6 +136,40 @@ describe('GET /background-agents', () => {
 
     expect(response.body.agents[0].taskState).toBe('failed');
     expect(response.body.agents[0]).not.toHaveProperty('pid');
+  });
+
+  it('keeps the pid a live registry record proves, as `sessions ps` does', async () => {
+    // The store has no pid yet — the launch window, or a `worker.json`
+    // read that failed soft — while the worker has registered and is
+    // alive. Reconciled without the merge, the row loses that pid and
+    // reads `failed`, contradicting the CLI on the same session.
+    const response = await request(
+      appWith(
+        async () => [
+          snapshot({
+            state: { ...snapshot().state, sessionState: 'working' },
+          }),
+        ],
+        async () => [record()],
+      ),
+    ).get('/background-agents');
+
+    expect(response.body.agents).toHaveLength(1);
+    expect(response.body.agents[0].taskState).toBe('running');
+    expect(response.body.agents[0].pid).toBe(LIVE_PID);
+  });
+
+  it('does not list an interactive session the merge appends', async () => {
+    // `mergeSessionRows` appends every registry record no managed row
+    // claimed; this route reports background agents only.
+    const response = await request(
+      appWith(
+        async () => [],
+        async () => [record({ sessionId: 'sess-interactive' })],
+      ),
+    ).get('/background-agents');
+
+    expect(response.body.agents).toEqual([]);
   });
 
   it('omits pid and startedAt rather than inventing them', async () => {

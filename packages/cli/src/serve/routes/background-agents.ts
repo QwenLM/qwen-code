@@ -13,11 +13,12 @@
  * `qwen --bg` is owned by the Agent View supervisor and appears nowhere
  * in it.
  *
- * The rows come from `managedSessionRows`, the same function
- * `qwen sessions ps` renders, so the CLI and anything built on this route
- * cannot describe one session two different ways. They are read from the
- * supervisor's session store, which still lists a session after its
- * worker exits; the roster only supplies display names. See
+ * The rows come from the same composition `qwen sessions ps` uses —
+ * `managedSessionRows` merged with the live-session registry — so the CLI
+ * and anything built on this route cannot describe one session two
+ * different ways. The sessions are read from the supervisor's store,
+ * which still lists one after its worker exits; the roster only supplies
+ * display names. See
  * `docs/plans/2026-09-04-background-agent-surfaces.md` for why that store
  * is the authority rather than the daemon's own model.
  *
@@ -28,9 +29,11 @@
  */
 
 import type { Application } from 'express';
+import { listLiveSessions } from '@qwen-code/qwen-code-core/services/session-registry.js';
 import { listAgentViewSessionSnapshots } from '../../agent-view/supervisor-store.js';
 import {
   managedSessionRows,
+  mergeSessionRows,
   reconcileRowLiveness,
 } from '../../commands/sessions/managed-rows.js';
 import type { AgentViewTaskState } from '../../agent-view/presentation.js';
@@ -65,6 +68,8 @@ export interface BackgroundAgentView {
 export interface RegisterBackgroundAgentRoutesDeps {
   /** Overridden in tests; defaults to the real supervisor store. */
   listSnapshots?: typeof listAgentViewSessionSnapshots;
+  /** Overridden in tests; defaults to the real live-session registry. */
+  listRecords?: typeof listLiveSessions;
   isWorkspaceTrusted?: () => boolean;
 }
 
@@ -73,6 +78,7 @@ export function registerBackgroundAgentRoutes(
   deps: RegisterBackgroundAgentRoutesDeps = {},
 ): void {
   const listSnapshots = deps.listSnapshots ?? listAgentViewSessionSnapshots;
+  const listRecords = deps.listRecords ?? listLiveSessions;
 
   app.get('/background-agents', async (_req, res) => {
     if (deps.isWorkspaceTrusted?.() === false) {
@@ -80,8 +86,20 @@ export function registerBackgroundAgentRoutes(
       return;
     }
     try {
+      // The composition `qwen sessions ps` uses. Merging first is what
+      // `reconcileRowLiveness` documents as its precondition: a managed
+      // row whose worker pid is not recorded yet keeps the pid the
+      // registry half proved alive instead of reading as `failed`. The
+      // filter drops the registry-only rows the merge appends — this
+      // route reports background agents, not every session here.
+      const [records, snapshots] = await Promise.all([
+        listRecords(),
+        listSnapshots(),
+      ]);
       const rows = reconcileRowLiveness(
-        managedSessionRows(await listSnapshots()),
+        mergeSessionRows(records, managedSessionRows(snapshots)).filter(
+          (row) => row.managed,
+        ),
       );
       // `taskState` is set on every row `managedSessionRows` returns —
       // it only maps owned snapshots. The guard is for the type, and for

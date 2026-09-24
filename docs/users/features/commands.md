@@ -1097,8 +1097,12 @@ configuration when the command prints it.
 
 A controller presents the token the way any other sender does — as the
 first line of the connection — and takes the socket path from the
-session registry (`qwen sessions ps --json` prints one record per live
-session, `ipcPath` being the address):
+session registry: `qwen sessions ps --json` prints one line per session,
+managed ones first, and a line carries `ipcPath` only when that session
+has a registry record with peer messaging available. Select on the field
+rather than reading the first line —
+`qwen sessions ps --json | jq -r 'select(.ipcPath) | .ipcPath' | head -1`
+— and connect to it:
 
 ```bash
 { printf '%s\n' \
