@@ -86,6 +86,7 @@ import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
 import {
   sanitizeWorkflowText,
   stringifyWorkflowResult,
+  workflowResultReplacer,
 } from '../../agents/workflow-result-format.js';
 import {
   buildWorkflowSizeGuidelineParagraph,
@@ -1436,13 +1437,13 @@ function safeStringifyResult(result: unknown): string {
  */
 function safeStringifyDisplayPayload(payload: unknown): string {
   try {
-    return JSON.stringify(payload, null, 2);
+    return JSON.stringify(payload, workflowResultReplacer, 2);
   } catch {
     if (payload && typeof payload === 'object') {
       const sanitized: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(payload)) {
         try {
-          JSON.stringify(value);
+          JSON.stringify(value, workflowResultReplacer);
           sanitized[key] = value;
         } catch {
           sanitized[key] =
@@ -1450,7 +1451,7 @@ function safeStringifyDisplayPayload(payload: unknown): string {
         }
       }
       try {
-        return JSON.stringify(sanitized, null, 2);
+        return JSON.stringify(sanitized, workflowResultReplacer, 2);
       } catch {
         // Fall through to the generic fallback string below.
       }

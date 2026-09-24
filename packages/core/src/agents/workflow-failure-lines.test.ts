@@ -73,6 +73,33 @@ describe('reportedFailureLines', () => {
     );
   });
 
+  it('retains each VM Error reason within the failure-field budget', () => {
+    const errors: unknown = runInContext(
+      `['agent A: rate limited', 'agent B: timeout', 'agent C: oom'].map(message => new Error(message))`,
+      createContext({}),
+    );
+    expect(reportedFailureLines({ errors })).toEqual([
+      'Reported errors: ["Error: agent A: rate limited","Error: agent B: timeout","Error: agent C: oom"]',
+    ]);
+  });
+
+  it.each([
+    [
+      'Map',
+      `new Map([['agent-1', 'rate limited']])`,
+      '[["agent-1","rate limited"]]',
+    ],
+    ['Set', `new Set(['agent-1: rate limited'])`, '["agent-1: rate limited"]'],
+  ])(
+    'retains a populated VM %s failure value',
+    (_name, expression, expected) => {
+      const failure: unknown = runInContext(expression, createContext({}));
+      expect(reportedFailureLines({ failed: failure })).toEqual([
+        `Reported failed: ${expected}`,
+      ]);
+    },
+  );
+
   it.each([
     ['plain object', {}],
     ['null-prototype object', Object.create(null) as object],

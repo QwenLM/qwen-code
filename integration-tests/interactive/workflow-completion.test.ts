@@ -66,16 +66,34 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       {
         source: 'model',
         status: 'completed',
-        script: 'return { marker: "WORKFLOW_MODEL_RESULT_12176" };',
+        script:
+          'return { marker: "WORKFLOW_MODEL_RESULT_12176", error: new Error("MODEL_ERROR_REASON_12176") };',
         marker: 'WORKFLOW_MODEL_RESULT_12176',
+        resultDetails: ['Error: MODEL_ERROR_REASON_12176'],
       },
       {
         source: 'slash',
         status: 'completed',
         script:
-          'const error = new Error("WORKFLOW_VM_ERROR_12176"); error.stack = "Error: WORKFLOW_VM_ERROR_12176\\n\\tat report-probe.js"; return { marker: "WORKFLOW_ERROR_RESULT_12176", failed: ["fr"], errors: [error], error };',
+          'const error = new Error("WORKFLOW_VM_ERROR_12176"); return { marker: "WORKFLOW_ERROR_RESULT_12176", failed: ["fr"], errors: [error, new Error("AGENT_B_TIMEOUT_12176"), new Error("AGENT_C_OOM_12176")], error };',
         marker: 'WORKFLOW_ERROR_RESULT_12176',
         reportedError: 'WORKFLOW_VM_ERROR_12176',
+        resultDetails: [
+          'Error: AGENT_B_TIMEOUT_12176',
+          'Error: AGENT_C_OOM_12176',
+        ],
+      },
+      {
+        source: 'slash',
+        status: 'completed',
+        script:
+          'return { marker: "WORKFLOW_COLLECTION_RESULT_12176", failed: ["fr"], errors: new Map([["agent-map", new Error("MAP_RATE_LIMIT_12176")]]), error: new Set(["SET_TIMEOUT_12176"]) };',
+        marker: 'WORKFLOW_COLLECTION_RESULT_12176',
+        resultDetails: [
+          'agent-map',
+          'Error: MAP_RATE_LIMIT_12176',
+          'SET_TIMEOUT_12176',
+        ],
       },
     ])('delivers $marker once', async (testCase) => {
       const isSlash = testCase.source === 'slash';
@@ -198,6 +216,9 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       }
       expect(screen).not.toContain('started in the background');
       expect(screen).toContain(testCase.marker);
+      for (const detail of testCase.resultDetails ?? []) {
+        expect(screen).toContain(detail);
+      }
       if (isSlash) expect(screen).toContain('Run ID: wf_');
       if (isSlash && testCase.status === 'completed') {
         expect(screen).toContain('Reported failed: ["fr"]');
@@ -225,8 +246,16 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         expect(reported).toContain(
           `Reported error: Error: ${testCase.reportedError}`,
         );
-        expect(reported).toContain('  at report-probe.js');
+        expect(reported).not.toContain(' at ');
         expect(reported).not.toContain('Reported errors: [{}]');
+      }
+      for (const detail of testCase.resultDetails ?? []) {
+        const payload = isSlash
+          ? messages.match(
+              /<reported-failures>([\s\S]*?)<\/reported-failures>/,
+            )?.[1]
+          : messages;
+        expect(payload).toContain(detail);
       }
       if (testCase.largeResult) {
         expect(
@@ -260,6 +289,14 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         followUpRequests.at(-1)!.body['messages'],
       );
       expect(followUp).toContain(testCase.marker);
+      for (const detail of testCase.resultDetails ?? []) {
+        const payload = isSlash
+          ? followUp.match(
+              /<reported-failures>([\s\S]*?)<\/reported-failures>/,
+            )?.[1]
+          : followUp;
+        expect(payload).toContain(detail);
+      }
       if (testCase.reportedError) {
         expect(
           followUp.match(

@@ -10,9 +10,15 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 function renderError(error: Error): string {
   const name = typeof error.name === 'string' ? error.name : 'Error';
   const message = String(error.message ?? '');
-  return typeof error.stack === 'string' && error.stack.includes(message)
-    ? error.stack
-    : `${name}: ${message}`;
+  return `${name}: ${message}`;
+}
+
+export function workflowResultReplacer(_key: string, value: unknown): unknown {
+  // Workflow values cross a VM boundary, where instanceof checks fail.
+  if (types.isNativeError(value)) return renderError(value);
+  if (types.isMap(value)) return [...value.entries()];
+  if (types.isSet(value)) return [...value.values()];
+  return value;
 }
 
 export function stringifyWorkflowResult(
@@ -25,12 +31,8 @@ export function stringifyWorkflowResult(
     // Workflow values cross a VM boundary, where instanceof Error is false.
     if (types.isNativeError(result)) return renderError(result);
     return (
-      JSON.stringify(
-        result,
-        (_key, value: unknown) =>
-          types.isNativeError(value) ? renderError(value) : value,
-        pretty ? 2 : undefined,
-      ) ?? String(result)
+      JSON.stringify(result, workflowResultReplacer, pretty ? 2 : undefined) ??
+      String(result)
     );
   } catch {
     return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;

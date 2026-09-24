@@ -19,7 +19,7 @@ describe('workflow result formatting', () => {
     );
     expect(failure).not.toBeInstanceOf(Error);
     expect(Object.prototype.toString.call(failure)).toBe('[object Error]');
-    expect(stringifyWorkflowResult(failure)).toContain('disk full');
+    expect(stringifyWorkflowResult(failure)).toBe('Error: disk full');
   });
 
   it('retains nested VM Error messages in compact and pretty results', () => {
@@ -28,10 +28,27 @@ describe('workflow result formatting', () => {
       createContext({}),
     );
     for (const pretty of [false, true]) {
-      expect(stringifyWorkflowResult({ errors: [failure] }, pretty)).toContain(
-        'disk full',
-      );
+      expect(
+        JSON.parse(stringifyWorkflowResult({ errors: [failure] }, pretty)),
+      ).toEqual({ errors: ['Error: disk full'] });
     }
+  });
+
+  it('renders a messageless Error without its runtime stack', () => {
+    expect(stringifyWorkflowResult(new Error())).toBe('Error: ');
+  });
+
+  it('preserves Map keys, Set values, and nested VM Errors', () => {
+    const result: unknown = runInContext(
+      `({ failed: new Map([[1, new Error('numeric key')], ['1', new Set(['string key'])]]) })`,
+      createContext({}),
+    );
+    expect(JSON.parse(stringifyWorkflowResult(result))).toEqual({
+      failed: [
+        [1, 'Error: numeric key'],
+        ['1', ['string key']],
+      ],
+    });
   });
 
   it('keeps the fallback for a circular result containing an Error', () => {
