@@ -235,6 +235,11 @@ vi.mock('./utils/processUtils.js', async (importOriginal) => ({
   superviseInProcess: vi.fn(),
 }));
 
+vi.mock('./config/environment.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config/environment.js')>()),
+  hasLoadedEnvironmentValues: vi.fn(() => false),
+}));
+
 vi.mock('./config/sandboxConfig.js', () => ({
   loadSandboxConfig: vi.fn(),
 }));
@@ -1291,6 +1296,7 @@ describe('llm.tsx main function', () => {
       label: string;
       argv: Partial<CliArgs>;
       dualOutputInputFile?: string;
+      envFileValues?: boolean;
       expected: 'in-process' | boolean;
     }> = [
       {
@@ -1341,11 +1347,25 @@ describe('llm.tsx main function', () => {
         argv: {},
         expected: 'in-process',
       },
+      {
+        // Modules loaded before .env / settings.env were applied read the old
+        // environment; only a fresh image sees those values.
+        label: 'plain one-shot prompt with env-file values',
+        argv: { prompt: 'hi' },
+        envFileValues: true,
+        expected: true,
+      },
+      {
+        label: 'plain interactive launch with env-file values',
+        argv: {},
+        envFileValues: true,
+        expected: false,
+      },
     ];
 
     it.each(rows)(
       'routes $label to $expected',
-      async ({ argv, dualOutputInputFile, expected }) => {
+      async ({ argv, dualOutputInputFile, envFileValues, expected }) => {
         const originalIsTTY = Object.getOwnPropertyDescriptor(
           process.stdin,
           'isTTY',
@@ -1363,6 +1383,12 @@ describe('llm.tsx main function', () => {
           './utils/relaunch.js'
         );
         const { superviseInProcess } = await import('./utils/processUtils.js');
+        const { hasLoadedEnvironmentValues } = await import(
+          './config/environment.js'
+        );
+        vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(
+          envFileValues ?? false,
+        );
         vi.mocked(parseArguments).mockResolvedValue(argv as CliArgs);
         vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
         vi.mocked(loadSettings).mockReturnValue({
@@ -1398,6 +1424,7 @@ describe('llm.tsx main function', () => {
         try {
           await expect(main()).rejects.toThrow('stop after routing check');
         } finally {
+          vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(false);
           vi.unstubAllEnvs();
           if (originalIsTTY) {
             Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
