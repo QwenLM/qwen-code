@@ -1325,7 +1325,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
               ? ` ${stripUnsafeCharacters(suggestion.sourceBadge)}`
               : '';
             // A row with no shared column has no description gutter to pay, so
-            // its budget is `descriptionWidth`'s arithmetic minus that 2.
+            // its budget drops only the dropdown margins and the active marker:
+            // columns - 6.
             const columnWidth = Math.max(
               0,
               sharedColumn ? labelColumnWidth : columns - 6,
