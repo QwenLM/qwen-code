@@ -5,7 +5,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { connect } from 'node:net';
+import { connect, createServer, type AddressInfo } from 'node:net';
+import { networkInterfaces } from 'node:os';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
@@ -61,6 +62,21 @@ function attestationRequest(origin: string): Promise<Response> {
       capabilityDigest: boot.capabilityDigest,
       isolationClass: boot.isolationClass,
     }),
+  });
+}
+
+function connects(host: string, port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = connect({ host, port, timeout: 1_000 });
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once('error', () => resolve(false));
   });
 }
 
@@ -122,6 +138,26 @@ describe('Managed Runtime attestation worker', () => {
     ['wrong version', JSON.stringify({ ...boot, version: 2 })],
     ['string version', JSON.stringify({ ...boot, version: '1' })],
     ['wrong type', JSON.stringify({ ...boot, type: 'ready' })],
+    [
+      'missing key',
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(boot).filter(([key]) => key !== 'workspaceId'),
+        ),
+      ),
+    ],
+    [
+      'renamed key',
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(boot).map(([key, value]) => [
+            key === 'tenantId' ? 'tenant' : key,
+            value,
+          ]),
+        ),
+      ),
+    ],
+    ['null payload', 'null'],
   ])('rejects an invalid boot payload: %s', async (_label, payload) => {
     await expect(
       readManagedRuntimeWorkerBoot(Readable.from([payload])),
@@ -173,7 +209,10 @@ describe('Managed Runtime attestation worker', () => {
     const result = readManagedRuntimeWorkerBoot(input);
     // The reader has already taken the first chunk, so the second arrives as
     // a separate byte chunk, as stdin delivers them.
-    expect(input.readableLength).toBe(0);
+    expect(
+      input.readableLength,
+      'precondition: the reader took the first chunk, so the second arrives on its own',
+    ).toBe(0);
     input.push(' '.repeat(32 * 1024 + 1 - Buffer.byteLength(serialized)));
 
     await expect(result).rejects.toThrow(
@@ -182,33 +221,41 @@ describe('Managed Runtime attestation worker', () => {
     expect(input.destroyed).toBe(true);
   }, 5_000);
 
-  // A wildcard bind would also answer on 127.0.0.2, which Linux and Windows
-  // treat as loopback. macOS assigns only 127.0.0.1 to lo0, so there the probe
-  // could not reach even a wildcard listener and would prove nothing.
-  it.skipIf(process.platform === 'darwin')(
-    'does not accept connections on other loopback addresses',
-    async () => {
-      const worker = await startManagedRuntimeAttestationWorker(boot);
-      openWorkers.add(worker);
-      const port = Number(new URL(worker.ready.url).port);
-      const connects = (host: string) =>
-        new Promise<boolean>((resolve) => {
-          const socket = connect({ host, port, timeout: 1_000 });
-          socket.once('connect', () => {
-            socket.destroy();
-            resolve(true);
-          });
-          socket.once('timeout', () => {
-            socket.destroy();
-            resolve(false);
-          });
-          socket.once('error', () => resolve(false));
-        });
+  it('does not accept connections on other local addresses', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(boot);
+    openWorkers.add(worker);
+    const port = Number(new URL(worker.ready.url).port);
+    expect(await connects('127.0.0.1', port)).toBe(true);
 
-      expect(await connects('127.0.0.1')).toBe(true);
-      expect(await connects('127.0.0.2')).toBe(false);
-    },
-  );
+    // Which extra loopback and interface addresses reach a wildcard
+    // listener differs by platform, so probe only those that do here.
+    const wildcard = createServer();
+    await new Promise<void>((resolve, reject) => {
+      wildcard.once('error', reject);
+      wildcard.listen(0, '0.0.0.0', resolve);
+    });
+    onTestFinished(
+      () => new Promise<void>((resolve) => wildcard.close(() => resolve())),
+    );
+    const wildcardPort = (wildcard.address() as AddressInfo).port;
+    const candidates = [
+      '127.0.0.2',
+      ...Object.values(networkInterfaces())
+        .flatMap((entries) => entries ?? [])
+        .filter((entry) => entry.family === 'IPv4' && !entry.internal)
+        .map((entry) => entry.address),
+    ];
+    const answering = async (hosts: string[], target: number) => {
+      const answers = await Promise.all(
+        hosts.map((host) => connects(host, target)),
+      );
+      return hosts.filter((_, index) => answers[index]);
+    };
+    const probes = await answering(candidates, wildcardPort);
+    expect(probes).not.toHaveLength(0);
+
+    expect(await answering(probes, port)).toEqual([]);
+  });
 
   it('mounts only the attestation manifest on a loopback listener', async () => {
     const worker = await startManagedRuntimeAttestationWorker(boot);
