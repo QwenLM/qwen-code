@@ -28,6 +28,7 @@ import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
 } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type {
   ChannelWorkerControlState,
@@ -577,6 +578,7 @@ export interface ServeAppDeps {
   maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
   isChannelControlDraining?: () => boolean;
   isChannelControlInitializing?: () => boolean;
@@ -2367,6 +2369,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    getChannelRestoreFailures: deps.getChannelRestoreFailures,
     maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,

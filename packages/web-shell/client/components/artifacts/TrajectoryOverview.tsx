@@ -15,10 +15,16 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { Maximize2Icon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
+import {
+  ClockIcon,
+  Maximize2Icon,
+  ZoomInIcon,
+  ZoomOutIcon,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
 import type {
+  TimelineMode,
   TimelineModel,
   TimelineSpan,
 } from '../../trajectory/buildTimeline';
@@ -94,6 +100,11 @@ export interface TrajectoryOverviewProps {
    * other way of clearing it reports `undefined`.
    */
   onRangeChange: (range: TimelineRange | undefined) => void;
+  /**
+   * Ask for the other way of laying out time. The mode in force is the
+   * model's own, so the strip can never draw one mode under the other's label.
+   */
+  onModeChange: (mode: TimelineMode) => void;
 }
 
 /**
@@ -221,6 +232,28 @@ export function formatWindowTime(ms: number, windowMs: number): string {
   return `${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`;
 }
 
+/**
+ * A moment on a real-time axis, as a local clock reading with as many
+ * fractional digits as the stretch in view needs: whole seconds for ten
+ * seconds and more, then one digit per tenfold narrower window, down to
+ * milliseconds.
+ */
+export function formatClockTime(
+  epochMs: number,
+  windowMs: number,
+  language: string,
+): string {
+  const digits =
+    windowMs >= 10_000 ? 0 : windowMs >= 1_000 ? 1 : windowMs >= 100 ? 2 : 3;
+  return new Intl.DateTimeFormat(language, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    ...(digits > 0 ? { fractionalSecondDigits: digits as 1 | 2 | 3 } : {}),
+  }).format(epochMs);
+}
+
 function spanStyle(span: TimelineSpan, total: number): CSSProperties {
   const length = span.end - span.start;
   const share = total > 0 ? length / total : 0;
@@ -248,8 +281,16 @@ export function TrajectoryOverview({
   describe,
   range,
   onRangeChange,
+  onModeChange,
 }: TrajectoryOverviewProps) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const clock = model?.mode === 'clock';
+  // What the status line says after the reader's last action. A switch of
+  // mode lays the axis out afresh and drops any zoom, so it is the switch that
+  // has to be said, not the zoom going away.
+  const [lastAction, setLastAction] = useState<'zoom' | 'mode' | undefined>(
+    undefined,
+  );
   const busy = model ? formatDuration(model.total) : undefined;
   const plotRef = useRef<HTMLDivElement | null>(null);
   const gestureRef = useRef<Gesture | null>(null);
@@ -294,6 +335,7 @@ export function TrajectoryOverview({
   }, []);
 
   const applyViewport = useCallback((next: Viewport | undefined) => {
+    setLastAction('zoom');
     const current = modelRef.current;
     const value =
       next !== undefined && current !== undefined
@@ -543,8 +585,15 @@ export function TrajectoryOverview({
     left: percent(vLength > 0 ? -(vStart / vLength) * 100 : 0),
     width: percent(vLength > 0 ? (total / vLength) * 100 : 100),
   };
-  const windowFrom = formatWindowTime(vStart, vLength);
-  const windowTo = formatWindowTime(vStart + vLength, vLength);
+  /** A point on the axis, as the mode in force names one. */
+  const pointAt = (ms: number, windowMs: number): string =>
+    clock
+      ? formatClockTime((model?.originMs ?? 0) + ms, windowMs, language)
+      : formatWindowTime(ms, windowMs);
+  const windowFrom = pointAt(vStart, vLength);
+  const windowTo = pointAt(vStart + vLength, vLength);
+  const elapsed = busy;
+  const activeText = model ? formatDuration(model.activeMs) : undefined;
 
   const shown = draft ?? range;
   const inside = useMemo(
@@ -562,14 +611,24 @@ export function TrajectoryOverview({
             // and an image's children are hidden from assistive technology.
             role: 'group',
             'aria-label':
-              t('trajectory.overview.label', {
-                spans: model.spans.length,
-                busy: busy ?? '',
-              }) +
+              (clock
+                ? t('trajectory.clock.label', {
+                    spans: model.spans.length,
+                    elapsed: elapsed ?? '',
+                    active: activeText ?? '',
+                  })
+                : t('trajectory.overview.label', {
+                    spans: model.spans.length,
+                    busy: busy ?? '',
+                  })) +
               (range
                 ? t('trajectory.range.aria', {
-                    from: formatDuration(range.start),
-                    to: formatDuration(range.end),
+                    from: clock
+                      ? pointAt(range.start, range.end - range.start)
+                      : formatDuration(range.start),
+                    to: clock
+                      ? pointAt(range.end, range.end - range.start)
+                      : formatDuration(range.end),
                   })
                 : '') +
               (viewport
@@ -666,14 +725,30 @@ export function TrajectoryOverview({
           </div>
           <div className={styles.axis}>
             <span aria-hidden="true" data-testid="trajectory-overview-from">
-              {vStart > 0 ? windowFrom : '0'}
+              {clock || vStart > 0 ? windowFrom : '0'}
             </span>
             <span className={styles.axisEnd}>
               {/* The buttons come first so the value stays last, its right
                   edge on the track's right end, which is the point it names.
                   Not `disabled` when there is nothing to do: a disabled button
                   drops the focus of the reader who just pressed it, and these
-                  are pressed exactly when they are about to run out. */}
+                  are pressed exactly when they are about to run out. The mode
+                switch leads: it changes what is drawn, the others only which
+                stretch of it is in view. */}
+              <button
+                type="button"
+                className={styles.zoomButton}
+                data-testid="trajectory-mode-clock"
+                aria-pressed={clock}
+                aria-label={t('trajectory.mode.clock')}
+                title={t('trajectory.mode.clock')}
+                onClick={() => {
+                  setLastAction('mode');
+                  onModeChange(clock ? 'active' : 'clock');
+                }}
+              >
+                <ClockIcon size={10} strokeWidth={1.8} aria-hidden="true" />
+              </button>
               <button
                 type="button"
                 className={styles.zoomButton}
@@ -714,12 +789,19 @@ export function TrajectoryOverview({
                 <Maximize2Icon size={10} strokeWidth={1.8} aria-hidden="true" />
               </button>
               <span aria-hidden="true" data-testid="trajectory-overview-busy">
-                {zoomed
-                  ? t('trajectory.zoom.window', {
-                      to: windowTo,
-                      busy: busy ?? '',
-                    })
-                  : t('trajectory.overview.busy', { duration: busy ?? '' })}
+                {clock
+                  ? zoomed
+                    ? windowTo
+                    : t('trajectory.clock.window', {
+                        elapsed: elapsed ?? '',
+                        active: activeText ?? '',
+                      })
+                  : zoomed
+                    ? t('trajectory.zoom.window', {
+                        to: windowTo,
+                        busy: busy ?? '',
+                      })
+                    : t('trajectory.overview.busy', { duration: busy ?? '' })}
               </span>
             </span>
           </div>
@@ -732,13 +814,19 @@ export function TrajectoryOverview({
             role="status"
             data-testid="trajectory-zoom-status"
           >
-            {zoomed
-              ? t('trajectory.zoom.status', {
-                  from: windowFrom,
-                  to: windowTo,
-                  busy: busy ?? '',
-                })
-              : ''}
+            {lastAction === 'mode'
+              ? t(
+                  clock
+                    ? 'trajectory.clock.status'
+                    : 'trajectory.active.status',
+                )
+              : zoomed
+                ? t('trajectory.zoom.status', {
+                    from: windowFrom,
+                    to: windowTo,
+                    busy: busy ?? '',
+                  })
+                : ''}
           </span>
         </>
       ) : notice ? (

@@ -5982,3 +5982,31 @@ describe('assistantBlockRendersAsSystemNotice', () => {
     ).toBe(false);
   });
 });
+
+it('projects generic tool wrappers into real names and arguments in chat messages', () => {
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'wrapped',
+        status: 'completed',
+        rawInput: {
+          name: 'mcp__server__lookup',
+          arguments: { query: 'value' },
+        },
+        _meta: { toolName: 'tool_call' },
+      },
+    }),
+  );
+  const message = transcriptBlocksToDaemonMessages(state.blocks).find(
+    (message) => message.role === 'tool_group',
+  );
+  expect(message?.role === 'tool_group' && message.tools[0]).toMatchObject({
+    toolName: 'mcp__server__lookup',
+    title: 'mcp__server__lookup',
+    args: { query: 'value' },
+  });
+});

@@ -93,6 +93,11 @@ describe('StandaloneApp', () => {
     vi.restoreAllMocks();
   });
 
+  it('enables the tool calls entry in the standalone app', () => {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    expect(testState.props?.webShellProps.showToolCalls).toBe(true);
+  });
+
   it('reloads the page when the root error fallback retry is clicked', () => {
     testState.throwOnRender = true;
     const reload = vi.fn();
