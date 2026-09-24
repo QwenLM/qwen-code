@@ -1300,4 +1300,62 @@ describe('review fixes', () => {
       'delivered',
     ]);
   });
+
+  it('previews without uploading or leaving a task, then submits that exact snapshot', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath, { dryRun: true });
+    expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+    expect(h.store.list()).toEqual([]);
+    const digest = /--expect ([0-9a-f]{16})/.exec(h.out.join('\n'))?.[1];
+    expect(digest).toBeDefined();
+
+    await runPlan(h.deps, h.planPath, { expect: digest });
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+    expect(h.store.list()).toHaveLength(1);
+  });
+
+  it('refuses a submission whose batch changed after the approved preview', async () => {
+    const mutations: Array<(plan: Record<string, unknown>) => void> = [
+      (plan) => {
+        (plan['shared'] as Record<string, unknown>)['instructions'] =
+          'Translate to French.';
+      },
+      (plan) => {
+        plan['items'] = (plan['items'] as unknown[]).slice(0, 1);
+      },
+      (plan) => {
+        plan['maxOutputTokens'] = 64;
+      },
+    ];
+    for (const mutate of mutations) {
+      const h = (harness = setup());
+      await runPlan(h.deps, h.planPath, { dryRun: true });
+      const digest = /--expect ([0-9a-f]{16})/.exec(h.out.join('\n'))?.[1];
+      const plan = JSON.parse(fs.readFileSync(h.planPath, 'utf8'));
+      mutate(plan);
+      fs.writeFileSync(h.planPath, JSON.stringify(plan));
+      await expect(
+        runPlan(h.deps, h.planPath, { expect: digest }),
+      ).rejects.toThrow(/changed since it was previewed/);
+      expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+      expect(h.store.list()).toEqual([]);
+      fs.rmSync(h.root, { recursive: true, force: true });
+      fs.rmSync(h.home, { recursive: true, force: true });
+    }
+    harness = undefined;
+  });
+
+  it('refuses a submission whose source file changed after the preview', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath, { dryRun: true });
+    const digest = /--expect ([0-9a-f]{16})/.exec(h.out.join('\n'))?.[1];
+    fs.writeFileSync(
+      path.join(h.root, 'docs', 'zh', 'a.md'),
+      '# A\n\n改了。\n',
+    );
+    await expect(
+      runPlan(h.deps, h.planPath, { expect: digest }),
+    ).rejects.toThrow(/changed since it was previewed/);
+    expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+  });
 });

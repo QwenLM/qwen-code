@@ -38,15 +38,26 @@ writing them to docs/en with the same file names
 ```
 
 The agent runs `qwen batch check`, confirms the task fits, reads a small
-sample, writes a plan to `.qwen/batch/plans/`, and submits it:
+sample, writes a plan to `.qwen/batch/plans/`, and previews it — nothing is
+uploaded or billed:
 
 ```bash
-qwen batch run .qwen/batch/plans/<slug>.json
-# task translate-docs-20260923103000: 42 item(s), window 24h
+qwen batch run .qwen/batch/plans/<slug>.json --dry-run
+# preview: 42 item(s), window 24h — nothing uploaded, nothing billed
 # model qwen-plus, thinking off, max output 8192 tokens (frozen from your current settings; retries reuse them)
 # ~180,000 in / ~190,000 out tokens (rough estimate); ...
+# snapshot 3f9c2a7e5d10b884; submit exactly this batch with: qwen batch run .qwen/batch/plans/<slug>.json --expect 3f9c2a7e5d10b884
+```
+
+It then submits that snapshot. The approval prompt for this command is where
+you decide to spend, with the preview above it; if the plan, a source file or
+your settings changed in between, the submission is refused.
+
+```bash
+qwen batch run .qwen/batch/plans/<slug>.json --expect 3f9c2a7e5d10b884
+# task translate-docs-20260923103000: 42 item(s), window 24h
+# ...
 # batch job: batch_abc123
-# collect later with: qwen batch collect translate-docs-20260923103000
 ```
 
 `run` returns immediately and **you do not need to collect by hand**. The

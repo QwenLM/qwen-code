@@ -86,6 +86,10 @@ describe('bundled batch-api skill', () => {
     expect(body).toContain('Never fall back to doing the transform yourself');
     // Every executor call goes through the session's own CLI first.
     expect(body).toContain('"${QWEN_CODE_CLI:-qwen}" batch run');
+    // The paid submission is approved against a preview it must still match.
+    const preview = body.indexOf('--dry-run');
+    expect(preview).toBeGreaterThan(-1);
+    expect(preview).toBeLessThan(body.indexOf('--expect <digest>'));
   });
 
   it('waits in a background shell, never polls from the model, never retries', () => {

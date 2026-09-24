@@ -410,9 +410,32 @@ function keepPlansOutOfGit(cwd: string, planPath: string): void {
   if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, '*\n');
 }
 
+export interface RunOptions {
+  /** Assemble and report without uploading; prints the snapshot digest. */
+  dryRun?: boolean;
+  /** Submit only if the assembled batch still matches this digest. */
+  expect?: string;
+}
+
+/**
+ * What the user approves when they approve a paid submission: everything the
+ * provider will bill for — each request line (sources, instructions, model,
+ * frozen parameters), the completion window and the account it runs on.
+ */
+const snapshotDigest = (task: BatchTask, assembly: AttemptAssembly) =>
+  sha256(
+    [
+      task.completionWindow,
+      task.endpoint?.baseUrl,
+      task.endpoint?.keyFingerprint,
+      assembly.jsonl,
+    ].join('\n'),
+  ).slice(0, 16);
+
 export async function runPlan(
   deps: WorkflowDeps,
   planFile: string,
+  options: RunOptions = {},
 ): Promise<void> {
   const planPath = path.resolve(deps.cwd, planFile);
   const plan = loadPlanFile(planPath);
@@ -434,6 +457,7 @@ export async function runPlan(
   task.attempts.push(attempt);
   let assembly: AttemptAssembly;
   let cost: { text: string; costUsd?: number };
+  let digest: string;
   try {
     if (plan.enableThinking === false && request.thinkingMandatory) {
       throw new Error(
@@ -443,15 +467,30 @@ export async function runPlan(
     assembly = assembleAttempt(task, attemptNumber, attempt.itemIds);
     cost = costLine(assembly.inputTokens, assembly.outputTokens, deps.env);
     enforceBudget(plan, cost);
+    digest = snapshotDigest(task, assembly);
+    // An approval covers the batch that was previewed, not whatever the
+    // plan file, its sources or the settings say by the time it runs.
+    if (options.expect !== undefined && options.expect !== digest) {
+      throw new Error(
+        `the batch changed since it was previewed (expected ${options.expect}, now ${digest}): ` +
+          `the plan, a source file or the frozen settings differ. Nothing was submitted; preview again with --dry-run.`,
+      );
+    }
   } catch (error) {
     // Nothing reached the provider: leave no empty task behind in `list`.
     store.remove(task.id);
     throw error;
   }
-  store.save(task);
+  if (options.dryRun) {
+    store.remove(task.id);
+  } else {
+    store.save(task);
+  }
 
   deps.out(
-    `task ${task.id}: ${task.items.length} item(s), window ${task.completionWindow}`,
+    options.dryRun
+      ? `preview: ${task.items.length} item(s), window ${task.completionWindow} — nothing uploaded, nothing billed`
+      : `task ${task.id}: ${task.items.length} item(s), window ${task.completionWindow}`,
   );
   const effective = {
     ...request,
@@ -472,6 +511,12 @@ export async function runPlan(
     deps.err(`[batch] note: ${note}`);
   }
   deps.out(cost.text);
+  if (options.dryRun) {
+    deps.out(
+      `snapshot ${digest}; submit exactly this batch with: qwen batch run ${planFile} --expect ${digest}`,
+    );
+    return;
+  }
   await store.withLock(
     task.id,
     () => submitAttempt(deps, task, attempt, store, assembly),

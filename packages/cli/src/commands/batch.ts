@@ -201,17 +201,38 @@ const runWorkflowCommand: CommandModule = {
   describe:
     'Run an agent-prepared batch plan: assemble requests, submit, record the task',
   builder: (yargs) =>
-    yargs.positional('plan', {
-      describe:
-        'Plan JSON (usually written by the /batch-api skill): shared rules + source/target items',
-      type: 'string',
-      demandOption: true,
-    }),
+    yargs
+      .positional('plan', {
+        describe:
+          'Plan JSON (usually written by the /batch-api skill): shared rules + source/target items',
+        type: 'string',
+        demandOption: true,
+      })
+      .option('dry-run', {
+        describe:
+          'Assemble and show items, frozen settings and the estimate without uploading; prints a snapshot digest',
+        type: 'boolean',
+        default: false,
+      })
+      .option('expect', {
+        describe:
+          'Submit only if the batch still matches this snapshot digest from --dry-run',
+        type: 'string',
+      })
+      .check((argv) =>
+        argv['dry-run'] && argv['expect'] !== undefined
+          ? '--dry-run and --expect cannot be combined'
+          : true,
+      ),
   handler: (argv) =>
     run(async () => {
       await runPlan(
         workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
         argv['plan'] as string,
+        {
+          dryRun: argv['dry-run'] as boolean,
+          expect: argv['expect'] as string | undefined,
+        },
       );
     }),
 };

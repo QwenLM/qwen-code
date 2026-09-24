@@ -41,7 +41,11 @@ of items.
   3. Prepare lightly: glob the files, read a 2–3 file sample, write the
      shared rules once.
   4. Write the plan to `.qwen/batch/plans/<slug>.json`.
-  5. Run `qwen batch run <plan>` and relay its output.
+  5. Preview with `qwen batch run <plan> --dry-run` (nothing uploaded) and
+     show the user the item count, frozen settings and estimate; then submit
+     that exact snapshot with `qwen batch run <plan> --expect <digest>`.
+     Approving this command is the spending decision, made with the preview
+     in view; a batch that changed since the preview is refused.
   6. Start `qwen batch collect <task-id> --wait` as a background shell and
      end the turn (§6).
   7. When the waiter exits, the agent is notified once: it reports the
@@ -52,15 +56,15 @@ of items.
 
 ### 2.2 `qwen batch` subcommands (deterministic executor)
 
-| Command             | Behavior                                                                                   |
-| ------------------- | ------------------------------------------------------------------------------------------ |
-| `check`             | Verify credentials, endpoint and Batch route; show what `run` would freeze; nothing billed |
-| `run <plan>`        | Validate plan → assemble → estimate → budget gate → submit → record                        |
-| `collect <task-id>` | Reconcile → poll (optional `--wait`) → download → validate → deliver → report              |
-| `retry <task-id>`   | Resubmit only `failed` items as a new attempt; truncated ones need `--max-output-tokens`   |
-| `list`              | List recorded tasks (local only, no credentials)                                           |
-| `cancel <task-id>`  | Cancel the task's active batch (finished requests are still billed)                        |
-| `clean <task-id>`   | Delete the local record; cancels nothing; refuses while a batch may be open unless forced  |
+| Command             | Behavior                                                                                                                                                                          |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check`             | Verify credentials, endpoint and Batch route; show what `run` would freeze; nothing billed                                                                                        |
+| `run <plan>`        | Validate plan → assemble → estimate → budget gate → submit → record; `--dry-run` stops before upload and prints a snapshot digest, `--expect <digest>` submits only that snapshot |
+| `collect <task-id>` | Reconcile → poll (optional `--wait`) → download → validate → deliver → report                                                                                                     |
+| `retry <task-id>`   | Resubmit only `failed` items as a new attempt; truncated ones need `--max-output-tokens`                                                                                          |
+| `list`              | List recorded tasks (local only, no credentials)                                                                                                                                  |
+| `cancel <task-id>`  | Cancel the task's active batch (finished requests are still billed)                                                                                                               |
+| `clean <task-id>`   | Delete the local record; cancels nothing; refuses while a batch may be open unless forced                                                                                         |
 
 `run` prints the task id and exits, so waiting never costs agent turns.
 `collect` can run any number of times.
@@ -185,6 +189,7 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
 | Assembled line over 1 MB                                                | Refused before upload; split the document                                                                         |
 | Create returns a definite 4xx                                           | Orphan upload deleted, items `failed`, `retry` is safe                                                            |
 | Create answer lost (5xx / dropped socket)                               | `submit-unknown`, and `run` exits with an error; `collect` reconciles via the provider list; no resubmit          |
+| Plan, a source or the frozen settings changed after the preview         | `run --expect` refuses; nothing is uploaded and no task is kept                                                   |
 | Reconcile finds 0 or 2+ candidates                                      | Report and stop; the provider list is the source of truth                                                         |
 | Batch not settled at collect                                            | Report status; `--wait` polls (no lock held) with 10s → 60s backoff until it settles or `--timeout`               |
 | Result truncated / tool calls / empty                                   | Item `failed` with the reason; a truncated item needs a larger limit to retry                                     |

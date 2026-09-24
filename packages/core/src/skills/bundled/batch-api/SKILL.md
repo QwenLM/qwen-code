@@ -127,22 +127,32 @@ Rules:
 
 ## 4. Submit through the executor
 
-Run exactly this with the shell tool:
+First preview the batch — it assembles every request and prints the item
+count, the frozen model/thinking/output-limit line, the cost estimate and a
+snapshot digest, but uploads nothing and bills nothing:
 
 ```
-"${QWEN_CODE_CLI:-qwen}" batch run .qwen/batch/plans/<slug>.json
+"${QWEN_CODE_CLI:-qwen}" batch run .qwen/batch/plans/<slug>.json --dry-run
 ```
 
-Then report to the user, verbatim from the command output: the task id, item
-count, the frozen model/thinking/output-limit line, the cost estimate, and
-any `[batch]` warning. If the command fails, relay its error and stop. The
-single exception: when the error names a field of the plan file itself (an
-invalid id, a duplicate target, an unknown field), fix that field once and
-run again.
+Show the user those lines verbatim, plus any `[batch]` note. Then submit
+exactly that snapshot, with the digest the preview printed:
+
+```
+"${QWEN_CODE_CLI:-qwen}" batch run .qwen/batch/plans/<slug>.json --expect <digest>
+```
+
+Approving this command is the user's decision to spend, made with the preview
+in front of them — never submit without a preview in the same turn, and never
+drop `--expect`. If it reports that the batch changed since the preview, run
+the preview again and show the new one. If either command fails, relay its
+error and stop. The single exception: when the error names a field of the
+plan file itself (an invalid id, a duplicate target, an unknown field), fix
+that field once and preview again.
 
 ## 5. Wait in the background, then report
 
-Right after a successful `run`, start the waiter with the shell tool and
+Right after a successful submission, start the waiter with the shell tool and
 `is_background: true`:
 
 ```
