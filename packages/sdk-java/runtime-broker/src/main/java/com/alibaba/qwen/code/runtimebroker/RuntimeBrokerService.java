@@ -157,6 +157,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                     CompletionStage<Object> result;
                     try {
+                        requireUsableLease(context);
                         result = mapFailure(safeStage(() ->
                                 transport.control(context.lease(),
                                         context.session(), immutable)),
@@ -231,6 +232,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             != ToolExecutionRecord.State.CANCEL_REQUESTED) {
                         return CompletableFuture.completedFuture(requested);
                     }
+                    requireUsableLease(context);
                     return mapFailure(safeStage(() -> transport.cancel(
                             context.lease(), context.session(),
                             requested.getReference())),
@@ -336,6 +338,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<Boolean> releaseSession(
             SessionContext context) {
+        requireUsableLease(context);
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
         synchronized (context) {
@@ -487,8 +490,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 return finishing;
             }
             BindingContext live = requireLiveBinding(record);
-            return safeStage(() -> provisioner.confirm(request, live.lease()))
-                    .thenApply(ignored -> live);
+            CompletableFuture<BindingContext> confirmed =
+                    new CompletableFuture<>();
+            safeStage(() -> provisioner.confirm(request, live.lease()))
+                    .whenComplete((ignored, error) -> {
+                        if (error == null) {
+                            confirmed.complete(live);
+                        } else {
+                            invalidateBinding(record);
+                            confirmed.completeExceptionally(unwrap(error));
+                        }
+                    });
+            return confirmed;
         }
         if (record.getState()
                 != RuntimeBindingRecord.State.PROVISIONING) {
@@ -550,6 +563,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 "Runtime provisioning failed", cause);
                     }
                     if (currentClaim == null) {
+                        releaseQuietly(claimed.getRequest(), lease);
                         throw unavailable("runtime_provision_fenced",
                                 "Runtime provisioning claim expired");
                     }
@@ -559,6 +573,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                             RuntimeBindingRecord.State.READY,
                                             lease, clock.instant()));
                     if (ready == null) {
+                        releaseQuietly(claimed.getRequest(), lease);
                         throw unavailable("runtime_provision_fenced",
                                 "Runtime provisioning claim expired");
                     }
@@ -667,6 +682,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 || executing.getState()
                         != ToolExecutionRecord.State.EXECUTING
                 || !ownsDispatch(executing, claimed)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (!provisioner.isUsable(context.lease())) {
+            invalidateBinding(context.binding());
+            markUnknown(executing.getExecutionCallId(),
+                    executing.getDispatchGeneration());
             return CompletableFuture.completedFuture(null);
         }
         DispatchRenewal renewal = new DispatchRenewal(
@@ -923,6 +944,40 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 RuntimeBindingRecord.State.FAILED, null, clock.instant()));
     }
 
+    /**
+     * Retires a binding whose lease just failed liveness or attestation so
+     * the next caller mints a fresh generation instead of retrying a dead
+     * record forever.
+     */
+    private void invalidateBinding(RuntimeBindingRecord record) {
+        liveBindings.remove(record.getBindingId());
+        RuntimeBindingRecord claimed = bindingRepository.claimOperation(
+                record.getBindingId(), brokerOwnerId, operationLeaseDuration);
+        if (claimed != null) {
+            failBinding(claimed);
+        }
+    }
+
+    private void requireUsableLease(SessionContext context) {
+        if (!provisioner.isUsable(context.lease())) {
+            invalidateBinding(context.binding());
+            throw unavailable("runtime_provision_failed",
+                    "Managed Runtime process is not alive.");
+        }
+    }
+
+    private void releaseQuietly(RuntimeProvisionRequest request,
+            RuntimeLease lease) {
+        try {
+            provisioner.release(request, lease).whenComplete(
+                    (ignored, error) -> {
+                        // Best-effort teardown for a lease nobody will hold.
+                    });
+        } catch (RuntimeException ignored) {
+            // Best-effort teardown for a lease nobody will hold.
+        }
+    }
+
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -932,6 +987,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         sessions.values().forEach(future -> future.cancel(false));
         dispatches.values().forEach(future -> future.cancel(false));
         scheduler.shutdownNow();
+        provisioner.close();
     }
 
     private CompletionStage<RuntimeScope> resolveScope(

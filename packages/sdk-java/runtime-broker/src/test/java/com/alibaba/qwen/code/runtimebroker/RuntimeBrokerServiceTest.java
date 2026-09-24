@@ -942,6 +942,61 @@ class RuntimeBrokerServiceTest {
         }
     }
 
+    @Test
+    void failedReattestationRetiresTheBindingAndReprovisions() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeBindingRecord ready = join(fixture.service.warm(
+                    "harness"));
+            assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
+
+            fixture.provisioner.confirmResult = CompletableFuture
+                    .failedFuture(new RuntimeBrokerException(503,
+                            "runtime_provision_failed",
+                            "Managed Runtime process is not alive.", true));
+
+            RuntimeBrokerException error = failure(
+                    fixture.service.warm("harness"));
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    fixture.bindingRepository.findById(ready.getBindingId())
+                            .getState());
+
+            fixture.provisioner.confirmResult =
+                    CompletableFuture.completedFuture(null);
+            RuntimeBindingRecord again = join(fixture.service.warm(
+                    "harness"));
+            assertEquals(RuntimeBindingRecord.State.READY, again.getState());
+            assertEquals(2, fixture.provisioner.calls.get());
+            assertNotEquals(ready.getLease().getRuntimeInstanceId(),
+                    again.getLease().getRuntimeInstanceId());
+        }
+    }
+
+    @Test
+    void deadLeaseSkipsDispatchAndRetiresTheBinding() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.provisioner.usable = false;
+
+            join(fixture.service.createExecution("harness", "runtime",
+                    "idempotency", reference("runtime", "digest")));
+
+            assertEquals(0, fixture.transport.executeCalls.get());
+            awaitExecution(fixture.executionRepository, "execution-1",
+                    ToolExecutionRecord.State.UNKNOWN);
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    fixture.bindingRepository.findById("binding-1")
+                            .getState());
+        }
+    }
+
+    @Test
+    void closingTheServiceClosesTheProvisioner() {
+        Fixture fixture = new Fixture(WORKSPACE_SCOPE);
+        fixture.close();
+        assertTrue(fixture.provisioner.closed);
+    }
+
     private static <T> T join(CompletionStage<T> stage) {
         return stage.toCompletableFuture().join();
     }
@@ -1025,8 +1080,13 @@ class RuntimeBrokerServiceTest {
     private static final class FakeProvisioner
             implements RuntimeProvisioner {
         final AtomicInteger calls = new AtomicInteger();
+        final AtomicInteger confirmCalls = new AtomicInteger();
         volatile CompletableFuture<RuntimeLease> provisionResult;
         volatile RuntimeLease issuedLease;
+        volatile CompletableFuture<Void> confirmResult =
+                CompletableFuture.completedFuture(null);
+        volatile boolean usable = true;
+        volatile boolean closed;
 
         @Override
         public CompletionStage<RuntimeLease> provision(
@@ -1037,6 +1097,23 @@ class RuntimeBrokerServiceTest {
             }
             issuedLease = lease(call);
             return CompletableFuture.completedFuture(issuedLease);
+        }
+
+        @Override
+        public CompletionStage<Void> confirm(RuntimeProvisionRequest request,
+                RuntimeLease lease) {
+            confirmCalls.incrementAndGet();
+            return confirmResult;
+        }
+
+        @Override
+        public boolean isUsable(RuntimeLease lease) {
+            return usable;
+        }
+
+        @Override
+        public void close() {
+            closed = true;
         }
     }
 

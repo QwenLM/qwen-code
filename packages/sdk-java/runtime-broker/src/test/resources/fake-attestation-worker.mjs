@@ -13,6 +13,17 @@ const boot = JSON.parse(
   }),
 );
 
+const args = process.argv.slice(2);
+const chatty = args.includes('--chatty');
+if (args.includes('--big-ready')) {
+  process.stdout.write(`${'a'.repeat(40 * 1024)}\n`);
+  process.exit(1);
+}
+if (chatty) {
+  // Mirror the real worker: a stdout write failure is fatal.
+  process.stdout.once('error', () => process.exit(1));
+}
+
 const server = createServer((request, response) => {
   const chunks = [];
   request.on('data', (chunk) => chunks.push(chunk));
@@ -41,6 +52,9 @@ const server = createServer((request, response) => {
         'content-type': 'application/json',
       });
       response.end(body);
+      if (chatty) {
+        process.stdout.write('post-ready chatter\n');
+      }
       return;
     }
     response.writeHead(404, {

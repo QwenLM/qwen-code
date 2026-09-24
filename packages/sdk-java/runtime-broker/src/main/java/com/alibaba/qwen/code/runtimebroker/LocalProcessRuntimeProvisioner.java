@@ -17,17 +17,22 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Starts the merged attestation worker over stdin and returns a lease only
  * after that process attests as the same identity.
  */
 public final class LocalProcessRuntimeProvisioner
-        implements RuntimeProvisioner, AutoCloseable {
+        implements RuntimeProvisioner {
     private static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
+    private static final int READY_RECORD_LIMIT = 32 * 1024;
+    private static final Pattern CAPABILITY_DIGEST =
+            Pattern.compile("sha256:[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final List<String> command;
@@ -67,6 +72,19 @@ public final class LocalProcessRuntimeProvisioner
                 executor);
     }
 
+    @Override
+    public CompletionStage<Void> release(RuntimeProvisionRequest request,
+            RuntimeLease lease) {
+        stop(lease);
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public boolean isUsable(RuntimeLease lease) {
+        OwnedProcess process = owned.get(lease.getRuntimeInstanceId());
+        return process != null && process.process.isAlive();
+    }
+
     void stop(RuntimeLease lease) {
         OwnedProcess process = owned.remove(lease.getRuntimeInstanceId());
         if (process != null) {
@@ -85,6 +103,7 @@ public final class LocalProcessRuntimeProvisioner
 
     private RuntimeLease start(RuntimeProvisionRequest request) {
         OwnedProcess ownedProcess = null;
+        boolean adopted = false;
         try {
             String runtimeInstanceId = UUID.randomUUID().toString();
             String runtimeIncarnation = UUID.randomUUID().toString();
@@ -95,6 +114,12 @@ public final class LocalProcessRuntimeProvisioner
             String token = Base64.getUrlEncoder().withoutPadding()
                     .encodeToString(tokenBytes);
             RuntimeScope scope = request.getScope();
+            if (!CAPABILITY_DIGEST.matcher(scope.getCapabilityDigest())
+                    .matches()) {
+                throw new RuntimeBrokerException(400,
+                        "runtime_provision_failed",
+                        "capabilityDigest is not a sha256 digest.", false);
+            }
             JSONObject boot = new JSONObject();
             boot.put("capabilityDigest", scope.getCapabilityDigest());
             boot.put("epoch", 1);
@@ -114,7 +139,7 @@ public final class LocalProcessRuntimeProvisioner
                     .directory(workingDirectory.toFile())
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();
-            ownedProcess = new OwnedProcess(process, request,
+            ownedProcess = new OwnedProcess(process,
                     new RuntimeProvisionSeed(provisionRequestId,
                             runtimeInstanceId, runtimeIncarnation, leaseId,
                             1, token));
@@ -140,18 +165,15 @@ public final class LocalProcessRuntimeProvisioner
                     leaseId, 1);
             attest(request, ownedProcess.seed, lease);
             owned.put(runtimeInstanceId, ownedProcess);
+            adopted = true;
             return lease;
-        } catch (RuntimeException exception) {
-            if (ownedProcess != null) {
-                ownedProcess.process.destroy();
-            }
-            throw exception;
         } catch (IOException exception) {
-            if (ownedProcess != null) {
-                ownedProcess.process.destroy();
-            }
             throw failed("Managed Runtime worker failed to start.",
                     exception);
+        } finally {
+            if (!adopted && ownedProcess != null) {
+                ownedProcess.process.destroyForcibly();
+            }
         }
     }
 
@@ -169,6 +191,12 @@ public final class LocalProcessRuntimeProvisioner
         try {
             transport.attest(lease, request, seed).toCompletableFuture()
                     .get(READY_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (ExecutionException exception) {
+            if (exception
+                    .getCause() instanceof RuntimeBrokerException failure) {
+                throw failure;
+            }
+            throw failed("Managed Runtime attestation failed.", exception);
         } catch (Exception exception) {
             throw failed("Managed Runtime attestation failed.", exception);
         }
@@ -177,27 +205,70 @@ public final class LocalProcessRuntimeProvisioner
     private static String readReadyLine(Process process) throws IOException {
         CompletableFuture<String> line = new CompletableFuture<>();
         Thread reader = new Thread(() -> {
-            try (BufferedReader input = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(),
-                            StandardCharsets.UTF_8))) {
-                line.complete(input.readLine());
-            } catch (IOException exception) {
-                line.completeExceptionally(exception);
+            BufferedReader input = new BufferedReader(new InputStreamReader(
+                    process.getInputStream(), StandardCharsets.UTF_8));
+            try {
+                line.complete(readLine(input, true));
+            } catch (Throwable throwable) {
+                line.completeExceptionally(throwable);
+            }
+            // The worker treats a closed stdout pipe as fatal, so keep the
+            // pipe open and drained for the worker's lifetime.
+            try {
+                while (readLine(input, false) != null) {
+                    // Discard everything the worker prints after ready.
+                }
+            } catch (Throwable ignored) {
+                // The worker is gone; nothing left to drain.
             }
         }, "runtime-ready");
         reader.setDaemon(true);
         reader.start();
+        String ready;
         try {
-            String ready = line.get(READY_TIMEOUT.toMillis(),
+            ready = line.get(READY_TIMEOUT.toMillis(),
                     TimeUnit.MILLISECONDS);
-            if (ready == null) {
-                throw failed("Managed Runtime worker closed before ready.");
-            }
-            return ready;
         } catch (Exception exception) {
             process.destroyForcibly();
+            if (exception instanceof ExecutionException
+                    && exception
+                            .getCause() instanceof RuntimeBrokerException failure) {
+                throw failure;
+            }
             throw failed("Managed Runtime worker did not become ready.",
                     exception);
+        }
+        if (ready == null) {
+            process.destroyForcibly();
+            throw failed("Managed Runtime worker closed before ready.");
+        }
+        return ready;
+    }
+
+    private static String readLine(BufferedReader input, boolean bounded)
+            throws IOException {
+        StringBuilder builder = new StringBuilder();
+        boolean any = false;
+        while (true) {
+            int value = input.read();
+            if (value == -1) {
+                return any ? builder.toString() : null;
+            }
+            any = true;
+            if (value == '\n') {
+                return builder.toString();
+            }
+            if (value == '\r') {
+                continue;
+            }
+            if (builder.length() >= READY_RECORD_LIMIT) {
+                if (bounded) {
+                    throw failed("Managed Runtime ready record exceeds the "
+                            + "32 KiB limit.");
+                }
+                continue;
+            }
+            builder.append((char) value);
         }
     }
 
@@ -215,7 +286,6 @@ public final class LocalProcessRuntimeProvisioner
                 message, true, cause);
     }
 
-    private record OwnedProcess(Process process,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+    private record OwnedProcess(Process process, RuntimeProvisionSeed seed) {
     }
 }
