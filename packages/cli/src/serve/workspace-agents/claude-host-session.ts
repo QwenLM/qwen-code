@@ -13,7 +13,7 @@ import {
   RequestError,
   type Client,
 } from '@agentclientprotocol/sdk';
-import { sanitizeChildEnv } from '@qwen-code/qwen-code-core';
+import { sanitizeChildEnv } from '@qwen-code/qwen-code-core/utils/sanitize-child-env.js';
 import {
   assertExternalAgentSpawnPlatformSupported,
   selectPeerModeId,
