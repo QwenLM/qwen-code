@@ -157,7 +157,8 @@ export class ComputerUseApp {
       this.#invalidate();
       this.#generation = this.#computer.connectionGeneration;
     }
-    let window = currentWindow(windows, { allowNone: allowNoWindow });
+    const nativeWindow = currentWindow(windows, { allowNone: allowNoWindow });
+    let window = nativeWindow;
     if (window && windows.some((candidate) => candidate.pid === window.pid &&
       candidate.window_id !== window.window_id && candidate.title === "" &&
       candidate.layer === 0 && candidate.is_on_screen === true) &&
@@ -168,7 +169,9 @@ export class ComputerUseApp {
       window = currentPopup(visible, visibleTarget ?? window) ?? window;
     }
     if (!window) return { pid: this.#pid };
-    return { window, pid: window.pid ?? this.#pid, windowId: window.window_id ?? window.windowId, key: `${window.pid ?? this.#pid}:${window.window_id ?? window.windowId}` };
+    return { window, pid: window.pid ?? this.#pid, windowId: window.window_id ?? window.windowId,
+      nativeWindowId: nativeWindow.window_id ?? nativeWindow.windowId,
+      key: `${window.pid ?? this.#pid}:${window.window_id ?? window.windowId}` };
   }
 
   async #observe(options = {}, resolved) {
@@ -285,8 +288,9 @@ export class ComputerUseApp {
         if (elementRequired && !Number.isSafeInteger(point)) {
           throw new ComputerUseError("This action requires a short element ID", { code: "app_element_required" });
         }
+        const keyboard = ["pressKey", "hotkey", "typeText", "paste"].includes(method);
         let address = point === undefined
-          ? { pid: target.pid, windowId: target.windowId }
+          ? { pid: target.pid, windowId: keyboard ? target.nativeWindowId : target.windowId }
           : this.#address(point, target);
         if (method === "drag") {
           if (![options.fromX, options.fromY, options.toX, options.toY].every(Number.isFinite)) {

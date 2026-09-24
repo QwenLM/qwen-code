@@ -38,7 +38,7 @@ function fixture({ platform = "macos", apps = [{ ...appRecord }], windows = [{ .
       });
     },
   };
-  for (const method of ["windowClick", "doubleClick", "rightClick", "windowPressKey", "windowTypeText", "windowHotkey", "windowDrag", "windowScroll", "setValue", "performSecondaryAction"]) {
+  for (const method of ["windowClick", "doubleClick", "rightClick", "windowPressKey", "windowTypeText", "windowHotkey", "windowDrag", "windowScroll", "paste", "setValue", "performSecondaryAction"]) {
     driver[method] = async (input) => {
       calls.push({ method, input });
       return action ? action(method, input) : result({ effect: "confirmed" });
@@ -189,6 +189,16 @@ test("App follows an untitled foreground palette inside its native window", asyn
   await app.click({ x: 50, y: 50 });
   assert.equal(calls.at(-1).input.windowId, 11n);
   assert.equal(calls.at(-1).input.deliveryMode, "background");
+  await app.pressKey("Escape");
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.hotkey(["super", "w"]);
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.typeText("text");
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  await app.paste("text");
+  assert.equal(calls.at(-1).input.windowId, 7n);
   windows.pop();
   assert.equal((await app.getState()).window, "Document");
 });
