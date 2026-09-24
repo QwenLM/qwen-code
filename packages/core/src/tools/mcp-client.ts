@@ -75,6 +75,7 @@ import {
   runWithTimeout,
 } from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
+import { getJsonRpcErrorCode } from './jsonrpc-error-code.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
@@ -1496,6 +1497,16 @@ export async function connectAndDiscover(
     );
 
     mcpClient.onerror = (error) => {
+      // Same -32601 tolerance as the connect() handler (R2-1): a legacy-
+      // era tools-only server answering method-not-found must not poison
+      // the registry here either — the discovery calls below swallow it
+      // and a successful discovery rewrites CONNECTED anyway.
+      if (isJsonRpcMethodNotFound(error)) {
+        debugLogger.debug(
+          `MCP method-not-found (${mcpServerName}): ${getErrorMessage(error)}`,
+        );
+        return;
+      }
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
@@ -1755,46 +1766,30 @@ async function discoverToolsWithMetadata(
 /**
  * True when an MCP request failed because the method is not implemented.
  * JSON-RPC guarantees the numeric code (`-32601`), so that is the primary,
- * precise check. The message fallback (for transports that drop the code)
- * keeps the original case-sensitive exact substring `'Method not found'` —
- * deliberately NOT a broad `/method not found/i`, which would also swallow
- * unrelated errors like "Error in method not found handler: ...".
+ * precise check (via the shared `getJsonRpcErrorCode` extraction). The
+ * message fallback (for transports that drop the code) keeps the original
+ * case-sensitive exact substring `'Method not found'` — deliberately NOT a
+ * broad `/method not found/i`, which would also swallow unrelated errors
+ * like "Error in method not found handler: ...".
  */
 function isMethodNotFound(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (code === -32601) return true;
+  if (getJsonRpcErrorCode(error) === -32601) return true;
   return error instanceof Error && error.message.includes('Method not found');
 }
 
 /**
- * Stricter -32601 detector for `client.onerror`, which has no request
- * context and therefore cannot accept the loose `'Method not found'`
- * substring fallback that `isMethodNotFound` uses. The substring match
- * matches on any string containing the exact case-sensitive phrase,
- * which is fine inside `listMcpPrompts`/`listMcpResources` (where the
- * call site knows which method it just dispatched) but unsafe at the
- * session-liveness layer — a server's error body could carry that
- * phrase for unrelated reasons. Instead, parse the JSON-RPC error
- * payload the legacy-era HTTP transport wraps the response in and
- * require the precise numeric `-32601` code.
+ * -32601 detector for `client.onerror`, which has no request context and
+ * therefore cannot accept the loose `'Method not found'` substring
+ * fallback that `isMethodNotFound` uses — the phrase alone must never
+ * gate a session-liveness decision. Accepts only the numeric
+ * `-32601` code, wherever the transport surfaces it: structured
+ * `error.code`, or the JSON-RPC body embedded in `data.text` / `text` /
+ * `message` (legacy-era HTTP wraps the body before `onerror` fires).
+ * Worded however the server phrases the message — a spec-legal
+ * `-32601` with "Unknown method" still counts.
  */
 function isJsonRpcMethodNotFound(error: unknown): boolean {
-  if (!isMethodNotFound(error)) return false;
-  const code = (error as { code?: unknown } | null)?.code;
-  if (code === -32601) return true;
-  // The legacy-era transport wraps the JSON-RPC error body in a string
-  // like `Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}`.
-  // A substring match against the bare phrase is too loose for a
-  // session-liveness check — require the numeric code inside the
-  // payload too.
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : '';
-  const parsed = /\{[^{}]*"code"\s*:\s*(-?\d+)/.exec(message);
-  return parsed !== null && parsed[1] === '-32601';
+  return getJsonRpcErrorCode(error) === -32601;
 }
 
 /**

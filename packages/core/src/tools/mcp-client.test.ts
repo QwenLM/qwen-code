@@ -1571,15 +1571,15 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
 
-    // Issue #12496: a JSON-RPC -32601 "Method not found" response from a
-    // legacy-era tools-only server (e.g. GitLab built-in MCP) used to
-    // flip status to DISCONNECTED via the SDK's `client.onerror` even
-    // though the discovery layer already tolerates -32601 (returns
-    // `[]`). The onerror path must mirror the discovery tolerance so
-    // a missing prompts/resources capability does not poison the
-    // status registry. Other transport errors (ECONNREFUSED, 502,
-    // etc.) still flip DISCONNECTED.
-    it('does not flip status to DISCONNECTED on a -32601 onerror (#12496)', async () => {
+    // Issue #12496: the session-liveness layer (client.onerror) must
+    // tolerate a numeric JSON-RPC -32601 — a legacy-era tools-only server
+    // (e.g. GitLab built-in) answers method-not-found for prompts/list /
+    // resources/list it never advertised, and the wrapped body poisons the
+    // status registry via onerror before the discovery layer swallows it.
+    // Other transport errors (ECONNREFUSED, proxy 502, phrase-only prose)
+    // still flip DISCONNECTED.
+    let onerrorTestSeq = 0;
+    async function setupConnectedClient(label: string) {
       const mockedClient: Record<string, unknown> = {
         connect: vi.fn(),
         discover: vi.fn(),
@@ -1601,115 +1601,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
         tool: () => Promise.resolve({ functionDeclarations: [] }),
       } as unknown as GenAiLib.CallableTool);
-      const serverName = `method-not-found-${Date.now()}`;
-      const client = new McpClient(
-        serverName,
-        {
-          command: 'test-command',
-        },
-        {} as ToolRegistry,
-        {} as PromptRegistry,
-        {} as WorkspaceContext,
-        false,
-      );
-      await client.connect();
-      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
-
-      // The production code does `this.client.onerror = (error) => {…}` —
-      // capture the assigned callback off the mock so we can invoke it
-      // directly, simulating the SDK transport's outer `catch` firing
-      // onerror with a -32601 JSON-RPC response.
-      const onerror = mockedClient['onerror'] as (error: unknown) => void;
-      const error32601 = Object.assign(
-        new Error(
-          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
-        ),
-        { code: 'CLIENT_HTTP_NOT_IMPLEMENTED' },
-      );
-      onerror(error32601);
-
-      // Status must stay CONNECTED. The earlier disconnect poison on
-      // -32601 made the server red in `/mcp` even though tools/list
-      // had succeeded.
-      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
-      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
-    });
-
-    it('still flips status to DISCONNECTED on a real transport error after #12496', async () => {
-      const mockedClient: Record<string, unknown> = {
-        connect: vi.fn(),
-        discover: vi.fn(),
-        disconnect: vi.fn(),
-        getStatus: vi.fn(),
-        registerCapabilities: vi.fn(),
-        setRequestHandler: vi.fn(),
-        getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
-        request: vi.fn().mockResolvedValue({ tools: [] }),
-        close: vi.fn(),
-        getInstructions: vi.fn(),
-      };
-      vi.mocked(ClientLib.Client).mockReturnValue(
-        mockedClient as unknown as ClientLib.Client,
-      );
-      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
-        {} as SdkClientStdioLib.StdioClientTransport,
-      );
-      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
-        tool: () => Promise.resolve({ functionDeclarations: [] }),
-      } as unknown as GenAiLib.CallableTool);
-      const serverName = `real-error-${Date.now()}`;
-      const client = new McpClient(
-        serverName,
-        {
-          command: 'test-command',
-        },
-        {} as ToolRegistry,
-        {} as PromptRegistry,
-        {} as WorkspaceContext,
-        false,
-      );
-      await client.connect();
-      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
-
-      const onerror = mockedClient['onerror'] as (error: unknown) => void;
-      onerror(new Error('TypeError: fetch failed: ECONNREFUSED'));
-
-      // Real transport errors must still flip DISCONNECTED.
-      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
-      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
-    });
-
-    // Issue #12496 R1-1: the session-liveness layer cannot accept the
-    // loose `'Method not found'` substring match `isMethodNotFound`
-    // uses for discovery. A server error body containing the phrase
-    // for an unrelated reason (e.g. a generic 404 page or a stream
-    // parser error mentioning the phrase) must still flip DISCONNECTED,
-    // because the numeric JSON-RPC `-32601` code is the only thing
-    // that proves the server explicitly answered "I don't have this
-    // method family".
-    it('still flips DISCONNECTED when the body mentions Method not found without -32601 (#12496 R1-1)', async () => {
-      const mockedClient: Record<string, unknown> = {
-        connect: vi.fn(),
-        discover: vi.fn(),
-        disconnect: vi.fn(),
-        getStatus: vi.fn(),
-        registerCapabilities: vi.fn(),
-        setRequestHandler: vi.fn(),
-        getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
-        request: vi.fn().mockResolvedValue({ tools: [] }),
-        close: vi.fn(),
-        getInstructions: vi.fn(),
-      };
-      vi.mocked(ClientLib.Client).mockReturnValue(
-        mockedClient as unknown as ClientLib.Client,
-      );
-      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
-        {} as SdkClientStdioLib.StdioClientTransport,
-      );
-      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
-        tool: () => Promise.resolve({ functionDeclarations: [] }),
-      } as unknown as GenAiLib.CallableTool);
-      const serverName = `phrase-no-code-${Date.now()}`;
+      const serverName = `${label}-${(onerrorTestSeq += 1)}`;
       const client = new McpClient(
         serverName,
         { command: 'test-command' },
@@ -1720,18 +1612,78 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       );
       await client.connect();
       expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
-
       const onerror = mockedClient['onerror'] as (error: unknown) => void;
-      // Message contains the substring but no `-32601` JSON-RPC code —
-      // a benign error body that happens to mention the phrase.
-      onerror(
+      return { client, onerror, serverName };
+    }
+
+    it.each([
+      [
+        'legacy-era wrapped -32601 body with the phrase',
+        Object.assign(
+          new Error(
+            'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+          ),
+          { code: 'CLIENT_HTTP_NOT_IMPLEMENTED' },
+        ),
+      ],
+      [
+        'spec-legal -32601 worded without the phrase (R2-3)',
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Unknown method"},"id":1}',
+        ),
+      ],
+      [
+        'structured numeric -32601 with no body phrase (R2-5 fast path)',
+        Object.assign(new Error('server refused'), { code: -32601 }),
+      ],
+      [
+        'body in data.text with nested members before code (R2-7)',
+        Object.assign(new Error('wrapped'), {
+          data: {
+            text: '{"jsonrpc":"2.0","params":{"nested":{"x":1}},"error":{"code":-32601,"message":"nope"}}',
+          },
+        }),
+      ],
+    ])('keeps CONNECTED on onerror %s (#12496)', async (label, error) => {
+      const { client, onerror, serverName } = await setupConnectedClient(
+        `mnf-${label.slice(0, 6).replace(/\W/g, '')}`,
+      );
+      onerror(error);
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      // R1-4: the tolerance path must not record the benign payload as a
+      // transport error, and must log at debug, not error.
+      expect(client.getLastTransportError()).toBeUndefined();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('method-not-found'),
+      );
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'a real transport error',
+        new Error('TypeError: fetch failed: ECONNREFUSED'),
+      ],
+      [
+        'phrase-only prose with no -32601 code',
         new Error(
           'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request: Method not found in registry"},"id":1}',
         ),
+      ],
+    ])('flips DISCONNECTED on onerror %s (#12496)', async (label, error) => {
+      const { client, onerror, serverName } = await setupConnectedClient(
+        `disc-${label.slice(0, 6).replace(/\W/g, '')}`,
       );
-
+      onerror(error);
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      // R1-4: transport errors keep the original contract — the upstream
+      // cause is captured for PoolEntry and logged at error level.
+      expect(client.getLastTransportError()).toBe(error);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(`MCP ERROR (${serverName})`),
+      );
     });
 
     it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
