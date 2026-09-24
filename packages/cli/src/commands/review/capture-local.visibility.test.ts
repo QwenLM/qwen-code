@@ -74,7 +74,16 @@ function capture(): Record<string, unknown> {
   return JSON.parse(readFileSync(out, 'utf8')) as Record<string, unknown>;
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
+  // A candidate is written only under a published identity (an anchor
+  // certified by nobody is withheld), and this suite's control arm asserts
+  // the candidate IS written — so the fixture publishes one, as every real
+  // round has. Without it the arm passes for the wrong reason and the
+  // withhold arms stop discriminating.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
   invisibleScript.length = 0;
   invisibleCalls = 0;
@@ -94,6 +103,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (savedIdentity === undefined) {
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  } else {
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+  }
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();

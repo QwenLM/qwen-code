@@ -118,6 +118,7 @@ import type {
 import { TranscriptViewport } from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
+import { TurnCallsProvider } from './turnCallsContext';
 import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
@@ -224,6 +225,7 @@ import {
 import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
+  ArtifactFilter,
   TurnOutputKind,
   TurnOutputOpenRequest,
   TurnOutputScheduledTask,
@@ -1251,6 +1253,8 @@ export interface WebShellProps {
   header?: WebShellChatHeaderOptions;
   /** Right extension panel options. */
   rightPanel?: WebShellRightPanelOptions;
+  /** Show the tool-call entry on user messages. Defaults to false. */
+  showToolCalls?: boolean;
   /** Environment information panel options. */
   environmentPanel?: WebShellEnvironmentPanelOptions;
   /** Session ids to control the split view; an empty array closes it. */
@@ -1266,8 +1270,11 @@ export interface WebShellProps {
   /**
    * Called instead of the built-in right panel open behavior when a user clicks
    * a turn output such as review changes, an artifact, or a scheduled task.
+   * Return false to use the built-in behavior; true or undefined claims the open.
    */
-  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onRightPanelOpen?:
+    | ((request: TurnOutputOpenRequest) => void)
+    | ((request: TurnOutputOpenRequest) => boolean);
   /** Override file-review links without replacing the other right panels. */
   onFileReviewOpen?: (
     request: Extract<TurnOutputOpenRequest, { kind: 'review' }>,
@@ -1282,6 +1289,7 @@ export interface WebShellProps {
    * Controls which turn output cards appear below messages. Defaults to all.
    */
   messageTurnOutputs?: readonly TurnOutputKind[];
+  filterArtifact?: ArtifactFilter;
   /** Imperative handle for externally opening WebShell surfaces. */
   shellRef?: React.Ref<WebShellApi>;
   /**
@@ -1800,6 +1808,7 @@ interface ArtifactPanelPersistedState {
 
 type PersistedArtifactPanelTab =
   | Extract<ArtifactPanelTab, { kind: 'web_preview' }>
+  | Omit<Extract<ArtifactPanelTab, { kind: 'turn_calls' }>, 'promptLabel'>
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'review' }>,
       | 'id'
@@ -1907,6 +1916,8 @@ function parsePersistedArtifactPanelTab(
     'rootToolCallId',
     'taskId',
     'parentSessionId',
+    'recordId',
+    'promptId',
   ];
   if (
     optionalStrings.some(
@@ -1926,6 +1937,21 @@ function parsePersistedArtifactPanelTab(
   }
   const common = { id: tab['id'], title: tab['title'] };
   switch (tab['kind']) {
+    case 'turn_calls':
+      if (
+        tab['id'] !== 'turn_calls' ||
+        typeof tab['turnId'] !== 'string' ||
+        (!tab['recordId'] && !tab['promptId'])
+      )
+        return;
+      return {
+        ...common,
+        id: 'turn_calls',
+        kind: 'turn_calls',
+        turnId: tab['turnId'],
+        recordId: tab['recordId'] as string | undefined,
+        promptId: tab['promptId'] as string | undefined,
+      };
     case 'review':
       return {
         ...common,
@@ -2094,6 +2120,19 @@ function serializeArtifactPanelTabs(
         ];
       case 'source':
         return [];
+      case 'turn_calls':
+        // Projection-local turn IDs can identify a different turn after reload.
+        if (!tab.recordId && !tab.promptId) return [];
+        return [
+          {
+            id: tab.id,
+            title,
+            kind: tab.kind,
+            turnId: tab.turnId,
+            recordId: tab.recordId,
+            promptId: tab.promptId,
+          },
+        ];
       case 'review':
         return [
           {
@@ -3171,6 +3210,7 @@ export function App({
   modelManagement,
   header,
   rightPanel,
+  showToolCalls = false,
   environmentPanel,
   splitSessionIds: externalSplitSessionIds,
   onSplitSessionIdsChange,
@@ -3181,6 +3221,7 @@ export function App({
   onInsightReportOpen,
   onContextUsageOpen,
   messageTurnOutputs,
+  filterArtifact,
   shellRef,
   composerToolbarActions,
   mainModelFilter,
@@ -3424,6 +3465,7 @@ export function App({
   const customization = useMemo(
     () => ({
       artifact,
+      filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
@@ -3457,6 +3499,7 @@ export function App({
     }),
     [
       artifact,
+      filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
@@ -3736,6 +3779,9 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
+  const gitWorktreesSupported =
+    workspace.capabilities?.features?.includes('workspace_git_worktrees') ===
+    true;
   const [initialRemoteWorkspaceAddActive] = useState(
     () => standalone && isRemoteWorkspaceAddActive(),
   );
@@ -4781,6 +4827,23 @@ export function App({
   const artifactPanelDeferredPersistedTabsRef = useRef(
     new Map<string, PersistedArtifactPanelTab[]>(),
   );
+  useEffect(() => {
+    if (artifactPanelRestoredSessionKeyRef.current !== logicalSessionKey)
+      return;
+    const tab = artifactPanelTabs.find((item) => item.kind === 'turn_calls');
+    if (!tab || tab.kind !== 'turn_calls' || tab.recordId) return;
+    const recordId = blocks.find(
+      (block) =>
+        block.kind === 'user' &&
+        (tab.promptId
+          ? block.promptId === tab.promptId
+          : block.id === tab.turnId),
+    )?.sourceRecordIds?.[0];
+    if (!recordId) return;
+    setArtifactPanelTabs((tabs) =>
+      tabs.map((item) => (item === tab ? { ...tab, recordId } : item)),
+    );
+  }, [artifactPanelTabs, blocks, logicalSessionKey]);
   useLayoutEffect(() => {
     if (
       !logicalSessionKey ||
@@ -5573,7 +5636,11 @@ export function App({
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
           ? tabs.map((item) => (item.id === tab.id ? tab : item))
-          : [tab, ...tabs],
+          : [
+              ...tabs.filter((item) => item.kind === 'turn_calls'),
+              tab,
+              ...tabs.filter((item) => item.kind !== 'turn_calls'),
+            ],
       );
       setActiveArtifactPanelTabId(tab.id);
       setArtifactPanelWidth((width) =>
@@ -5740,7 +5807,11 @@ export function App({
                   ? { ...tab, previewVersion: (item.previewVersion ?? 0) + 1 }
                   : item,
               )
-            : [tab, ...tabs],
+            : [
+                ...tabs.filter((item) => item.kind === 'turn_calls'),
+                tab,
+                ...tabs.filter((item) => item.kind !== 'turn_calls'),
+              ],
         );
         setActiveArtifactPanelTabId(tab.id);
         setArtifactPanelWidth((width) =>
@@ -6386,6 +6457,8 @@ export function App({
           (persisted?.tabs ?? []).map(
             async (tab): Promise<ArtifactPanelTab | undefined> => {
               switch (tab.kind) {
+                case 'turn_calls':
+                  return { ...tab, sessionId: connection.sessionId };
                 case 'review': {
                   if (
                     tab.sourceSessionId &&
@@ -6632,7 +6705,10 @@ export function App({
           ? { ...tab, initialized: true }
           : tab,
       );
-      setArtifactPanelTabs(activatedTabs);
+      setArtifactPanelTabs([
+        ...activatedTabs.filter((tab) => tab.kind === 'turn_calls'),
+        ...activatedTabs.filter((tab) => tab.kind !== 'turn_calls'),
+      ]);
       if (reclaimEmptiedPanel) {
         // The reclaim removed every restored tab; apply the canonical empty
         // panel reset so no stale panel state is persisted as open.
@@ -6819,14 +6895,54 @@ export function App({
     );
     setArtifactPanelOpen(true);
   }, [connection.sessionId, getDefaultReviewPanelWidth, t]);
+  const openTurnCalls = useCallback(
+    (
+      turnId: string,
+      recordId?: string,
+      promptId?: string,
+      promptLabel?: string,
+    ) => {
+      if (!artifactPanelOpenRef.current) {
+        preserveEnvironmentPanelOnArtifactOpenRef.current = true;
+      }
+      const user = store
+        .getSnapshot()
+        .blocks.find((block) => block.kind === 'user' && block.id === turnId);
+      const tab: ArtifactPanelTab = {
+        id: 'turn_calls',
+        kind: 'turn_calls',
+        sessionId: connection.sessionId,
+        title: t('turnCalls.title'),
+        turnId,
+        recordId: recordId ?? user?.sourceRecordIds?.[0],
+        promptId: promptId ?? user?.promptId,
+        promptLabel:
+          promptLabel ??
+          (user?.kind === 'user'
+            ? user.text.replace(/\s+/g, ' ').trim().slice(0, 160)
+            : undefined),
+      };
+      // One panel follows the turn the reader asked about, so opening another
+      // turn's list retargets the existing tab instead of stacking tabs.
+      setArtifactPanelTabs((tabs) => [
+        tab,
+        ...tabs.filter((item) => item.kind !== 'turn_calls'),
+      ]);
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t, store, connection.sessionId],
+  );
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (request.kind === 'review' && onFileReviewOpen) {
         onFileReviewOpen(request);
         return;
       }
-      if (onRightPanelOpen) {
-        onRightPanelOpen(request);
+      if (onRightPanelOpen && onRightPanelOpen(request) !== false) {
         return;
       }
       if (request.kind === 'background_task') {
@@ -10896,6 +11012,17 @@ export function App({
       view: 'commit',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenWorktrees = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    // The dialog's tab bar reaches Changes and History from here, and both
+    // read `gitCwd`. Omitting it would answer a session running in a worktree
+    // with the workspace root's diff and log.
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'worktrees',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const handleOpenLog = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
@@ -14452,6 +14579,28 @@ export function App({
     workspace.client,
   ]);
 
+  // Shared by the sidebar entry and the Worktrees tab so both start a
+  // worktree draft the same way.
+  const handleNewWorktreeSession = useCallback(
+    (workspaceCwd?: string) => {
+      // The intent travels with the draft it belongs to: set inside
+      // createNewSession's synchronous step, it is what the first prompt
+      // reads, and any later session start or workspace switch resets it
+      // like any other intent.
+      const targetWorkspaceCwd =
+        workspaceCwd ??
+        lockedWorkspaceCwd ??
+        workspacesRef.current.find(
+          (entry) => entry.primary && entry.trusted !== false,
+        )?.cwd;
+      if (!targetWorkspaceCwd) return false;
+      return createNewSession(
+        { kind: 'workspace', cwd: targetWorkspaceCwd },
+        { gitIntent: { mode: 'worktree' } },
+      );
+    },
+    [createNewSession, lockedWorkspaceCwd],
+  );
   // Clicking a card in the Session Overview panel switches the current window
   // to that session. loadSidebarSession already closes the panel, so this just
   // returns to the chat view and reports load failures.
@@ -18651,6 +18800,7 @@ export function App({
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
+    onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
     contextUsageControls,
@@ -18878,6 +19028,16 @@ export function App({
               initialView={gitDialog.view}
               sessionId={connection.sessionId}
               resolveSessionForWorkspace={resolveSessionForWorkspace}
+              onOpenSession={(sessionId) => {
+                const { workspaceCwd } = gitDialog;
+                setGitDialog(undefined);
+                handleOpenSessionFromOverview(sessionId, workspaceCwd);
+              }}
+              onNewWorktreeSession={() => {
+                const { workspaceCwd } = gitDialog;
+                setGitDialog(undefined);
+                void handleNewWorktreeSession(workspaceCwd);
+              }}
               onClose={() => setGitDialog(undefined)}
             />
           )}
@@ -19372,26 +19532,7 @@ export function App({
                     closeMobileDrawer();
                     openPanel('workspaces');
                   }}
-                  onNewWorktreeSession={(workspaceCwd) => {
-                    // The intent travels with the draft it belongs to: set
-                    // inside createNewSession's synchronous step, it is what
-                    // the first prompt reads, and any later session start or
-                    // workspace switch resets it like any other intent.
-                    const targetWorkspaceCwd =
-                      workspaceCwd ??
-                      lockedWorkspaceCwd ??
-                      workspacesRef.current.find(
-                        (entry) =>
-                          entry.primary && entry.trusted !== false,
-                      )?.cwd;
-                    if (!targetWorkspaceCwd) return false;
-                    return createNewSession(
-                      { kind: 'workspace', cwd: targetWorkspaceCwd },
-                      {
-                        gitIntent: { mode: 'worktree' },
-                      },
-                    );
-                  }}
+                  onNewWorktreeSession={handleNewWorktreeSession}
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
                   showSessionSourceSwitch={
@@ -20516,9 +20657,16 @@ export function App({
                                 )}
                               </ConversationSearch>
                             );
+                            const messageListWithTurnCalls = (
+                              <TurnCallsProvider
+                                onOpen={showToolCalls ? openTurnCalls : undefined}
+                              >
+                                {messageListContent}
+                              </TurnCallsProvider>
+                            );
                             const messageListWithWorkflowDetails = (
                               <WorkflowDetailsProvider tasks={sessionTasks}>
-                                {messageListContent}
+                                {messageListWithTurnCalls}
                               </WorkflowDetailsProvider>
                             );
                             const messageListWithSubagentDetails = (
@@ -21130,6 +21278,11 @@ export function App({
                               ? handleOpenCommit
                               : undefined
                           }
+                          onOpenWorktrees={
+                            gitDiffWorkspaceCwd && gitWorktreesSupported
+                              ? handleOpenWorktrees
+                              : undefined
+                          }
                           onOpenLog={
                             gitDiffWorkspaceCwd
                               ? handleOpenLog
@@ -21449,6 +21602,13 @@ export function App({
                 onOpenGitCommit={
                   workspaceContextActive && gitDiffWorkspaceCwd
                     ? handleOpenCommit
+                    : undefined
+                }
+                onOpenGitWorktrees={
+                  workspaceContextActive &&
+                  gitDiffWorkspaceCwd &&
+                  gitWorktreesSupported
+                    ? handleOpenWorktrees
                     : undefined
                 }
                 onOpenGitLog={
