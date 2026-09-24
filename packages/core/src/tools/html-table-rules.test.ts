@@ -293,9 +293,81 @@ describe('addTableRules', () => {
     // of the page past the 100 KB the tool returns.
     const huge = service(true).turndown(page(1_000_000));
 
+    expect(huge).toBe('| x |\n| --- |\n| a |\n\nafter');
     expect(huge).toBe(service(true).turndown(page(1000)));
-    expect(huge.length).toBeLessThan(100);
-    expect(huge).toContain('after');
+  });
+
+  it('pads a table only while its grid stays within a few cells per real cell', () => {
+    // A lone cell with colspan="72" was padded to 72 columns, and a page of
+    // such tables came out twelve times its own size.
+    expect(
+      service(true).turndown('<table><tr><td colspan="72">x</td></tr></table>'),
+    ).toBe('| x |\n| --- |');
+
+    // 16 x 17 = 272 grid cells for 32 real ones is more than 8 per cell, so
+    // only the header is padded; GFM fills the short rows itself.
+    const html =
+      `<table><tr>${'<th>h</th>'.repeat(16)}</tr>` +
+      '<tr><td>x</td></tr>'.repeat(16) +
+      '</table>';
+
+    expect(service(true).turndown(html).split('\n')[2]).toBe('| x |');
+  });
+
+  it('narrows a colspan wider than the table to the widest row', () => {
+    // Taken at its word, colspan="1000" made the grid 1000 columns wide, so
+    // the whole table fell back to no spans and "2 m" moved into Product.
+    const html =
+      '<table><tr><th colspan="1000">Cables</th></tr>' +
+      '<tr><td rowspan="2">Cable</td><td>1 m</td><td>9 EUR</td></tr>' +
+      '<tr><td>2 m</td><td>12 EUR</td></tr>' +
+      '<tr><td>a</td><td>b</td><td>c</td></tr>'.repeat(48) +
+      '</table>';
+
+    const rows = tableRows(service(true).turndown(html));
+
+    expect(rows[0]).toEqual(['Cables', '', '']);
+    expect(rows[1]).toEqual(['---', '---', '---']);
+    expect(rows[3]).toEqual(['', '2 m', '12 EUR']);
+  });
+
+  it('drops a span the budget cannot pay for from its own cell only', () => {
+    // colspan="3" rowspan="1000" over empty rows is 3,000 grid cells for six
+    // real ones. Leaving the whole table without its spans lost the column
+    // the later rowspan holds, and "s" moved into the first column.
+    const html =
+      '<table><tr><td colspan="3" rowspan="1000">A</td></tr>' +
+      '<tr></tr>'.repeat(999) +
+      '<tr><td rowspan="2">P</td><td>q</td><td>r</td></tr>' +
+      '<tr><td>s</td><td>t</td></tr></table>';
+
+    expect(tableRows(service(true).turndown(html))).toEqual([
+      ['A', '', ''],
+      ['---', '---', '---'],
+      ['P', 'q', 'r'],
+      ['', 's', 't'],
+    ]);
+  });
+
+  it('clamps a colspan at 1000 columns, as HTML does', () => {
+    const html =
+      `<table><tr>${'<td>c</td>'.repeat(1500)}</tr>` +
+      '<tr><td colspan="5000">X</td><td>Y</td></tr></table>';
+
+    expect(tableRows(service(true).turndown(html))[2].indexOf('Y')).toBe(1000);
+  });
+
+  it('stops padding a table past MAX_GRID_CELLS, whatever its size', () => {
+    // 8 columns over 5,002 rows is 40,016 grid cells, within 8 per real cell
+    // but past the 40,000 no table is padded beyond.
+    const html =
+      `<table><tr>${'<th>h</th>'.repeat(8)}</tr>` +
+      '<tr><td colspan="8">x</td></tr>'.repeat(5001) +
+      '</table>';
+
+    const lines = service(true).turndown(html).split('\n');
+
+    expect(lines[lines.length - 1]).toBe('| x |');
   });
 
   it('survives spans that would cover millions of grid cells', () => {
@@ -305,16 +377,21 @@ describe('addTableRules', () => {
     expect(() => service(true).turndown(html)).not.toThrow();
   });
 
-  it('keeps the widest row inside the table when the spans are over budget', () => {
+  it('keeps the widest row inside the table when the grid is over budget', () => {
     // Past the budget the delimiter counted only the header's own cells, so
-    // the third cell of the last row fell outside the table.
+    // the cells of the wider last row fell outside the table.
     const html =
       '<table><tr><th>A</th><th>B</th></tr>' +
-      '<tr><td colspan="1000">wide</td></tr>' +
-      '<tr><td>1</td><td>2</td><td>3</td></tr></table>';
+      '<tr><td>x</td></tr>'.repeat(20) +
+      `<tr>${'<td>w</td>'.repeat(20)}</tr></table>`;
 
     expect(service(true).turndown(html)).toBe(
-      '| A | B | |\n| --- | --- | --- |\n| wide |\n| 1 | 2 | 3 |',
+      [
+        `| A | B |${' |'.repeat(18)}`,
+        `|${' --- |'.repeat(20)}`,
+        ...Array<string>(20).fill('| x |'),
+        `|${' w |'.repeat(20)}`,
+      ].join('\n'),
     );
   });
 

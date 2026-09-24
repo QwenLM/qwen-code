@@ -15,10 +15,11 @@ const MAX_COLSPAN = 1000;
 // or the conversion, much larger than the page. So a table is padded out to a
 // full grid only while the grid stays within a few cells per real cell, and
 // never past MAX_GRID_CELLS, where its Markdown is already well over 100 KB,
-// more than a fetched page may return. A table past that is written row by
-// row, one column per cell, as if it had no spans.
+// more than a fetched page may return. A span the budget cannot pay for is
+// dropped from its own cell, and the rest of the table keeps its grid; a table
+// whose rows would still outgrow it is written row by row, one column per
+// cell, as if it had no spans.
 const GRID_CELLS_PER_CELL = 8;
-const MIN_GRID_CELLS = 64;
 const MAX_GRID_CELLS = 40_000;
 
 /**
@@ -217,7 +218,8 @@ function measure(table: Element): TableGrid {
 
 /**
  * Lay the table out on a grid the way a browser does, so spans take their
- * columns. Returns null once the grid would pass the table's budget.
+ * columns. Returns null when padding the rows to that grid would pass the
+ * table's budget.
  */
 function layOut(
   rows: Element[],
@@ -233,9 +235,11 @@ function layOut(
     (total, rowCells) => total + rowCells.length,
     0,
   );
-  const budget = Math.min(
-    MAX_GRID_CELLS,
-    MIN_GRID_CELLS + GRID_CELLS_PER_CELL * realCells,
+  const budget = Math.min(MAX_GRID_CELLS, GRID_CELLS_PER_CELL * realCells);
+  // Past the widest row a colspan only covers columns no cell ever fills.
+  const widest = cells.reduce(
+    (most, rowCells) => Math.max(most, rowCells.length),
+    0,
   );
 
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
@@ -252,10 +256,11 @@ function layOut(
       before.set(cell, free());
       // A rowspan ends with its row group, as in a browser.
       const rowsLeft = groupEnds[rowIndex] - rowIndex;
-      const across = spanOf(cell, 'colspan', 1, MAX_COLSPAN);
-      const down = spanOf(cell, 'rowspan', rowsLeft, rowsLeft);
+      let across = Math.min(spanOf(cell, 'colspan', 1, MAX_COLSPAN), widest);
+      let down = spanOf(cell, 'rowspan', rowsLeft, rowsLeft);
       if (taken.size + across * down > budget) {
-        return null;
+        across = 1;
+        down = 1;
       }
       colspan.set(cell, across);
       for (let r = 0; r < down; r++) {
