@@ -144,6 +144,48 @@ describe('SessionRouter', () => {
   });
 
   describe('routing key scopes', () => {
+    it.each(['user', 'thread', 'chat_thread', 'single'] as const)(
+      'isolates message routes under %s scope',
+      async (scope) => {
+        const router = new SessionRouter(bridge, '/tmp', scope);
+        const review = await router.resolve(
+          'ch',
+          'alice',
+          'chat1',
+          'thread1',
+          undefined,
+          true,
+          { routeKey: '/review' },
+        );
+        const qa = await router.resolve(
+          'ch',
+          'alice',
+          'chat1',
+          'thread1',
+          undefined,
+          true,
+          { routeKey: '/QA' },
+        );
+        expect(review).not.toBe(qa);
+        expect(router.getTarget(review)).toMatchObject({
+          chatId: 'chat1',
+          threadId: 'thread1',
+          messageRoute: '/review',
+        });
+        expect(
+          router.getSession('ch', 'alice', 'chat1', 'thread1', '/review'),
+        ).toBe(review);
+        expect(
+          router.hasSession('ch', 'alice', 'chat1', 'thread1', '/QA'),
+        ).toBe(true);
+        expect(
+          router.removeSession('ch', 'alice', 'chat1', 'thread1', '/review'),
+        ).toEqual([review]);
+        expect(
+          router.getSession('ch', 'alice', 'chat1', 'thread1', '/QA'),
+        ).toBe(qa);
+      },
+    );
     it('user scope: routes by channel + sender + chat', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       const s1 = await router.resolve('ch', 'alice', 'chat1');

@@ -5,7 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
@@ -13,13 +15,16 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
@@ -280,6 +285,532 @@ class InMemoryRepositoryTest {
                 () -> repository.compareAndSet(current, replacement));
         assertSame(current, repository.findById(SCOPE, "session"));
         assertNull(repository.findById(otherScope, "session"));
+    }
+
+    @Test
+    void executionIdempotencyAndDispatchClaimAreDurablePrimitives()
+            throws Exception {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+
+        List<ToolExecutionRecord> records = invokeConcurrently(() ->
+                repository.findOrCreate(execution(
+                        "execution-" + Thread.currentThread().threadId())));
+        Set<String> executionIds = records.stream()
+                .map(ToolExecutionRecord::getExecutionCallId)
+                .collect(Collectors.toSet());
+        assertEquals(1, executionIds.size());
+        String executionId = executionIds.iterator().next();
+
+        ToolExecutionRecord first = repository.claimDispatch(executionId,
+                "owner-a", Duration.ofSeconds(30));
+        assertEquals(1, first.getDispatchGeneration());
+        assertNull(repository.claimDispatch(executionId, "owner-b",
+                Duration.ofSeconds(30)));
+        assertTrue(repository.hasActiveByRuntimeSession("session"));
+
+        clock.advance(Duration.ofSeconds(31));
+        ToolExecutionRecord takeover = repository.claimDispatch(executionId,
+                "owner-b", Duration.ofSeconds(30));
+        assertEquals(2, takeover.getDispatchGeneration());
+        assertNull(repository.compareAndSet(first,
+                first.withResult(result("error"), 0, clock.instant()),
+                "owner-a", 1));
+
+        ToolExecutionRecord settled = repository.compareAndSet(takeover,
+                takeover.withResult(result("success"), 0,
+                        clock.instant()), "owner-b", 2);
+        assertEquals("success", settled.getExecutionStatus());
+        assertFalse(repository.hasActiveByRuntimeSession("session"));
+        assertNull(repository.compareAndSet(settled,
+                settled.withState(ToolExecutionRecord.State.PREPARED,
+                        false), "owner-b", 2));
+    }
+
+    @Test
+    void claimDispatchNeverWritesALiveClaim() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        repository.findOrCreate(execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch("execution",
+                "owner-a", Duration.ofSeconds(30));
+        ToolExecutionRecord executing = repository.compareAndSet(claimed,
+                claimed.withState(ToolExecutionRecord.State.EXECUTING,
+                        false), "owner-a", 1);
+
+        ToolExecutionRecord own = repository.claimDispatch("execution",
+                "owner-a", Duration.ofMinutes(5));
+        assertNull(repository.claimDispatch("execution", "owner-b",
+                Duration.ofSeconds(30)));
+
+        ToolExecutionRecord stored = repository.findByExecutionCallId(
+                "execution");
+        assertEquals(executing.getVersion(), own.getVersion());
+        assertEquals(ToolExecutionRecord.State.EXECUTING, stored.getState());
+        assertEquals(executing.getVersion(), stored.getVersion());
+        assertEquals(executing.getDispatchLeaseUntil(),
+                stored.getDispatchLeaseUntil());
+    }
+
+    @Test
+    void executionIdempotencyReturnsOriginalIdentityForConflictChecking() {
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(new MutableClock(START));
+        ToolExecutionRecord original = execution("execution-a");
+        ToolExecutionRecord duplicate = new ToolExecutionRecord(
+                "execution-b", original.getIdempotencyKey(), "binding", 1,
+                "harness", "session", "turn", "tool", "changed",
+                reference("changed"), ToolExecutionRecord.State.PREPARED,
+                null, null, 0, false, null, null, 0, 0, null);
+
+        assertSame(original, repository.findOrCreate(original));
+        assertSame(original, repository.findOrCreate(duplicate));
+        assertFalse(original.sameRequest(duplicate));
+    }
+
+    @Test
+    void settlementRequiresTheCurrentDispatchClaim() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord first = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        clock.advance(Duration.ofSeconds(31));
+        ToolExecutionRecord takeover = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-b",
+                Duration.ofSeconds(30));
+
+        // Same record version, but the stale owner's claim: fencing, not
+        // optimistic versioning, must reject the settlement.
+        ToolExecutionRecord staleClaim = takeover.withDispatch("owner-a",
+                first.getDispatchLeaseUntil(),
+                first.getDispatchGeneration(), takeover.getState());
+        assertNull(repository.compareAndSet(staleClaim,
+                staleClaim.withResult(result("error"), 0,
+                        clock.instant()), "owner-a", 1));
+
+        ToolExecutionRecord noClaim = takeover.withDispatch(null, null, 0,
+                takeover.getState());
+        assertNull(repository.compareAndSet(noClaim,
+                noClaim.withResult(result("error"), 0, clock.instant()),
+                null, 0));
+
+        assertSame(takeover, repository.findByExecutionCallId(
+                created.getExecutionCallId()));
+    }
+
+    @Test
+    void settlementRequiresALiveLease() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+
+        clock.advance(Duration.ofSeconds(31));
+        assertNull(repository.compareAndSet(claimed,
+                claimed.withResult(result("success"), 0,
+                        clock.instant()), "owner-a", 1));
+        assertNull(repository.renewDispatch(created.getExecutionCallId(),
+                "owner-a", claimed.getDispatchGeneration(),
+                Duration.ofSeconds(30)));
+
+        // Re-claiming a DISPATCHING record is safe: nothing physically ran.
+        ToolExecutionRecord reclaimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        assertEquals(claimed.getDispatchGeneration() + 1,
+                reclaimed.getDispatchGeneration());
+        ToolExecutionRecord settled = repository.compareAndSet(reclaimed,
+                reclaimed.withResult(result("success"), 0,
+                        clock.instant()), "owner-a", 2);
+        assertEquals("success", settled.getExecutionStatus());
+    }
+
+    @Test
+    void takeoverOfExecutingClaimBecomesUnknown() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        ToolExecutionRecord executing = repository.compareAndSet(claimed,
+                claimed.withState(ToolExecutionRecord.State.EXECUTING,
+                        false), "owner-a", 1);
+
+        clock.advance(Duration.ofSeconds(31));
+        assertNull(repository.claimDispatch(created.getExecutionCallId(),
+                "owner-b", Duration.ofSeconds(30)));
+
+        ToolExecutionRecord unknown = repository.findByExecutionCallId(
+                created.getExecutionCallId());
+        assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+        assertEquals("owner-a", unknown.getDispatchOwner());
+
+        assertNull(repository.compareAndSet(executing,
+                executing.withResult(result("success"), 0,
+                        clock.instant()), "owner-a", 1));
+        assertNull(repository.claimDispatch(created.getExecutionCallId(),
+                "owner-b", Duration.ofSeconds(30)));
+        assertNull(repository.renewDispatch(created.getExecutionCallId(),
+                "owner-a", executing.getDispatchGeneration(),
+                Duration.ofSeconds(30)));
+        assertTrue(repository.hasActiveByRuntimeSession("session"));
+
+        ToolExecutionRecord resolved = repository.resolveUnknown(unknown,
+                result("cancelled"), clock.instant());
+        assertEquals("cancelled", resolved.getExecutionStatus());
+        // The last claim survives settlement for attestation.
+        assertEquals("owner-a", resolved.getDispatchOwner());
+        assertEquals(unknown.getDispatchLeaseUntil(),
+                resolved.getDispatchLeaseUntil());
+        assertFalse(repository.hasActiveByRuntimeSession("session"));
+        assertNull(repository.resolveUnknown(resolved, result("error"),
+                clock.instant()));
+        assertNull(repository.compareAndSet(resolved,
+                resolved.withState(ToolExecutionRecord.State.PREPARED,
+                        false), "owner-a", 1));
+    }
+
+    @Test
+    void cancellationIntentDoesNotRequireTheDispatchClaim() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        ToolExecutionRecord executing = repository.compareAndSet(claimed,
+                claimed.withState(ToolExecutionRecord.State.EXECUTING,
+                        false), "owner-a", 1);
+
+        ToolExecutionRecord requested = repository.requestCancel(
+                created.getExecutionCallId(), executing.getVersion());
+        assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                requested.getState());
+        assertSame(requested, repository.requestCancel(
+                created.getExecutionCallId(), requested.getVersion()));
+        assertNull(repository.requestCancel(created.getExecutionCallId(),
+                requested.getVersion() - 1));
+
+        ToolExecutionRecord dropping = repository.findByExecutionCallId(
+                created.getExecutionCallId());
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(dropping,
+                        dropping.withState(
+                                ToolExecutionRecord.State.CANCEL_REQUESTED,
+                                false), "owner-a", 1));
+
+        ToolExecutionRecord settled = repository.compareAndSet(dropping,
+                dropping.withResult(result("cancelled"), 0,
+                        clock.instant()), "owner-a", 1);
+        assertTrue(settled.isCancelRequested());
+        assertNull(repository.requestCancel(created.getExecutionCallId(),
+                settled.getVersion()));
+    }
+
+    @Test
+    void cancelBeforeDispatchSettlesImmediately() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+
+        ToolExecutionRecord settled = repository.requestCancel(
+                created.getExecutionCallId(), created.getVersion());
+        assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+        assertEquals("cancelled", settled.getExecutionStatus());
+        assertTrue(settled.isCancelRequested());
+        assertFalse(repository.hasActiveByRuntimeSession("session"));
+        assertNull(repository.requestCancel(created.getExecutionCallId(),
+                created.getVersion()));
+    }
+
+    @Test
+    void cancelWhileDispatchingKeepsStateAndSurvivesTakeover() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+
+        ToolExecutionRecord requested = repository.requestCancel(
+                created.getExecutionCallId(), claimed.getVersion());
+        assertEquals(ToolExecutionRecord.State.DISPATCHING,
+                requested.getState());
+        assertTrue(requested.isCancelRequested());
+
+        clock.advance(Duration.ofSeconds(31));
+        ToolExecutionRecord takeover = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-b",
+                Duration.ofSeconds(30));
+        assertTrue(takeover.isCancelRequested());
+        // The new owner honours the intent instead of dispatching again.
+        ToolExecutionRecord settled = repository.compareAndSet(takeover,
+                takeover.withResult(result("cancelled"), 0,
+                        clock.instant()), "owner-b", 2);
+        assertEquals("cancelled", settled.getExecutionStatus());
+    }
+
+    @Test
+    void staleOwnerCannotSettleAfterReReadingAFreshVersion() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        repository.claimDispatch(created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        clock.advance(Duration.ofSeconds(31));
+        ToolExecutionRecord takeover = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-b",
+                Duration.ofSeconds(30));
+
+        // Owner A re-reads for a fresh version; its settlement must fail.
+        ToolExecutionRecord reread = repository.findByExecutionCallId(
+                created.getExecutionCallId());
+        assertNull(repository.compareAndSet(reread,
+                reread.withResult(result("error"), 0, clock.instant()),
+                "owner-a", 1));
+        // Right generation, wrong owner: still not owner B's claim.
+        assertNull(repository.compareAndSet(reread,
+                reread.withResult(result("error"), 0, clock.instant()),
+                "owner-a", 2));
+        ToolExecutionRecord settled = repository.compareAndSet(takeover,
+                takeover.withResult(result("success"), 0, clock.instant()),
+                "owner-b", 2);
+        assertEquals("success", settled.getExecutionStatus());
+    }
+
+    @Test
+    void sameOwnerCannotWriteWithAStaleGeneration() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        repository.claimDispatch(created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        clock.advance(Duration.ofSeconds(31));
+        ToolExecutionRecord reclaimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        assertEquals(2, reclaimed.getDispatchGeneration());
+
+        // Same owner, but the generation it claimed first: fenced off.
+        assertNull(repository.compareAndSet(reclaimed,
+                reclaimed.withResult(result("error"), 0, clock.instant()),
+                "owner-a", 1));
+        assertEquals("success", repository.compareAndSet(reclaimed,
+                reclaimed.withResult(result("success"), 0, clock.instant()),
+                "owner-a", 2).getExecutionStatus());
+    }
+
+    @Test
+    void executionStateDoesNotMoveBackwards() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        ToolExecutionRecord executing = repository.compareAndSet(claimed,
+                claimed.withState(ToolExecutionRecord.State.EXECUTING,
+                        false), "owner-a", 1);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(executing,
+                        executing.withState(
+                                ToolExecutionRecord.State.PREPARED, false),
+                        "owner-a", 1));
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(executing,
+                        executing.withState(
+                                ToolExecutionRecord.State.DISPATCHING,
+                                false), "owner-a", 1));
+
+        // The dispatcher's own ambiguous-outcome report stays legal.
+        ToolExecutionRecord unknown = repository.compareAndSet(executing,
+                executing.withUnknown(), "owner-a", 1);
+        assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+        assertEquals("owner-a", unknown.getDispatchOwner());
+    }
+
+    @Test
+    void cancellationStickinessReadsTheStoredRecord() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        ToolExecutionRecord flagged = repository.requestCancel(
+                created.getExecutionCallId(), claimed.getVersion());
+        assertTrue(flagged.isCancelRequested());
+
+        // A caller-derived snapshot with the flag dropped must not erase
+        // the stored intent, even from the claim holder itself.
+        ToolExecutionRecord forged = flagged.withState(
+                ToolExecutionRecord.State.DISPATCHING, false);
+        assertFalse(forged.isCancelRequested());
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(forged, forged, "owner-a",
+                        1));
+        assertTrue(repository.findByExecutionCallId(
+                created.getExecutionCallId()).isCancelRequested());
+    }
+
+    @Test
+    void resultSequenceCannotMoveBackwards() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        ToolExecutionRecord progressed = new ToolExecutionRecord(
+                "execution", "key", "binding", 1, "harness", "session",
+                "turn", "tool", "digest", reference("digest"),
+                ToolExecutionRecord.State.PREPARED, null, null, 5, false,
+                null, null, 0, 0, null);
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.findOrCreate(progressed));
+
+        ToolExecutionRecord atFive = new ToolExecutionRecord("execution",
+                "key", "binding", 1, "harness", "session", "turn", "tool",
+                "digest", reference("digest"),
+                ToolExecutionRecord.State.DISPATCHING, null, null, 5, false,
+                "owner-a", START.plusSeconds(30), 1, 1, null);
+        ToolExecutionRecord regressed = new ToolExecutionRecord("execution",
+                "key", "binding", 1, "harness", "session", "turn", "tool",
+                "digest", reference("digest"),
+                ToolExecutionRecord.State.DISPATCHING, null, null, 0, false,
+                "owner-a", START.plusSeconds(30), 1, 1, null);
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(atFive, regressed, "owner-a",
+                        1));
+
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        ToolExecutionRecord settled = repository.compareAndSet(claimed,
+                claimed.withResult(result("success"), 7, clock.instant()),
+                "owner-a", 1);
+        assertEquals(7, settled.getLastSequence());
+        assertThrows(IllegalArgumentException.class,
+                () -> settled.withResult(result("error"), 6,
+                        clock.instant()));
+    }
+
+    @Test
+    void payloadsRejectInvalidNumbersAndNonStringKeys() {
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(new MutableClock(START));
+        Map<String, Object> topLevel = new HashMap<>(reference("digest"));
+        topLevel.put("tokens", new AtomicLong(1));
+        assertThrows(IllegalArgumentException.class,
+                () -> ToolExecutionRecord.prepared("execution", "key",
+                        "binding", 1, "harness", "session", "turn", "tool",
+                        "digest", topLevel));
+        Map<String, Object> nested = new HashMap<>(reference("digest"));
+        nested.put("tokens", Map.of("deep", new AtomicLong(1)));
+        assertThrows(IllegalArgumentException.class,
+                () -> ToolExecutionRecord.prepared("execution", "key",
+                        "binding", 1, "harness", "session", "turn", "tool",
+                        "digest", nested));
+        Map<String, Object> badKey = new HashMap<>(reference("digest"));
+        badKey.put("nested", Map.of(1, "x"));
+        assertThrows(IllegalArgumentException.class,
+                () -> ToolExecutionRecord.prepared("execution", "key",
+                        "binding", 1, "harness", "session", "turn", "tool",
+                        "digest", badKey));
+        for (Number nonFinite : List.of(Double.NaN,
+                Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                Float.NaN, Float.POSITIVE_INFINITY,
+                Float.NEGATIVE_INFINITY)) {
+            Map<String, Object> invalid = new HashMap<>(reference("digest"));
+            invalid.put("tokens", nonFinite);
+            assertThrows(IllegalArgumentException.class,
+                    () -> ToolExecutionRecord.prepared("execution", "key",
+                            "binding", 1, "harness", "session", "turn",
+                            "tool", "digest", invalid));
+        }
+        assertTrue(BrokerValues.sameJsonMap(
+                Map.of("value", 162544.13f),
+                Map.of("value", new BigDecimal("162544.13"))));
+        assertFalse(BrokerValues.sameJsonMap(
+                Map.of("value", 9_007_199_254_740_993L),
+                Map.of("value", 9_007_199_254_740_992d)));
+        assertFalse(BrokerValues.sameJsonMap(
+                Map.of("value", 16_777_217),
+                Map.of("value", 16_777_216f)));
+
+        ToolExecutionRecord created = repository.findOrCreate(
+                execution("execution"));
+        assertThrows(IllegalArgumentException.class,
+                () -> created.withResult(
+                        Map.of("executionStatus", "success", "tokens",
+                                new AtomicLong(1)),
+                        0, START));
+        assertThrows(IllegalArgumentException.class,
+                () -> created.withResult(
+                        Map.of("executionStatus", "success", "tokens",
+                                Double.NaN),
+                        0, START));
+        ToolExecutionRecord claimed = repository.claimDispatch(
+                created.getExecutionCallId(), "owner-a",
+                Duration.ofSeconds(30));
+        ToolExecutionRecord settled = repository.compareAndSet(claimed,
+                claimed.withResult(
+                        Map.of("executionStatus", "success", "tokens", 1L),
+                        0, START),
+                "owner-a", 1);
+        assertEquals("success", settled.getExecutionStatus());
+    }
+
+    @Test
+    void cancelRequestedStateRequiresTheFlag() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new ToolExecutionRecord("execution", "key", "binding",
+                        1, "harness", "session", "turn", "tool", "digest",
+                        reference("digest"),
+                        ToolExecutionRecord.State.CANCEL_REQUESTED, null,
+                        null, 0, false, null, null, 0, 0, null));
+    }
+
+    private static ToolExecutionRecord execution(String executionCallId) {
+        return ToolExecutionRecord.prepared(executionCallId, "key",
+                "binding", 1, "harness", "session", "turn", "tool",
+                "digest", reference("digest"));
+    }
+
+    private static Map<String, Object> reference(String digest) {
+        return Map.of("sessionId", "session", "promptId", "turn",
+                "callId", "tool", "argsDigest", digest);
+    }
+
+    private static Map<String, Object> result(String status) {
+        return Map.of("executionStatus", status);
     }
 
     private static <T> List<T> invokeConcurrently(Callable<T> operation)

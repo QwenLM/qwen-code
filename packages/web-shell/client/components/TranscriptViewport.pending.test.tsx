@@ -301,6 +301,42 @@ describe('TranscriptViewport pending first entry', () => {
     expect(list().scrollTop).toBe(400);
   });
 
+  it('clears pending search navigation when its dialog request is cancelled', async () => {
+    const { ref, store, mode, getTranscriptPage, settle } = await setup();
+    const request = deferred<DaemonSessionTranscriptPage>();
+    getTranscriptPage.mockReturnValue(request.promise);
+    let current = true;
+    let navigation: Promise<boolean | 'cancelled'> | undefined;
+    await act(async () => {
+      navigation = ref.current!.scrollToSearchHit!(
+        {
+          sessionId: 'session',
+          snapshot: 'snapshot',
+          revision: store.getViewportSnapshot().revision,
+          recordId: 'old',
+          turnId: 'old',
+          turnOrdinal: 0,
+          role: 'user',
+          snippet: 'old',
+          matchStart: 0,
+          matchEnd: 3,
+        },
+        () => current,
+      );
+    });
+    expect(container!.querySelector('[role="status"]')).not.toBeNull();
+    current = false;
+    await act(async () => {
+      request.resolve(page);
+      await navigation;
+    });
+    settle();
+    expect(await navigation).toBe('cancelled');
+    expect(mode()).toBe('live');
+    expect(container!.querySelector('[role="status"]')).toBeNull();
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it('cancels a distant selection when the user scrolls before it resolves', async () => {
     const { store, mode, open, list, getTranscriptPage, settle } =
       await setup();
@@ -352,4 +388,244 @@ describe('TranscriptViewport pending first entry', () => {
       expect(container!.querySelector('[role="status"]')).toBeNull();
     },
   );
+});
+
+it('preserves the historical reading position when a distant search is cancelled', async () => {
+  const { ref, store, client, mode, open, getTranscriptPage, settle } =
+    await setup();
+  await open();
+  settle();
+  expect(mode()).toBe('historical');
+  const originalRange = store.getViewportSnapshot().ranges[0]!;
+  const request = deferred<DaemonSessionTranscriptPage>();
+  client.materializeTranscriptEvents = (events, nextOrdinal, excluded) => {
+    const ids = events.map(
+      (event) => (event.data as { recordId: string }).recordId,
+    );
+    return {
+      blocks: ids
+        .filter((id) => !excluded.has(id))
+        .map((id) => ({
+          id,
+          kind: id === 'turn-1' ? ('user' as const) : ('assistant' as const),
+          text: id,
+          sourceRecordIds: [id],
+          createdAt: 1,
+          updatedAt: 1,
+          clientReceivedAt: 1,
+        })),
+      nextBlockOrdinal: nextOrdinal + ids.length,
+      encounteredRecordIds: ids,
+    };
+  };
+  const searchPage = (index: number): DaemonSessionTranscriptPage => ({
+    v: 1,
+    sessionId: 'session',
+    targetRecordId: 'turn-1',
+    events: [
+      {
+        v: 1,
+        type: 'test',
+        data: { recordId: index === 0 ? 'turn-1' : `assistant-${index}` },
+      },
+    ],
+    hasMore: index < 6,
+    ...(index < 6 ? { nextCursor: String(index + 1) } : {}),
+  });
+  getTranscriptPage.mockImplementation(async (options) => {
+    const index = options.cursor ? Number(options.cursor) : 0;
+    return index === 6 ? request.promise : searchPage(index);
+  });
+  let current = true;
+  let navigation: Promise<boolean | 'cancelled'> | undefined;
+  await act(async () => {
+    navigation = ref.current!.scrollToSearchHit!(
+      {
+        sessionId: 'session',
+        snapshot: 'snapshot',
+        revision: store.getViewportSnapshot().revision,
+        recordId: 'assistant-6',
+        turnId: 'turn-1',
+        turnOrdinal: 1,
+        role: 'assistant',
+        snippet: 'target',
+        matchStart: 0,
+        matchEnd: 6,
+      },
+      () => current,
+    );
+  });
+  await vi.waitFor(() =>
+    expect(getTranscriptPage).toHaveBeenCalledWith({ cursor: '6', limit: 200 }),
+  );
+  current = false;
+  await act(async () => {
+    request.resolve(searchPage(6));
+    await navigation;
+  });
+  settle();
+  expect(await navigation).toBe('cancelled');
+  expect
+    .soft(
+      store
+        .getViewportSnapshot()
+        .ranges.some((range) => range.id === originalRange.id),
+    )
+    .toBe(true);
+  expect(mode()).toBe('historical');
+});
+
+it.each(['complete', 'cancel'] as const)(
+  'handles a distant search %s when the pinned historical range fills the five-page budget',
+  async (finish) => {
+    const { ref, store, client, mode, open, getTranscriptPage, settle } =
+      await setup();
+    client.materializeTranscriptEvents = (events, nextOrdinal, excluded) => {
+      const ids = events.map(
+        (event) => (event.data as { recordId: string }).recordId,
+      );
+      return {
+        blocks: ids
+          .filter((id) => !excluded.has(id))
+          .map((id) => ({
+            id,
+            kind:
+              id === 'old' || id === 'turn-1'
+                ? ('user' as const)
+                : ('assistant' as const),
+            text: id,
+            sourceRecordIds: [id],
+            createdAt: 1,
+            updatedAt: 1,
+            clientReceivedAt: 1,
+          })),
+        nextBlockOrdinal: nextOrdinal + ids.length,
+        encounteredRecordIds: ids,
+      };
+    };
+    let distantReads = 0;
+    const fallback = deferred<DaemonSessionTranscriptPage>();
+    let fallbackPage: DaemonSessionTranscriptPage | undefined;
+    getTranscriptPage.mockImplementation(async (options) => {
+      const distant = options.atRecordId === 'turn-1';
+      const index = options.cursor ? Number(options.cursor) : 0;
+      const recordId = distant
+        ? 'turn-1'
+        : index === 0
+          ? 'old'
+          : `reading-${index}`;
+      const response: DaemonSessionTranscriptPage = {
+        v: 1,
+        sessionId: 'session',
+        targetRecordId: distant ? 'turn-1' : 'old',
+        events: [{ v: 1, type: 'test', data: { recordId } }],
+        hasMore: !distant,
+        ...(!distant ? { nextCursor: String(index + 1) } : {}),
+      };
+      if (distant && ++distantReads === 2 && finish === 'cancel') {
+        fallbackPage = response;
+        return fallback.promise;
+      }
+      return response;
+    });
+    await open();
+    settle();
+    const originalRangeId = store.getViewportSnapshot().ranges[0]!.id;
+    for (let index = 0; index < 4; index++) {
+      await act(async () => store.loadNewer(originalRangeId));
+    }
+    expect(store.getViewportSnapshot().pages.size).toBe(5);
+    expect(
+      store
+        .getViewportSnapshot()
+        .ranges.find((range) => range.id === originalRangeId)?.pageIds,
+    ).toHaveLength(5);
+    let current = true;
+    let navigation: Promise<boolean | 'cancelled'> | undefined;
+    await act(async () => {
+      navigation = ref.current!.scrollToSearchHit!(
+        {
+          sessionId: 'session',
+          snapshot: 'snapshot',
+          revision: store.getViewportSnapshot().revision,
+          recordId: 'turn-1',
+          turnId: 'turn-1',
+          turnOrdinal: 1,
+          role: 'user',
+          snippet: 'target',
+          matchStart: 0,
+          matchEnd: 6,
+        },
+        () => current,
+      );
+    });
+    if (finish === 'cancel') {
+      await vi.waitFor(() => expect(fallbackPage).toBeDefined());
+      current = false;
+      await act(async () => {
+        fallback.resolve(fallbackPage!);
+        await navigation;
+      });
+    } else {
+      await act(async () => {
+        await navigation;
+      });
+    }
+    settle();
+    expect(await navigation).toBe(finish === 'complete' ? true : 'cancelled');
+    expect(mode()).toBe('historical');
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+    if (finish === 'complete') {
+      expect(
+        container!.querySelector('[data-web-shell-message-list]')?.textContent,
+      ).toContain('turn-1');
+    } else {
+      expect(
+        store
+          .getViewportSnapshot()
+          .ranges.find((range) => range.id === originalRangeId)?.pageIds,
+      ).toHaveLength(5);
+      expect(
+        container!.querySelector('[data-web-shell-message-list]')?.textContent,
+      ).toContain('old');
+    }
+  },
+);
+
+it('returns cancelled when scrolling supersedes an in-flight search navigation', async () => {
+  const { ref, store, mode, list, getTranscriptPage, settle } = await setup();
+  const request = deferred<DaemonSessionTranscriptPage>();
+  getTranscriptPage.mockReturnValue(request.promise);
+  let navigation: Promise<boolean | 'cancelled'> | undefined;
+  await act(async () => {
+    navigation = ref.current!.scrollToSearchHit!(
+      {
+        sessionId: 'session',
+        snapshot: 'snapshot',
+        revision: store.getViewportSnapshot().revision,
+        recordId: 'old',
+        turnId: 'old',
+        turnOrdinal: 0,
+        role: 'user',
+        snippet: 'old',
+        matchStart: 0,
+        matchEnd: 3,
+      },
+      () => true,
+    );
+  });
+  act(() =>
+    list().dispatchEvent(
+      new WheelEvent('wheel', { bubbles: true, deltaY: -10 }),
+    ),
+  );
+  await act(async () => {
+    request.resolve(page);
+    await navigation;
+  });
+  settle();
+  expect(await navigation).toBe('cancelled');
+  expect(mode()).toBe('live');
+  expect(store.getSnapshot().selected?.status).not.toBe('loading');
+  expect(container!.querySelector('[role="alert"]')).toBeNull();
 });

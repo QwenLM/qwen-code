@@ -27,6 +27,12 @@ export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
+  /**
+   * 当前消息的生成态；历史或静态内容为 false。所属 MessageList 空闲
+   * （isResponding=false）时，恢复 replay 中残留的 streaming 标记也会被
+   * 收口为 false，且已收口的行在会话重新响应时、内容不变的前提下保持收口。
+   */
+  isStreaming: boolean;
 }
 
 export interface WebShellCodeBlockRenderInfo {
@@ -187,6 +193,8 @@ export type WebShellChatHeaderItem =
   | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
+  /** Show the mobile-access QR entry in chat headers. Defaults to false. */
+  showMobileAccess?: boolean;
   /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }

@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -24,6 +24,7 @@ import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { IdeClient } from '@qwen-code/qwen-code-core/ide/ide-client.js';
 import { buildHumanReadableRuleLabel } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { isEditorAvailable } from '@qwen-code/qwen-code-core/utils/editor.js';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
@@ -71,6 +72,25 @@ export const ToolConfirmationMessage: React.FC<
   const preferredEditor = settings.merged.general?.preferredEditor as
     | EditorType
     | undefined;
+  const hideModify =
+    confirmationDetails.type === 'edit'
+      ? confirmationDetails.hideModify
+      : false;
+  // Offering "Modify with external editor" for an editor that is not installed
+  // only leads to a failed launch (#10745), so probe availability first.
+  // `isEditorAvailable` shells out to look the binary up on PATH, hence the
+  // memo and the guards that skip the probe when the option can't be offered
+  // anyway (compact mode renders a fixed option list, non-edit confirmations
+  // and `hideModify` never offer it).
+  const editorAvailable = useMemo(
+    () =>
+      !compactMode &&
+      confirmationDetails.type === 'edit' &&
+      !hideModify &&
+      preferredEditor !== undefined &&
+      isEditorAvailable(preferredEditor),
+    [compactMode, confirmationDetails.type, hideModify, preferredEditor],
+  );
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
   const [isDiffingEnabled, setIsDiffingEnabled] = useState(false);
@@ -268,7 +288,7 @@ export const ToolConfirmationMessage: React.FC<
     if (
       !confirmationDetails.hideModify &&
       (!config.getIdeMode() || !isDiffingEnabled) &&
-      preferredEditor
+      editorAvailable
     ) {
       options.push({
         label: t('Modify with external editor'),
