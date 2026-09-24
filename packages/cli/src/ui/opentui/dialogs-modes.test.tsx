@@ -22,7 +22,6 @@ const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     width: 100,
-    height: 40,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -81,10 +80,7 @@ vi.mock('@opentui/react', async () => {
         mocks.state.keyboardHandlers.push(stable.current);
       }
     },
-    useTerminalDimensions: () => ({
-      width: mocks.state.width,
-      height: mocks.state.height,
-    }),
+    useTerminalDimensions: () => ({ width: mocks.state.width }),
   };
 });
 vi.mock('@opentui/core', () => ({
@@ -115,6 +111,7 @@ import {
   OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
   OpenTuiOutputStyleDialog,
+  wrappedRows,
 } from './dialogs-modes.js';
 
 const CONCISE = BUILT_IN_OUTPUT_STYLES.find(
@@ -232,7 +229,6 @@ describe('OpenTuiApprovalModeDialog', () => {
       availableTerminalHeight?: number;
       /** A workspace-scope `tools.approvalMode`, which raises ink's warning. */
       workspaceModified?: boolean;
-      trusted?: boolean;
     } = {},
   ) {
     const setValue = vi.fn();
@@ -241,7 +237,7 @@ describe('OpenTuiApprovalModeDialog', () => {
     let approvalMode = options.current ?? ApprovalMode.DEFAULT;
     const config = {
       getApprovalMode: () => approvalMode,
-      isTrustedFolder: () => options.trusted ?? true,
+      isTrustedFolder: () => true,
       setApprovalMode: (mode: ApprovalMode) => {
         approvalMode = mode;
       },
@@ -272,7 +268,6 @@ describe('OpenTuiApprovalModeDialog', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.width = 100;
-    mocks.state.height = 40;
   });
 
   it("labels every mode with ink's display name, description and row number", () => {
@@ -518,13 +513,29 @@ describe('OpenTuiApprovalModeDialog', () => {
     expect(queryRow('User Settings')).not.toBeNull();
     expect(queryRow('Workspace Settings')).toBeNull();
   });
+
+  it('reads the footer hint from the step on screen, not the step it left', () => {
+    // At region 11 with the warning up, the mode step's budget hides the hint
+    // (the warning's rows raise its threshold to 12) while the scope step's
+    // own budget shows it. Reading the mode step's budget for the scope step
+    // would hide a hint the rows on screen paid for.
+    renderModeDialog({ availableTerminalHeight: 11, workspaceModified: true });
+    expect(
+      screen.queryByText('(Use Enter to select, Tab to configure scope)'),
+    ).toBeNull();
+
+    press('tab');
+
+    expect(
+      screen.getByText('(Use Enter to apply scope, Tab to go back)'),
+    ).not.toBeNull();
+  });
 });
 
 describe('OpenTuiApprovalModeDialog trust gate', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.width = 100;
-    mocks.state.height = 40;
   });
 
   function renderUntrusted(availableTerminalHeight?: number) {
@@ -612,17 +623,99 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     expect(queryRow('plan mode - ')).toBeNull();
     expect(queryRow('YOLO mode - ')).not.toBeNull();
   });
+
+  it('clears the refusal when the scope moves, and the list window grows back', () => {
+    // The refusal's rows are charged to the list window, so a refusal that
+    // stayed after the scope it refused against moved would keep the list
+    // windowed behind a message that no longer describes anything.
+    renderUntrusted(13);
+    press('return');
+    expect(
+      screen.getByText(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      ),
+    ).not.toBeNull();
+    expect(queryRow('plan mode - ')).toBeNull();
+
+    press('tab');
+    press('down');
+    press('return');
+
+    expect(
+      screen.queryByText(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      ),
+    ).toBeNull();
+    expect(queryRow('plan mode - ')).not.toBeNull();
+    expect(queryRow('YOLO mode - ')).not.toBeNull();
+  });
 });
 
 describe('OpenTuiOutputStyleDialog', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
     mocks.loadSessionOutputStyles.mockReset();
     mocks.loadSessionOutputStyles.mockResolvedValue(BUILT_IN_OUTPUT_STYLES);
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('clips ten-row catalog labels to the columns a two-digit number column leaves', async () => {
+    // DialogSelect sizes the number box from the full list's length, so a
+    // ten-row catalog spends six columns on row chrome, not five. Clipped one
+    // column wider, @opentui's word wrap puts the tail on a second physical
+    // row the budget never paid for — measured on the real renderer at
+    // 100x24: rows overpainted while digit key 5 still committed one.
+    const customs: OutputStyleDefinition[] = [
+      'Alpha',
+      'Bravo',
+      'Charlie',
+      'Delta',
+      'Echo',
+    ].map((name) => ({
+      name,
+      description: `A ${name} style with a description long enough to need truncation at sixty columns`,
+      source: 'user',
+      prompt: 'Behave accordingly.',
+      keepCodingInstructions: false,
+    }));
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      ...customs,
+    ]);
+    mocks.state.width = 60;
+    const harness = createHarness();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(queryRow('Alpha — ')).not.toBeNull());
+    // Ten rows at width 60: content width 52 minus indicator (2) and the
+    // two-digit number box (4) leaves each label 46 columns.
+    for (const name of [
+      'default',
+      'Concise',
+      'Proactive',
+      'Explanatory',
+      'Learning',
+      'Alpha',
+      'Bravo',
+      'Charlie',
+      'Delta',
+      'Echo',
+    ]) {
+      expect(getCachedStringWidth(labelText(`${name} — `))).toBeLessThanOrEqual(
+        46,
+      );
+    }
   });
 
   it('lists a custom style and pre-selects the active one', async () => {
@@ -1046,6 +1139,7 @@ describe('OpenTuiEffortDialog', () => {
 
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
   });
 
   function renderEffortDialog(reasoningEffort: string | undefined) {
@@ -1138,6 +1232,19 @@ describe('OpenTuiEffortDialog', () => {
       'Reasoning effort: high (requested; the effective tier depends on the active provider/model).',
     );
   });
+
+  it('shows the whole subtitle over as many rows as it needs, like ink', () => {
+    // ink's EffortDialog renders the title run as a plain bold Text with no
+    // wrap="truncate" — only ApprovalModeDialog truncates — so the
+    // clamped-per-model caveat reaches a narrow terminal whole instead of
+    // clipping to '(applied acr…' or dropping out entirely below it.
+    mocks.state.width = 40;
+    renderEffortDialog(undefined);
+
+    expect(
+      screen.getByText('(applied across all providers; clamped per model)'),
+    ).not.toBeNull();
+  });
 });
 
 describe('DialogFrame fill flag (Decision 66)', () => {
@@ -1191,5 +1298,25 @@ describe('DialogFrame fill flag (Decision 66)', () => {
     expect(layoutOf(container.firstElementChild)).toMatchObject({
       flexGrow: 0,
     });
+  });
+});
+
+describe('wrappedRows (the row count a wrapped notice pays for)', () => {
+  it('packs a spaceless CJK run by cell width, never splitting a glyph', () => {
+    // The shipped zh workspace warning is 28 full-width characters with no
+    // spaces, and the renderer cannot split a two-cell glyph across the
+    // boundary, so a 19-column row holds nine of them — not the ten a
+    // whole-width division predicts. The space-split model budgets four rows
+    // where the renderer paints five, and the warning's last row is lost.
+    expect(
+      wrappedRows(
+        '⚠ 工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
+        19,
+      ),
+    ).toBe(5);
+  });
+
+  it('counts a newline as a row break', () => {
+    expect(wrappedRows('a\nb', 40)).toBe(2);
   });
 });

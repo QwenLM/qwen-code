@@ -1712,6 +1712,21 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
     expect(text).not.toContain('\u001b');
   });
 
+  it('strips the escape bytes an extension-owned badge carries', async () => {
+    // The badge is built from the manifest's displayName, which nothing
+    // validates: string-width reads ESC as zero-width, so the 35-column cap
+    // the badge builder applies lets the bytes through to the rendered row.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      source: 'plugin-command',
+      sourceDetail: 'extension',
+      sourceLabel: '\u001b[31mEvil\u001b[0m',
+    });
+    expect(text).toContain('[Evil]');
+    expect(text).not.toContain('\u001b');
+  });
+
   // The wrap alignment measured on a real terminal only holds while these stay
   // three separate flex children: concatenated into one text run, a long hint
   // word-wraps the whole run and the row grows to three lines instead of ink's

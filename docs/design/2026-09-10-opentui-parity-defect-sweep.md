@@ -2175,13 +2175,15 @@ seventy-three identical and fifty-eight divergent, two of them the sampled check
 apart, the rest carry 258 rows only ink draws and 288 only this port draws. The
 seventy-three/fifty-eight split those counts were taken over is the one Coverage
 boundary withdraws: it does not reproduce from these frames, and the row counts
-fall with it. The census below counts from it, and stands as that pass's own
-reading of the families rather than as a live tally.
+fall with it. The tally above and the census
+below count from it, and stand as that pass's own readings rather than as live
+tallies — the same narrative past every per-pass re-run paragraph above is written
+in.
 
 Those fifty-six fall in eleven families by primary cause, four of them new to that
-pass. Nine are non-deterministic and no fix can close them: the two sampled
-checkpoints, the two single-frame spinner phrases, the three stamp frames where the
-clock moved on its own, and the elapsed milliseconds on the two sub-agent frames.
+pass. Seven are non-deterministic and no fix can close them: the two single-frame
+spinner phrases, the three stamp frames where the clock moved on its own, and the
+elapsed milliseconds on the two sub-agent frames.
 Nineteen are Decision 26 — this port still shows the banner ink has scrolled off, so
 identical content sits at different rows. Ten carry a defect no earlier pass had
 shown: the notice row keeps glyphs from the banner row it displaced, because the
@@ -2406,17 +2408,17 @@ It now takes the numeric half of the same mirror, and its Enter reads the ref. O
 
 Decision 66 gave the approval-mode dialog ink's region height and ink's derivation for what fits inside it. Three things that derivation assumed were still wrong on this side, and a fourth step never got the derivation at all.
 
-The row width. ink gives the mode labels, the title run and the footer hint `wrap="truncate"`, and its row constants count one physical row for each. This port rendered all three with the renderer's default word wrap and no width clip, so on a narrow terminal each took more rows than its constant budgets and the list slid out of the frame. Decision 68 already established that this renderer has no truncate wrap, so the clipping moves into the arithmetic the same way: a label gets the content width minus its row's two-column indicator and, when the list is numbered, the `N.` column and its space; the title run `> Title ` is clipped to the content width and the dim subtitle then gets whatever that run left, which is how ink's single truncated Text composes the two; the footer hint gets the content width. The warning is not clipped, because ink wraps it.
+The row width. ink gives the mode labels, the title run and the footer hint `wrap="truncate"`, and its row constants count one physical row for each. This port rendered all three with the renderer's default word wrap and no width clip, so on a narrow terminal each took more rows than its constant budgets and the list slid out of the frame. Decision 68 already established that this renderer has no truncate wrap, so the clipping moves into the arithmetic the same way: a label gets the content width minus its row's two-column indicator and, when the list is numbered, the `N.` column and its space, the column sized from the list's length so a tenth row costs its label one more column; the title run `> Title ` is clipped to the content width and the dim subtitle then gets whatever that run left, which is how ink's single truncated Text composes the two; the footer hint gets the content width. The warning is not clipped, because ink wraps it.
 
 The row count of a wrapped notice. ink budgets its workspace warning at a flat three rows. At a hundred columns the text — ninety-one columns of it inside a ninety-two-column content width — fits one wrapped row, so the flat count over-pays by one; at forty columns it needs three rows, so the flat count under-pays by one and the list paints over the last of them. The count is now derived: one margin row plus the rows the text occupies once word-wrapped at the content width, with a word wider than the row broken across rows. ink's flat three stays as the floor, because paying fewer rows than ink would put a mode row on screen that ink does not show, and the derivation only ever adds to it.
 
 The trust-gate refusal. This port draws a refusal below the same list when the folder is untrusted or a write throws; ink has no counterpart in this dialog, so the budget carried no term for it, and the errorless budget has no slack at exactly the heights where the gate fires. The refusal takes the same derivation. Its term stays out of the `MIN_HEIGHT_*` thresholds, which are ink's.
 
-The Tab step. It shares the frame and the region with the mode step but had no budget of its own, so it kept the spacer row the mode step had just shed and an unwindowed list. **This is a deliberate divergence.** ink's `ScopeSelector` keeps both and gets away with it because ink's frame carries `overflow="hidden"` and absorbs the overrun; at region heights four to six the same rows here overpaint each other, and Enter commits a scope the user could not read. The step now runs the same derivation and sheds the spacer and windows its list, where ink keeps them. The rows ink loses to its clip are rows nobody could read either way, but the divergence is recorded rather than matched, because matching it would mean giving this frame a clip it does not have.
+The Tab step. It shares the frame and the region with the mode step but had no budget of its own, so it kept the spacer row the mode step had just shed and an unwindowed list. **This is a deliberate divergence.** ink's `ScopeSelector` keeps both and gets away with it because ink's frame carries `overflow="hidden"` and absorbs the overrun; at region heights four to six the same rows here overpaint each other, and Enter commits a scope the user could not read. The step now runs the same derivation and sheds the spacer and windows its list, where ink keeps them. The rows ink loses to its clip are rows nobody could read either way, but the divergence is recorded rather than matched, because matching it would mean giving this frame a clip it does not have. The footer hint reads the budget of the step on screen rather than the mode step's, so the two steps can disagree about it — at a region of eleven rows with the warning up, the mode step hides it and the scope step shows it — and a test walks that split.
 
 Six cases pin the arithmetic, and each was run against the mutation that undoes it: dropping the label clip, the subtitle clip or the hint clip fails exactly the case that measures that run; replacing the warning's derivation with ink's flat three fails only the narrow-terminal case; charging the refusal nothing fails the trust-gate case; dropping either half of the Tab step's pass-through fails the Tab case; and taking the floor away fails the case that pins it. Two tables then walk the budget across six region heights without the warning and four with it, asserting the spacer, the footer hint, the arrows and the number of rendered rows at each, which is what pins both the spacer and the warning footer-hint thresholds and the guard that keeps the hint on screen when dropping it would only buy room for arrows. No new frames this round: the harness reads strings and declared layout props, and what changed is row arithmetic at widths the matrix's hundred-column arm does not reach.
 
-## Decision 71 — the help overlay budgets from the region, and the frame rule reaches the frames beside it
+## Decision 71 — the help overlay budgets from the region, and the frames beside it open flush and let the region clip
 
 The popup slot is a fixed height that already accounts for the banner, the status
 bar and the composer, so the ten rows the help overlay reserved for that same
@@ -2425,15 +2427,22 @@ every terminal height, and windowed its command list at sixteen rows on a
 forty-row terminal where ink shows a fixed eighteen. It now reads the region
 budget the mount is already handed and subtracts only its own chrome, so the list
 reaches ink's eighteen and the slot keeps no unused rows. The cap stays — the
-window never exceeds the eighteen rows ink hard-codes — and below a region of
-fourteen rows the overlay still cannot fit, which Follow-ups records.
+window never exceeds the eighteen rows ink hard-codes, so past a thirty-seven-row
+terminal the region outgrows the window and the rows below it stay blank, three of
+them on a forty-row terminal — and at a region of fourteen rows or below the
+overlay still cannot fit, which Follow-ups records.
 
-The same pass applies Decision 67's rule to the four sibling frames that still
-carried the pair the shared dialog chrome dropped: a box that asks for a size has
-to ask to shrink as well, and a box that opens one row below the region's top has
-to stop doing so. Those are the memory, statusline, stats and skills frames and
-the arena's, whose bottom borders were measured painting past the region and now
-land inside it. The two sized bodies inside them are not covered by this change.
+The same pass also reaches the four sibling frames beside it — the memory,
+statusline, stats and skills frames and the arena's — which each opened one row
+below the region's top, so their bottom borders were measured painting past it.
+They now open flush with it, and they stay unshrinkable: the renderer defaults an
+unsized box to shrinkable, and a shrunk frame squeezes its text rows to zero
+height and paints them over each other — measured on /stats and /statusline at
+80×24 and on /skills at 100×20 — so each root box refuses the shrink explicitly
+and lets the region's clip cut whatever does not fit, the way ink's stats dialog
+clips. A structural test pins each frame's flush opening and its refusal to
+shrink. The sized bodies inside the frames are not covered by this change;
+Follow-ups records them.
 
 ## Coverage boundary
 
@@ -2757,11 +2766,13 @@ What was verified, and how far the verification reaches:
   console is an open question.
 - The help overlay's body budget comes from the popup region rather than the raw
   terminal height, so its command list windows at ink's fixed eighteen rows on a
-  forty-row terminal instead of sixteen and leaves no unused rows in the slot.
-  Below a region of fourteen rows the body still budgets fewer rows than the
-  commands tab's own chrome needs, and the window's one-row floor then leaves the
-  intro and the hint clipped under a live header and footer. ink has no
-  counterpart to compare against: it never derives that window from the height.
+  forty-row terminal instead of sixteen and, up to a thirty-seven-row terminal,
+  leaves no unused rows in the slot — above it the eighteen-row cap leaves the
+  extra region rows blank. At a region of fourteen rows or below the body still
+  budgets fewer rows than the commands tab's own chrome needs, and the window's
+  one-row floor then leaves the intro and the hint clipped under a live header
+  and footer. ink has no counterpart to compare against: it never derives that
+  window from the height.
 - The two reserves that size the conversation around an expanded confirmation
   are hand-derived from a row inventory. The long-confirmation scenario shows
   the shipped value green and zero timing out, but a value four rows smaller
@@ -3164,20 +3175,21 @@ What was verified, and how far the verification reaches:
   24-hour bracketed time inline, with an identical locale call. Pointing ink at the
   shared one would edit the very file the frame evidence was captured against, so
   the second copy stays and the two are only kept equal by hand.
-- Two sized bodies inside the dialog frames still hold their own height: the diff
-  dialog's fourteen-row scroll region and the subagents dialog's twelve-row one.
-  Their frames now shrink with the region, and a frame that shrinks around a body
-  that does not overpaints its own bottom border — measured at a region of
-  seventeen rows and below, where the last body row lands on the border. Windowing
-  those two heights from the region budget is the fix, and the height has to be
-  folded into the body's key the way the session picker folds its own, because the
-  renderer clears the shrink on an explicitly sized node and never re-applies a
-  prop whose value did not change.
-- The four sibling frames that now follow that rule — memory, statusline, stats,
-  skills and the arena's — carry no props-level witness. Two are frame components
-  a test could call the way the shared dialog chrome's test does; the other two are
-  the root box of a dialog body, so pinning them means rendering the dialog, and no
-  test file renders them today.
+- Three sized bodies inside the dialog frames still hold their own height: the
+  diff dialog's fourteen-row scroll region, the subagents dialog's twelve-row
+  one, and the skills dialog's twelve-row one. The first two sit in the shared
+  dialog chrome, which shrinks with the region, and a frame that shrinks around a
+  body that does not overpaints its own bottom border — measured at a region of
+  seventeen rows and below for the fourteen-row body and of fifteen rows and
+  below for the twelve-row one, where the last body row lands on the border,
+  while the two region heights above each boundary are absorbed silently into the
+  frame's inner spacing. Windowing those two heights from the region budget is
+  the fix — it closes the overpaint and the absorption band together — and the
+  height has to be folded into the body's key the way the session picker folds
+  its own, because the renderer clears the shrink on an explicitly sized node and
+  never re-applies a prop whose value did not change. The skills body needs no
+  such windowing: its frame keeps its natural height and the region clips it, the
+  way ink clips /stats.
 - Decision 68's shrink emulation still sits inline in the completion row's map
   body, so the twenty-three measured combinations cannot live in the repo as a
   test, and two of the four numbers the arithmetic reads — the non-shared column

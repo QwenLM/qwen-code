@@ -51,8 +51,8 @@ export const MAIN_CONTENT_HEIGHT_RESERVATION = 2;
  * OpenTUI popup region, and AppContainer's `mainContentHeightReservation`.
  * The third is legacy-mode only — VP mode reserves nothing there — but it
  * feeds `availableTerminalHeight`, and through it the shell tool's terminal
- * height and the stream's viewport rows, so raising this constant to give a
- * popup one more row also shortens every embedded shell result by one.
+ * height and the stream's viewport rows, so raising this constant takes a row
+ * from every popup and shortens every embedded shell result by one.
  */
 export const STATIC_EXTRA_HEIGHT = 3;
 

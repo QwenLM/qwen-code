@@ -58,6 +58,7 @@ import { clampDialogHeight } from '../utils/layoutUtils.js';
 import {
   clipToWidth,
   getCachedStringWidth,
+  toCodePoints,
   truncateToWidth,
 } from '../utils/textUtils.js';
 import type { DialogListItem } from './dialogs-core.js';
@@ -71,12 +72,19 @@ interface LabeledItem<T> extends DialogListItem<T> {
 /**
  * Columns a list row leaves its label: the dialog's content width minus the
  * row's own `›` indicator box (2) and, when numbered, the `N.` box plus its
- * trailing space. ink gives every label `wrap="truncate"`, so a label wider
- * than this is clipped rather than wrapped — a wrapped row is two physical
- * rows and the budget below counts it as one.
+ * trailing space. DialogSelect sizes that box from the full list's length
+ * (`String(items.length).length` digits), so a ten-row list spends one more
+ * column on it than a nine-row one. ink gives every label `wrap="truncate"`,
+ * so a label wider than this is clipped rather than wrapped — a wrapped row
+ * is two physical rows and the budget below counts it as one.
  */
-function rowLabelWidth(terminalWidth: number, showNumbers: boolean): number {
-  return Math.max(0, dialogContentWidth(terminalWidth) - (showNumbers ? 5 : 2));
+function rowLabelWidth(
+  terminalWidth: number,
+  itemCount: number,
+  showNumbers: boolean,
+): number {
+  const numberBox = showNumbers ? String(itemCount).length + 2 : 0;
+  return Math.max(0, dialogContentWidth(terminalWidth) - 2 - numberBox);
 }
 
 /**
@@ -92,7 +100,7 @@ function LabeledRows<T>(props: {
 }) {
   const { list, focused } = props;
   const { width } = useTerminalDimensions();
-  const labelWidth = rowLabelWidth(width, focused);
+  const labelWidth = rowLabelWidth(width, list.items.length, focused);
   return (
     <DialogSelect
       items={list.items}
@@ -123,13 +131,27 @@ function DialogTitle(props: {
   title: string;
   subtitle?: string;
   marginBottom?: number;
+  /** ink's ApprovalModeDialog alone gives the run `wrap="truncate"`; the
+   * effort and output-style dialogs render a plain Text that wraps, so their
+   * subtitles stay whole over as many rows as they need. */
+  truncateTitle?: boolean;
 }) {
   const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  const titleRun = `> ${props.title} `;
+  if (!props.truncateTitle) {
+    return (
+      <box flexDirection="row" marginBottom={props.marginBottom ?? 1}>
+        <text fg={C.text} attributes={1}>
+          {titleRun}
+        </text>
+        {props.subtitle ? <text fg={C.dim}>{props.subtitle}</text> : null}
+      </box>
+    );
+  }
   // ink puts the whole run — prefix, title and dim subtitle — inside one
   // `wrap="truncate"` Text, so the subtitle only gets the columns the title
   // left and neither wraps onto a second row the budget does not pay for.
-  const contentWidth = dialogContentWidth(width);
-  const titleRun = `> ${props.title} `;
   const titleWidth = getCachedStringWidth(titleRun);
   return (
     <box flexDirection="row" marginBottom={props.marginBottom ?? 1}>
@@ -166,25 +188,46 @@ const FOOTER_HINT_ROWS = 2;
  * too), so the budget has to pay for the rows they actually occupy: the
  * refusal had no term in it at all, and the warning's flat count only covers a
  * terminal wide enough for the text to fit inside it.
+ *
+ * Two renderer rules the count has to share: a newline always starts a new
+ * row, and a word wider than the row is broken by cell width without splitting
+ * a double-width glyph — so a spaceless CJK run packs nine characters into a
+ * nineteen-column row, not the ten a whole-width division predicts.
  */
-function wrappedRows(text: string, width: number): number {
+export function wrappedRows(text: string, width: number): number {
   if (width <= 0) {
     return 1;
   }
-  let rows = 1;
-  let used = 0;
-  for (const word of text.split(' ')) {
-    const wordWidth = getCachedStringWidth(word);
-    if (used > 0 && used + 1 + wordWidth > width) {
-      rows += 1;
-      used = 0;
+  let rows = 0;
+  for (const line of text.split('\n')) {
+    let lineRows = 1;
+    let used = 0;
+    for (const word of line.split(' ')) {
+      const wordWidth = getCachedStringWidth(word);
+      if (used > 0) {
+        if (used + 1 + wordWidth > width) {
+          lineRows += 1;
+          used = 0;
+        } else {
+          used += 1;
+        }
+      }
+      if (wordWidth <= width - used) {
+        used += wordWidth;
+        continue;
+      }
+      // A word wider than the space left to it is broken across rows, cell by
+      // cell; a two-cell glyph that would straddle the boundary moves whole.
+      for (const char of toCodePoints(word)) {
+        const charWidth = getCachedStringWidth(char);
+        if (used > 0 && used + charWidth > width) {
+          lineRows += 1;
+          used = 0;
+        }
+        used += charWidth;
+      }
     }
-    used += used > 0 ? 1 + wordWidth : wordWidth;
-    // A single word wider than the row is broken across rows.
-    while (used > width) {
-      rows += 1;
-      used -= width;
-    }
+    rows += lineRows;
   }
   return rows;
 }
@@ -380,6 +423,13 @@ export function OpenTuiApprovalModeDialog(props: {
   // `overflow="hidden"`. Here the same rows overpaint each other at region
   // heights 4 to 6 (measured), and Enter commits a scope the user cannot read.
   const scopeBudget = modeListBudget(regionHeight, 0, 0, scopeItems.length);
+  // The trust-gate refusal is charged to the list window, so it must not
+  // outlive the state it describes: a scope move clears it, and a successful
+  // write closes the dialog.
+  const adoptScope = (scope: SettingScope) => {
+    setSelectedScope(scope);
+    setError(null);
+  };
   // The footer hint lives outside both branches, in the frame whose rows the
   // step on screen paid for.
   const activeBudget = view === 'mode' ? budget : scopeBudget;
@@ -395,10 +445,10 @@ export function OpenTuiApprovalModeDialog(props: {
     // ink's handleScopeSelect only records the scope and steps back: the mode
     // row's Enter is what persists.
     onSelect: (scope) => {
-      setSelectedScope(scope);
+      adoptScope(scope);
       setView('mode');
     },
-    onHighlight: (scope) => setSelectedScope(scope),
+    onHighlight: adoptScope,
   });
 
   useDialogFrameKeys({
@@ -414,6 +464,7 @@ export function OpenTuiApprovalModeDialog(props: {
             title={t('Approval Mode')}
             subtitle={otherScopeModifiedMessage}
             marginBottom={budget.showModeSpacer ? 1 : 0}
+            truncateTitle
           />
           <LabeledRows
             list={modeList}
@@ -437,6 +488,7 @@ export function OpenTuiApprovalModeDialog(props: {
           <DialogTitle
             title={t('Apply To')}
             marginBottom={scopeBudget.showModeSpacer ? 1 : 0}
+            truncateTitle
           />
           <LabeledRows
             list={scopeList}

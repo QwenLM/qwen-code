@@ -133,10 +133,12 @@ export interface OpenTuiDialogMountProps {
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
   /** Row budget for the dialog bodies that window themselves (model, theme,
-   * approval mode). The settings dialog receives it and reads no height: its
-   * window is a constant, recorded among the unwindowed bodies the parity doc
-   * defers. */
-  availableTerminalHeight?: number;
+   * approval mode) and for the help overlay's body rows. The settings dialog
+   * receives it and reads no height: its window is a constant, recorded among
+   * the unwindowed bodies the parity doc defers. Required so a caller cannot
+   * budget the overlay from the raw terminal height — five rows more than the
+   * region holds — by forgetting it. */
+  availableTerminalHeight: number;
 }
 
 export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
@@ -299,9 +301,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   };
   const [helpScroll, setHelpScroll] = useState(0);
   const dialogWidth = dialogAreaWidth(dimensions.width);
-  const helpBodyRows = computeHelpBodyRows(
-    props.availableTerminalHeight ?? dimensions.height,
-  );
+  const helpBodyRows = computeHelpBodyRows(props.availableTerminalHeight);
   const helpWindowRows = helpCommandWindowRows(helpBodyRows);
   // Only the two command tabs have a scrollable window, and its bound is that
   // tab's line count. Clamping here rather than leaving it to the render keeps

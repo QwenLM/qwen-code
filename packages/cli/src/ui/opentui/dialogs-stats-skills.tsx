@@ -190,7 +190,10 @@ export function OpenTuiStatsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      flexShrink={1}
+      // A shrinkable frame squeezes its text rows to zero on a short region
+      // and paints them over each other; staying natural height lets the
+      // region's overflow="hidden" clip instead, as ink does for /stats.
+      flexShrink={0}
     >
       {/* Tab bar */}
       <box flexDirection="row">
@@ -441,7 +444,10 @@ export function OpenTuiSkillsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      flexShrink={1}
+      // A shrinkable frame squeezes its text rows to zero on a short region
+      // and paints them over each other; staying natural height lets the
+      // region's overflow="hidden" clip instead, as ink does for /stats.
+      flexShrink={0}
     >
       <box flexDirection="row" justifyContent="space-between">
         <text fg={C.accent} attributes={1}>

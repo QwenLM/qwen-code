@@ -47,8 +47,6 @@ const mocks = vi.hoisted(() => {
     dialogProps: {} as Record<string, Record<string, unknown>>,
     /** Line count the stubbed help-content builders report, to pin the scroll bound. */
     helpLineCount: 0,
-    /** Terminal height the mocked renderer reports, to pin the help body budget. */
-    terminalHeight: 40,
   };
   // Renders the dialog-name marker but keeps the props the mount passed, so
   // wiring (callbacks, data builders) stays observable from these tests.
@@ -92,10 +90,7 @@ vi.mock('@opentui/react', () => ({
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.keyboardHandlers.push(handler);
   },
-  useTerminalDimensions: () => ({
-    width: 120,
-    height: mocks.state.terminalHeight,
-  }),
+  useTerminalDimensions: () => ({ width: 120, height: 40 }),
   useRenderer: () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
@@ -248,7 +243,7 @@ function mount(
       notify={overrides.notify ?? (() => {})}
       fillInput={overrides.fillInput}
       onSelectSetting={overrides.onSelectSetting}
-      availableTerminalHeight={overrides.availableTerminalHeight}
+      availableTerminalHeight={overrides.availableTerminalHeight ?? 35}
     />,
   );
 }
@@ -310,7 +305,6 @@ describe('OpenTuiDialogMount routing', () => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.dialogProps = {};
     mocks.state.helpLineCount = 0;
-    mocks.state.terminalHeight = 40;
     vi.clearAllMocks();
     mockGetHookSystem.mockReset();
   });
@@ -414,7 +408,7 @@ describe('OpenTuiDialogMount routing', () => {
   it('drives help tab cycling and scrolling through its own keyboard handler', () => {
     // 23 lines over the 18-row window leave five offsets that actually move it.
     mocks.state.helpLineCount = 23;
-    mount({ dialog: 'help' });
+    mount({ dialog: 'help' }, { availableTerminalHeight: 31 });
     expect(mocks.state.keyboardHandlers.length).toBeGreaterThan(0);
     const send = (name: string, shift = false) => {
       act(() => {
@@ -427,7 +421,7 @@ describe('OpenTuiDialogMount routing', () => {
     // The overlay gets the popup area, not the raw terminal: the 120 columns
     // this renderer reports cap at 100, the width ink hands its Help dialog.
     expect(overlay().width).toBe(100);
-    expect(overlay().bodyRows).toBe(34);
+    expect(overlay().bodyRows).toBe(25);
     expect(overlay().tab).toBe('general');
     // The general tab has no scrollable window, so the arrow keys are inert.
     send('down');
@@ -452,12 +446,11 @@ describe('OpenTuiDialogMount routing', () => {
   });
 
   it('pages the help command list by the window a short terminal leaves', () => {
-    // The same 23 lines, but a 24-row terminal budgets 18 body rows and the tab
+    // The same 23 lines, but a 24-row region budgets 18 body rows and the tab
     // chrome claims four of them: the window narrows to 14, so a page covers 14
     // lines and stops at nine rather than the five offsets a roomy terminal has.
     mocks.state.helpLineCount = 23;
-    mocks.state.terminalHeight = 24;
-    mount({ dialog: 'help' });
+    mount({ dialog: 'help' }, { availableTerminalHeight: 24 });
     const send = (name: string) => {
       act(() => {
         for (const handler of mocks.state.keyboardHandlers)
@@ -496,6 +489,7 @@ describe('OpenTuiDialogMount routing', () => {
         commands={[]}
         onClose={onClose}
         notify={() => {}}
+        availableTerminalHeight={19}
       />,
     );
     act(() => {
