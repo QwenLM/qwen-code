@@ -176,7 +176,13 @@ export function createBatchAutoCollector(
       // A partial collect still reports what it delivered.
       summary = (error as { summary?: CollectSummary }).summary;
       if (!summary) throw error;
+      const partial = describeCollect(summary);
+      // One that delivered nothing has nothing to report: keep throwing so the
+      // pass counts as a failure and the user is told once it repeats.
+      if (!partial) throw error;
       log(`batch auto-collect: ${task.id}: ${String(error)}`);
+      options.notify(partial);
+      return;
     }
     const notice = describeCollect(summary);
     if (notice) options.notify(notice);
