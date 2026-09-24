@@ -11,6 +11,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import {
   TrajectoryOverview,
+  exactPercent,
+  formatWindowTime,
   type TrajectoryOverviewProps,
 } from './TrajectoryOverview';
 import type {
@@ -33,11 +35,20 @@ afterEach(() => {
   mounted.length = 0;
 });
 
+/** Render the last mounted overview again with new props, same root. */
+let rerender: (props: Partial<TrajectoryOverviewProps>) => void = () => {};
+
 function render(props: Partial<TrajectoryOverviewProps>): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   mounted.push({ root, container });
+  rerender = (next) => draw(root, next);
+  draw(root, props);
+  return container;
+}
+
+function draw(root: Root, props: Partial<TrajectoryOverviewProps>) {
   act(() => {
     root.render(
       <I18nProvider language="en">
@@ -51,7 +62,6 @@ function render(props: Partial<TrajectoryOverviewProps>): HTMLElement {
       </I18nProvider>,
     );
   });
-  return container;
 }
 
 const ROW = { kind: 'message', key: 'x' } as unknown as TrajectoryRow;
@@ -127,6 +137,52 @@ function plotOf(container: HTMLElement): HTMLElement {
 
 /** Client x of a point `fraction` of the way along the track. */
 const at = (fraction: number) => PLOT_LEFT + fraction * PLOT_WIDTH;
+
+/** A wheel turn over the track; returns the event to read `defaultPrevented`. */
+function wheel(
+  target: Element,
+  clientX: number,
+  delta: {
+    deltaX?: number;
+    deltaY?: number;
+    deltaMode?: number;
+    ctrlKey?: boolean;
+  },
+): WheelEvent {
+  const event = new WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    clientX,
+    ctrlKey: delta.ctrlKey ?? false,
+    deltaX: delta.deltaX ?? 0,
+    deltaY: delta.deltaY ?? 0,
+    deltaMode: delta.deltaMode ?? 0,
+  });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+function domainOf(container: HTMLElement): HTMLElement {
+  return container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-domain"]',
+  )!;
+}
+
+const layer = (container: HTMLElement) => {
+  const domain = domainOf(container);
+  return {
+    left: domain.style.left,
+    width: domain.style.width,
+    zoomed: domain.dataset['zoomed'] === 'true',
+  };
+};
+
+const button = (container: HTMLElement, name: 'in' | 'out' | 'reset') =>
+  container.querySelector<HTMLButtonElement>(
+    `[data-testid="trajectory-zoom-${name}"]`,
+  )!;
 
 const overviewOf = (container: HTMLElement) =>
   container.querySelector<HTMLElement>('[data-testid="trajectory-overview"]');
@@ -327,10 +383,8 @@ describe('TrajectoryOverview', () => {
         onRangeChange,
       });
       const plot = plotOf(container);
-      // A right press starts no gesture of its own.
+      // Linux and macOS raise the menu on the press, before the release.
       pointer(plot, 'pointerdown', at(0.5), 2);
-      pointer(plot, 'pointerup', at(0.5), 2);
-      expect(onRangeChange).not.toHaveBeenCalled();
       const menu = new MouseEvent('contextmenu', {
         bubbles: true,
         cancelable: true,
@@ -339,6 +393,11 @@ describe('TrajectoryOverview', () => {
         plot.dispatchEvent(menu);
       });
       expect(menu.defaultPrevented).toBe(true);
+      // The menu event itself clears nothing; the release that did not move
+      // does, once.
+      expect(onRangeChange).not.toHaveBeenCalled();
+      pointer(plot, 'pointerup', at(0.5), 2);
+      expect(onRangeChange).toHaveBeenCalledTimes(1);
       expect(onRangeChange).toHaveBeenCalledWith(undefined);
     });
 
@@ -407,5 +466,469 @@ describe('TrajectoryOverview', () => {
     );
     expect(only!.style.getPropertyValue('--left')).toBe('0%');
     expect(only!.style.getPropertyValue('--width')).toBe('0%');
+  });
+  describe('viewport', () => {
+    // MODEL spans 2000 ms. A wheel of -400 px at the middle zooms by
+    // exp(-0.6): 1097.62 ms in view, from 451.19 to 1548.81 ms. These numbers
+    // were worked out apart from the code, and are written out here so a
+    // change to the formula shows up as a failure rather than a new answer.
+    const zoomedMiddle = (container: HTMLElement) =>
+      wheel(plotOf(container), at(0.5), { deltaY: -400 });
+
+    it('draws the whole run in the track until it is zoomed', () => {
+      const container = render({ model: MODEL });
+      expect(layer(container)).toEqual({
+        left: '0%',
+        width: '100%',
+        zoomed: false,
+      });
+    });
+
+    it('zooms around the pointer and keeps the page from scrolling', () => {
+      const container = render({ model: MODEL });
+      const event = zoomedMiddle(container);
+      expect(event.defaultPrevented).toBe(true);
+      expect(layer(container)).toEqual({
+        left: '-41.106%',
+        width: '182.212%',
+        zoomed: true,
+      });
+    });
+
+    it('keeps the point under the pointer where it was', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      wheel(plot, at(0.25), { deltaY: -400 });
+      // 500 ms was under the pointer before the zoom; it must still be.
+      pointer(plot, 'pointerdown', at(0.25));
+      pointer(plot, 'pointermove', at(0.25) + 20);
+      pointer(plot, 'pointerup', at(0.25) + 20);
+      expect(onRangeChange.mock.calls[0]![0].start).toBeCloseTo(500, 9);
+    });
+
+    it('reads a wheel that counts in lines as the pixels it stands for', () => {
+      const container = render({ model: MODEL });
+      wheel(plotOf(container), at(0.5), { deltaY: -25, deltaMode: 1 });
+      expect(layer(container).width).toBe('182.212%');
+    });
+
+    it('reads a wheel that counts in pages as a track width each', () => {
+      const container = render({ model: MODEL });
+      // One page is the 400px track: the same zoom as -400px.
+      wheel(plotOf(container), at(0.5), { deltaY: -1, deltaMode: 2 });
+      expect(layer(container).width).toBe('182.212%');
+    });
+
+    it('leaves a pinch and Ctrl with the wheel to the browser', () => {
+      const container = render({ model: MODEL });
+      const event = wheel(plotOf(container), at(0.5), {
+        deltaY: -400,
+        ctrlKey: true,
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('goes back to the whole run, and then lets the page scroll', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      wheel(plotOf(container), at(0.5), { deltaY: 2000 });
+      expect(layer(container)).toEqual({
+        left: '0%',
+        width: '100%',
+        zoomed: false,
+      });
+      const again = wheel(plotOf(container), at(0.5), { deltaY: 100 });
+      expect(again.defaultPrevented).toBe(false);
+    });
+
+    it('keeps a zoom out near the end of the run inside the run', () => {
+      const container = render({ model: MODEL });
+      const plot = plotOf(container);
+      // In at 90%: 812.14–1909.76 ms. Out by exp(0.3) around 10% would reach
+      // 2255 ms, past the end, so the stretch is pushed back to finish there.
+      wheel(plot, at(0.9), { deltaY: -400 });
+      wheel(plot, at(0.1), { deltaY: 200 });
+      expect(layer(container)).toEqual({
+        left: '-34.986%',
+        width: '134.986%',
+        zoomed: true,
+      });
+    });
+
+    it('stops at the narrowest stretch', () => {
+      const container = render({ model: MODEL });
+      wheel(plotOf(container), at(0.5), { deltaY: -100_000 });
+      expect(layer(container).width).toBe('10000%');
+      expect(button(container, 'in').getAttribute('aria-disabled')).toBe(
+        'true',
+      );
+    });
+
+    it('stops a long run at a 5000th of its length, inside layout limits', () => {
+      // One hour: at a 20ms floor the layer would be 180,000 track widths,
+      // past what browsers lay out.
+      const container = render({
+        model: {
+          ...MODEL,
+          spans: [span({ rowKey: 'only', start: 0, end: 3_600_000 })],
+          turnMarks: [],
+          total: 3_600_000,
+        },
+      });
+      wheel(plotOf(container), at(0.5), { deltaY: -100_000 });
+      expect(layer(container).width).toBe('500000%');
+      expect(button(container, 'in').getAttribute('aria-disabled')).toBe(
+        'true',
+      );
+    });
+
+    it('pans a zoomed strip sideways, up to the end of the run', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      const event = wheel(plotOf(container), at(0.5), { deltaX: 100_000 });
+      expect(event.defaultPrevented).toBe(true);
+      expect(layer(container).left).toBe('-82.212%');
+    });
+
+    it('leaves a sideways swipe alone when there is nowhere to pan', () => {
+      const container = render({ model: MODEL });
+      const event = wheel(plotOf(container), at(0.5), { deltaX: 300 });
+      expect(event.defaultPrevented).toBe(false);
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('pans with the right button and leaves the selection alone', () => {
+      const onRangeChange = vi.fn();
+      const container = render({
+        model: MODEL,
+        range: { start: 0, end: 500 },
+        onRangeChange,
+      });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      // Dragging left by a quarter of the track brings later time into view.
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.25), 2);
+      expect(plot.dataset['panning']).toBe('true');
+      pointer(plot, 'pointerup', at(0.25), 2);
+      expect(layer(container).left).toBe('-66.106%');
+      expect(plot.dataset['panning']).toBeUndefined();
+      expect(onRangeChange).not.toHaveBeenCalled();
+    });
+
+    it('still clears on a right click that wobbled, where there is nothing to pan', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      // 6px of travel: past the drag threshold, but at the whole run nothing
+      // can move, so this was a right click.
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.5) + 6, 2);
+      expect(plot.dataset['panning']).toBeUndefined();
+      pointer(plot, 'pointerup', at(0.5) + 6, 2);
+      expect(layer(container).zoomed).toBe(false);
+      expect(onRangeChange).toHaveBeenCalledTimes(1);
+      expect(onRangeChange).toHaveBeenCalledWith(undefined);
+    });
+
+    it('still clears on a right drag against the end the view is pinned to', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      // Zoomed at the very start: dragging right asks for earlier time, and
+      // there is none.
+      wheel(plot, at(0), { deltaY: -400 });
+      expect(layer(container).left).toBe('0%');
+      pointer(plot, 'pointerdown', at(0.3), 2);
+      pointer(plot, 'pointermove', at(0.6), 2);
+      pointer(plot, 'pointerup', at(0.6), 2);
+      expect(layer(container).left).toBe('0%');
+      expect(onRangeChange).toHaveBeenCalledWith(undefined);
+    });
+
+    it('ignores the other button while one press is under way', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      pointer(plot, 'pointerdown', at(0.1));
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.4));
+      pointer(plot, 'pointerup', at(0.4));
+      expect(onRangeChange).toHaveBeenCalledTimes(1);
+      expect(onRangeChange).toHaveBeenCalledWith({ start: 200, end: 800 });
+    });
+
+    it('does not zoom under a drag in progress', () => {
+      const container = render({ model: MODEL });
+      const plot = plotOf(container);
+      pointer(plot, 'pointerdown', at(0.1));
+      pointer(plot, 'pointermove', at(0.4));
+      const event = wheel(plot, at(0.4), { deltaY: -400 });
+      expect(event.defaultPrevented).toBe(false);
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('does not zoom under a right-button pan either', () => {
+      const container = render({ model: MODEL });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.25), 2);
+      const event = wheel(plot, at(0.25), { deltaY: -400 });
+      expect(event.defaultPrevented).toBe(false);
+      expect(layer(container).width).toBe('182.212%');
+    });
+
+    it('lets go of a pan the browser cancelled', () => {
+      const container = render({ model: MODEL });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.25), 2);
+      pointer(plot, 'pointercancel', at(0.25), 2);
+      expect(plot.dataset['panning']).toBeUndefined();
+      // Nothing is left holding the strip: the wheel zooms again.
+      const event = wheel(plot, at(0.5), { deltaY: -400 });
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('abandons a drag when the right button is pressed during it', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      pointer(plot, 'pointerdown', at(0.1));
+      pointer(plot, 'pointermove', at(0.4));
+      // A browser raises only the menu event for a second button pressed
+      // while the first is held.
+      const menu = new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        plot.dispatchEvent(menu);
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-range"]'),
+      ).toBeNull();
+      pointer(plot, 'pointerup', at(0.4));
+      expect(onRangeChange).toHaveBeenCalledTimes(1);
+      expect(onRangeChange).toHaveBeenCalledWith(undefined);
+    });
+
+    it('selects time through the zoom', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      pointer(plot, 'pointerdown', at(0.2));
+      pointer(plot, 'pointermove', at(0.6));
+      pointer(plot, 'pointerup', at(0.6));
+      const range = onRangeChange.mock.calls[0]![0];
+      expect(range.start).toBeCloseTo(670.713, 3);
+      expect(range.end).toBeCloseTo(1109.762, 3);
+    });
+
+    it('stops a drag at the edges of what is in view', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange });
+      const plot = plotOf(container);
+      zoomedMiddle(container);
+      pointer(plot, 'pointerdown', PLOT_LEFT - 50);
+      pointer(plot, 'pointermove', PLOT_LEFT + PLOT_WIDTH + 50);
+      pointer(plot, 'pointerup', PLOT_LEFT + PLOT_WIDTH + 50);
+      const range = onRangeChange.mock.calls[0]![0];
+      expect(range.start).toBeCloseTo(451.188, 3);
+      expect(range.end).toBeCloseTo(1548.812, 3);
+    });
+
+    it('zooms from the buttons around the middle of what is in view', () => {
+      const container = render({ model: MODEL });
+      act(() => button(container, 'in').click());
+      // One wheel notch: exp(-0.18), 1670.54 ms centred on 1000 ms.
+      expect(layer(container)).toEqual({
+        left: '-9.861%',
+        width: '119.722%',
+        zoomed: true,
+      });
+      act(() => button(container, 'out').click());
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('zooms from the buttons around where the view is, not the run', () => {
+      const container = render({ model: MODEL });
+      // In at 90%: 812.14–1909.76 ms, centred on 1360.95 ms. The button then
+      // narrows to 916.81 ms about that centre: 902.54–1819.36 ms.
+      wheel(plotOf(container), at(0.9), { deltaY: -400 });
+      act(() => button(container, 'in').click());
+      expect(layer(container)).toEqual({
+        left: '-98.444%',
+        width: '218.147%',
+        zoomed: true,
+      });
+    });
+
+    it('offers reset and zoom out only once zoomed, without disabling them', () => {
+      const container = render({ model: MODEL });
+      for (const name of ['out', 'reset'] as const) {
+        expect(button(container, name).getAttribute('aria-disabled')).toBe(
+          'true',
+        );
+        expect(button(container, name).disabled).toBe(false);
+      }
+      zoomedMiddle(container);
+      expect(button(container, 'reset').getAttribute('aria-disabled')).toBe(
+        null,
+      );
+      act(() => button(container, 'reset').click());
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('keeps the buttons where assistive technology can reach them', () => {
+      const container = render({ model: MODEL });
+      for (const name of ['in', 'out', 'reset'] as const) {
+        const el = button(container, name);
+        expect(el.closest('[aria-hidden="true"]')).toBeNull();
+        expect(el.getAttribute('aria-label')).toBeTruthy();
+      }
+      expect(overviewOf(container)!.getAttribute('role')).toBe('group');
+    });
+
+    it('says which stretch is in view', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      expect(
+        container.querySelector('[data-testid="trajectory-overview-from"]')!
+          .textContent,
+      ).toBe('451ms');
+      expect(
+        container.querySelector('[data-testid="trajectory-overview-busy"]')!
+          .textContent,
+      ).toBe('1.5s of 2.0s');
+      expect(overviewOf(container)!.getAttribute('aria-label')).toBe(
+        'Timeline of 3 timed records, 2.0s of activity, zoomed to 451ms–1.5s',
+      );
+    });
+
+    it('says a zoom out loud, and nothing at the whole run', () => {
+      const container = render({ model: MODEL });
+      const status = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-zoom-status"]',
+      )!;
+      expect(status.getAttribute('role')).toBe('status');
+      expect(status.closest('[aria-hidden="true"]')).toBeNull();
+      expect(status.textContent).toBe('');
+      act(() => button(container, 'in').click());
+      // 164.73–1835.27 ms: a 1.7s window, shown to a tenth of a second.
+      expect(status.textContent).toBe('Showing 165ms–1.8s of 2.0s');
+    });
+
+    it('names the two ends of a narrow window apart', () => {
+      const container = render({ model: MODEL });
+      // The 20ms floor about the middle: 990–1010 ms.
+      wheel(plotOf(container), at(0.5), { deltaY: -100_000 });
+      expect(
+        container.querySelector('[data-testid="trajectory-overview-from"]')!
+          .textContent,
+      ).toBe('990ms');
+      expect(
+        container.querySelector('[data-testid="trajectory-overview-busy"]')!
+          .textContent,
+      ).toBe('1.010s of 2.0s');
+    });
+
+    it('brings a row selected elsewhere into view', () => {
+      const container = render({ model: MODEL });
+      // Zoomed on the start of the run, 0–1097.62 ms.
+      wheel(plotOf(container), at(0), { deltaY: -400 });
+      // A selection inside the view moves nothing.
+      rerender({ model: MODEL, selectedKey: 'req' });
+      expect(layer(container).left).toBe('0%');
+      // 'sub' runs 1500–2000 ms, past the view: it slides as far as the run
+      // allows, which leaves the span inside.
+      rerender({ model: MODEL, selectedKey: 'sub' });
+      expect(layer(container)).toEqual({
+        left: '-82.212%',
+        width: '182.212%',
+        zoomed: true,
+      });
+    });
+
+    it('draws a run of no length without dividing by it', () => {
+      const container = render({
+        model: {
+          ...MODEL,
+          spans: [span({ start: 0, end: 0 })],
+          turnMarks: [],
+          total: 0,
+        },
+      });
+      expect(layer(container)).toEqual({
+        left: '0%',
+        width: '100%',
+        zoomed: false,
+      });
+    });
+
+    it('places spans exactly, however far the layer is stretched', () => {
+      const container = render({
+        model: {
+          ...MODEL,
+          spans: [span({ rowKey: 'x', start: 1_234_567, end: 1_234_600 })],
+          turnMarks: [],
+          total: 3_600_000,
+        },
+      });
+      // 34.293527777…%; rounded to three places it was hundreds of pixels
+      // off at full zoom.
+      expect(spansOf(container)[0]!.style.getPropertyValue('--left')).toBe(
+        '34.29352778%',
+      );
+    });
+
+    it('leaves each span placed in percent of the whole run', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      const [req] = spansOf(container);
+      expect(req!.style.getPropertyValue('--left')).toBe('0%');
+      expect(req!.style.getPropertyValue('--width')).toBe('50%');
+    });
+
+    it('lets the zoom go when the run is read again', () => {
+      const container = render({ model: MODEL });
+      zoomedMiddle(container);
+      expect(layer(container).zoomed).toBe(true);
+      rerender({ model: { ...MODEL } });
+      expect(layer(container).zoomed).toBe(false);
+    });
+  });
+
+  describe('formatWindowTime', () => {
+    it('follows the window, not the size of the number', () => {
+      expect(formatWindowTime(451.19, 1097)).toBe('451ms');
+      expect(formatWindowTime(1548.8, 1097)).toBe('1.5s');
+      expect(formatWindowTime(1010, 20)).toBe('1.010s');
+      expect(formatWindowTime(1505, 500)).toBe('1.51s');
+      expect(formatWindowTime(1_018_490, 500)).toBe('16m 58.49s');
+      expect(formatWindowTime(3_723_004, 20)).toBe('1h 2m 3.004s');
+    });
+
+    it('never prints sixty seconds', () => {
+      expect(formatWindowTime(119_970, 5000)).toBe('2m 0.0s');
+    });
+
+    it('falls back to the everyday format for windows of a minute or more', () => {
+      expect(formatWindowTime(90_000, 60_000)).toBe('1m 30s');
+    });
+  });
+
+  describe('exactPercent', () => {
+    it('keeps precision, drops trailing zeros, and never uses exponents', () => {
+      expect(exactPercent(50)).toBe('50%');
+      expect(exactPercent(-0)).toBe('0%');
+      expect(exactPercent(1e-7)).toBe('0.0000001%');
+      expect(exactPercent(100 / 3)).toBe('33.33333333%');
+    });
   });
 });
