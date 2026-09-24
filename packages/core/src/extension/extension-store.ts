@@ -1873,7 +1873,12 @@ export class ExtensionStore {
           continue;
         }
         if (journal.rollbackBlocked && !this.retryDue(journal)) {
-          if (!(await this.canRetryRollback(journal))) {
+          // A fault is no evidence the restore got anywhere, so only a held
+          // step may be absorbed on the strength of its top-level entries.
+          if (
+            journal.rollbackHeld === false ||
+            !(await this.canRetryRollback(journal))
+          ) {
             throw this.windowRefusal(journal);
           }
           decided = journal.rollbackHeld ? 'held' : 'fault';

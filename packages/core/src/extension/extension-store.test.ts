@@ -3366,6 +3366,11 @@ describe('ExtensionStore', () => {
       expect(failure).toBeInstanceOf(AggregateError);
       // Only a lock is absorbed; anything else still stops the caller.
       await expect(store.readSnapshot()).rejects.toMatchObject({ code: 'EIO' });
+      // Inside the fault's window nothing was restored, so a read is refused
+      // with the unresolved-transaction text instead of being served.
+      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionConflictError,
+      );
     });
 
     it('refuses a second transaction while one is still unresolved', async () => {
@@ -3522,18 +3527,35 @@ describe('ExtensionStore', () => {
       await plant('aa-intact-old', 'one', 1_000, true);
       await plant('zz-torn-new', 'torn', 2_000, true);
       await store.readSnapshot();
-      expect(
-        (await fsp.stat(path.join(transactionsDir, 'aa-intact-old.json')))
-          .mtimeMs,
-      ).toBeGreaterThan(
-        (await fsp.stat(path.join(transactionsDir, 'zz-torn-new.json')))
-          .mtimeMs,
-      );
-      // Written newest-first, so the rewrite leaves the marking pass's mtime
-      // inversion in place instead of undoing the state under test.
+      // Every journal the store orders must carry its own key: otherwise the
+      // order survives only on the files some other write happened to touch.
+      const journalFields = async (name: string) =>
+        JSON.parse(
+          await fsp.readFile(path.join(transactionsDir, name), 'utf8'),
+        ) as Record<string, unknown>;
+      expect(await journalFields('aa-intact-old.json')).toMatchObject({
+        orderMs: 1_000_000,
+      });
+      expect(await journalFields('zz-torn-new.json')).toMatchObject({
+        orderMs: 2_000_000,
+      });
       await expireJournalWindow(
         path.join(transactionsDir, 'zz-torn-new.json'),
         path.join(transactionsDir, 'aa-intact-old.json'),
+      );
+      // The same pass stamps both journals, so only a clock tick separates
+      // their mtimes; pin the inversion instead of racing the timestamp
+      // granularity of the filesystem under test.
+      const nowSeconds = Date.now() / 1000;
+      await fsp.utimes(
+        path.join(transactionsDir, 'zz-torn-new.json'),
+        nowSeconds,
+        nowSeconds,
+      );
+      await fsp.utimes(
+        path.join(transactionsDir, 'aa-intact-old.json'),
+        nowSeconds + 10,
+        nowSeconds + 10,
       );
       await store.readSnapshot();
       expect(
@@ -5175,9 +5197,12 @@ describe('ExtensionStore', () => {
       ]);
       expect(await fsp.stat(path.join(rollbackRoot, 'stack-t2'))).toBeDefined();
 
-      // A later caller keeps reading, and does not repeat the failing restore:
-      // the owed step waits out one window before it is attempted again.
-      await expect(store.readSnapshot()).resolves.toBeDefined();
+      // A later caller does not repeat the failing restore - the owed step
+      // waits out one window - and is refused meanwhile: nothing was restored,
+      // so the destination is not the artifact the snapshot names.
+      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionConflictError,
+      );
       expect(restoreAttempts).toBe(1);
 
       // Clearing the fault is all a later pass needs to finish the unwind and
