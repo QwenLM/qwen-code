@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import { appendFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import process from 'node:process';
+import { setTimeout } from 'node:timers';
 
 const boot = JSON.parse(
   await new Promise((resolve, reject) => {
