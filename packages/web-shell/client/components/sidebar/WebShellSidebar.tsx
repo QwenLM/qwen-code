@@ -4443,6 +4443,10 @@ export function WebShellSidebar({
       const showDelete = standalone
         ? sessionActionItems.has('delete')
         : canShowDeleteSession(session);
+      // `showDelete` already applied the workspace-scope gate — standalone rows
+      // bypass it on purpose — so the disabled state only carries #12619's rule:
+      // the session this client is attached to is deletable once it goes idle.
+      const deleteDisabled = busy || (isCurrent && running);
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
@@ -4661,7 +4665,7 @@ export function WebShellSidebar({
                           key: 'delete',
                           icon: <Trash2Icon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.delete'),
-                          disabled: busy || !canDeleteSession(session),
+                          disabled: deleteDisabled,
                           destructive: true,
                           title:
                             isCurrent && running
@@ -4798,7 +4802,7 @@ export function WebShellSidebar({
                             {showDelete && !inlineActionItems.has('delete') && (
                               <DropdownMenuItem
                                 variant="destructive"
-                                disabled={busy || !canDeleteSession(session)}
+                                disabled={deleteDisabled}
                                 title={
                                   isCurrent && running
                                     ? t('sidebar.currentDeleteDisabled')
