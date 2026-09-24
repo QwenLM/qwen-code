@@ -656,6 +656,11 @@ export type {
   DaemonSessionGroupUpdate,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionListView,
   DaemonSessionSearchMatch,
   DaemonSessionSearchOptions,
@@ -872,3 +877,6 @@ export type {
 
 export { parseDaemonBackgroundTurn } from './types.js';
 export type { DaemonBackgroundTurn } from './types.js';
+
+export { isShellResultDisplay } from './shellResult.js';
+export type { ShellResultDisplay } from './shellResult.js';

@@ -196,6 +196,31 @@ export function snapshotArgs(
   return { args: JSON.parse(json) as unknown, argsRecorded: true };
 }
 
+/**
+ * Why a run cannot be started again from what its history kept of its `args`,
+ * or `undefined` when it can.
+ *
+ * A retry reuses the run's journal, whose key chain is rooted in a hash of
+ * the args, so starting one with the wrong args replays nothing and
+ * re-dispatches every agent under the old run id -- worse than refusing.
+ *
+ * - `omitted`: the args were too large for the snapshot to keep.
+ * - `unrecorded`: the snapshot predates {@link snapshotArgs}, so it cannot
+ *   say whether the run had args at all.
+ *
+ * The daemon refuses these, and the task projection reports the same answer
+ * to clients, so a client never offers an action the daemon will refuse.
+ */
+export function snapshotArgsUnavailable(
+  snapshot: Pick<WorkflowSnapshot, 'args' | 'argsOmitted' | 'argsRecorded'>,
+): 'omitted' | 'unrecorded' | undefined {
+  if (snapshot.argsOmitted) return 'omitted';
+  if (snapshot.argsRecorded !== true && snapshot.args === undefined) {
+    return 'unrecorded';
+  }
+  return undefined;
+}
+
 /** A non-JSON-serializable result is replaced with a placeholder string. */
 function safeResult(result: unknown): unknown {
   if (result === undefined) return undefined;

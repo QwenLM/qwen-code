@@ -70,6 +70,8 @@ import type {
   DaemonSessionSavedWorkflowStatus,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -3382,6 +3384,36 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
+    );
+  }
+
+  /**
+   * Read independent workspace pages in one native REST request. Callers
+   * pre-flight `session_catalog_batch` once and use qualified session lists
+   * on older daemons. Continue each workspace with its own returned cursor;
+   * default batch cursors differ from legacy numeric list cursors.
+   */
+  async listSessionsCatalog(
+    request: DaemonSessionCatalogRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionCatalogResult> {
+    const { pageSize, ...options } = request.options ?? {};
+    return await this.jsonRequest<DaemonSessionCatalogResult>(
+      '/sessions/catalog',
+      'POST /sessions/catalog',
+      {
+        method: 'POST',
+        body: {
+          ...request,
+          options:
+            request.options === undefined
+              ? undefined
+              : { ...options, size: pageSize },
+        },
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
     );
   }
 

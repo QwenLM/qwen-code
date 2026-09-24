@@ -60,7 +60,9 @@ describe('bundled browser-use skill', () => {
   });
 
   it('names where the Qwen Chrome extension comes from', () => {
-    expect(skill).toContain('no store listing yet');
+    expect(skill).toContain(
+      'https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph',
+    );
     expect(skill).toContain('`packages/chrome-extension`');
     expect(skill).toContain('`dist/extension`');
     expect(skill).toContain('Load unpacked');
