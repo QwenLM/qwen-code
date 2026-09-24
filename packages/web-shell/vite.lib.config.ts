@@ -159,11 +159,17 @@ function injectCssModules(): Plugin {
 // `path.resolve` returns backslashes on Windows, so both sides go through
 // `normalizePath`: compared raw, the stub would never apply there and the
 // Windows build would blow the budget this exists to protect.
-const LIVE_MESSAGES_MODULE = normalizePath(
-  resolve(__dirname, './client/live/messages.ts'),
-);
-const LIVE_MESSAGES_TRANSCRIPT_STUB = normalizePath(
-  resolve(__dirname, './client/live/messages.transcript-stub.ts'),
+const TRANSCRIPT_DEAD_MESSAGES = new Map(
+  [
+    ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
+    [
+      './client/components/workspace-agents/messages.ts',
+      './client/components/workspace-agents/messages.transcript-stub.ts',
+    ],
+  ].map(([module, stub]) => [
+    normalizePath(resolve(__dirname, module)),
+    normalizePath(resolve(__dirname, stub)),
+  ]),
 );
 
 function stubTranscriptDeadMessages(): Plugin {
@@ -175,9 +181,11 @@ function stubTranscriptDeadMessages(): Plugin {
         ...options,
         skipSelf: true,
       });
-      return resolved && normalizePath(resolved.id) === LIVE_MESSAGES_MODULE
-        ? LIVE_MESSAGES_TRANSCRIPT_STUB
-        : null;
+      return (
+        (resolved &&
+          TRANSCRIPT_DEAD_MESSAGES.get(normalizePath(resolved.id))) ??
+        null
+      );
     },
   };
 }
