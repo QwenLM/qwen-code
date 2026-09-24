@@ -49,6 +49,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             sessions = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, CompletableFuture<Void>> dispatches =
             new ConcurrentHashMap<>();
+    // Executions whose transport.execute call is in flight in this process,
+    // as opposed to dispatches, which also covers a claim being fenced.
+    private final Set<String> invocations = ConcurrentHashMap.newKeySet();
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport,
@@ -157,6 +160,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                     CompletionStage<Object> result;
                     try {
+                        requireUsableLease(context);
                         result = mapFailure(safeStage(() ->
                                 transport.control(context.lease(),
                                         context.session(), immutable)),
@@ -207,20 +211,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         ToolExecutionRecord current = requireExecution(
                                 context, executionId);
                         requested = requestCancel(current);
+                        // An UNKNOWN record may still have an invocation
+                        // running in this process; it gets the physical
+                        // cancel below but is never settled from here.
                         if (requested.isSettled()
-                                || requested.getState()
-                                        == ToolExecutionRecord.State.UNKNOWN) {
+                                || (requested.getState()
+                                        == ToolExecutionRecord.State.UNKNOWN
+                                        && !invocations.contains(
+                                                executionId))) {
                             return CompletableFuture.completedFuture(
                                     requested);
                         }
                     }
                     if (requested.getState()
-                                    == ToolExecutionRecord.State.DISPATCHING
-                            || (requested.getState()
-                                            == ToolExecutionRecord.State
-                                                    .CANCEL_REQUESTED
-                                    && !requested.hasLiveDispatchAt(
-                                            clock.instant()))) {
+                            == ToolExecutionRecord.State.DISPATCHING) {
                         beginDispatch(context, requested);
                         ToolExecutionRecord latest = executionRepository
                                 .findByExecutionCallId(executionId);
@@ -228,9 +232,37 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 latest == null ? requested : latest);
                     }
                     if (requested.getState()
-                            != ToolExecutionRecord.State.CANCEL_REQUESTED) {
+                                    == ToolExecutionRecord.State
+                                            .CANCEL_REQUESTED
+                            && !invocations.contains(executionId)) {
+                        // Fence a lapsed claim nothing here is running. A
+                        // claim the repository still holds live falls
+                        // through to the physical cancel, as does an
+                        // invocation still running in this process.
+                        ToolExecutionRecord fenced;
+                        try {
+                            fenced = fenceLapsedClaim(requested);
+                        } catch (RuntimeException exception) {
+                            throw unavailable(
+                                    "runtime_execution_cancel_failed",
+                                    "Runtime execution cancellation failed",
+                                    exception);
+                        }
+                        if (fenced == null || fenced.getState()
+                                != ToolExecutionRecord.State
+                                        .CANCEL_REQUESTED) {
+                            return CompletableFuture.completedFuture(
+                                    fenced == null ? requested : fenced);
+                        }
+                    }
+                    if (requested.getState()
+                                    != ToolExecutionRecord.State
+                                            .CANCEL_REQUESTED
+                            && requested.getState()
+                                    != ToolExecutionRecord.State.UNKNOWN) {
                         return CompletableFuture.completedFuture(requested);
                     }
+                    requireUsableLease(context);
                     return mapFailure(safeStage(() -> transport.cancel(
                             context.lease(), context.session(),
                             requested.getReference())),
@@ -336,6 +368,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<Boolean> releaseSession(
             SessionContext context) {
+        if (!provisioner.isUsable(context.lease())) {
+            return releaseUnusableSession(context);
+        }
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
         synchronized (context) {
@@ -380,6 +415,36 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                 });
         return result;
+    }
+
+    /**
+     * A session whose worker is already dead cannot reach the transport.
+     * Retire the binding and finish the release locally. An in-flight
+     * execution still reports busy; an in-flight release is joined.
+     */
+    private CompletionStage<Boolean> releaseUnusableSession(
+            SessionContext context) {
+        invalidateBinding(context.binding());
+        synchronized (context) {
+            CompletableFuture<Boolean> inFlight = context.release();
+            if (inFlight != null) {
+                return inFlight;
+            }
+            if (context.hasActiveControl()
+                    || executionRepository.hasActiveByRuntimeSession(
+                            context.session().getRuntimeSessionId())) {
+                throw conflict("runtime_session_busy",
+                        "Runtime Session has an active operation");
+            }
+            RuntimeSessionRecord releasing =
+                    transitionSessionToReleasing(context);
+            if (releasing.getState()
+                    != RuntimeSessionRecord.State.RELEASED) {
+                finishSessionRelease(releasing);
+            }
+            sessions.remove(context.session().getRuntimeSessionId());
+            return CompletableFuture.completedFuture(true);
+        }
     }
 
     private CompletionStage<RuntimeSessionRecord> acquireSession(
@@ -486,8 +551,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (finishing != null) {
                 return finishing;
             }
-            return CompletableFuture.completedFuture(
-                    requireLiveBinding(record));
+            BindingContext live = requireLiveBinding(record);
+            CompletableFuture<BindingContext> confirmed =
+                    new CompletableFuture<>();
+            safeStage(() -> provisioner.confirm(request, live.lease()))
+                    .whenComplete((ignored, error) -> {
+                        if (error == null) {
+                            confirmed.complete(live);
+                        } else {
+                            invalidateBinding(record);
+                            confirmed.completeExceptionally(unwrap(error));
+                        }
+                    });
+            return confirmed;
         }
         if (record.getState()
                 != RuntimeBindingRecord.State.PROVISIONING) {
@@ -549,6 +625,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 "Runtime provisioning failed", cause);
                     }
                     if (currentClaim == null) {
+                        releaseQuietly(claimed.getRequest(), lease);
                         throw unavailable("runtime_provision_fenced",
                                 "Runtime provisioning claim expired");
                     }
@@ -558,6 +635,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                             RuntimeBindingRecord.State.READY,
                                             lease, clock.instant()));
                     if (ready == null) {
+                        releaseQuietly(claimed.getRequest(), lease);
                         throw unavailable("runtime_provision_fenced",
                                 "Runtime provisioning claim expired");
                     }
@@ -668,6 +746,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 || !ownsDispatch(executing, claimed)) {
             return CompletableFuture.completedFuture(null);
         }
+        if (!provisioner.isUsable(context.lease())) {
+            invalidateBinding(context.binding());
+            markUnknown(executing.getExecutionCallId(),
+                    executing.getDispatchGeneration());
+            return CompletableFuture.completedFuture(null);
+        }
         DispatchRenewal renewal = new DispatchRenewal(
                 executing.getExecutionCallId(),
                 executing.getDispatchGeneration());
@@ -678,9 +762,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     executing.getDispatchGeneration());
             throw exception;
         }
+        invocations.add(executing.getExecutionCallId());
         return safeStage(() -> transport.execute(context.lease(),
                 context.session(), executing.getReference()))
                 .<Void>handle((result, error) -> {
+                    // Stop counting as running before the outcome is
+                    // written, so a cancel that reads that outcome does not
+                    // treat this finished invocation as still running.
+                    invocations.remove(executing.getExecutionCallId());
                     if (error != null || result == null) {
                         markUnknown(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration());
@@ -776,6 +865,33 @@ public final class RuntimeBrokerService implements AutoCloseable {
             current = executionRepository.findByExecutionCallId(
                     executionCallId);
         }
+        fenceLapsedClaim(current);
+    }
+
+    /**
+     * Once a claim has lapsed, no compare-and-set can settle the record or
+     * mark it UNKNOWN; the takeover fence in {@code claimDispatch} can still
+     * mark it UNKNOWN. {@code claimDispatch} judges the lease by the
+     * repository's clock and never writes over a live claim, whoever holds
+     * it. A DISPATCHING record is left alone, since claiming it would hold a
+     * dispatch nothing here is running.
+     */
+    private ToolExecutionRecord fenceLapsedClaim(ToolExecutionRecord current) {
+        if (current == null
+                || (current.getState() != ToolExecutionRecord.State.EXECUTING
+                        && current.getState()
+                                != ToolExecutionRecord.State
+                                        .CANCEL_REQUESTED)) {
+            return current;
+        }
+        // Only this broker's own live claim comes back; a settled or fenced
+        // record, or another broker's live claim, yields null and is read
+        // again.
+        ToolExecutionRecord claimed = executionRepository.claimDispatch(
+                current.getExecutionCallId(), brokerOwnerId,
+                dispatchLeaseDuration);
+        return claimed != null ? claimed : executionRepository
+                .findByExecutionCallId(current.getExecutionCallId());
     }
 
     private ToolExecutionRecord requestCancel(
@@ -821,6 +937,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw unavailable("runtime_execution_cancel_failed",
                     "Runtime cancellation returned an invalid result",
                     exception);
+        } catch (RuntimeBrokerException exception) {
+            if (!"runtime_execution_state_conflict".equals(
+                    exception.getCode())) {
+                throw exception;
+            }
+            // The Runtime settled the call after this claim lapsed; fence it
+            // for reconciliation instead of reporting a state conflict. The
+            // conflict stands only while the repository still holds the
+            // claim live; a record another writer settled is returned.
+            ToolExecutionRecord latest = fenceLapsedClaim(
+                    executionRepository.findByExecutionCallId(
+                            requested.getExecutionCallId()));
+            if (latest == null || (!latest.isSettled()
+                    && latest.getState()
+                            != ToolExecutionRecord.State.UNKNOWN)) {
+                throw exception;
+            }
         }
     }
 
@@ -922,6 +1055,44 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 RuntimeBindingRecord.State.FAILED, null, clock.instant()));
     }
 
+    /**
+     * Retires a binding whose lease just failed liveness or attestation so
+     * the next caller mints a fresh generation instead of retrying a dead
+     * record forever. The retired lease is released so its worker stops
+     * listening.
+     */
+    private void invalidateBinding(RuntimeBindingRecord record) {
+        liveBindings.remove(record.getBindingId());
+        if (record.getLease() != null) {
+            releaseQuietly(record.getRequest(), record.getLease());
+        }
+        RuntimeBindingRecord claimed = bindingRepository.claimOperation(
+                record.getBindingId(), brokerOwnerId, operationLeaseDuration);
+        if (claimed != null) {
+            failBinding(claimed);
+        }
+    }
+
+    private void requireUsableLease(SessionContext context) {
+        if (!provisioner.isUsable(context.lease())) {
+            invalidateBinding(context.binding());
+            throw unavailable("runtime_provision_failed",
+                    "Managed Runtime process is not alive.");
+        }
+    }
+
+    private void releaseQuietly(RuntimeProvisionRequest request,
+            RuntimeLease lease) {
+        try {
+            provisioner.release(request, lease).whenComplete(
+                    (ignored, error) -> {
+                        // Best-effort teardown for a lease nobody will hold.
+                    });
+        } catch (RuntimeException ignored) {
+            // Best-effort teardown for a lease nobody will hold.
+        }
+    }
+
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -931,6 +1102,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         sessions.values().forEach(future -> future.cancel(false));
         dispatches.values().forEach(future -> future.cancel(false));
         scheduler.shutdownNow();
+        provisioner.close();
     }
 
     private CompletionStage<RuntimeScope> resolveScope(
@@ -987,12 +1159,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private boolean shouldDriveDispatch(ToolExecutionRecord record) {
+        // The repository judges the lease: claimDispatch leaves a live claim
+        // alone and fences a lapsed EXECUTING or CANCEL_REQUESTED record.
         return !record.isSettled()
-                && record.getState() != ToolExecutionRecord.State.UNKNOWN
-                && (record.getState() == ToolExecutionRecord.State.PREPARED
-                        || record.getState()
-                                == ToolExecutionRecord.State.DISPATCHING
-                        || !record.hasLiveDispatchAt(clock.instant()));
+                && record.getState() != ToolExecutionRecord.State.UNKNOWN;
     }
 
     private static Map<String, Object> immutableMap(Object value,

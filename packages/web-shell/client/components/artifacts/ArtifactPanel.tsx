@@ -26,6 +26,7 @@ import {
   GlobeIcon,
   ImageIcon,
   LayersIcon,
+  WrenchIcon,
   ListTreeIcon,
   MessageCirclePlusIcon,
   PanelRightIcon,
@@ -51,6 +52,7 @@ import {
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { DiffView } from '../messages/tools/DiffView';
+import { TurnCallsPanel } from './TurnCallsPanel';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { normalizeTextMediaType } from '../../utils/imageIngestion';
@@ -105,7 +107,9 @@ import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
+import type { WebShellModelManagementOptions } from '../../modelManagement';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
+import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
@@ -329,6 +333,17 @@ export type ArtifactPanelTab =
       kind: 'workflow';
       title: string;
       sessionId?: string;
+    }
+  | {
+      id: 'turn_calls';
+      kind: 'turn_calls';
+      title: string;
+      sessionId?: string;
+      promptLabel?: string;
+      /** Id of the turn's leading user message, whose calls this tab lists. */
+      turnId: string;
+      recordId?: string;
+      promptId?: string;
     };
 
 type WorkspaceScopedArtifactPanelTab = Extract<
@@ -383,6 +398,12 @@ interface ArtifactPanelProps {
   loading?: boolean;
   restoring?: boolean;
   error?: string | null;
+  onSelectTurnCallsPrompt?: (
+    turnId: string,
+    recordId?: string,
+    promptId?: string,
+    promptLabel?: string,
+  ) => void;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onOpenFilePreview: (
@@ -422,6 +443,7 @@ interface ArtifactPanelProps {
     title: string,
     fromFirstPrompt?: boolean,
   ) => void;
+  onSideTaskInitialPromptRefused?: (tabId: string) => void;
   onNestedRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onNestedArtifactsChange?: (
     sessionId: string,
@@ -438,10 +460,13 @@ interface ArtifactPanelProps {
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  modelManagement?: WebShellModelManagementOptions;
   workflow?: {
     todos: readonly TodoItem[];
     tools: readonly ACPToolCall[];
     tasks: readonly DaemonSessionTaskStatus[];
+    /** Shared per-render projection; also feeds the cockpit and its graph. */
+    projection?: SessionWorkflowProjection;
     artifacts: readonly DaemonSessionArtifact[];
     selectedTodoId?: string;
     onSelectedTodoIdChange: (todoId: string | undefined) => void;
@@ -471,6 +496,7 @@ export function ArtifactPanel({
   restoring = false,
   error,
   onSelectTab,
+  onSelectTurnCallsPrompt,
   onCloseTab,
   onOpenFilePreview,
   latestReviewAvailable = false,
@@ -489,6 +515,7 @@ export function ArtifactPanel({
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
+  onSideTaskInitialPromptRefused,
   onNestedRightPanelOpen,
   onNestedArtifactsChange,
   onOpenNestedSubagent,
@@ -498,6 +525,7 @@ export function ArtifactPanel({
   onOpenWorkflowAgent,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
   workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
@@ -633,7 +661,9 @@ export function ArtifactPanel({
                   onFocus={(event) =>
                     measureSessionTitleScroll(event.currentTarget)
                   }
-                  title={tab.title}
+                  title={
+                    tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title
+                  }
                 >
                   <span
                     className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
@@ -700,6 +730,11 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'turn_calls' ? (
+                      <WrenchIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : tab.kind === 'trajectory' ? (
                       <ListTreeIcon
                         className={styles.tabIconSvg}
@@ -713,14 +748,18 @@ export function ArtifactPanel({
                     className={styles.tabTitle}
                     data-web-shell-session-title
                   >
-                    <span className={styles.tabTitleInner}>{tab.title}</span>
+                    <span className={styles.tabTitleInner}>
+                      {tab.kind === 'turn_calls'
+                        ? t('turnCalls.title')
+                        : tab.title}
+                    </span>
                   </span>
                 </button>
                 <button
                   type="button"
                   className={styles.tabCloseButton}
                   onClick={() => onCloseTab(tab.id)}
-                  aria-label={`Close ${tab.title}`}
+                  aria-label={`Close ${tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title}`}
                   title="Close"
                 >
                   <CloseIcon />
@@ -1268,10 +1307,12 @@ export function ArtifactPanel({
             }
             onCreated={onSideTaskCreated ?? ignoreSideTaskCreated}
             onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
+            onInitialPromptRefused={onSideTaskInitialPromptRefused}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
+            modelManagement={modelManagement}
             onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'image' ? (
@@ -1314,6 +1355,19 @@ export function ArtifactPanel({
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+          />
+        ) : activeTab.kind === 'turn_calls' ? (
+          <TurnCallsPanel
+            key={`${activeTab.sessionId}:${workspaceCwd}`}
+            turnId={activeTab.turnId}
+            ownerSessionId={activeTab.sessionId}
+            recordId={activeTab.recordId}
+            promptId={activeTab.promptId}
+            promptLabel={activeTab.promptLabel}
+            onSelectPrompt={onSelectTurnCallsPrompt}
+            workspaceCwd={workspaceCwd}
+            onOpenFile={onNestedRightPanelOpen}
+            onOpenAgent={onOpenNestedSubagent}
           />
         ) : (
           <ScheduledTaskDetail

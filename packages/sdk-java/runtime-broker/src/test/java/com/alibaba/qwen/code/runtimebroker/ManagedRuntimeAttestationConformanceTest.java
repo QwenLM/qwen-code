@@ -85,6 +85,10 @@ class ManagedRuntimeAttestationConformanceTest {
         return JSON.readTree(path.toFile());
     }
 
+    static Path contractDirectory() {
+        return findContractDirectory();
+    }
+
     private static Path findContractDirectory() {
         Path current = Path.of(System.getProperty("user.dir")).toAbsolutePath();
         for (int depth = 0; depth < 6 && current != null; depth++) {
@@ -116,21 +120,11 @@ class ManagedRuntimeAttestationConformanceTest {
     }
 
     private static String classify(int status) {
-        if (status == 200) {
-            return "ok";
-        }
-        if (status == 401 || status == 403) {
-            return "credentials";
-        }
-        if (status == 400 || status == 413) {
-            return "protocol";
-        }
-        if (status == 409) {
-            return "identity";
-        }
-        if (status == 404 || status == 405) {
-            return "incompatible";
-        }
-        throw new AssertionError("unclassified fixture status: " + status);
+        return switch (status) {
+            case 200, 401, 403, 400, 413, 409, 404, 405 ->
+                    HttpRuntimeTransport.classificationFor(status);
+            default -> throw new AssertionError(
+                    "unclassified fixture status: " + status);
+        };
     }
 }
