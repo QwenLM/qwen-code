@@ -21881,6 +21881,58 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('releases the Skill fallback after a pure declaration-only mutation', async () => {
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'locked',
+          status: 'disabled',
+          disabledReason: 'hard',
+          lockedScope: 'user',
+        },
+        { name: 'other', description: 'Other skill', status: 'ok' },
+      ],
+    });
+    mockConnection.commands = [skillCommandFixture('other', 'Other skill')];
+    mockConnection.skills = ['other'];
+    const { rerender } = renderApp();
+    await flush();
+    await openComposerSkills();
+
+    emitPartialSkillMutation('enable-pure-declaration', [
+      { name: 'locked', enabled: true },
+    ]);
+    rerender();
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'other', description: 'Other skill' },
+    ]);
+
+    mockConnection.commands = [
+      skillCommandFixture('other', 'Other skill'),
+      skillCommandFixture('late', 'Late session skill'),
+    ];
+    mockConnection.skills = ['other', 'late'];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'late', description: 'Late session skill' },
+      { name: 'other', description: 'Other skill' },
+    ]);
+
+    emitSkillMutation(
+      'applied-after-pure',
+      [{ name: 'other', enabled: true }],
+      'applied',
+    );
+    rerender();
+    await flush();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+  });
+
   it('removes declaration-only enables from a mixed pending mutation', async () => {
     const lockedStatus = {
       skills: [
