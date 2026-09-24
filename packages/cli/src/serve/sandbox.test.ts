@@ -223,6 +223,87 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'mounts the managed root read-only at the launch spelling when a parent is a symlink',
+    async () => {
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      execSyncMock.mockReturnValue(Buffer.from(''));
+
+      // macOS hands out exactly this shape by default: os.tmpdir() and
+      // /var sit behind a symlink, so the spelling the flag carried at
+      // launch diverges from the pinned canonical root.
+      const base = fs.realpathSync.native(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sandbox-managed-')),
+      );
+      try {
+        const realRoot = path.join(base, 'real');
+        const linkRoot = path.join(base, 'link');
+        const canonical = path.join(realRoot, 'deploy', 'managed');
+        fs.mkdirSync(canonical, { recursive: true });
+        fs.symlinkSync(realRoot, linkRoot, 'dir');
+        const launchSpelling = path.join(linkRoot, 'deploy', 'managed');
+
+        const cliConfig = {
+          getManagedExtensionsDir: () => canonical,
+        } as unknown as Config;
+
+        const imageCheck = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+        });
+        const child = new EventEmitter();
+        spawnMock
+          .mockImplementationOnce(() => {
+            queueMicrotask(() => {
+              imageCheck.stdout.emit('data', Buffer.from('image-id'));
+              imageCheck.emit('close', 0);
+            });
+            return imageCheck;
+          })
+          .mockReturnValueOnce(child);
+
+        const result = start_sandbox(
+          { command: 'docker', image: 'example.com/qwen-code:latest' },
+          [],
+          cliConfig,
+          [
+            process.execPath,
+            '/path/to/cli.js',
+            '--managed-extensions',
+            launchSpelling,
+            // A lookalike in a value position: it resolves away from the
+            // managed root, so it must not gain a mount.
+            '--prompt',
+            '--managed-extensions',
+            os.tmpdir(),
+          ],
+        );
+
+        await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+        const args = spawnMock.mock.calls[1]?.[1] as string[];
+        const volumes = args.filter(
+          (_, index) => args[index - 1] === '--volume',
+        );
+        // The canonical mount stays, and the spelling the child actually
+        // receives is covered read-only as well: without it the spelling
+        // resolves through the read-write tmpdir mount inside the container.
+        expect(volumes).toContain(`${canonical}:${canonical}:ro`);
+        expect(volumes).toContain(`${canonical}:${launchSpelling}:ro`);
+        expect(
+          volumes.filter((spec) => spec.startsWith(`${canonical}:`)),
+        ).toHaveLength(2);
+        expect(
+          volumes.some((spec) => spec.endsWith(`:${os.tmpdir()}:ro`)),
+        ).toBe(false);
+
+        child.emit('close', 0);
+        await expect(result).resolves.toBe(0);
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('does not mount the managed extensions root twice when it is the workspace', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);

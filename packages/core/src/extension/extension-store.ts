@@ -17,10 +17,26 @@ import {
   renameWithRetry,
 } from '../utils/atomicFileWrite.js';
 import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
+import { hasStoredExtensionSecrets } from './extensionSettings.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 
 const debugLogger = createDebugLogger('EXTENSION_STORE');
+
+// Rules can also reach an already-managed policy after the claim-time stash
+// ran (a legacy re-import at refresh, or the in-call import inside a batch
+// mutation), so the managed clear itself stashes what it is about to delete;
+// the hand-back restores the rules when the policy returns to a user
+// identity.
+function stashLegacyPathRulesForManaged(policy: ExtensionPolicy): void {
+  if (
+    policy.managed &&
+    policy.legacyPathRules &&
+    !policy.preservedLegacyPathRules
+  ) {
+    policy.preservedLegacyPathRules = [...policy.legacyPathRules];
+  }
+}
 
 export type ExtensionActivation = 'enabled' | 'disabled';
 export type WorkspaceActivation = ExtensionActivation | 'inherit';
@@ -41,6 +57,12 @@ export interface ExtensionPolicy {
   // so the user's rules wait here until the policy returns to a user
   // identity; without the stash the clear would erase them permanently.
   preservedLegacyPathRules?: string[];
+  // The user package's default activation when a managed identity claimed
+  // the policy. Managed-era activation changes belong to the managed
+  // episode, so the hand-back restores this snapshot; without it, enabling
+  // and later withdrawing a managed package would permanently re-enable a
+  // package the user explicitly disabled.
+  preservedDefaultActivation?: ExtensionActivation;
 }
 
 export interface ExtensionStoreSnapshot {
@@ -339,7 +361,10 @@ function parseState(
         (Array.isArray(parsed.preservedLegacyPathRules) &&
           parsed.preservedLegacyPathRules.every(
             (rule) => typeof rule === 'string',
-          )))
+          ))) &&
+      (parsed.preservedDefaultActivation === undefined ||
+        parsed.preservedDefaultActivation === 'enabled' ||
+        parsed.preservedDefaultActivation === 'disabled')
     );
   };
   if (
@@ -636,11 +661,19 @@ export class ExtensionStore {
           if (policy.legacyPathRules && !policy.preservedLegacyPathRules) {
             policy.preservedLegacyPathRules = [...policy.legacyPathRules];
           }
+          // The default toggle needs the same hold: activation changes made
+          // during the managed episode belong to the managed package, not to
+          // the user package this policy returns to.
+          policy.preservedDefaultActivation ??= policy.defaultActivation;
         } else {
           delete policy.managed;
           if (policy.preservedLegacyPathRules) {
             policy.legacyPathRules ??= [...policy.preservedLegacyPathRules];
             delete policy.preservedLegacyPathRules;
+          }
+          if (policy.preservedDefaultActivation !== undefined) {
+            policy.defaultActivation = policy.preservedDefaultActivation;
+            delete policy.preservedDefaultActivation;
           }
         }
         changed = true;
@@ -762,6 +795,21 @@ export class ExtensionStore {
             (entry) =>
               entry.name === EXTENSION_SETTINGS_FILENAME && entry.isFile(),
           );
+          if (adoptManagedSettingsDirectory) {
+            // A managed package's sensitive settings live in the secret
+            // backend under the managed identity and leave no selector
+            // metadata behind (`settings set` never writes one), so a
+            // settings-only directory can still be secret-bearing. Stored
+            // secrets stay a conflict, like the selector file, instead of
+            // being silently orphaned by the adoption.
+            const retainedIdentityId = currentPolicy
+              ? input.identity.id
+              : nameConflict![0];
+            adoptManagedSettingsDirectory = !(await hasStoredExtensionSecrets(
+              retainedPolicy.name,
+              retainedIdentityId,
+            ));
+          }
           if (adoptManagedSettingsDirectory && entries.length > 0) {
             retainedEnv = await fsp.readFile(
               path.join(destinationDirectory, EXTENSION_SETTINGS_FILENAME),
@@ -916,6 +964,10 @@ export class ExtensionStore {
         if (committed.preservedLegacyPathRules) {
           committed.legacyPathRules ??= [...committed.preservedLegacyPathRules];
           delete committed.preservedLegacyPathRules;
+        }
+        if (committed.preservedDefaultActivation !== undefined) {
+          committed.defaultActivation = committed.preservedDefaultActivation;
+          delete committed.preservedDefaultActivation;
         }
       }
       targetSnapshot.generation = snapshot.generation + 1;
@@ -1099,7 +1151,10 @@ export class ExtensionStore {
   ): Promise<ExtensionStoreSnapshot> {
     return await this.mutate(identity, (policy) => {
       policy.defaultActivation = activation;
-      if (options.clearLegacyPathRules) delete policy.legacyPathRules;
+      if (options.clearLegacyPathRules) {
+        stashLegacyPathRulesForManaged(policy);
+        delete policy.legacyPathRules;
+      }
     });
   }
 
@@ -1111,6 +1166,7 @@ export class ExtensionStore {
     const outcome = await this.mutateMany(identities, (policy) => {
       policy.defaultActivation = activation;
       if (options.clearLegacyPathRulesForManaged && policy.managed) {
+        stashLegacyPathRulesForManaged(policy);
         delete policy.legacyPathRules;
       }
     });
@@ -1130,7 +1186,12 @@ export class ExtensionStore {
               [canonicalizeWorkspacePath(activation.workspacePath)]: 'enabled',
             }
           : {};
+      // An explicit scope decision re-bases the policy's activation, so the
+      // pre-managed snapshot no longer applies: keeping the stash would
+      // resurrect the replaced rules and default at the next hand-back.
       delete policy.legacyPathRules;
+      delete policy.preservedLegacyPathRules;
+      delete policy.preservedDefaultActivation;
     });
   }
 

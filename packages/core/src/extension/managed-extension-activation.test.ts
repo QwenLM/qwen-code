@@ -269,6 +269,65 @@ describe('managed user activation outside the home directory', () => {
     expect(policy?.preservedLegacyPathRules).toBeUndefined();
   });
 
+  it('hands a fresh-store inherited home-path disable back after the managed episode', async () => {
+    const homeWorkspace = path.join(os.homedir(), 'workspace');
+    fs.mkdirSync(homeWorkspace);
+    // A home upgrading from a pre-state.json release: only the V1 enablement
+    // file carries the disable, and no extension store exists yet.
+    const enablementDir = path.join(process.env['QWEN_HOME']!, 'extensions');
+    fs.mkdirSync(enablementDir, { recursive: true });
+    const rule = `!${os.homedir().replace(/\\/g, '/')}/*`;
+    fs.writeFileSync(
+      path.join(enablementDir, 'extension-enablement.json'),
+      JSON.stringify({ portable: { overrides: [rule] } }),
+    );
+    writeExtension(path.join(enablementDir, 'user-copy'), 'portable', 'user');
+
+    writeExtension(
+      path.join(managedExtensionsDir, 'deployed'),
+      'portable',
+      '1.0.0',
+    );
+    expect(
+      fs.existsSync(
+        path.join(process.env['QWEN_HOME']!, 'extension-store', 'state.json'),
+      ),
+    ).toBe(false);
+    const adopted = await createConfig(homeWorkspace);
+    expect(adopted.getExtensions()).toEqual([
+      expect.objectContaining({ source: 'managed', isActive: false }),
+    ]);
+
+    await adopted
+      .getExtensionManager()
+      .enableExtension('portable', SettingScope.User);
+    expect((await createConfig(homeWorkspace)).getActiveExtensions()).toEqual([
+      expect.objectContaining({ source: 'managed' }),
+    ]);
+
+    fs.rmSync(path.join(managedExtensionsDir, 'deployed'), {
+      recursive: true,
+      force: true,
+    });
+    const restored = await createConfig(homeWorkspace);
+    expect(restored.getExtensions()).toEqual([
+      expect.objectContaining({ source: 'user', isActive: false }),
+    ]);
+    const activation = await restored
+      .getExtensionManager()
+      .getExtensionActivation(restored.getExtensions()[0]!.id, homeWorkspace);
+    expect(activation).toMatchObject({
+      effective: 'disabled',
+      source: 'legacy_path_rule',
+    });
+    const snapshot = await new ExtensionStore().readSnapshot();
+    const policy = Object.values(snapshot.extensions).find(
+      (entry) => entry.name === 'portable',
+    );
+    expect(policy?.legacyPathRules?.length).toBeGreaterThan(0);
+    expect(policy?.preservedLegacyPathRules).toBeUndefined();
+  });
+
   it('retains the existing home-path activation semantics for user extensions', async () => {
     writeExtension(
       path.join(process.env['QWEN_HOME']!, 'extensions', 'user-only'),

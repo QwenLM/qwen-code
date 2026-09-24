@@ -16,6 +16,8 @@ import {
   ExtensionStore,
   ExtensionStoreCorruptError,
 } from './extension-store.js';
+import { ExtensionSettingScope, updateSetting } from './extensionSettings.js';
+import type { ExtensionConfig } from './extensionManager.js';
 import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
 describe('ExtensionStore', () => {
@@ -42,6 +44,17 @@ describe('ExtensionStore', () => {
 
   const makeStore = () =>
     new ExtensionStore({ extensionsDir, storeDir, enablementPath });
+
+  beforeEach(() => {
+    // The adoption gate probes the user-scope secret backend; keep it on the
+    // file backend inside the test root so no real keychain is touched.
+    vi.stubEnv('QWEN_HOME', path.join(root, 'qwen-home'));
+    vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
 
   const readQuarantinedJournal = async (journal: string): Promise<string> => {
     const prefix = `${path.basename(journal)}.corrupt-`;
@@ -3278,6 +3291,164 @@ describe('ExtensionStore', () => {
       );
     },
   );
+
+  it('restores a pre-managed default disable when the managed identity is withdrawn', async () => {
+    const store = makeStore();
+    const identity = { id: 'c1'.repeat(32), name: 'claimed' };
+    // The user's own disable predates the managed episode and is recorded as
+    // the default activation rather than a legacy path rule.
+    await store.setDefaultActivations([identity], 'disabled');
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+    });
+
+    // Enabling the managed package is an episode-local choice; the hand-back
+    // must not let it re-enable the user's own package.
+    await store.setDefaultActivation(identity, 'enabled', {
+      clearLegacyPathRules: true,
+    });
+    const handedBack = await store.ensureInitialized([identity]);
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(handedBack.extensions[identity.id]?.defaultActivation).toBe(
+      'disabled',
+    );
+    expect(
+      handedBack.extensions[identity.id]?.preservedDefaultActivation,
+    ).toBeUndefined();
+  });
+
+  it('stashes legacy rules that reach a managed policy inside a batch mutation', async () => {
+    const store = makeStore();
+    const identity = { id: 'e1'.repeat(32), name: 'batched' };
+    await store.ensureInitialized([{ ...identity, source: 'managed' }]);
+    // The legacy projection arrives late — written after the state snapshot —
+    // so the batch mutation imports and clears it inside the same call.
+    const rule = `!${legacyWorkspaceRule(workspacePath())}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ batched: { overrides: [rule] } }),
+    );
+    const future = new Date(Date.now() + 10_000);
+    await fsp.utimes(enablementPath, future, future);
+
+    const cleared = await store.setDefaultActivations([identity], 'enabled', {
+      clearLegacyPathRulesForManaged: true,
+    });
+    expect(cleared.extensions[identity.id]?.legacyPathRules).toBeUndefined();
+    expect(cleared.extensions[identity.id]?.preservedLegacyPathRules).toEqual([
+      rule,
+    ]);
+
+    // Retire the projection so the hand-back can only draw on the stash.
+    await fsp.rm(enablementPath);
+    const handedBack = await store.ensureInitialized([identity]);
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(handedBack.extensions[identity.id]?.legacyPathRules).toEqual([rule]);
+    expect(
+      handedBack.extensions[identity.id]?.preservedLegacyPathRules,
+    ).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'batched',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'disabled', source: 'legacy_path_rule' });
+  });
+
+  it('drops the preserved managed-era stash when an explicit scope change replaces it', async () => {
+    const store = makeStore();
+    const identity = { id: 'd1'.repeat(32), name: 'scoped' };
+    const rule = `!${legacyWorkspaceRule(workspacePath())}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ scoped: { overrides: [rule] } }),
+    );
+    await store.ensureInitialized([identity]);
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]?.preservedLegacyPathRules).toEqual([
+      rule,
+    ]);
+
+    await store.setDefaultActivations([identity], 'enabled', {
+      clearLegacyPathRulesForManaged: true,
+    });
+    // The explicit scope decision supersedes the stashed pre-managed state;
+    // keeping the stash would resurrect the replaced rule at the hand-back.
+    await store.setActivationScope(identity, { scope: 'user' });
+
+    const handedBack = await store.ensureInitialized([identity]);
+    const policy = handedBack.extensions[identity.id]!;
+    expect(policy.managed).toBeUndefined();
+    expect(policy.legacyPathRules).toBeUndefined();
+    expect(policy.preservedLegacyPathRules).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'scoped',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'enabled', source: 'default' });
+  });
+
+  it('refuses to adopt a managed settings directory while the backend still holds its secrets', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'e5'.repeat(32),
+      name: 'configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'e6'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination, { recursive: true });
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    // `settings set` stores a sensitive value under the managed identity
+    // without writing selector metadata, so the directory alone looks
+    // adoptable even though it is secret-bearing.
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      'SAVED=old\n',
+    );
+  });
 
   it('fails closed when current and previous state are corrupt', async () => {
     const store = makeStore();

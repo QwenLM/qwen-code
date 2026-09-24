@@ -2014,6 +2014,27 @@ export class ExtensionManager {
       return null;
     }
 
+    if (source === 'managed') {
+      // Entries with no manifest are not extensions (fingerprintExtensionsDir
+      // skips them for the same reason): an asset-only directory in the
+      // managed root — a staging dir, a .git checkout — must be skipped
+      // silently. Routing it through onLoadFailure would reserve its
+      // basename as a FAILED package and shadow a valid same-name user
+      // extension. lstat, not existsSync: a manifest that exists but cannot
+      // be read still fails below and keeps its reservation.
+      const hasManifest = [
+        EXTENSIONS_CONFIG_FILENAME,
+        AGENT_PLUGIN_MANIFEST,
+      ].some((file) => {
+        try {
+          return !!fs.lstatSync(path.join(extensionDir, file));
+        } catch {
+          return false;
+        }
+      });
+      if (!hasManifest) return null;
+    }
+
     let extension: Extension | undefined;
     try {
       // Destructured separately so `extension` stays visible in the catch

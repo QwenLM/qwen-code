@@ -451,6 +451,70 @@ describe('managed extension activation migration', () => {
     ).toMatchObject({ effective: 'enabled', source: 'default' });
   });
 
+  it('hands an externally imported home-path disable back after a managed batch enable and withdrawal', async () => {
+    const rule = `!${workspace.replace(/\\/g, '/')}/*`;
+    writePackage(
+      path.join(process.env['QWEN_HOME']!, 'extensions', 'user-copy'),
+      '1.0.0',
+    );
+    writePackage(path.join(managedExtensionsDir, 'deployed'), '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    const managedId = deployed.getLoadedExtensions()[0]!.id;
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[managedId],
+    ).toMatchObject({ managed: true });
+
+    // The legacy projection arrives late: an external writer rewrites the
+    // enablement file after the store snapshot, so a refresh imports the
+    // rule onto the already-managed policy.
+    fs.writeFileSync(
+      path.join(
+        process.env['QWEN_HOME']!,
+        'extensions',
+        'extension-enablement.json',
+      ),
+      JSON.stringify({ [name]: { overrides: [rule] } }),
+    );
+    await deployed.refreshCache();
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[managedId],
+    ).toMatchObject({ managed: true, legacyPathRules: [rule] });
+    expect(
+      deployed.getExtensionActivationForIdentityFromSnapshot(
+        { id: managedId, name },
+        await deployed.getExtensionStoreSnapshot(),
+        workspace,
+      ),
+    ).toMatchObject({ effective: 'disabled', source: 'legacy_path_rule' });
+
+    await deployed.setExtensionDefaultActivations([name], 'enabled');
+
+    fs.rmSync(path.join(managedExtensionsDir, 'deployed'), {
+      recursive: true,
+      force: true,
+    });
+    await deployed.refreshCache();
+    const restored = await deployed.getExtensionStoreSnapshot();
+    const userPolicy = Object.values(restored.extensions).find(
+      (policy) => policy.name === name,
+    );
+    expect(userPolicy?.managed).toBeUndefined();
+    expect(userPolicy?.legacyPathRules).toEqual([rule]);
+    expect(userPolicy?.preservedLegacyPathRules).toBeUndefined();
+    const userExtension = deployed
+      .getLoadedExtensions()
+      .find((extension) => extension.source === 'user');
+    expect(userExtension).toBeDefined();
+    expect(
+      deployed.getExtensionActivationForIdentityFromSnapshot(
+        { id: userExtension!.id, name },
+        restored,
+        workspace,
+      ),
+    ).toMatchObject({ effective: 'disabled', source: 'legacy_path_rule' });
+  });
+
   it('rechecks managed ownership when committing a prepared user install', async () => {
     const managedPackage = path.join(managedExtensionsDir, 'deployed');
     writePackage(managedPackage, '2.0.0');

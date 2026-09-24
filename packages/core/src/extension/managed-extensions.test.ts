@@ -397,6 +397,30 @@ describe('managed extensions', () => {
     },
   );
 
+  it('does not reserve the name of a managed directory that holds no manifest', async () => {
+    writeExtension(user, 'mine', { name: 'docs', version: 'user' });
+    // An asset-only directory in the managed root — a staging dir, a .git
+    // checkout — is not an extension at all, so it must not claim a name:
+    // reporting it through onLoadFailure would reserve "docs" as a FAILED
+    // package and shadow the user's working extension.
+    const assets = path.join(managed, 'docs');
+    fs.mkdirSync(assets);
+    fs.writeFileSync(path.join(assets, 'README.txt'), 'deployment assets');
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const loaded = subject.getLoadedExtensions();
+    expect(loaded).toEqual([
+      expect.objectContaining({ name: 'docs', source: 'user' }),
+    ]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).not.toContain('shadowed');
+    await subject.uninstallExtensionById(loaded[0]!.id, false);
+    expect(
+      fs.existsSync(path.join(user, 'mine', EXTENSIONS_CONFIG_FILENAME)),
+    ).toBe(false);
+  });
+
   it('catalog discovery keeps managed ownership and full-cache contents without loading subresources', async () => {
     writeExtension(user, 'shadowed', { name: 'PORTABLE', version: 'user' });
     writeExtension(user, 'user-only');

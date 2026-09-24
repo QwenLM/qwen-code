@@ -60,6 +60,25 @@ function ensureDirectoryAndGetRealPath(dir: string): string {
   return fs.realpathSync(dir);
 }
 
+// Every value spelling the forwarded argv carries for the managed root, in
+// both `--managed-extensions <value>` and `--managed-extensions=<value>`
+// forms. These are the same raw tokens the child re-parses, so a lookalike
+// in a value position (e.g. a piped prompt) is indistinguishable here;
+// callers must verify each spelling before acting on it.
+function managedExtensionsArgvSpellings(cliArgs: string[]): string[] {
+  const spellings: string[] = [];
+  for (let index = 0; index < cliArgs.length; index++) {
+    const token = cliArgs[index];
+    if (token === '--managed-extensions') {
+      const value = cliArgs[index + 1];
+      if (value !== undefined) spellings.push(value);
+    } else if (token?.startsWith('--managed-extensions=')) {
+      spellings.push(token.slice('--managed-extensions='.length));
+    }
+  }
+  return spellings;
+}
+
 const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'qwen-code-sandbox';
 const SANDBOX_NETWORK_NAME = 'qwen-code-sandbox';
 const SANDBOX_PROXY_NAME = 'qwen-code-sandbox-proxy';
@@ -621,6 +640,32 @@ export async function start_sandbox(
         '--volume',
         `${managedExtensionsDir}:${containerManagedDir}:ro`,
       );
+      mountedDestinations.add(containerManagedDir);
+    }
+    // The forwarded flag keeps its launch spelling (see above), and the
+    // child canonicalizes it against the container's filesystem. When a
+    // parent component of that spelling is a symlink — macOS resolves /var
+    // and /tmp this way by default — the spelling diverges from the pinned
+    // canonical path above: inside the container it then resolves through a
+    // read-write mount (voiding the :ro guard) or fails to resolve at all.
+    // Cover each argv spelling that resolves to this same root with its own
+    // read-only mount. A lookalike token in a value position resolves
+    // somewhere else and is skipped, so it can neither shadow container
+    // paths nor widen what the container sees.
+    for (const spelling of managedExtensionsArgvSpellings(cliArgs)) {
+      const containerSpelling = getContainerPath(
+        path.resolve(workdir, spelling),
+      );
+      if (mountedDestinations.has(containerSpelling)) continue;
+      let resolved: string;
+      try {
+        resolved = fs.realpathSync.native(path.resolve(workdir, spelling));
+      } catch {
+        continue;
+      }
+      if (resolved !== managedExtensionsDir) continue;
+      args.push('--volume', `${managedExtensionsDir}:${containerSpelling}:ro`);
+      mountedDestinations.add(containerSpelling);
     }
   }
 

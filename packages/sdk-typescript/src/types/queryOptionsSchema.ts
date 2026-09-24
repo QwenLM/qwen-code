@@ -36,6 +36,7 @@ const RESERVED_CLI_FLAGS = new Set([
   '--allowed-mcp-server-names',
   '--extensions',
   '-e',
+  '--managed-extensions',
   '--proxy',
   '--sandbox',
   '--no-sandbox',

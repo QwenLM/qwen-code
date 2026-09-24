@@ -90,6 +90,7 @@ describe('QueryOptionsSchema', () => {
     '--add-dir',
     '--extensions',
     '-e',
+    '--managed-extensions',
     '--sandbox',
     '-s',
     '--no-sandbox',
@@ -196,6 +197,7 @@ describe('QueryOptionsSchema', () => {
     '--approval-mode=yolo',
     '--insecure=true',
     '--proxy=http://localhost:8080',
+    '--managed-extensions=/tmp/attacker',
   ])('rejects extraArgs with --flag=value syntax: %s', (flag) => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);

@@ -532,6 +532,26 @@ export async function updateSetting(
   await atomicWriteFile(envFilePath, newEnvContent, { noFollow: true });
 }
 
+/**
+ * Whether the user-scope secret backend holds any values for the given
+ * extension identity. The adoption gate in the extension store uses this
+ * because `updateSetting` stores sensitive values without writing selector
+ * metadata, so a settings-only directory can still be secret-bearing.
+ */
+export async function hasStoredExtensionSecrets(
+  extensionName: string,
+  extensionId: string,
+): Promise<boolean> {
+  const storage = new HybridTokenStorage(
+    getKeychainStorageName(
+      extensionName,
+      extensionId,
+      ExtensionSettingScope.USER,
+    ),
+  );
+  return (await storage.listSecrets()).length > 0;
+}
+
 interface settingsChanges {
   promptForSensitive: ExtensionSetting[];
   removeSensitive: ExtensionSetting[];
