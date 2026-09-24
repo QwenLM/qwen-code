@@ -354,67 +354,6 @@ describe('provider-side rejection', () => {
       jobErrors: ['model_not_found The model does not support batch'],
     });
   });
-
-  it('reports a rejection during validation right after run', async () => {
-    const h = (harness = setup());
-    h.api.createBatch.mockImplementationOnce(
-      async (_ep: unknown, inputFileId: string) => {
-        h.jobs.set('batch-1', rejected('batch-1', inputFileId));
-        return jobOf('batch-1', 'validating', { input_file_id: inputFileId });
-      },
-    );
-    await runPlan(h.deps, h.planPath);
-    expect(h.err.join('\n')).toMatch(
-      /rejected batch-1 during validation: model_not_found/,
-    );
-    expect(h.sleeps).toEqual([5_000]);
-  });
-
-  it('reports a batch that create already returns as failed, without waiting', async () => {
-    const h = (harness = setup());
-    h.api.createBatch.mockImplementationOnce(
-      async (_ep: unknown, inputFileId: string) => {
-        const job = rejected('batch-1', inputFileId);
-        h.jobs.set('batch-1', job);
-        return job;
-      },
-    );
-    await runPlan(h.deps, h.planPath);
-    expect(h.err.join('\n')).toMatch(/rejected batch-1 during validation/);
-    expect(h.sleeps).toEqual([]);
-  });
-
-  it('gives up quietly after the validation window', async () => {
-    const h = (harness = setup());
-    h.api.createBatch.mockImplementationOnce(
-      async (_ep: unknown, inputFileId: string) => {
-        const job = jobOf('batch-1', 'validating', {
-          input_file_id: inputFileId,
-        });
-        h.jobs.set('batch-1', job);
-        return job;
-      },
-    );
-    await runPlan(h.deps, h.planPath);
-    expect(h.sleeps).toEqual(Array(6).fill(5_000));
-    expect(h.err.join('\n')).not.toMatch(/rejected/);
-  });
-
-  it('stays quiet when validation passes', async () => {
-    const h = (harness = setup());
-    h.api.createBatch.mockImplementationOnce(
-      async (_ep: unknown, inputFileId: string) => {
-        h.jobs.set(
-          'batch-1',
-          jobOf('batch-1', 'in_progress', { input_file_id: inputFileId }),
-        );
-        return jobOf('batch-1', 'validating', { input_file_id: inputFileId });
-      },
-    );
-    await runPlan(h.deps, h.planPath);
-    expect(h.err.join('\n')).not.toMatch(/rejected/);
-    expect(h.sleeps).toEqual([5_000]);
-  });
 });
 
 describe('collectTask', () => {

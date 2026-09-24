@@ -334,7 +334,7 @@ async function submitAttempt(
   attempt: TaskAttempt,
   store: BatchTaskStore,
   preassembled?: AttemptAssembly,
-): Promise<BatchJob | undefined> {
+): Promise<void> {
   const api = deps.api ?? liveApi;
   attempt.submitState = 'intent';
   store.save(task);
@@ -375,7 +375,6 @@ async function submitAttempt(
     refreshTaskStatus(task);
     store.save(task);
     deps.out(`batch job: ${job.id}`);
-    return job;
   } catch (error) {
     const status = (error as BatchApiError | undefined)?.status;
     // 408 is a timeout, not a refusal: the create may still have landed.
@@ -414,63 +413,6 @@ async function submitAttempt(
     deps.err(
       `[batch] run \`qwen batch collect ${task.id}\` to reconcile before doing anything else.`,
     );
-    return undefined;
-  }
-}
-
-// DashScope validates a new batch for a few seconds before queueing it; a
-// batch it cannot run at all (e.g. a model without Batch support) fails
-// there with job-level errors and no per-line output.
-const VALIDATION_POLL_MS = 5_000;
-const VALIDATION_POLLS = 6;
-
-function reportRejection(
-  deps: WorkflowDeps,
-  taskId: string,
-  job: BatchJob,
-): void {
-  const errors = jobErrorsOf(job);
-  deps.err(
-    `[batch] the provider rejected ${job.id} during validation` +
-      `${errors.length > 0 ? `: ${errors.join('; ')}` : ''}. Nothing was generated or billed.`,
-  );
-  deps.err(
-    `[batch] fix the cause (for example, a model without Batch support) before retrying; ` +
-      `\`qwen batch collect ${taskId}\` records the failure on the task.`,
-  );
-}
-
-/**
- * Wait out the validation window (~30s at most) so a batch the provider
- * rejects outright is reported now, not hours later by collect. Quiet when
- * the batch moves on normally; a failed poll is not an error.
- */
-async function reportEarlyRejection(
-  deps: WorkflowDeps,
-  taskId: string,
-  created: BatchJob | undefined,
-): Promise<void> {
-  if (!created) return;
-  if (created.status === 'failed') {
-    reportRejection(deps, taskId, created);
-    return;
-  }
-  if (created.status !== 'validating') return;
-  const api = deps.api ?? liveApi;
-  const sleep = deps.sleep ?? realSleep;
-  for (let poll = 0; poll < VALIDATION_POLLS; poll++) {
-    await sleep(VALIDATION_POLL_MS);
-    let job: BatchJob;
-    try {
-      job = await api.getBatch(deps.ep, created.id);
-    } catch {
-      return;
-    }
-    if (job.status === 'failed') {
-      reportRejection(deps, taskId, job);
-      return;
-    }
-    if (job.status !== 'validating') return;
   }
 }
 
@@ -556,12 +498,11 @@ export async function runPlan(
     deps.err(`[batch] note: ${note}`);
   }
   deps.out(cost.text);
-  const job = await store.withLock(
+  await store.withLock(
     task.id,
     () => submitAttempt(deps, task, attempt, store, assembly),
     { waitMs: deps.lockWaitMs },
   );
-  await reportEarlyRejection(deps, task.id, job);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
 }
 
@@ -1148,8 +1089,7 @@ async function retryLocked(
     `retrying ${retryItems.length} item(s) as attempt ${attemptNumber}` +
       `${newLimit === undefined ? '' : ` with max output ${newLimit} tokens`}: ${cost.text}`,
   );
-  const job = await submitAttempt(deps, task, attempt, store, assembly);
-  await reportEarlyRejection(deps, task.id, job);
+  await submitAttempt(deps, task, attempt, store, assembly);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
 }
 
