@@ -1894,6 +1894,9 @@ describe('collectContextData (contextCommand)', () => {
       [big, small],
     ]) {
       const text = formatContextUsageText({ ...data, skills });
+      // Presence first: a missing row makes indexOf -1, which is "less than".
+      expect(text).toContain('big-skill');
+      expect(text).toContain('small-skill');
       expect(text.indexOf('big-skill')).toBeLessThan(
         text.indexOf('small-skill'),
       );
