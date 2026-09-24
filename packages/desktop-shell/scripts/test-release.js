@@ -825,6 +825,11 @@ function testUpdaterMirrorConfiguration() {
     main,
     /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
   );
+  assert.match(main, /"QWEN_DESKTOP_DISABLE_UPDATES"/);
+  assert.match(
+    main,
+    /if cfg!\(debug_assertions\) \|\| updates_disabled\(\) \{/,
+  );
   assert.equal((main.match(/check_for_update\(&app\)/g) ?? []).length, 2);
 }
 
