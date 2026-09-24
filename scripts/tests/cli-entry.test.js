@@ -7,14 +7,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 
-const { spawnSyncMock, existsSyncMock, homedirMock, tmpdirMock } = vi.hoisted(
-  () => ({
-    spawnSyncMock: vi.fn(() => ({ status: 0, signal: null })),
-    existsSyncMock: vi.fn(() => false),
-    homedirMock: vi.fn(() => '/home/test-user'),
-    tmpdirMock: vi.fn(() => '/tmp'),
-  }),
-);
+const {
+  spawnSyncMock,
+  existsSyncMock,
+  homedirMock,
+  tmpdirMock,
+  enableCompileCacheMock,
+} = vi.hoisted(() => ({
+  spawnSyncMock: vi.fn(() => ({ status: 0, signal: null })),
+  existsSyncMock: vi.fn(() => false),
+  homedirMock: vi.fn(() => '/home/test-user'),
+  tmpdirMock: vi.fn(() => '/tmp'),
+  enableCompileCacheMock: vi.fn(() => ({
+    status: 1,
+    directory: '/tmp/node-compile-cache',
+  })),
+}));
 
 vi.mock('node:child_process', () => ({
   spawnSync: spawnSyncMock,
@@ -31,6 +39,14 @@ vi.mock('node:os', async (importOriginal) => ({
   ...(await importOriginal()),
   homedir: homedirMock,
   tmpdir: tmpdirMock,
+}));
+
+// Mocked so the launcher never enables a real compile cache in the test worker.
+vi.mock('node:module', () => ({
+  default: {
+    enableCompileCache: enableCompileCacheMock,
+    constants: { compileCacheStatus: { ENABLED: 1, ALREADY_ENABLED: 2 } },
+  },
 }));
 
 const normalizePath = (path) => String(path).replaceAll('\\', '/');
@@ -203,6 +219,44 @@ describe('scripts/cli-entry.js production entry', () => {
       if (inheritedShim === undefined)
         delete process.env.QWEN_CODE_LAUNCHER_PATH;
       else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
+  it('hands the compile cache to the spawned CLI', async () => {
+    // Without it every spawned run — one-shot `-p` included — recompiles the
+    // whole bundle; only the in-process fast paths used to enable the cache.
+    const inherited = process.env.NODE_COMPILE_CACHE;
+    delete process.env.NODE_COMPILE_CACHE;
+    try {
+      await import('../cli-entry.js?compile-cache');
+      const spawnEnv = spawnSyncMock.mock.calls.at(-1)?.[2]?.env;
+      expect(spawnEnv.NODE_COMPILE_CACHE).toBe('/tmp/node-compile-cache');
+    } finally {
+      if (inherited === undefined) delete process.env.NODE_COMPILE_CACHE;
+      else process.env.NODE_COMPILE_CACHE = inherited;
+    }
+  });
+
+  it('keeps an inherited compile cache and a disabled one', async () => {
+    const inherited = process.env.NODE_COMPILE_CACHE;
+    process.env.NODE_COMPILE_CACHE = '/custom/cache';
+    try {
+      await import('../cli-entry.js?inherited-compile-cache');
+      expect(spawnSyncMock.mock.calls.at(-1)?.[2]?.env.NODE_COMPILE_CACHE).toBe(
+        '/custom/cache',
+      );
+
+      delete process.env.NODE_COMPILE_CACHE;
+      // NODE_DISABLE_COMPILE_CACHE=1 makes Node report the cache as disabled.
+      enableCompileCacheMock.mockReturnValueOnce({ status: 3 });
+      vi.resetModules();
+      await import('../cli-entry.js?disabled-compile-cache');
+      expect(
+        'NODE_COMPILE_CACHE' in spawnSyncMock.mock.calls.at(-1)[2].env,
+      ).toBe(false);
+    } finally {
+      if (inherited === undefined) delete process.env.NODE_COMPILE_CACHE;
+      else process.env.NODE_COMPILE_CACHE = inherited;
     }
   });
 

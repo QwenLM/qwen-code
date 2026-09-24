@@ -12,6 +12,17 @@ import {
 } from './processUtils.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
+// Node reads these while booting (NODE_OPTIONS, NODE_EXTRA_CA_CERTS, ...), so
+// a value that `.env` or `settings.env` injected after startup only takes
+// effect in a fresh image. Captured at module load, before loadEnvironment().
+const snapshotNodeBootEnv = (env: NodeJS.ProcessEnv): string =>
+  JSON.stringify(
+    Object.entries(env)
+      .filter(([key]) => /^(NODE_|UV_)/i.test(key))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
+const startupNodeBootEnv = snapshotNodeBootEnv(process.env);
+
 interface RelaunchOptions {
   afterSpawn?: () => void;
   childEnv?: Readonly<Record<string, string>>;
@@ -84,6 +95,19 @@ export async function relaunchAppInChildProcess(
     typeof process.execve === 'function' &&
     !['win32', 'os400'].includes(process.platform)
   ) {
+    // With no new Node or script arguments and no boot-time Node env change,
+    // the replacement image would be this process booted a second time:
+    // continue in place instead. `childEnv` only carries state (env
+    // provenance) that a fresh image must re-read and this process already
+    // holds, so only the no-relaunch guard is published.
+    if (
+      additionalNodeArgs.length === 0 &&
+      additionalScriptArgs.length === 0 &&
+      snapshotNodeBootEnv(process.env) === startupNodeBootEnv
+    ) {
+      process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+      return;
+    }
     try {
       return process.execve(
         process.execPath,
