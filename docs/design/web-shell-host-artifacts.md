@@ -18,4 +18,4 @@ The existing customization context carries the display filter to primary, split,
 
 ## Validation
 
-Verify absent/void/true/false callbacks and native subagent fallback; filtered artifact counts in main/split messages without data loss; light/dark highlighting, unknown language and oversized input fallback. Build library and declarations, run package tests and final upstream preflight. Verify host layouts and unchanged standalone behavior with real browser evidence. Status: implementation in progress; real-browser and upstream gates pending.
+Verify absent/void/true/false callbacks and native subagent fallback; filtered artifact counts in main/split messages without data loss; light/dark highlighting, unknown language and oversized input fallback. Build library and declarations, run package tests and final upstream preflight. Verify host layouts and unchanged standalone behavior with real browser evidence.
