@@ -3069,14 +3069,13 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
     // The archives ship the node-pty wrapper plus the target prebuild, and the
-    // guide has to say so instead of sending PTY users to an npm install; the
-    // linux-arm64 gap it does not cover must stay named. Bare 'linux-arm64'
-    // also occurs in the release-artifact list, so pin the sentence itself:
-    // the prebuild package is published and the gap is a missing pin (#11898).
+    // guide has to say so instead of sending PTY users to an npm install. Bare
+    // 'linux-arm64' also occurs in the release-artifact list, so pin the
+    // sentence that names it as a covered PTY target (#11872).
     expect(guide).toContain('@lydell/node-pty');
     const flattenedGuide = guide.replace(/\s+/g, ' ');
     expect(flattenedGuide).toContain(
-      '`linux-arm64` is the exception: `@lydell/node-pty-linux-arm64` is published, but this repo does not pin it',
+      '`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64` and `win-x64`',
     );
     expect(flattenedGuide).not.toContain('package is published yet');
     expect(guide).not.toContain(
