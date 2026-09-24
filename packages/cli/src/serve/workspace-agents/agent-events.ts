@@ -125,6 +125,9 @@ export async function subscribeAgentEvents(
     };
     hub = created;
     hubs.set(workspaceCwd, created);
+    // Held before the await: another subscriber leaving meanwhile would
+    // otherwise see an empty hub, drop it, and orphan the watchers below.
+    created.listeners.add(listener);
     const threadsDir = getThreadsDir(workspaceCwd);
     await mkdir(threadsDir, { recursive: true }).catch(() => {});
     watchDir(created, getAgentsDir(workspaceCwd), () =>

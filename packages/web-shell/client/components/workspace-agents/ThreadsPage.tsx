@@ -119,6 +119,8 @@ export interface NewThread {
   acceptanceCriteria?: string;
   priority?: ThreadPriorityChoice;
   assignee?: string;
+  /** The first post; the assignee starts from it. */
+  message?: string;
 }
 
 function ThreadRow({

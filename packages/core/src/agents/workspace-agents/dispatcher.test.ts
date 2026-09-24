@@ -448,6 +448,48 @@ describe('dispatchOnce', () => {
     expect(after.status).not.toBe('blocked');
   });
 
+  it('still posts the answer of a run that posted a status update first', async () => {
+    const thread = await seedQueued({ assigneeAgentId: ALICE.id });
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: ALICE.id,
+      authorKind: 'agent',
+      text: 'Looking at the logs now.',
+      sourceRunId: 'rn_1',
+    });
+    const stored = (await readThread(PROJECT_ROOT, thread.id))!;
+    await writeThread(PROJECT_ROOT, {
+      ...stored,
+      runs: [
+        run({
+          status: 'running',
+          attempts: 1,
+          sessionId: 'se_1',
+          progress: {
+            attempt: 1,
+            sequence: 3,
+            receivedAt: 1,
+            activityAt: 1,
+            stage: 'responding',
+            detail: '',
+            outputText: 'The flake comes from a shared temp dir.',
+          },
+        }),
+      ],
+    });
+
+    await dispatchOnce(PROJECT_ROOT, port({ state: { kind: 'completed' } }));
+
+    const after = (await readThread(PROJECT_ROOT, thread.id))!;
+    expect(
+      after.messages
+        .filter((message) => message.sourceRunId === 'rn_1')
+        .map((message) => message.text),
+    ).toEqual([
+      'Looking at the logs now.',
+      'The flake comes from a shared temp dir.',
+    ]);
+  });
+
   it('rebooks accepted but unread input after an explicit close', async () => {
     const thread = await seedQueued({ assigneeAgentId: ALICE.id });
     await postMessage(PROJECT_ROOT, thread.id, {
@@ -485,6 +527,46 @@ describe('dispatchOnce', () => {
           entry.triggerMessageIds.includes(messageId),
       ),
     ).toBe(true);
+  });
+
+  it('completes a turn that missed a mid-turn message and hands it on', async () => {
+    // Replaying the whole run would pay for the finished work twice.
+    const thread = await seedQueued({ assigneeAgentId: ALICE.id });
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'look at the flaky test',
+    });
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'also check CI',
+    });
+    const stored = (await readThread(PROJECT_ROOT, thread.id))!;
+    const [first, late] = stored.messages.map((message) => message.id);
+    await writeThread(PROJECT_ROOT, {
+      ...stored,
+      runs: [
+        run({
+          status: 'running',
+          attempts: 1,
+          sessionId: 'se_1',
+          triggerMessageIds: [first!, late!],
+          acceptedMessageIds: [first!, late!],
+          consumedMessageIds: [first!],
+        }),
+      ],
+    });
+
+    await dispatchOnce(PROJECT_ROOT, port({ state: { kind: 'completed' } }));
+
+    const after = (await readThread(PROJECT_ROOT, thread.id))!;
+    const finished = after.runs.find((entry) => entry.id === 'rn_1')!;
+    expect(finished).toMatchObject({ status: 'completed', attempts: 1 });
+    expect(
+      after.runs.filter(
+        (entry) =>
+          entry.id !== 'rn_1' && entry.triggerMessageIds.includes(late!),
+      ),
+    ).toHaveLength(1);
   });
 
   it('keeps cancellation pending until the body stops and charges its usage', async () => {
@@ -564,6 +646,54 @@ describe('dispatchOnce', () => {
     expect(driver.start).not.toHaveBeenCalled();
     const stored = await readThread(PROJECT_ROOT, thread.id);
     expect(stored!.runs[0]?.status).toBe('queued');
+  });
+
+  it('reports a child that answered in plain text to its waiting parent', async () => {
+    // A plain answer leaves no close obligation, so without a report the
+    // parent would wait on the child forever.
+    const parent = await createThread(PROJECT_ROOT, {
+      title: 'parent',
+      assigneeAgentId: BOB.id,
+    });
+    const created = await createThread(PROJECT_ROOT, {
+      title: 'child',
+      parentThreadId: parent.id,
+    });
+    await writeThread(PROJECT_ROOT, {
+      ...created,
+      status: 'in_progress',
+      runs: [
+        run({
+          id: 'rn_child',
+          status: 'running',
+          attempts: 1,
+          sessionId: 'se_1',
+          progress: {
+            attempt: 1,
+            sequence: 2,
+            receivedAt: 1,
+            activityAt: 1,
+            stage: 'responding',
+            detail: '',
+            outputText: 'The temp dir is shared between workers.',
+          },
+        }),
+      ],
+    });
+
+    await dispatchOnce(PROJECT_ROOT, port({ state: { kind: 'completed' } }));
+    await dispatchOnce(PROJECT_ROOT, port({ state: { kind: 'completed' } }));
+
+    const { threads } = await listThreads(PROJECT_ROOT);
+    const parentAfter = threads.find((thread) => thread.id === parent.id)!;
+    const reports = parentAfter.messages.filter(
+      (message) => message.triggerKind === 'child_report',
+    );
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.text).toContain('replied');
+    expect(
+      parentAfter.runs.filter((entry) => entry.agentId === BOB.id),
+    ).toHaveLength(1);
   });
 
   it('delivers a child review to its parent exactly once across replays', async () => {

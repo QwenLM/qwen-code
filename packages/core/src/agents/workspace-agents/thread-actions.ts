@@ -377,6 +377,13 @@ export async function postMessage(
   );
 }
 
+/**
+ * Creates a thread and books its assignee in one transaction.
+ *
+ * `message` is the person's first post. It becomes the assignment itself, so
+ * the first run starts with it; posting it after creation would reach an
+ * agent that is already working and may never read it.
+ */
 export async function createAssignedThread(
   projectRoot: string,
   input: {
@@ -385,6 +392,7 @@ export async function createAssignedThread(
     acceptanceCriteria?: string;
     priority?: ThreadPriority;
     assignee: WorkspaceAgent;
+    message?: string;
   },
 ): Promise<{ thread: Thread; assignment: PostMessageResult }> {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
@@ -409,7 +417,7 @@ export async function createAssignedThread(
         from: HUMAN_AUTHOR_ID,
         authorKind: 'human',
         triggerKind: 'assignment',
-        text: `Assigned to ${mentionToken(assignee)}.`,
+        text: input.message?.trim() || `Assigned to ${mentionToken(assignee)}.`,
       },
       { agents, threadOverride: thread },
     );
@@ -688,6 +696,8 @@ export async function requeueRun(
               endedAt: undefined,
               error: undefined,
               failureStage: undefined,
+              // The last attempt's text is not this attempt's answer.
+              progress: undefined,
             }
           : entry,
       ),

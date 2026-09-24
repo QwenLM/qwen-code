@@ -6179,12 +6179,14 @@ export class Session implements SessionContext {
                     (message) =>
                       message.sequence === agentRun.contextThroughSequence,
                   );
-                  if (!recorder || !delivered) {
+                  if (!delivered) {
                     throw new Error(
-                      'Agent input requires a transcript and delivery watermark',
+                      'Agent input requires a delivery watermark',
                     );
                   }
-                  await recorder.flush();
+                  // With chat recording off there is no transcript to flush;
+                  // the thread itself keeps the input.
+                  await recorder?.flush();
                   await consumeAgentInput(
                     this.config.getWorkingDir(),
                     delivered.id,
@@ -9613,15 +9615,12 @@ export class Session implements SessionContext {
       if (message.kind === 'structured' && message.agentRun) {
         try {
           if (
-            !recorder ||
             !message.messageId ||
             message.agentRun.contextThroughSequence === undefined
           ) {
-            throw new Error(
-              'Agent input requires a transcript and delivery watermark',
-            );
+            throw new Error('Agent input requires a delivery watermark');
           }
-          await recorder.flush();
+          await recorder?.flush();
           await consumeAgentInput(
             this.config.getWorkingDir(),
             message.messageId,

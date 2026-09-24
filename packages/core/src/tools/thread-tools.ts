@@ -408,6 +408,11 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               `No agent named "${this.params.assignee}" in this workspace. Use one of the peers listed in your run frame.`,
             );
           }
+          if (assignee.retiredAt !== undefined) {
+            throw new Error(
+              `Agent "${assignee.name}" is retired and cannot take work.`,
+            );
+          }
           if (assignee.enabled === false) {
             throw new Error(
               `Agent "${assignee.name}" is disabled and cannot take work.`,

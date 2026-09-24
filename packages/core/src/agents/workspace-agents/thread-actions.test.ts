@@ -10,9 +10,15 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Storage } from '../../config/storage.js';
-import { createThread, readThread, writeThread } from './store.js';
+import {
+  createThread,
+  readThread,
+  updateWorkspaceAgents,
+  writeThread,
+} from './store.js';
 import {
   countQueuedElsewhere,
+  createAssignedThread,
   postMessage,
   upsertRunUsage,
 } from './thread-actions.js';
@@ -168,6 +174,36 @@ describe('agent thread actions', () => {
         },
       ],
     });
+  });
+
+  it("starts an assigned thread from the person's first message", async () => {
+    // Posting the message after creation would reach a run that is already
+    // working, which may end without ever reading it.
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [ALICE, BOB]);
+
+    const { thread: created, assignment } = await createAssignedThread(
+      PROJECT_ROOT,
+      {
+        title: 'Flaky test',
+        assignee: ALICE,
+        message: '@alice why is it flaky?',
+      },
+    );
+
+    expect(created.messages).toHaveLength(1);
+    expect(created.messages[0]).toMatchObject({
+      authorKind: 'human',
+      triggerKind: 'assignment',
+      text: '@alice why is it flaky?',
+    });
+    expect(assignment.dispatched).toHaveLength(1);
+    expect(created.runs).toEqual([
+      expect.objectContaining({
+        agentId: ALICE.id,
+        status: 'queued',
+        triggerMessageIds: [created.messages[0]!.id],
+      }),
+    ]);
   });
 
   it('reports a post with no mention or assignee', async () => {
