@@ -18,6 +18,8 @@ export default defineConfig({
       process.platform === 'win32'
         ? [
             ...configDefaults.exclude,
+            'scripts/tests/e2e-shard-retry.test.js',
+            'scripts/tests/security-checks-audit-retry.test.js',
             'scripts/tests/pr-self-report-label.test.js',
             // Bash-driven workflow suites cannot run on Windows; pure
             // YAML-parse workflow suites still do.
@@ -26,13 +28,31 @@ export default defineConfig({
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
+    // Several suites spawn the real `corepack pnpm`; on a cold per-run cache
+    // every worker would download the pinned pnpm concurrently, and a losing
+    // install poisons the shared cache for the rest of the run (#12436).
+    // Warm it once here, before any worker forks.
+    globalSetup: ['scripts/tests/corepack-warmup.js'],
     // Several tests in install-script.test.js shell out to `node` to run
     // create-standalone-package.js, which on Windows runs a full
     // tar+gzip pass under antivirus inspection. Real runtimes observed on
     // Windows CI: 4780ms / 1666ms / 1079ms — the 4.8s one is right at
     // vitest's 5s default and flakes. Bump the suite timeout so a single
     // slow subprocess startup doesn't fail an otherwise-healthy test run.
-    testTimeout: 30_000,
+    //
+    // 30s then proved to be the quiet-host figure. On the shared pool the
+    // same work runs about 5x slower, and release run 33725742855 lost its
+    // Quality Checks (Scripts) job to two files at once —
+    // qwen-autofix-workflow.test.js, whose heaviest case measures ~14s idle,
+    // and acp-serve-boundary-guard.test.js — neither of them slow, both past
+    // 30s under contention. Per-test `vi.setConfig` does not help: these
+    // cases register their timeout at collection, before it runs.
+    // `||`, not `??`: `??` only catches `undefined`, and the value this repo
+    // actually plants is `''` — that is what `${{ cond && 'x' || '' }}` renders
+    // when the condition is false. `Number('')` is 0, and vitest reads 0 as
+    // "no timeout at all", so the empty spelling would silently disarm every
+    // ceiling in this suite. `NaN` from a typo falls back the same way.
+    testTimeout: Number(process.env['QWEN_SCRIPTS_TEST_TIMEOUT_MS']) || 90_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
@@ -42,13 +62,7 @@ export default defineConfig({
     // the host cores, which is what every other suite in this repository
     // uses.
     //
-    // The long fake-timer suites here stall a worker's event loop long
-    // enough for vitest's worker->main `onTaskUpdate` RPC to hit its 60s
-    // timeout and surface as an unhandled error — with every test in the
-    // suite green, yet the run exiting 1 (observed deterministic on the
-    // macOS runners). Test failures still fail the run; only unhandled
-    // errors stop being fatal, and only off Linux — the ubuntu lane and
-    // Linux local runs keep the unhandled-error signal.
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
 });

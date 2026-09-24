@@ -7,10 +7,10 @@
  *
  * Protects users from infinite loops when the classifier persistently blocks
  * (LLM stuck in a dead-end) or persistently fails (infrastructure problem).
- * After either the consecutive thresholds or the total denial cap are
- * exceeded, the orchestrator falls back to DEFAULT-mode confirmation flow
- * for the next tool call. The session itself stays in AUTO; only the single
- * offending call is downgraded.
+ * The exact blocked action may be retried once through DEFAULT-mode
+ * confirmation. Calls that reach a consecutive threshold or the total denial
+ * cap also fall back on that same call. The session itself stays in AUTO; only
+ * the single offending call is downgraded.
  *
  * Block and unavailable counters cross-reset: they represent different
  * failure modes and should not accumulate together. Switching ApprovalMode
@@ -19,10 +19,13 @@
  * `total*` counters are cumulative for the session and trigger a total
  * denial cap even when the model avoids consecutive-cap thresholds by
  * alternating blocks, unavailable verdicts, and allowed calls.
+ * Only one pending retry fingerprint is stored; a later classifier block for
+ * another action replaces it.
  */
 
 /** Reasons the orchestrator may choose to fall back to manual approval. */
 export type DenialFallbackReason =
+  | 'classifier_blocked_retry'
   | 'consecutive_block'
   | 'consecutive_unavailable'
   | 'total_denial';
@@ -32,6 +35,7 @@ export interface AutoModeDenialState {
   consecutiveUnavailable: number;
   totalBlock: number;
   totalUnavailable: number;
+  pendingManualRetryFingerprint?: string;
 }
 
 export const AUTO_MODE_DENIAL_LIMITS = {
@@ -73,33 +77,53 @@ export function isDenialFallbackReason(
 ): reason is DenialFallbackReason {
   return (
     reason === 'consecutive_block' ||
+    reason === 'classifier_blocked_retry' ||
     reason === 'consecutive_unavailable' ||
     reason === 'total_denial'
   );
 }
 
 /** Record a successful (allow) decision. Resets both consecutive counters. */
-export function recordAllow(state: AutoModeDenialState): AutoModeDenialState {
-  if (state.consecutiveBlock === 0 && state.consecutiveUnavailable === 0) {
+export function recordAllow(
+  state: AutoModeDenialState,
+  actionFingerprint?: string,
+): AutoModeDenialState {
+  const clearsPendingRetry =
+    actionFingerprint !== undefined &&
+    state.pendingManualRetryFingerprint === actionFingerprint;
+  if (
+    state.consecutiveBlock === 0 &&
+    state.consecutiveUnavailable === 0 &&
+    !clearsPendingRetry
+  ) {
     return state; // no-op
   }
-  return {
+  const next = {
     ...state,
     consecutiveBlock: 0,
     consecutiveUnavailable: 0,
   };
+  if (clearsPendingRetry) delete next.pendingManualRetryFingerprint;
+  return next;
 }
 
 /**
  * Record a classifier-policy block. Increments `consecutiveBlock` and
  * `totalBlock`; cross-resets `consecutiveUnavailable`.
  */
-export function recordBlock(state: AutoModeDenialState): AutoModeDenialState {
+export function recordBlock(
+  state: AutoModeDenialState,
+  actionFingerprint?: string,
+): AutoModeDenialState {
   return {
+    ...state,
     consecutiveBlock: state.consecutiveBlock + 1,
     consecutiveUnavailable: 0,
     totalBlock: state.totalBlock + 1,
     totalUnavailable: state.totalUnavailable,
+    ...(actionFingerprint
+      ? { pendingManualRetryFingerprint: actionFingerprint }
+      : {}),
   };
 }
 
@@ -112,6 +136,7 @@ export function recordUnavailable(
   state: AutoModeDenialState,
 ): AutoModeDenialState {
   return {
+    ...state,
     consecutiveBlock: 0,
     consecutiveUnavailable: state.consecutiveUnavailable + 1,
     totalBlock: state.totalBlock,
@@ -120,13 +145,14 @@ export function recordUnavailable(
 }
 
 /**
- * Decide whether the next tool call should bypass the classifier and fall
- * back to DEFAULT-mode confirmation. The fallback applies to a single call
- * only; the session remains in AUTO. The total denial cap takes precedence
- * over consecutive caps so alternating denial modes cannot avoid fallback.
+ * Decide whether a tool call should bypass the classifier and fall back to
+ * DEFAULT-mode confirmation. The fallback applies to a single call only; the
+ * session remains in AUTO. The total denial cap takes precedence over
+ * consecutive caps so alternating denial modes cannot avoid fallback.
  */
 export function shouldFallback(
   state: AutoModeDenialState,
+  actionFingerprint?: string,
 ): { fallback: true; reason: DenialFallbackReason } | { fallback: false } {
   if (hasReachedTotalCap(state)) {
     return { fallback: true, reason: 'total_denial' };
@@ -140,7 +166,23 @@ export function shouldFallback(
   ) {
     return { fallback: true, reason: 'consecutive_unavailable' };
   }
+  if (
+    actionFingerprint !== undefined &&
+    state.pendingManualRetryFingerprint === actionFingerprint
+  ) {
+    return { fallback: true, reason: 'classifier_blocked_retry' };
+  }
   return { fallback: false };
+}
+
+/** Consume the one-shot manual retry before its confirmation is displayed. */
+export function consumePendingManualRetry(
+  state: AutoModeDenialState,
+): AutoModeDenialState {
+  if (state.pendingManualRetryFingerprint === undefined) return state;
+  const next = { ...state };
+  delete next.pendingManualRetryFingerprint;
+  return next;
 }
 
 /**
@@ -149,13 +191,12 @@ export function shouldFallback(
  * If the total denial cap was reached, also clears total counters so the
  * session does not stay permanently pinned to manual prompts.
  *
- * Symmetric with `recordAllow`: a manual approval signals the user accepted
- * the action, and the next call should re-engage the classifier. If the
- * classifier or its infrastructure is still degraded, the next call's
- * verdict will simply re-arm the appropriate counter (one block / one
- * unavailable) — same recovery curve as initial onset, no permanent
- * lock-out. Resetting only `consecutiveBlock` (the original v1 behaviour)
- * created an asymmetry: a transient API blip past
+ * A manual approval signals the user accepted the action, and the next call
+ * should re-engage the classifier. If the classifier or its infrastructure is
+ * still degraded, the next call's verdict will simply re-arm the appropriate
+ * counter (one block / one unavailable) — same recovery curve as initial
+ * onset, no permanent lock-out. Resetting only `consecutiveBlock` (the
+ * original v1 behaviour) created an asymmetry: a transient API blip past
  * `maxConsecutiveUnavailable` would permanently downgrade the rest of the
  * session to manual approval even after the user approved the fallback
  * prompt, until ApprovalMode toggled.
@@ -164,7 +205,13 @@ export function recordFallbackApprove(
   state: AutoModeDenialState,
 ): AutoModeDenialState {
   if (hasReachedTotalCap(state)) {
-    return createDenialState();
+    return {
+      ...state,
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    };
   }
   if (state.consecutiveBlock === 0 && state.consecutiveUnavailable === 0) {
     return state;

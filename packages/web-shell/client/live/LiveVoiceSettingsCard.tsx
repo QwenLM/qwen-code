@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FlaskConicalIcon } from 'lucide-react';
 import type { DaemonLiveRequirementState } from '@qwen-code/sdk';
 import { useI18n } from '../i18n';
@@ -22,19 +22,28 @@ import {
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../components/ui/select';
 import { Separator } from '../components/ui/separator';
 import { Spinner } from '../components/ui/spinner';
 import { Switch } from '../components/ui/switch';
 import { HotkeySetter } from './HotkeySetter';
-import type { UseLiveVoiceSetupResult } from './useLiveVoiceSetup';
+import { liveModelOptions } from './live-model-options';
+import {
+  INSTALLING_STATES,
+  type UseLiveVoiceSetupResult,
+} from './useLiveVoiceSetup';
 
-const INSTALLING_STATES = new Set([
-  'checking',
-  'downloading',
-  'verifying',
-  'installing',
-  'launching',
-]);
+// The Select value for "type another id". Stored model ids are trimmed, so
+// none can start with a space.
+const CUSTOM_MODEL = ' custom';
+
+const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 function RequirementBadge({
   state,
@@ -69,8 +78,49 @@ export function LiveVoiceSettingsCard({
   const status = setup.status;
   const enabled = status?.enabled === true;
   const busy = setup.mutating || setup.loading;
-  const installBusy = INSTALLING_STATES.has(status?.install.state ?? '');
+  const installBusy =
+    status !== undefined && INSTALLING_STATES.has(status.install.state);
   const requirements = status?.live.requirements;
+  // A `realtimeOnly` route reads its key from an environment variable; the
+  // daemon refuses to store one for it, so there is nothing to type here.
+  const keyFromRoute = status?.keySource === 'route';
+  // Until the first status arrives the key's source is unknown, so the
+  // input stays hidden rather than invite a write the daemon may refuse.
+  // While the model does not resolve, the daemon refuses `apiKey: replace`
+  // as well; the modelError alert carries the remediation on its own.
+  const keyEditable =
+    status !== undefined && !keyFromRoute && !status.modelError;
+  // Absent `models` marks a daemon that predates selectable models, which
+  // refuses a model update, so the model stays read-only there.
+  const modelChoices =
+    status?.models !== undefined ? liveModelOptions(status) : undefined;
+  const savedModel = status?.model ?? '';
+  const [model, setModel] = useState(savedModel);
+  const [customModel, setCustomModel] = useState(false);
+  useEffect(() => {
+    setModel(savedModel);
+    setCustomModel(false);
+  }, [savedModel]);
+  // Absent on daemons that predate a configurable endpoint; empty while the
+  // default is in use.
+  const savedEndpoint = status?.endpoint;
+  const [endpointDraft, setEndpointDraft] = useState(savedEndpoint ?? '');
+  useEffect(() => {
+    setEndpointDraft(savedEndpoint ?? '');
+  }, [savedEndpoint]);
+  const savedVoice = status?.voice ?? '';
+  // Absent on daemons that predate selectable voices; an update there is
+  // refused with empty_live_setup_update, so the control stays read-only.
+  const voiceSelectable = status?.voice !== undefined;
+  // Every voice change is refused with invalid_live_model while the model
+  // does not resolve; the model picker is the only in-UI recovery.
+  const voiceEditable = voiceSelectable && status?.modelError === undefined;
+  const [voice, setVoice] = useState(savedVoice);
+  useEffect(() => {
+    setVoice(savedVoice);
+  }, [savedVoice]);
+  // Absent on daemons that predate the browser Host: those are macOS-only.
+  const nativeHost = status?.nativeHost !== false;
 
   const saveKey = async () => {
     const value = apiKey.trim();
@@ -85,6 +135,56 @@ export function LiveVoiceSettingsCard({
     }
   };
 
+  // Changing any of these while Live Voice is on makes the daemon open a
+  // validation session first, so a wrong id, voice or endpoint fails here,
+  // not mid-call.
+  const saveModel = async (value: string) => {
+    const next = value.trim();
+    if (!status || !next || next === savedModel) return;
+    try {
+      await setup.update({ model: next });
+    } catch {
+      // The hook exposes the sanitized daemon error in the card.
+    }
+  };
+
+  const chooseModel = (value: string) => {
+    if (value === CUSTOM_MODEL) {
+      setCustomModel(true);
+      return;
+    }
+    setCustomModel(false);
+    void saveModel(value);
+  };
+
+  // A key typed for the new endpoint goes in the same request: validating
+  // the new endpoint with the old key, or the new key against the old
+  // endpoint, would fail for a key bound to one region or domain.
+  const saveEndpoint = async () => {
+    const endpoint = endpointDraft.trim();
+    if (savedEndpoint === undefined || endpoint === savedEndpoint) return;
+    const key = apiKey.trim();
+    try {
+      await setup.update({
+        endpoint,
+        ...(key ? { apiKey: { operation: 'replace', value: key } } : {}),
+      });
+      if (key) setApiKey('');
+    } catch {
+      // The hook exposes the sanitized daemon error in the card.
+    }
+  };
+
+  const saveVoice = async () => {
+    const value = voice.trim();
+    if (!value || value === savedVoice) return;
+    try {
+      await setup.update({ voice: value });
+    } catch {
+      setVoice(savedVoice);
+    }
+  };
+
   const clearKey = async () => {
     try {
       await setup.update({ apiKey: { operation: 'clear' } });
@@ -95,8 +195,14 @@ export function LiveVoiceSettingsCard({
   };
 
   const setEnabled = async (next: boolean) => {
-    if (next) {
+    // The confirmation is about downloading and installing the native Host;
+    // with no native Host on this platform there is nothing to confirm.
+    if (next && nativeHost) {
       setConfirmOpen(true);
+      return;
+    }
+    if (next) {
+      confirmEnable();
       return;
     }
     try {
@@ -129,7 +235,11 @@ export function LiveVoiceSettingsCard({
             </Badge>
           </div>
           <p className="max-w-3xl text-sm text-muted-foreground">
-            {t('settings.liveSetup.description')}
+            {t(
+              nativeHost
+                ? 'settings.liveSetup.description'
+                : 'settings.liveSetup.browserDescription',
+            )}
           </p>
         </div>
         {setup.loading && !status ? (
@@ -147,6 +257,69 @@ export function LiveVoiceSettingsCard({
       <Separator />
 
       <div className="grid gap-4 lg:grid-cols-2">
+        {savedEndpoint !== undefined ? (
+          <div className="space-y-2" data-live-endpoint>
+            <label
+              htmlFor="live-realtime-endpoint"
+              className="text-sm font-medium"
+            >
+              {t('settings.liveSetup.endpoint')}
+            </label>
+            {keyFromRoute ? (
+              <>
+                <p className="break-all text-sm" id="live-realtime-endpoint">
+                  {savedEndpoint}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.liveSetup.endpointFromRoute')}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    id="live-realtime-endpoint"
+                    autoComplete="off"
+                    value={endpointDraft}
+                    disabled={setup.mutating || !keyEditable}
+                    placeholder={DEFAULT_BASE_URL}
+                    onChange={(event) => setEndpointDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void saveEndpoint();
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    data-live-endpoint-save
+                    disabled={
+                      endpointDraft.trim() === savedEndpoint ||
+                      setup.mutating ||
+                      !keyEditable
+                    }
+                    onClick={() => void saveEndpoint()}
+                  >
+                    {t('settings.liveSetup.save')}
+                  </Button>
+                </div>
+                {status?.endpointError ? (
+                  <p
+                    className="text-xs text-destructive"
+                    role="alert"
+                    data-live-endpoint-error
+                  >
+                    {status.endpointError}
+                  </p>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.liveSetup.endpointHint')}
+                </p>
+              </>
+            )}
+          </div>
+        ) : null}
+
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-3">
             <label htmlFor="live-realtime-key" className="text-sm font-medium">
@@ -160,7 +333,9 @@ export function LiveVoiceSettingsCard({
                     : 'settings.liveSetup.notConfigured',
                 )}
               </Badge>
-              {status?.keyConfigured && !enabled ? (
+              {!enabled &&
+              (status?.storedKey === true ||
+                (status?.keyConfigured === true && !keyFromRoute)) ? (
                 <Button
                   type="button"
                   size="xs"
@@ -173,39 +348,166 @@ export function LiveVoiceSettingsCard({
               ) : null}
             </div>
           </div>
-          <div className="flex gap-2">
-            <Input
-              id="live-realtime-key"
-              type="password"
-              autoComplete="off"
-              value={apiKey}
+          {keyFromRoute ? (
+            status?.keyError ? (
+              <p
+                className="text-xs text-destructive"
+                role="alert"
+                data-live-key-error
+              >
+                {status.keyError}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground" data-live-key-route>
+                {t(
+                  status?.keyConfigured
+                    ? 'settings.liveSetup.keyFromEnv'
+                    : 'settings.liveSetup.keyFromEnvMissing',
+                  { env: status?.keyEnv ?? '' },
+                )}
+              </p>
+            )
+          ) : keyEditable ? (
+            <div className="flex gap-2">
+              <Input
+                id="live-realtime-key"
+                type="password"
+                autoComplete="off"
+                value={apiKey}
+                disabled={setup.mutating}
+                placeholder={
+                  status?.keyConfigured
+                    ? t('settings.liveSetup.apiKeyReplace')
+                    : t('settings.liveSetup.apiKeyPlaceholder')
+                }
+                onChange={(event) => setApiKey(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void saveKey();
+                }}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!apiKey.trim() || setup.mutating}
+                onClick={() => void saveKey()}
+              >
+                {setup.mutating ? <Spinner /> : t('settings.liveSetup.save')}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="space-y-2">
+          <label htmlFor="live-realtime-model" className="text-sm font-medium">
+            {t('settings.liveSetup.model')}
+          </label>
+          {modelChoices ? (
+            <Select
+              value={customModel ? CUSTOM_MODEL : modelChoices.selected}
               disabled={setup.mutating}
-              placeholder={
-                status?.keyConfigured
-                  ? t('settings.liveSetup.apiKeyReplace')
-                  : t('settings.liveSetup.apiKeyPlaceholder')
-              }
-              onChange={(event) => setApiKey(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') void saveKey();
-              }}
-            />
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!apiKey.trim() || setup.mutating}
-              onClick={() => void saveKey()}
+              onValueChange={chooseModel}
             >
-              {setup.mutating ? <Spinner /> : t('settings.liveSetup.save')}
-            </Button>
-          </div>
+              <SelectTrigger id="live-realtime-model" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {modelChoices.options.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+                <SelectItem value={CUSTOM_MODEL}>
+                  {t('settings.liveSetup.modelCustom')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          ) : (
+            <p className="text-sm" id="live-realtime-model">
+              {status?.model ?? 'qwen3.5-omni-plus-realtime'}
+            </p>
+          )}
+          {customModel ? (
+            <div className="flex gap-2">
+              <Input
+                autoComplete="off"
+                aria-label={t('settings.liveSetup.model')}
+                data-live-model-input
+                value={model}
+                disabled={setup.mutating}
+                onChange={(event) => setModel(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void saveModel(model);
+                }}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-live-model-save
+                disabled={
+                  !model.trim() || model.trim() === savedModel || setup.mutating
+                }
+                onClick={() => void saveModel(model)}
+              >
+                {t('settings.liveSetup.save')}
+              </Button>
+            </div>
+          ) : null}
+          {status?.modelError ? (
+            <p className="text-xs text-destructive" role="alert">
+              {status.modelError}
+            </p>
+          ) : null}
+          {modelChoices ? (
+            <p className="text-xs text-muted-foreground">
+              {t('settings.liveSetup.modelHint')}
+            </p>
+          ) : null}
           <p className="text-xs text-muted-foreground">
-            {status?.model ?? 'qwen3.5-omni-plus-realtime'}
+            {t('settings.liveSetup.appliesNextCall')}
           </p>
         </div>
 
         <div className="space-y-2">
+          <label htmlFor="live-realtime-voice" className="text-sm font-medium">
+            {t('settings.liveSetup.voice')}
+          </label>
+          <div className="flex gap-2">
+            <Input
+              id="live-realtime-voice"
+              autoComplete="off"
+              value={voice}
+              disabled={setup.mutating || !voiceEditable}
+              onChange={(event) => setVoice(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void saveVoice();
+              }}
+            />
+            {voiceEditable ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-live-voice-save
+                disabled={
+                  !voice.trim() || voice.trim() === savedVoice || setup.mutating
+                }
+                onClick={() => void saveVoice()}
+              >
+                {t('settings.liveSetup.save')}
+              </Button>
+            ) : null}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.liveSetup.voiceHint')}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.liveSetup.appliesNextCall')}
+          </p>
+        </div>
+
+        <div className="space-y-2" hidden={!nativeHost}>
           <div className="text-sm font-medium">
             {t('settings.liveSetup.shortcut')}
           </div>
@@ -220,7 +522,7 @@ export function LiveVoiceSettingsCard({
         </div>
       </div>
 
-      {enabled && status ? (
+      {enabled && status && nativeHost ? (
         <>
           <Separator />
           <div className="space-y-3">
@@ -290,7 +592,7 @@ export function LiveVoiceSettingsCard({
         </>
       ) : null}
 
-      {(setup.error || (enabled && status?.install.message)) && (
+      {(setup.error || (enabled && nativeHost && status?.install.message)) && (
         <p className="text-sm text-destructive" role="alert">
           {setup.error?.message ?? status?.install.message}
         </p>

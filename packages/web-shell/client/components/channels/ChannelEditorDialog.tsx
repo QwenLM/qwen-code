@@ -39,6 +39,7 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { Textarea } from '../ui/textarea';
 import { Label } from '../ui/label';
 import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import {
@@ -55,11 +56,14 @@ import { ChannelPairingRequests } from './ChannelPairingRequests';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  defaultGroupSenders,
   hasDescriptorGroupPolicy,
-  hasDescriptorSenderPolicy,
+  hasDescriptorPrivatePolicy,
+  configuredPrivatePolicy,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
   type ChannelEditorValidationCode,
+  type ChannelGroupSenders,
 } from './channel-editor-state';
 import { PLATFORM_MARKS } from './channel-platform';
 
@@ -77,39 +81,48 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
   },
+  dws: {
+    privatePolicy: 'channels.editor.field.dws.privatePolicy',
+  },
   github: {
     token: 'channels.editor.field.github.token',
     useLocalGh: 'channels.editor.field.github.useLocalGh',
     baseUrl: 'channels.editor.field.github.baseUrl',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
-    senderPolicy: 'channels.editor.field.github.senderPolicy',
-    allowedUsers: 'channels.editor.field.github.allowedUsers',
     reasonFilter: 'channels.editor.field.github.reasonFilter',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
     baseUrl: 'channels.editor.field.gitlab.baseUrl',
     groupPolicy: 'channels.editor.field.gitlab.groupPolicy',
-    senderPolicy: 'channels.editor.field.gitlab.senderPolicy',
-    allowedUsers: 'channels.editor.field.gitlab.allowedUsers',
     action_prompt_template:
       'channels.editor.field.gitlab.action_prompt_template',
   },
 };
 
 const SHARED_ACCESS_FIELD_KEYS = new Set([
-  'senderPolicy',
+  'privatePolicy',
   'allowedUsers',
   'groupPolicy',
+  'operators',
 ]);
-const SHARED_SESSION_FIELD_KEYS = new Set(['sessionScope', 'multiSession']);
+const GROUP_SENDERS_OPTIONS = ['open', 'allowlist'] as const;
+const SHARED_SESSION_FIELD_KEYS = new Set([
+  'outputMode',
+  'sessionScope',
+  'multiSession',
+  'instructions',
+]);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
-  senderPolicy: 'channels.editor.field.shared.senderPolicy',
+  outputMode: 'channels.editor.field.shared.outputMode',
+  privatePolicy: 'channels.editor.field.shared.privatePolicy',
   allowedUsers: 'channels.editor.field.shared.allowedUsers',
   groupPolicy: 'channels.editor.field.shared.groupPolicy',
+  operators: 'channels.editor.field.shared.operators',
   sessionScope: 'channels.editor.field.shared.sessionScope',
   multiSession: 'channels.editor.field.shared.multiSession',
+  instructions: 'channels.editor.field.shared.instructions',
 };
 
 export interface ChannelEditorDialogProps {
@@ -592,6 +605,26 @@ export function ChannelEditorDialog({
         </FieldShell>
       );
     }
+    if (field.kind === 'string' && field.multiline) {
+      return (
+        <FieldShell
+          key={field.key}
+          id={id}
+          label={fieldLabel(field)}
+          required={field.required}
+          description={fieldDescription(field)}
+          error={error}
+        >
+          <Textarea
+            id={id}
+            value={String(value ?? '')}
+            aria-invalid={Boolean(error)}
+            aria-required={field.required}
+            onChange={(event) => update(event.target.value)}
+          />
+        </FieldShell>
+      );
+    }
     return (
       <FieldShell
         key={field.key}
@@ -818,10 +851,10 @@ export function ChannelEditorDialog({
             ) : null}
 
             {(() => {
-              const descriptorPolicy = hasDescriptorSenderPolicy(descriptor);
+              const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = descriptorPolicy
-                ? String(draft.values['senderPolicy'] ?? '')
-                : draft.senderPolicy;
+                ? String(draft.values['privatePolicy'] ?? '')
+                : draft.privatePolicy;
               const showRadioGroup = !descriptorPolicy;
               const descriptorGroupPolicy =
                 hasDescriptorGroupPolicy(descriptor);
@@ -833,12 +866,25 @@ export function ChannelEditorDialog({
                 effectiveGroupPolicy === 'pairing';
               const visibleAccessFields = accessFields.filter(
                 (field) =>
-                  field.key !== 'allowedUsers' ||
-                  effectivePolicy === 'allowlist',
+                  field.key !== 'operators' &&
+                  (field.key !== 'allowedUsers' ||
+                    effectivePolicy === 'allowlist' ||
+                    effectivePolicy === 'pairing'),
               );
+              const operatorsField = accessFields.find(
+                (field) => field.key === 'operators',
+              );
+              const showGroupSenders =
+                descriptorGroupPolicy &&
+                effectiveGroupPolicy !== '' &&
+                effectiveGroupPolicy !== 'disabled';
+              const effectiveGroupSenders =
+                draft.groupSenders || defaultGroupSenders();
               if (
                 !showRadioGroup &&
                 visibleAccessFields.length === 0 &&
+                !showGroupSenders &&
+                !operatorsField &&
                 !showPairing
               ) {
                 return null;
@@ -857,23 +903,28 @@ export function ChannelEditorDialog({
                     <>
                       <RadioGroup
                         className={styles.policyGrid}
-                        value={draft.senderPolicy}
-                        aria-invalid={Boolean(errors['senderPolicy'])}
+                        value={draft.privatePolicy}
+                        aria-invalid={Boolean(errors['privatePolicy'])}
                         onValueChange={(value) =>
                           setDraft((current) => ({
                             ...current,
-                            senderPolicy:
-                              value === 'pairing' || value === 'open'
+                            privatePolicy:
+                              value === 'disabled' ||
+                              value === 'allowlist' ||
+                              value === 'pairing' ||
+                              value === 'open'
                                 ? value
                                 : '',
                           }))
                         }
                       >
-                        {(['pairing', 'open'] as const).map((policy) => (
+                        {(
+                          ['disabled', 'allowlist', 'pairing', 'open'] as const
+                        ).map((policy) => (
                           <Label
                             key={policy}
                             className={styles.policyCard}
-                            data-selected={draft.senderPolicy === policy}
+                            data-selected={draft.privatePolicy === policy}
                           >
                             <RadioGroupItem value={policy} />
                             <span className={styles.policyCopy}>
@@ -889,9 +940,9 @@ export function ChannelEditorDialog({
                           </Label>
                         ))}
                       </RadioGroup>
-                      {errors['senderPolicy'] ? (
+                      {errors['privatePolicy'] ? (
                         <p role="alert" className="text-xs text-destructive">
-                          {errors['senderPolicy']}
+                          {errors['privatePolicy']}
                         </p>
                       ) : null}
                     </>
@@ -922,8 +973,70 @@ export function ChannelEditorDialog({
                       />
                     </FieldShell>
                   ) : null}
+                  {showGroupSenders ? (
+                    <FieldShell
+                      id={`${formId}-groupSenders`}
+                      label={t('channels.editor.field.shared.groupSenders')}
+                      description={t(
+                        'channels.editor.field.shared.groupSenders.description',
+                      )}
+                    >
+                      <Select
+                        value={effectiveGroupSenders}
+                        onValueChange={(value) =>
+                          setDraft((current) => ({
+                            ...current,
+                            groupSenders: value as ChannelGroupSenders,
+                          }))
+                        }
+                      >
+                        <SelectTrigger
+                          id={`${formId}-groupSenders`}
+                          className="w-full"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {GROUP_SENDERS_OPTIONS.map((option) => (
+                            <SelectItem key={option} value={option}>
+                              {t(
+                                `channels.editor.field.shared.groupSenders.option.${option}`,
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FieldShell>
+                  ) : null}
+                  {showGroupSenders && effectiveGroupSenders === 'allowlist' ? (
+                    <FieldShell
+                      id={`${formId}-groupAllowedUsers`}
+                      label={t(
+                        'channels.editor.field.shared.groupAllowedUsers',
+                      )}
+                      description={t(
+                        'channels.editor.field.shared.groupAllowedUsers.description',
+                      )}
+                    >
+                      <Input
+                        id={`${formId}-groupAllowedUsers`}
+                        value={draft.groupAllowedUsers}
+                        placeholder={t(
+                          'channels.editor.field.shared.groupAllowedUsers.placeholder',
+                        )}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            groupAllowedUsers: event.target.value,
+                          }))
+                        }
+                      />
+                    </FieldShell>
+                  ) : null}
+                  {operatorsField ? renderField(operatorsField) : null}
                   {showPairing ? (
-                    instance?.config.senderPolicy === 'pairing' ||
+                    (instance &&
+                      configuredPrivatePolicy(instance) === 'pairing') ||
                     instance?.config.groupPolicy === 'pairing' ? (
                       <ChannelPairingRequests
                         channelName={instance.name}

@@ -24,6 +24,28 @@ export type ComposerTagContentSegment =
   | { type: 'text'; text: string }
   | { type: 'reference'; tag: WebShellComposerTag };
 
+/**
+ * Composer-tag display getters.
+ *
+ * These live here rather than in `hooks/useComposerCore.ts` on purpose: that
+ * module imports the whole CodeMirror editor at top level, and read-only
+ * consumers (`UserMessage`, and through it the `@qwen-code/web-shell/transcript`
+ * entry that `/export html` bundles) need nothing but these three string
+ * getters. Importing them from `useComposerCore` dragged ~1 MB of CodeMirror
+ * into every exported HTML file (#11031).
+ */
+export function getComposerTagLabel(tag: WebShellComposerTag): string {
+  return tag.label?.trim() ?? '';
+}
+
+export function getComposerTagValue(tag: WebShellComposerTag): string {
+  return tag.value?.trim() ?? '';
+}
+
+export function getComposerTagDisplay(tag: WebShellComposerTag): string {
+  return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
+}
+
 export function isPreviewableFileComposerTag(
   tag: WebShellComposerTag,
 ): tag is WebShellComposerTag & { kind: 'file'; value: string } {
@@ -184,7 +206,9 @@ export function splitComposerTagContentByAnnotations(
   const segments: ComposerTagContentSegment[] = [];
   let cursor = 0;
   for (const annotation of inputAnnotations) {
-    if (annotation.type !== 'reference') continue;
+    // Annotations cross a trust boundary (persisted JSONL, request `_meta`):
+    // skip non-object entries instead of throwing on `null`.
+    if (!annotation || annotation.type !== 'reference') continue;
     const { start, end, text } = annotation;
     const reference: DaemonInputAnnotation['reference'] | undefined =
       annotation.reference;

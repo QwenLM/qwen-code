@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay, mapShellResultText } from './shell-result.js';
 import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
@@ -581,10 +582,37 @@ function compactMcpAppResultDisplay(
   display: McpAppResultDisplay,
   purpose: CompactionPurpose,
 ): McpAppResultDisplay {
+  // A transcript recorded by a non-interactive (daemon) runtime is replayed by
+  // the Web Shell, which mounts the sandboxed iframe only when `html` is
+  // non-empty and never re-fetches the `ui://` resource
+  // (packages/web-shell/client/components/messages/McpApp.tsx). Wiping the
+  // payload for the recording purpose made every daemon-recorded MCP App fall
+  // back to plain text on replay (#10369). Interactive TUI sessions are not
+  // covered here: coreToolScheduler history-compacts the display before handing
+  // it to the recorder, so those transcripts still carry blanks.
+  //
+  // `html` is retained whole: the producer rejects any resource over
+  // MCP_APP_RESOURCE_MAX_BYTES (1 MiB, tools/mcp-tool.ts), and a document
+  // truncated mid-markup would not render either, so `''` -- which degrades to
+  // `fallbackText` -- is the only useful over-budget value.
+  //
+  // `toolResult` has no producer bound (it carries `content[].data` base64 and
+  // `structuredContent` verbatim) and is only handed to the mounted app through
+  // `bridge.sendToolResult`, so an over-budget payload is dropped whole here
+  // rather than persisted: the record is the single copy resume, replay and the
+  // renderer all read. Terminal history only ever renders `fallbackText`, so it
+  // keeps dropping both fields.
+  const retainAppPayload = purpose === 'recording';
+  const retainedToolResult =
+    retainAppPayload &&
+    (JSON.stringify(display.toolResult) ?? '').length <=
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS
+      ? display.toolResult
+      : {};
   return {
     ...display,
-    html: '',
-    toolResult: {},
+    html: retainAppPayload ? display.html : '',
+    toolResult: retainedToolResult,
     fallbackText: compactString(
       display.fallbackText,
       purpose,
@@ -621,12 +649,48 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
   resultDisplay: T,
   purpose: CompactionPurpose,
 ): T {
+  if (isShellResultDisplay(resultDisplay)) {
+    return mapShellResultText(resultDisplay, (value) =>
+      compactString(value, purpose),
+    ) as T;
+  }
+
   if (typeof resultDisplay === 'string') {
     return compactString(resultDisplay, purpose) as T;
   }
 
   if (resultDisplay === undefined) {
     return resultDisplay;
+  }
+
+  if (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'ask_user_question_answers'
+  ) {
+    if (
+      typeof resultDisplay.text !== 'string' ||
+      !Array.isArray(resultDisplay.answers) ||
+      !resultDisplay.answers.every(
+        (entry) =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          typeof entry.question === 'string' &&
+          typeof entry.answer === 'string',
+      )
+    ) {
+      return resultDisplay;
+    }
+
+    return {
+      ...resultDisplay,
+      text: compactString(resultDisplay.text, purpose),
+      answers: resultDisplay.answers.map(({ question, answer }) => ({
+        question: compactString(question, purpose),
+        answer: compactString(answer, purpose),
+      })),
+    } as T;
   }
 
   if (isFileDiffDisplay(resultDisplay)) {

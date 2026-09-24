@@ -1,9 +1,10 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { ProxyOptions } from 'vite';
+import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
+import { getAllowedDaemonOrigin } from './client/config/daemon';
 
 const daemonProxy: ProxyOptions = {
   target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
@@ -14,7 +15,8 @@ const daemonProxy: ProxyOptions = {
     if (
       req.method === 'GET' &&
       (req.url?.startsWith('/extensions/') ||
-        req.url?.startsWith('/session-catalog/')) &&
+        req.url?.startsWith('/session-catalog/') ||
+        req.url?.startsWith('/live/')) &&
       /\.(?:[cm]?[jt]sx?|css|map)(?:\?|$)/.test(req.url)
     ) {
       return req.url;
@@ -46,14 +48,78 @@ const daemonProxy: ProxyOptions = {
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
 
+// Exact-path on purpose. A bare `/brand` prefix would also match
+// `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
+// for a value — and proxy it to the daemon, so the module graph never loads and
+// the dev page blanks. Same hazard the `/voice` and `/live` entries document.
+export const BRAND_ROUTE_PROXY = '^/brand/?$';
+
+// The local-files bridge upgrades here for secondary-workspace sessions;
+// without a ws-enabled entry the upgrade is never forwarded in dev and the
+// bridge hangs in `connecting`.
+export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
+
+// Shared with vite.lib.config.ts so the app and lib builds can never drift
+// onto different syntax floors: esbuild miscompiles xterm's logical
+// assignments below ES2021 (#11643), and the lib build bundles the same
+// xterm for npm hosts.
+export const WEB_SHELL_BUILD_TARGET = 'es2021';
+
+// Development permits same-origin ancestors; production denies them by default.
+function developmentCsp(requestUrl: string): string {
+  const queryStart = requestUrl.indexOf('?');
+  const raw = new URLSearchParams(
+    queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
+  ).get('daemon');
+  const origin = getAllowedDaemonOrigin(raw || '');
+  const connectOrigins: string[] = [];
+  if (origin) {
+    const websocket = new URL(origin);
+    websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
+    connectOrigins.push(origin, websocket.origin);
+  }
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data:",
+    `connect-src 'self' ${connectOrigins.join(' ')}`.trim(),
+    "worker-src 'self' blob:",
+    "base-uri 'none'",
+    'frame-src http: https: blob:',
+    "frame-ancestors 'self'",
+  ].join('; ');
+}
+
+function configureCsp(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    next();
+  });
+}
+
 export default defineConfig(({ command }) => ({
   root: 'client',
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    {
+      name: 'web-shell-development-csp',
+      configureServer: configureCsp,
+      configurePreviewServer: configureCsp,
+    },
+  ],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
         __dirname,
         './client/daemon-react-sdk.ts',
+      ),
+      '@qwen-code/web-shell/transcript': resolve(
+        __dirname,
+        './client/transcript.ts',
       ),
       '@': resolve(__dirname, './client'),
       ...(command === 'serve'
@@ -72,28 +138,66 @@ export default defineConfig(({ command }) => ({
     dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
+    // Avoid esbuild lowering xterm's logical assignments into invalid code.
+    target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    // The Live Voice capture worklet is loaded with audioWorklet.addModule(),
+    // which the Web Shell CSP (`script-src 'self'`, no `data:`) only allows
+    // from a same-origin URL. At ~2 KB it is under Vite's default inline
+    // limit and would be turned into a `data:` URL — silently, because the
+    // client then falls back to the main-thread capture node. Keep it a file.
+    assetsInlineLimit: (filePath) =>
+      /[\\/]live[\\/]capture-worklet\.js$/.test(filePath) ? false : undefined,
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'client/index.html'),
+        // This import-free worker must remain at the origin root so it can
+        // control all Web Shell navigation.
+        sw: resolve(__dirname, 'client/sw.js'),
+      },
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
+        format: 'es',
+      },
+    },
   },
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
   server: {
     cors: false,
+    headers: {
+      'Referrer-Policy': 'no-referrer',
+    },
     port: 5173,
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
+      // index.html in dev; the client swallows the parse failure and silently
+      // keeps the built-in name and logo, so a locally configured `ui.brand`
+      // would appear to do nothing.
+      [BRAND_ROUTE_PROXY]: daemonProxy,
       '/mcp-app-sandbox': { ...daemonProxy, bypass: undefined },
       // Daemon status report; scoped to the exact route the dashboard uses (a
       // bare `/daemon` prefix would proxy unrelated `/daemon/*` paths). Without
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
+      [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
+      // Remote-daemon browse/register proxies. Keys are path-prefix matches,
+      // so the `/workspace` entry above cannot reach these; without them the
+      // SPA fallback returns index.html in dev and the Add-workspace dialog
+      // fails JSON parsing on the browse leg.
+      '/remote-workspace-path-suggestions': daemonProxy,
+      '/remote-workspaces': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,
@@ -111,6 +215,15 @@ export default defineConfig(({ command }) => ({
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.
       '/usage': daemonProxy,
+      // Standalone-session CRUD (`/standalone/sessions*`) — the sidebar's
+      // standalone sessions list/load/create. Without it the SPA fallback
+      // returns index.html in dev and clicking or creating a standalone
+      // session fails JSON parsing.
+      '/standalone': daemonProxy,
+      // Live voice routes (`/live/status`, `/live/setup`, ...). The prefix
+      // overlaps `client/live/*` source modules; the bypass above exempts
+      // those source files from proxying.
+      '/live': daemonProxy,
       // Voice dictation is a WebSocket (`/voice/stream`); `ws: true` makes the
       // dev proxy forward the HTTP upgrade to the daemon. Scope it to the exact
       // path — a bare `/voice` prefix would shadow the client's own
@@ -120,6 +233,13 @@ export default defineConfig(({ command }) => ({
       // Interactive terminal WebSocket (`/terminal`); `ws: true` forwards the
       // HTTP upgrade to the daemon, same as `/voice/stream`.
       '/terminal': { ...daemonProxy, ws: true },
+      // ACP WebSocket (`/acp`): the local-files bridge upgrades here to host
+      // its client-side MCP server. Exact-path regex, so the prefix cannot
+      // shadow a client source module (same reasoning as `/voice/stream`).
+      // Without it the dev server answers the upgrade itself and the bridge
+      // hangs in `connecting`; production needs no proxy because the daemon
+      // serves the page and `/acp` is then same-origin.
+      '^/acp/?$': { ...daemonProxy, ws: true },
     },
   },
 }));

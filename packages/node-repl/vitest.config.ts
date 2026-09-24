@@ -13,5 +13,7 @@ export default defineConfig({
     // Kernel integration tests spawn real Node child processes.
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
 });

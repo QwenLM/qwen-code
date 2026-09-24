@@ -20,6 +20,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { summarizeReplayEvent } from './replay-summary.js';
 
 export interface SessionReplaySnapshot {
   compactedTurns: BridgeEvent[];
@@ -193,13 +194,11 @@ export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
  * can emit hundreds of frames (test plan reports 13 for a short
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
- * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set for chatty Stage 1
- * sessions, with ~30–60× headroom over a typical-but-busy turn at
- * the cost of a few hundred KB of RAM per session. Operators can
- * override per-daemon via `qwen serve --event-ring-size <n>`.
+ * be exhausted by a moderate turn before the client reconnected.
+ * 8000 is the current daemon design target; operators with very
+ * long agentic turns can raise it via `qwen serve --event-ring-size <n>`.
  */
-export const DEFAULT_RING_SIZE = 8000;
+export const DEFAULT_RING_SIZE = 8_000;
 /**
  * Fraction of the frame and byte caps at which a `slow_client_warning`
  * synthetic frame is force-pushed to the at-risk subscriber. The warning
@@ -497,14 +496,21 @@ export class EventBus {
     return events;
   }
 
+  private eventDetailMode: LiveReplayMode = 'full';
+
+  setEventDetailMode(mode: LiveReplayMode): void {
+    this.eventDetailMode = mode;
+  }
+
   /**
    * Publish an event to the bus. Returns the constructed `BridgeEvent`
-   * (with `id` + `v` assigned) on success, or `undefined` when the
-   * bus is closed.
+   * (with `id` + `v` assigned) on success, or `undefined` when the bus
+   * is closed, the event is unserializable, or summary mode filters it.
+   * Filtering is a normal no-op; rejected events do not consume an ID.
    *
-   * **Never throws** (never-throws contract). Closing the bus mid-publish
-   * is the only abnormal path and is handled as a return-undefined
-   * no-op; subscriber-enqueue failures are caught internally and
+   * **Never throws** (never-throws contract). Closed-bus and unserializable
+   * events are handled as return-undefined no-ops;
+   * subscriber-enqueue failures are caught internally and
    * translated to per-subscriber eviction. Call sites can rely on
    * this — the historical `try { publish(...) } catch {}` blocks in
    * `httpAcpBridge.ts` are defense-in-depth, not load-bearing, and
@@ -525,7 +531,7 @@ export class EventBus {
     // to anyway.
     if (this.closed) return undefined;
     const existingMeta = input._meta;
-    const event: BridgeEvent = {
+    let event: BridgeEvent = {
       // Read WITHOUT incrementing: a rejected event must not burn an id —
       // other subscribers would see a sequence gap (3 → 5) that resume
       // logic misreads as ring eviction. `nextId` advances only after the
@@ -538,6 +544,11 @@ export class EventBus {
         serverTimestamp: getServerTimestamp(existingMeta),
       },
     };
+    if (this.eventDetailMode === 'summary') {
+      const projected = summarizeReplayEvent(event);
+      if (!projected) return undefined;
+      event = projected;
+    }
     // Eager sizing doubles as the serializability gate (DAEMON-011): an
     // event JSON.stringify cannot represent would bypass every byte cap
     // at weight 0 and then fail at SSE send time anyway. Reject it here —

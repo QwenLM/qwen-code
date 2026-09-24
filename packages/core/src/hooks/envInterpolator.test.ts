@@ -67,6 +67,25 @@ describe('envInterpolator', () => {
       expect(result).toBe('');
     });
 
+    it.each([
+      ['$QWEN_SERVER_TOKEN', 'QWEN_SERVER_TOKEN'],
+      ['${QWEN_SERVER_TOKEN}', 'QWEN_SERVER_TOKEN'],
+      ['$qwen_server_token', 'qwen_server_token'],
+      [
+        '$QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
+        'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
+      ],
+    ])(
+      'never interpolates the Qwen-internal secret %s even when whitelisted',
+      (reference, name) => {
+        process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+        process.env['qwen_server_token'] = 'daemon-secret';
+        process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+        const result = interpolateEnvVars(`token=${reference}`, [name]);
+        expect(result).toBe('token=');
+      },
+    );
+
     it('should not replace text without $ prefix', () => {
       const result = interpolateEnvVars('MY_TOKEN', ['MY_TOKEN']);
       expect(result).toBe('MY_TOKEN');

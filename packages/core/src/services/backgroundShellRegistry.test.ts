@@ -559,6 +559,51 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain('<output-tail error="unreadable"');
     });
 
+    const itNoSymlink = process.platform === 'win32' ? it.skip : it;
+
+    itNoSymlink(
+      'does not follow symlinked output files when O_NOFOLLOW is unavailable (Windows flag set)',
+      async () => {
+        // Cross-product the test above misses: Windows has no O_NOFOLLOW
+        // (the constant is `undefined` and `| (O_NOFOLLOW ?? 0)` collapses
+        // to a plain open), so stub the constant away and pin that the
+        // compensating check still refuses to read through the link (#8227).
+        const dir = makeTempDir();
+        const secretPath = join(dir, 'secret.txt');
+        const outputPath = join(dir, 'shell.output');
+        writeFileSync(secretPath, 'secret credentials');
+        symlinkSync(secretPath, outputPath);
+
+        vi.resetModules();
+        vi.doMock('node:fs', async (importOriginal) => {
+          const actual = await importOriginal<typeof import('node:fs')>();
+          const modified = {
+            ...actual,
+            constants: { ...actual.constants, O_NOFOLLOW: undefined },
+          };
+          return { ...modified, default: modified };
+        });
+
+        try {
+          const { BackgroundShellRegistry: RegistryWithoutNoFollow } =
+            await import('./backgroundShellRegistry.js');
+          const reg = new RegistryWithoutNoFollow();
+          const callback = vi.fn();
+          reg.setNotificationCallback(callback);
+          reg.register(makeEntry({ shellId: 'a', outputPath }));
+
+          reg.complete('a', 0, 2000);
+
+          const [, modelText] = callback.mock.calls[0];
+          expect(modelText).not.toContain('secret credentials');
+          expect(modelText).toContain('<output-tail error="unreadable"');
+        } finally {
+          vi.doUnmock('node:fs');
+          vi.resetModules();
+        }
+      },
+    );
+
     it('skips output-tail when the output file does not exist', () => {
       // Guards the catch branch in `readOutputTail`. If the try/catch
       // ever regresses to throwing, `complete()` would propagate the
@@ -628,6 +673,15 @@ describe('BackgroundShellRegistry', () => {
       expect(() => reg.fail('b', 'boom', 3000)).not.toThrow();
       expect(reg.get('a')!.status).toBe('completed');
       expect(reg.get('b')!.status).toBe('failed');
+
+      // Consume-before-invoke: a throwing subscriber must not leave the entry
+      // eligible, or the next bind replays the same terminal notification.
+      expect(reg.get('a')!.notified).toBe(true);
+      expect(reg.get('b')!.notified).toBe(true);
+
+      const rebound = vi.fn();
+      reg.setNotificationCallback(rebound);
+      expect(rebound).not.toHaveBeenCalled();
     });
 
     it('does not emit more than once for late terminal transitions', () => {
@@ -676,8 +730,81 @@ describe('BackgroundShellRegistry', () => {
       reg.abortAll();
 
       expect(callback).not.toHaveBeenCalled();
+      expect(reg.get('a')!.notified).toBe(true);
+      expect(reg.get('b')!.notified).toBe(true);
+    });
+
+    it('redelivers a retained terminal notification when the same registry is rebound', () => {
+      const reg = new BackgroundShellRegistry();
+      const outputPath = makeOutputFile('done\n');
+      reg.register(
+        makeEntry({ shellId: 'a', command: 'npm test', outputPath }),
+      );
+
+      reg.complete('a', 0, 2000);
       expect(reg.get('a')!.notified).toBe(false);
-      expect(reg.get('b')!.notified).toBe(false);
+
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [displayText, modelText, meta] = callback.mock.calls[0];
+      expect(displayText).toBe('Background shell "npm test" completed.');
+      expect(modelText).toContain('<task-id>a</task-id>');
+      expect(modelText).toContain('<status>completed</status>');
+      expect(meta).toEqual({
+        shellId: 'a',
+        status: 'completed',
+        exitCode: 0,
+      });
+      expect(reg.get('a')!.notified).toBe(true);
+    });
+
+    it('redelivers retained terminal states in settle order once and suppresses shutdown cancellations', () => {
+      const reg = new BackgroundShellRegistry();
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+      reg.register(makeEntry({ shellId: 'c' }));
+      reg.register(makeEntry({ shellId: 'shutdown' }));
+      reg.cancel('c', 2000);
+      reg.fail('b', 'boom', 2001);
+      reg.complete('a', 0, 2002);
+      reg.abortAll();
+
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+
+      expect(callback.mock.calls.map((call) => call[2])).toEqual([
+        { shellId: 'c', status: 'cancelled' },
+        { shellId: 'b', status: 'failed' },
+        { shellId: 'a', status: 'completed', exitCode: 0 },
+      ]);
+      expect(reg.get('shutdown')!.notified).toBe(true);
+
+      const callback2 = vi.fn();
+      reg.setNotificationCallback(callback2);
+      expect(callback2).not.toHaveBeenCalled();
+    });
+
+    it('does not replay a still-running shell and still delivers its real terminal notification', () => {
+      const reg = new BackgroundShellRegistry();
+      reg.register(makeEntry({ shellId: 'running' }));
+      reg.register(makeEntry({ shellId: 'done' }));
+      reg.complete('done', 0, 2000);
+
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback.mock.calls[0][2]).toMatchObject({ shellId: 'done' });
+      expect(reg.get('running')!.notified).toBe(false);
+
+      reg.complete('running', 0, 3000);
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(callback.mock.calls[1][2]).toMatchObject({
+        shellId: 'running',
+        status: 'completed',
+      });
     });
   });
 

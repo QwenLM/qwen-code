@@ -1,11 +1,26 @@
-import { memo } from 'react';
+import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
+import { useSubagentDetails } from '../../subagentDetailsContext';
+import { memo, useCallback } from 'react';
 import {
+  CheckIcon,
   CircleCheckIcon,
   CircleMinusIcon,
   CircleXIcon,
+  CopyIcon,
+  LinkIcon,
+  FileTextIcon,
   InfoIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
+import {
+  formatCompressionTokens,
+  parseContextCompressionMeta,
+} from '../../utils/contextCompression';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import {
   ContextUsageMessage,
   parseContextUsageMessage,
@@ -20,6 +35,7 @@ import {
 import { GoalStatusMessage, parseGoalStatusMessage } from './GoalStatusMessage';
 import { Markdown } from './Markdown';
 import { UserMessage } from './UserMessage';
+import { Button } from '../ui/button';
 import styles from './SystemMessage.module.css';
 
 interface SystemMessageProps {
@@ -35,6 +51,7 @@ interface SystemMessageProps {
   }>;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: {
@@ -92,6 +109,46 @@ function formatVisionBridgeNotice(
   });
 }
 
+/**
+ * Localized replacement for the `/compress` sentences: the daemon formats its
+ * own English lines (kept for text-only ACP hosts), so every row of the
+ * compression flow is rendered here in this UI's language, with grouping that
+ * follows the UI language rather than the browser locale.
+ *
+ * The warning is the one exception — it is server-authored prose, so it is
+ * shown verbatim, on its own line (two trailing spaces = Markdown hard break,
+ * matching how the daemon itself joins it).
+ */
+function formatContextCompression(
+  data: unknown,
+  t: ReturnType<typeof useI18n>['t'],
+  language: string,
+): string | undefined {
+  const meta = parseContextCompressionMeta(data);
+  if (!meta) return undefined;
+  if (meta.phase === 'notice') {
+    return t('contextCompression.instructionsTruncated', {
+      max: formatCompressionTokens(meta.instructionsLimit, false, language),
+    });
+  }
+  if (meta.phase === 'progress') return t('contextUsage.compressing');
+  if (meta.phase === 'noop') return t('contextCompression.noop');
+  const { result } = meta;
+  const line = t('contextCompression.result', {
+    from: formatCompressionTokens(
+      result.originalTokenCount,
+      result.originalTokenCountIsEstimated,
+      language,
+    ),
+    to: formatCompressionTokens(
+      result.newTokenCount,
+      result.newTokenCountIsEstimated,
+      language,
+    ),
+  });
+  return result.warning ? `${line}  \n${result.warning}` : line;
+}
+
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
@@ -100,12 +157,112 @@ export const SystemMessage = memo(function SystemMessage({
   images,
   files,
   onShowContextDetail,
+  onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
+  const backgroundDetails = useSubagentDetails()?.onOpenBackground;
+  const [copied, flashCopied] = useCopiedFlash();
+  const handleCopy = useCallback(() => {
+    void writeClipboardText(content)
+      .then(() => {
+        flashCopied();
+      })
+      .catch(warnClipboardWriteFailure);
+  }, [content, flashCopied]);
+  if (source === 'background_notification_turn_started') {
+    const turn = parseDaemonBackgroundTurn(data);
+    const taskStatus = (
+      data as { backgroundTask?: { status?: string } } | undefined
+    )?.backgroundTask?.status;
+    const markerLabel =
+      taskStatus === 'completed'
+        ? t('system.taskCompleted')
+        : taskStatus === 'failed'
+          ? t('system.taskFailed')
+          : taskStatus === 'cancelled'
+            ? t('system.taskCancelled')
+            : t('background.result');
+    const MarkerIcon =
+      taskStatus === 'completed'
+        ? CircleCheckIcon
+        : taskStatus === 'failed'
+          ? CircleXIcon
+          : taskStatus === 'cancelled'
+            ? CircleMinusIcon
+            : InfoIcon;
+    return (
+      <div
+        className={`${styles.notificationBubble} ${styles.backgroundResult}`}
+        role="status"
+        data-background-turn-start
+      >
+        <span
+          className={styles.notificationIcon}
+          data-tone={
+            taskStatus === 'completed'
+              ? 'success'
+              : taskStatus === 'failed'
+                ? 'error'
+                : 'info'
+          }
+          aria-label={markerLabel}
+          title={markerLabel}
+          role="img"
+        >
+          <MarkerIcon aria-hidden="true" />
+        </span>
+        <span className="shrink-0 text-muted-foreground">
+          {t(
+            turn?.kind === 'agent'
+              ? 'background.agent'
+              : turn?.kind === 'peer'
+                ? 'background.peer'
+                : 'background.task',
+          )}
+        </span>
+        <span aria-hidden="true" className="text-muted-foreground">
+          ·
+        </span>
+        <span
+          className="min-w-0 flex-1 truncate"
+          title={turn?.label ?? turn?.kind ?? content}
+        >
+          {turn?.label ?? turn?.kind ?? content}
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {onLocateBackgroundSource && turn?.toolUseId && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+              onClick={() => onLocateBackgroundSource('', turn.toolUseId)}
+            >
+              <LinkIcon size={12} aria-hidden="true" />
+              {t('background.source')}
+            </Button>
+          )}
+          {/* A peer turn has no task behind it to show the details of. */}
+          {backgroundDetails && turn && turn.kind !== 'peer' && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+              onClick={() => backgroundDetails(turn)}
+            >
+              <FileTextIcon size={12} aria-hidden="true" />
+              {t('background.details')}
+            </Button>
+          )}
+        </span>
+      </div>
+    );
+  }
   if (source === 'mid_turn_message_injected') {
     return (
       <UserMessage
@@ -120,9 +277,19 @@ export const SystemMessage = memo(function SystemMessage({
   // The user ESC-cancelled a live stream. Render it right-aligned and subtle —
   // a user-initiated stop reads as belonging to the user side of the transcript.
   if (source === 'prompt_cancelled') {
+    const elapsedMs =
+      data && typeof data === 'object' && 'elapsedMs' in data
+        ? data.elapsedMs
+        : undefined;
     return (
       <div className={styles.cancelled} role="status">
-        <span>{t('turn.stopped')}</span>
+        <span>
+          {typeof elapsedMs === 'number' &&
+          Number.isFinite(elapsedMs) &&
+          elapsedMs >= 0
+            ? t('turn.stoppedAfter', { seconds: Math.ceil(elapsedMs / 1000) })
+            : t('turn.stopped')}
+        </span>
       </div>
     );
   }
@@ -194,7 +361,9 @@ export const SystemMessage = memo(function SystemMessage({
     variant === 'info' && source === 'model_switch_summary';
   const isRecap = variant === 'info' && source === 'recap';
   const isTaskNotification =
-    variant === 'info' && source === 'background_notification';
+    variant === 'info' &&
+    (source === 'background_notification' ||
+      source === 'background_task_completed');
   const notificationData =
     isTaskNotification && typeof data === 'object' && data !== null
       ? (data as Record<string, unknown>)
@@ -235,7 +404,12 @@ export const SystemMessage = memo(function SystemMessage({
     source === 'vision_bridge_notice'
       ? formatVisionBridgeNotice(data, t)
       : undefined;
-  const displayContent = visionBridgeContent ?? content;
+  const contextCompressionContent =
+    source === 'context_compression'
+      ? formatContextCompression(data, t, language)
+      : undefined;
+  const displayContent =
+    contextCompressionContent ?? visionBridgeContent ?? content;
 
   const taskKind = stringField('kind');
   const taskCommandLabel = stringField('commandLabel');
@@ -279,23 +453,29 @@ export const SystemMessage = memo(function SystemMessage({
 
   if (isTaskNotification) {
     return (
-      <div className={styles.notificationBubbleRow}>
-        <div className={styles.notificationBubbleColumn}>
-          <div className={styles.notificationBubble}>
-            <span
-              className={styles.notificationIcon}
-              data-tone={taskNotificationTone}
-              role="img"
-              aria-label={taskNotificationLabel}
-              title={taskNotificationLabel}
-            >
-              <TaskNotificationIcon aria-hidden="true" />
-            </span>
-            <div className={styles.notificationText}>
-              {taskI18nText ?? <Markdown content={content} />}
-            </div>
-          </div>
+      <div
+        className={`${styles.notificationBubble} ${styles.backgroundResult}`}
+      >
+        <span
+          className={styles.notificationIcon}
+          data-tone={taskNotificationTone}
+          role="img"
+          aria-label={taskNotificationLabel}
+          title={taskNotificationLabel}
+        >
+          <TaskNotificationIcon aria-hidden="true" />
+        </span>
+        <div
+          className={`min-w-0 flex-1${taskI18nText ? ' truncate' : ''}`}
+          title={taskI18nText}
+        >
+          {taskI18nText ?? <Markdown content={content} />}
         </div>
+        {notificationData?.['awaitingProcessing'] === true && (
+          <span className="ml-auto shrink-0 text-muted-foreground">
+            {t('background.pending')}
+          </span>
+        )}
       </div>
     );
   }
@@ -316,6 +496,23 @@ export const SystemMessage = memo(function SystemMessage({
               onClick={onRetryClick}
             >
               {t('retry.hint')}
+            </button>
+          </div>
+        )}
+        {source === 'turn_error' && variant === 'error' && (
+          <div className={styles.actions} data-web-shell-message-actions>
+            <button
+              type="button"
+              className={styles.copyButton}
+              title={t('common.copy')}
+              aria-label={t('common.copy')}
+              onClick={handleCopy}
+            >
+              {copied ? (
+                <CheckIcon aria-hidden="true" />
+              ) : (
+                <CopyIcon aria-hidden="true" />
+              )}
             </button>
           </div>
         )}

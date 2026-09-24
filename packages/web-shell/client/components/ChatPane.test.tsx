@@ -8,8 +8,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  GOAL_PAUSE_REASON_COMMAND,
+} from '@qwen-code/sdk/daemon';
+import type { ContextUsageControls } from '../hooks/useContextUsageControls';
 import { I18nProvider } from '../i18n';
+import { formatDateTime } from '../utils/formatDateTime';
 import {
   WebShellCustomizationProvider,
   type WebShellComposerToolbarRenderInfo,
@@ -32,6 +37,9 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let sessionHasActivePromptValue: boolean;
+let queuedPromptDispatchError:
+  | ((text: string) => string | undefined)
+  | undefined;
 let queuedPromptStreamingState: string | undefined;
 let queuedPromptSessionHasActivePrompt: boolean | undefined;
 let latestOnSubmit:
@@ -44,6 +52,10 @@ let latestOnSubmit:
     ) => boolean)
   | undefined;
 let latestChatEditorProps: any;
+type ToolApprovalTestProps = Parameters<
+  typeof import('./messages/ToolApproval').ToolApproval
+>[0];
+let latestToolApprovalProps: ToolApprovalTestProps | undefined;
 let renderRealChatEditor: boolean;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
@@ -60,23 +72,31 @@ const transcriptDispatch = vi.fn();
 const appendLocalUserMessage = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => true);
+const respondToPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const setReasoningEffort = vi.fn(async () => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
+const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  loadSession,
   sendPrompt,
   submitPermission,
+  respondToPermission,
   cancel,
   setApprovalMode,
   setModel,
+  setReasoningEffort,
   loadArtifacts,
   getTasks,
+  getWorkflowTasks,
   getGoal,
   controlGoal,
   readAttachment,
@@ -141,14 +161,16 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => catalogController,
-  useSessionHasActivePrompt: () => sessionHasActivePromptValue,
+  useDaemonActivePromptBridge: () => sessionHasActivePromptValue,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
   useQueuedPrompts: (args: {
+    getPromptDispatchError?: (text: string) => string | undefined;
     streamingState: string;
     sessionHasActivePrompt?: boolean;
   }) => {
+    queuedPromptDispatchError = args.getPromptDispatchError;
     queuedPromptStreamingState = args.streamingState;
     queuedPromptSessionHasActivePrompt = args.sessionHasActivePrompt;
     return {
@@ -190,8 +212,8 @@ vi.mock('../monitorDetailsContext', async () => {
   };
 });
 
-vi.mock('./MessageList', () => ({
-  MessageList: (props: any) => (
+vi.mock('./TranscriptViewport', () => ({
+  TranscriptViewport: (props: any) => (
     <div
       data-testid="pane-messages"
       data-approval={props.pendingApproval ? 'yes' : 'no'}
@@ -362,18 +384,22 @@ vi.mock('./QueuedPromptDisplay', () => ({
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
-  ToolApproval: (props: any) => (
-    <button
-      data-testid="tool-approval"
-      data-keyboard-active={String(props.keyboardActive)}
-      data-plan-todos={JSON.stringify(
-        props.planTodos?.map((todo: any) => todo.id) ?? [],
-      )}
-      onClick={() => props.onConfirm(props.request.id, 'proceed')}
-    >
-      approve
-    </button>
-  ),
+  ToolApproval: (props: ToolApprovalTestProps) => {
+    latestToolApprovalProps = props;
+    return (
+      <button
+        data-testid="tool-approval"
+        disabled={props.disabled}
+        data-keyboard-active={String(props.keyboardActive)}
+        data-plan-todos={JSON.stringify(
+          props.planTodos?.map((todo) => todo.id) ?? [],
+        )}
+        onClick={() => props.onConfirm(props.request.id, 'proceed')}
+      >
+        approve
+      </button>
+    );
+  },
 }));
 vi.mock('./messages/AskUserQuestion', () => ({
   AskUserQuestion: (props: any) => (
@@ -413,6 +439,7 @@ beforeEach(() => {
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
+  latestToolApprovalProps = undefined;
   renderRealChatEditor = false;
   sessionHasActivePromptValue = false;
   queuedPromptStreamingState = undefined;
@@ -428,6 +455,7 @@ beforeEach(() => {
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  getWorkflowTasks.mockReset();
   getGoal.mockReset();
   controlGoal.mockReset();
   readAttachment.mockReset();
@@ -446,9 +474,11 @@ beforeEach(() => {
   clearFollowup.mockClear();
   insertText.mockClear();
   submitPermission.mockClear();
+  respondToPermission.mockClear();
   cancel.mockClear();
   setApprovalMode.mockClear();
   setModel.mockClear();
+  setReasoningEffort.mockClear();
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -518,6 +548,243 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('publishes owner-specific context controls and withdraws them on unmount', () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const cleanups: ReturnType<typeof vi.fn>[] = [];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => {
+        const cleanup = vi.fn();
+        cleanups.push(cleanup);
+        return cleanup;
+      },
+    );
+    render({ registerContextUsageControls, onOpenContextUsage: vi.fn() });
+    expect(latestChatEditorProps.contextUsageControls).toBe(
+      registerContextUsageControls.mock.calls.at(-1)![0],
+    );
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionId: connectionState.sessionId,
+        canCompress: true,
+      }),
+    );
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+    };
+    rerender({ registerContextUsageControls });
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    pendingPermission = null;
+    rerender({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
+    sessionHasActivePromptValue = true;
+    rerender({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    expect(cleanups[0]).toHaveBeenCalledOnce();
+    act(() => root!.unmount());
+    root = null;
+    expect(cleanups.at(-1)).toHaveBeenCalledOnce();
+  });
+
+  it('clears the previous follow-up before submitting context compression', async () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => vi.fn(),
+    );
+    const command = deferred<{ stopReason: 'cancelled' }>();
+    const onBeforeContextCompress = vi.fn();
+    sendPrompt.mockReturnValue(command.promise);
+    render({ registerContextUsageControls, onBeforeContextCompress });
+    let pending!: Promise<void>;
+    act(() => {
+      pending = registerContextUsageControls.mock.calls.at(-1)![0].compress();
+    });
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
+    expect(clearFollowup).toHaveBeenCalledOnce();
+    expect(onBeforeContextCompress).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+    );
+    expect(clearFollowup.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
+    expect(onBeforeContextCompress.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
+    await act(async () => {
+      command.resolve({ stopReason: 'cancelled' });
+      await pending;
+    });
+  });
+
+  it('exposes the selected pane without confusing it with a running session', () => {
+    const props = { isActive: true };
+    render(props);
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(true);
+    expect(testid('chat-pane')?.getAttribute('aria-current')).toBe('location');
+    sessionHasActivePromptValue = true;
+    rerender(props);
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(true);
+    expect(testid('chat-pane')?.getAttribute('aria-current')).toBe('location');
+    rerender();
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(false);
+    expect(testid('chat-pane')?.hasAttribute('aria-current')).toBe(false);
+  });
+
+  it('reports tool and question waiting state while hidden and clears it on unmount', () => {
+    const onApprovalChange = vi.fn();
+    const props = { hidden: true, onApprovalChange };
+    render(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      true,
+    );
+    pendingPermission = null;
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+    pendingPermission = {
+      id: 'ask-1',
+      rawInput: { questions: [{ question: 'pick', options: [] }] },
+    };
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      true,
+    );
+    expect(submitPermission).not.toHaveBeenCalled();
+    act(() => root!.unmount());
+    root = null;
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+  });
+
+  it.each([
+    [false, '2026-01-02T00:00:00Z'],
+    [true, '2026-01-02T00:00:00Z'],
+    [false, undefined],
+  ] as const)(
+    'reuses title details without including actions and dismisses them when hidden (multiple workspaces: %s, updatedAt: %s)',
+    async (multiWorkspace, updatedAt) => {
+      vi.useFakeTimers();
+      try {
+        const props = {
+          title: 'Pane details',
+          workspaceCwd: '/work/split-project',
+          sessionSummary: {
+            sessionId: 'session-details',
+            workspaceCwd: '/work/split-project',
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt,
+            hasActivePrompt: false,
+            branch: { name: 'codex/split', baseBranch: 'main' },
+          },
+          onToggleMaximize: vi.fn(),
+        };
+        if (multiWorkspace) {
+          connectionState.capabilities = {
+            features: [],
+            workspaces: [
+              {
+                id: 'w0',
+                cwd: '/work/web-shell',
+                primary: true,
+                trusted: true,
+              },
+              {
+                id: 'w1',
+                cwd: '/work/split-project',
+                displayName: 'Payments API',
+                primary: false,
+                trusted: true,
+              },
+            ],
+          };
+        }
+        sessionHasActivePromptValue = true;
+        render(props);
+        const title = container!.querySelector('[data-slot="popover-anchor"]')!;
+        expect(title.textContent).toBe('Pane details');
+        expect(title.querySelector('button')).toBeNull();
+        const composerFocus = document.createElement('input');
+        container!.append(composerFocus);
+        composerFocus.focus();
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain(multiWorkspace ? 'Payments API' : 'split-project');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain('codex/split');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain('Running');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain(formatDateTime(updatedAt ?? '2026-01-01T00:00:00Z'));
+        expect(document.activeElement).toBe(composerFocus);
+        rerender({ ...props, hidden: true });
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('polls workflow tasks from the daemon capability, not the UI setting', async () => {
+    connectionState.supportedCommands = { workflowsEnabled: true };
+    messagesState = [
+      {
+        id: 'workflow-group',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'workflow',
+            status: 'in_progress',
+            args: {},
+          },
+        ],
+      },
+    ];
+    getWorkflowTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'sess-1',
+      now: 1_000,
+      tasks: [],
+    });
+
+    render({ sessionWorkflowEnabled: false });
+    await act(async () => Promise.resolve());
+
+    expect(getWorkflowTasks).toHaveBeenCalledWith({ silent: true });
+    expect(getTasks).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       'images',
@@ -826,6 +1093,7 @@ describe('ChatPane', () => {
       action: 'pause',
       expectedGoalId: 'goal-1',
       expectedRevision: 9,
+      reason: GOAL_PAUSE_REASON_COMMAND,
     });
 
     // `/goal set` maps to a versioned replace against the same fresh snapshot.
@@ -1306,6 +1574,47 @@ describe('ChatPane', () => {
     ).toContain('composerHidden');
   });
 
+  it.each([undefined, 'yolo'])(
+    'uses only the reported Plan execution policy for approval: %s',
+    (planExecutionMode) => {
+      connectionState.currentMode = 'plan';
+      connectionState.planExecutionMode = planExecutionMode;
+      pendingPermission = {
+        id: 'plan-approval',
+        toolName: 'exit_plan_mode',
+        toolKind: 'switch_mode',
+        options: [],
+      };
+      render();
+      expect(latestToolApprovalProps?.planExecutionMode).toBe(
+        planExecutionMode,
+      );
+    },
+  );
+
+  it('hides the composer during plan approval and restores it after resolution', () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'default';
+    pendingPermission = {
+      id: 'perm-plan',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    render();
+    const composerWrapper = () =>
+      container!.querySelector('[data-web-shell-composer]')?.parentElement;
+    expect(composerWrapper()?.className).toContain('composerHidden');
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(submitPermission).not.toHaveBeenCalled();
+
+    pendingPermission = null;
+    rerender();
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+    expect(testid('pane-approval')).toBeNull();
+  });
+
   it('restores the pane composer after the approval resolves', () => {
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
     render();
@@ -1351,6 +1660,15 @@ describe('ChatPane', () => {
     expect(testid('pane-messages')).not.toBeNull();
   });
 
+  it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
+    render();
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain('plan');
+    rerender({ planControlVisible: true });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('plan');
+    rerender();
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain('plan');
+  });
+
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {
     render({ title: 'Refactor core', workspaceCwd: '/w' });
     expect(latestChatEditorProps.visibleToolbarActions).toContain('addMenu');
@@ -1380,7 +1698,7 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.builtinAtProviders).toBeUndefined();
   });
 
-  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+  it('keeps the workspace in the split header and only shows the toolbar chip when embedded', () => {
     connectionState.capabilities = {
       features: [],
       workspaceCwd: '/work/web-shell',
@@ -1397,6 +1715,19 @@ describe('ChatPane', () => {
     };
     // The split view hands each pane its own workspace explicitly.
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]')?.textContent,
+    ).toContain('Payments API');
+
+    rerender({
+      title: 'Add pagination',
+      workspaceCwd: '/work/api',
+      embedded: true,
+    });
+    expect(container!.querySelector('header')).toBeNull();
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
     expect(latestChatEditorProps.workspaceName).toBe('Payments API');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
@@ -1612,6 +1943,7 @@ describe('ChatPane', () => {
       kind: 'attachment',
       title: 'data.json',
       turnId: 'sess-1',
+      attachmentId: 'attachment-1',
       mimeType: 'application/json',
       data: expect.any(Blob),
       workspaceCwd: '/w',
@@ -1635,6 +1967,7 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      submittedPrompt: 'hello there',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -1790,6 +2123,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -1813,6 +2147,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      '/deploy staging',
     );
   });
 
@@ -1846,6 +2181,7 @@ describe('ChatPane', () => {
       'onSlashCommand callback failed',
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -1861,6 +2197,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      submittedPrompt: '/usr/local/bin/tool',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -1926,6 +2263,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('with image', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
+      submittedPrompt: 'with image',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -1941,6 +2279,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('', {
+      submittedPrompt: '',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -1973,6 +2312,7 @@ describe('ChatPane', () => {
       });
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      submittedPrompt: 'check @.husky/',
       inputAnnotations,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -1995,6 +2335,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued next',
     );
     expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(sendPrompt).not.toHaveBeenCalled();
@@ -2113,6 +2454,7 @@ describe('ChatPane', () => {
       undefined,
       inputAnnotations,
       expect.any(Function),
+      'queue @.husky/',
     );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
@@ -2131,6 +2473,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued image',
     );
   });
 
@@ -2143,7 +2486,15 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('', images, undefined);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      '',
+      images,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '',
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -2181,7 +2532,16 @@ describe('ChatPane', () => {
       options?.onAdmissionStarted?.();
       throw new Error('disconnected');
     });
-    render({ onError, onImageIngestionNotice });
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => vi.fn(),
+    );
+    render({ onError, onImageIngestionNotice, registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
     const commit = vi.fn();
     await act(async () => {
       latestOnSubmit!('hi', undefined, undefined, commit);
@@ -2197,6 +2557,13 @@ describe('ChatPane', () => {
     const notice = testid('pane-prompt-admission-unknown');
     expect(notice).not.toBeNull();
     expect(latestChatEditorProps.disabled).toBe(true);
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    await act(async () => {
+      await registerContextUsageControls.mock.calls.at(-1)![0].compress();
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
       '/w',
     );
@@ -2216,6 +2583,9 @@ describe('ChatPane', () => {
     });
     expect(commit).not.toHaveBeenCalled();
     expect(latestChatEditorProps.disabled).toBe(false);
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
     expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     confirm.mockRestore();
@@ -2439,7 +2809,12 @@ describe('ChatPane', () => {
   });
 
   it('renders a tool approval and resolves it via submitPermission', () => {
-    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+      options: [{ id: 'proceed', kind: 'allow_once' }],
+    };
     render();
     expect(testid('tool-approval')).not.toBeNull();
     expect(testid('pane-messages')?.getAttribute('data-approval')).toBe('yes');
@@ -2483,6 +2858,22 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it.each([false, true])(
+    'keeps reasoning persistence scoped with standalone=%s',
+    async (standalone) => {
+      connectionState.sessionContext = standalone
+        ? { kind: 'standalone' }
+        : undefined;
+      render();
+      await act(async () => {
+        await latestChatEditorProps.onSelectReasoningEffort('medium');
+      });
+      expect(setReasoningEffort).toHaveBeenCalledWith('medium', {
+        persist: !standalone,
+      });
+    },
+  );
+
   it('renders no maximize toggle without onToggleMaximize', () => {
     render({ onClose: () => {} });
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
@@ -2496,6 +2887,7 @@ describe('ChatPane', () => {
       '[aria-label="Maximize pane"]',
     );
     expect(maximizeBtn).not.toBeNull();
+    expect(maximizeBtn!.querySelector('.lucide-expand')).not.toBeNull();
     // A toggle button always exposes its pressed state; not maximized here.
     expect(maximizeBtn!.getAttribute('aria-pressed')).toBe('false');
     act(() =>
@@ -2508,6 +2900,7 @@ describe('ChatPane', () => {
     render({ onToggleMaximize: () => {}, isMaximized: true });
     const restoreBtn = container!.querySelector('[aria-label="Restore pane"]');
     expect(restoreBtn).not.toBeNull();
+    expect(restoreBtn!.querySelector('.lucide-shrink')).not.toBeNull();
     expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
     // The label flips to "restore" — no stale "maximize" affordance remains.
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
@@ -2650,6 +3043,57 @@ describe('ChatPane', () => {
     );
   });
 
+  it('suppresses stale context and its action after a pane session becomes unavailable', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = null;
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('suppresses stale context while the pane connection is in error', () => {
+    connectionState.status = 'error';
+    connectionState.sessionId = 'sess-1';
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('opens composer details with the pane session and actions without adding a snapshot', () => {
+    const onOpenContextUsage = vi.fn();
+    render({ onOpenContextUsage });
+    act(() => latestChatEditorProps.onOpenContextUsage());
+    expect(onOpenContextUsage).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+      daemonActions,
+    );
+    expect(appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    const opener = latestChatEditorProps.onOpenContextUsage;
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBe(opener);
+    connectionState.status = 'error';
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls.canCompress).toBe(false);
+  });
+
+  it('keeps embedded side-task context read-only without a detail recovery path', () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    render({ embedded: true });
+    expect(latestChatEditorProps.onShowContextUsage).toBeTypeOf('function');
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
+  });
+
   it('shows context usage for this pane session', async () => {
     render();
 
@@ -2666,6 +3110,107 @@ describe('ChatPane', () => {
         text: expect.stringContaining('web-shell:context-usage:v1:'),
       }),
     ]);
+  });
+
+  it('hides model setup dynamically while preserving model and session commands', () => {
+    connectionState.commands = [
+      { name: 'auth', description: 'Configure models' },
+      { name: 'model', description: 'Select model' },
+      { name: 'delete', description: 'Delete session' },
+    ];
+    render();
+    const names = () =>
+      latestChatEditorProps.commands.map(
+        (command: { name: string }) => command.name,
+      );
+    expect(names()).toContain('auth');
+    rerender({ modelManagement: { allowAdd: false } });
+    expect(names()).not.toContain('auth');
+    expect(names()).toContain('model');
+    expect(names()).toContain('delete');
+    rerender({ modelManagement: { allowDelete: false } });
+    expect(names()).toContain('auth');
+  });
+
+  it.each([false, true])(
+    'refuses model setup only after the host handler declines (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => false);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).toHaveBeenCalledWith(
+        'warning',
+        'Adding models is disabled by the host.',
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'lets the host take over a disabled model setup command (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => true);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses current model management policy in a retained submit callback', () => {
+    const onSlashCommand = vi.fn(() => false);
+    render({ onSlashCommand });
+    const retainedSubmit = latestOnSubmit!;
+    const retainedDispatchPolicy = queuedPromptDispatchError!;
+    expect(retainedDispatchPolicy('/auth')).toBeUndefined();
+    rerender({ onSlashCommand, modelManagement: { allowAdd: false } });
+    expect(retainedDispatchPolicy('/auth')).toBe(
+      'Adding models is disabled by the host.',
+    );
+    expect(retainedDispatchPolicy('/model')).toBeUndefined();
+    act(() => {
+      expect(retainedSubmit('/auth')).toBe(true);
+    });
+    // The host saw the command first and declined; the policy refused it.
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'auth',
+      args: '',
+      input: '/auth',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
   it("lists the pane session's own commands in the slash menu", () => {
@@ -2711,6 +3256,309 @@ describe('ChatPane', () => {
     expect(models.map((m: { id: string }) => m.id)).toEqual(['qwen-max']);
   });
 
+  it.each(['default', 'auto-edit', 'auto', 'yolo'])(
+    'keeps %s selected while Plan is active and restores it on completion',
+    (mode) => {
+      connectionState.currentMode = 'plan';
+      connectionState.planExecutionMode = mode;
+      render({ planControlVisible: true });
+      expect(latestChatEditorProps.currentMode).toBe(mode);
+      expect(latestChatEditorProps.planMode).toBe(true);
+      expect(latestChatEditorProps.visibleToolbarActions).toContain('plan');
+      connectionState.currentMode = mode;
+      rerender();
+      expect(latestChatEditorProps.currentMode).toBe(mode);
+      expect(latestChatEditorProps.planMode).toBe(false);
+    },
+  );
+
+  it('blocks same-tick plan handoff during a mode request and permits approval after it settles', async () => {
+    connectionState.currentMode = 'plan';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    const mode = deferred<{ mode: string }>();
+    setApprovalMode.mockReturnValueOnce(mode.promise);
+    render();
+    await act(async () => {
+      latestChatEditorProps.onSelectMode('yolo');
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+      ).rejects.toThrow('still pending');
+    });
+    expect(submitPermission).not.toHaveBeenCalled();
+    expect(latestToolApprovalProps!.disabled).toBe(true);
+    await act(async () => {
+      mode.resolve({ mode: 'plan' });
+    });
+    expect(latestToolApprovalProps!.disabled).toBe(false);
+    await act(async () =>
+      latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+    );
+    expect(submitPermission).toHaveBeenCalledOnce();
+  });
+
+  it('holds plan handoff until authoritative mode exit, blocking permission and Plan changes', async () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'yolo';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    const permission = deferred<boolean>();
+    respondToPermission.mockReturnValueOnce(permission.promise);
+    render();
+    let submitted: void | Promise<void>;
+    act(() => {
+      submitted = latestToolApprovalProps!.onConfirm(
+        'plan-approval',
+        'restore_previous',
+      );
+      latestChatEditorProps.onSelectMode('default');
+      latestChatEditorProps.onTogglePlan();
+    });
+    expect(respondToPermission).toHaveBeenCalledWith('plan-approval', {
+      outcome: { outcome: 'selected', optionId: 'restore_previous' },
+      expectedPlanExecutionMode: 'yolo',
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    await act(async () => {
+      permission.resolve(true);
+      await submitted;
+    });
+    pendingPermission = null;
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+    pendingPermission = {
+      id: 'background-approval',
+      toolName: 'write_file',
+      toolKind: 'edit',
+      options: [],
+    };
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+    connectionState.currentMode = 'yolo';
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+    await act(async () => latestChatEditorProps.onTogglePlan());
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: true });
+  });
+
+  it('releases plan handoff on failure and owner replacement', async () => {
+    connectionState.currentMode = 'plan';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    render();
+    submitPermission.mockRejectedValueOnce(new Error('permission failed'));
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+      ).rejects.toThrow('permission failed');
+    });
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+    await act(async () =>
+      latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+    );
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+    ownerVersion += 1;
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+    setApprovalMode.mockRejectedValueOnce(new Error('mode failed'));
+    await act(async () => latestChatEditorProps.onTogglePlan());
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+  });
+
+  it('changes execution permission during Plan without approving the pending plan', async () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'default';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    render();
+    await act(async () => latestChatEditorProps.onSelectMode('yolo'));
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: true });
+    expect(submitPermission).not.toHaveBeenCalled();
+  });
+
+  it.each(['/plan', '/plan on', '/plan off', '/plan exit'])(
+    'retains %s during a pending mode request and accepts it after completion',
+    async (command) => {
+      connectionState.currentMode = 'yolo';
+      const pendingMode = deferred<{ mode: string }>();
+      setApprovalMode.mockReturnValueOnce(pendingMode.promise);
+      const onError = vi.fn();
+      render({ onError });
+      act(() => {
+        latestChatEditorProps.onSelectMode('yolo');
+      });
+      expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = latestOnSubmit!(command);
+      });
+      expect(accepted).toBe(false);
+      expect(setApprovalMode).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalled();
+      expect(sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        pendingMode.resolve({ mode: 'yolo' });
+      });
+      await act(async () => {
+        accepted = latestOnSubmit!(command);
+      });
+      expect(accepted).toBe(true);
+      expect(setApprovalMode).toHaveBeenCalledTimes(2);
+      expect(setApprovalMode).toHaveBeenLastCalledWith('yolo', {
+        planMode: command === '/plan' || command === '/plan on',
+      });
+    },
+  );
+
+  it.each(['/plan', '/plan on', '/plan off'])(
+    'does not consume %s while disconnected without a session',
+    (command) => {
+      connectionState.status = 'disconnected';
+      connectionState.sessionId = undefined;
+      render();
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = latestOnSubmit!(command);
+      });
+      expect(accepted).toBe(false);
+      expect(setApprovalMode).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['success', 'failure', 'replacement'])(
+    'blocks compression while preparing a /plan prompt and releases the gate after %s',
+    async (outcome) => {
+      connectionState.commands = [
+        { name: 'compress', source: 'builtin-command' },
+      ];
+      const prepared = deferred<{ mode: string }>();
+      setApprovalMode.mockReturnValueOnce(prepared.promise);
+      let controls!: ContextUsageControls;
+      const registerContextUsageControls = (value: ContextUsageControls) => {
+        controls = value;
+        return () => {};
+      };
+      render({ registerContextUsageControls });
+      expect(controls.canCompress).toBe(true);
+      const staleCompress = controls.compress;
+      act(() => {
+        latestOnSubmit!('/plan explain the migration');
+      });
+      expect(setApprovalMode).toHaveBeenCalledOnce();
+      expect(controls.canCompress).toBe(false);
+      await act(async () => staleCompress());
+      expect(sendPrompt).not.toHaveBeenCalled();
+      if (outcome === 'replacement') {
+        ownerVersion++;
+        connectionState.sessionId = 'replacement';
+        rerender({ registerContextUsageControls });
+        expect(controls.canCompress).toBe(true);
+      }
+      await act(async () => {
+        if (outcome === 'failure') prepared.reject(new Error('mode failed'));
+        else prepared.resolve({ mode: 'plan' });
+      });
+      expect(controls.canCompress).toBe(true);
+      if (outcome === 'success') {
+        expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+          'explain the migration',
+          expect.any(Object),
+        );
+      } else expect(sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends /plan prompts through normal admission callbacks after applying Plan', async () => {
+    const firstPrompt = vi.fn();
+    const commit = vi.fn();
+    connectionState.currentMode = 'yolo';
+    render({ onFirstPromptAdmitted: firstPrompt });
+    await act(async () => {
+      latestOnSubmit!(
+        '/plan explain the migration',
+        undefined,
+        undefined,
+        commit,
+      );
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: true });
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'explain the migration',
+      expect.objectContaining({
+        onAdmissionStarted: expect.any(Function),
+        onAdmitted: expect.any(Function),
+      }),
+    );
+    expect(commit).not.toHaveBeenCalled();
+    act(() => sendPromptAdmit!());
+    expect(commit).toHaveBeenCalledOnce();
+    expect(firstPrompt).toHaveBeenCalledWith('explain the migration');
+    expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
+  });
+
+  it('locks uncertain /plan prompt admission instead of permitting a duplicate', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
+    render();
+    await act(async () => {
+      latestOnSubmit!('/plan explain the migration');
+    });
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    act(() => {
+      latestOnSubmit!('/plan duplicate');
+    });
+    expect(sendPrompt).toHaveBeenCalledOnce();
+    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
+      '/w',
+    );
+    warn.mockRestore();
+  });
+
+  it('does not send a prepared /plan prompt into a replacement owner', async () => {
+    const prepared = deferred<{ mode: string }>();
+    setApprovalMode.mockReturnValueOnce(prepared.promise);
+    render();
+    act(() => {
+      latestOnSubmit!('/plan explain');
+    });
+    ownerVersion += 1;
+    connectionState.sessionId = 'replacement';
+    rerender();
+    await act(async () => {
+      prepared.resolve({ mode: 'plan' });
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
   it("drives THIS pane's approval mode when one is picked", () => {
     render();
     act(() =>
@@ -2718,7 +3566,7 @@ describe('ChatPane', () => {
         new MouseEvent('click', { bubbles: true }),
       ),
     );
-    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
   });
 
   it("switches THIS pane's model when one is picked", () => {
@@ -2801,7 +3649,7 @@ describe('ChatPane', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 
@@ -2851,3 +3699,253 @@ describe('ChatPane daemon keep-alive (#9487)', () => {
     expect(testid('pane-running')!.textContent).toBe('false');
   });
 });
+
+describe('ChatPane continuation errors', () => {
+  it.each([false, true])(
+    'keeps a current continuation failure visible and isolates old owners (replace owner: %s)',
+    async (replaceOwner) => {
+      const { createDaemonSessionActions } = await import(
+        '../daemon/session/actions'
+      );
+      const request = deferred<never>();
+      const continueRequest = vi.fn(() => request.promise);
+      const addNotice = vi.fn();
+      const onError = vi.fn();
+      const requestError = new TypeError('Failed to fetch continuation');
+      const sessionRef = {
+        current: {
+          sessionId: 'sess-1',
+          clientId: 'pane-client',
+          continueSession: continueRequest,
+        },
+      };
+      connectionState.context = {
+        v: 1,
+        sessionId: 'sess-1',
+        workspaceCwd: '/w',
+        state: {},
+        recovery: { kind: 'interrupted_prompt', canContinue: true },
+      };
+      // Actual action + actual ChatPane/Banner; only SDK request and hook state
+      // delivery are simulated. No SSE frames or provider replay are invented.
+      const actions = createDaemonSessionActions({
+        store: { getSnapshot: () => ({ activeAssistantBlockId: undefined }) },
+        sessionRef,
+        activePromptsRef: { current: new Map() },
+        settledPromptsRef: { current: new Map() },
+        pendingSessionLoadIdRef: { current: 0 },
+        sessionRecoveryGeneration: new WeakMap(),
+        passiveAssistantDoneTimerRef: { current: undefined },
+        getConnection: () => connectionState,
+        hasSessionActivePrompt: () => false,
+        setConnection: (next: unknown) => {
+          connectionState =
+            typeof next === 'function' ? next(connectionState) : next;
+        },
+        setPromptStatus: vi.fn(),
+        addNotice,
+      } as unknown as Parameters<typeof createDaemonSessionActions>[0]);
+      const continueAction = vi.fn(actions.continueSession);
+      Object.assign(daemonActions, { continueSession: continueAction });
+      try {
+        render({ onError });
+        const button = testid('session-recovery-banner')?.querySelector(
+          'button',
+        );
+        expect(button).toBeTruthy();
+        act(() => {
+          button!.click();
+          button!.click();
+        });
+        rerender({ onError });
+        expect(continueRequest).toHaveBeenCalledOnce();
+        expect(connectionState.context.recovery.canContinue).toBe(false);
+        expect(
+          testid('session-recovery-banner')?.querySelector('button'),
+        ).toBeFalsy();
+        if (replaceOwner) {
+          ownerVersion += 1;
+          sessionRef.current = { ...sessionRef.current, sessionId: 'sess-2' };
+          connectionState = {
+            ...connectionState,
+            sessionId: 'sess-2',
+            context: { ...connectionState.context, sessionId: 'sess-2' },
+          };
+          rerender({ onError });
+        }
+        await act(async () => {
+          request.reject(requestError);
+          await Promise.resolve();
+        });
+        await expect(continueAction.mock.results[0]!.value).rejects.toBe(
+          requestError,
+        );
+        rerender({ onError });
+        const inlineErrors = Array.from(
+          container!.querySelectorAll('[role="alert"]'),
+        )
+          .map((alert) => alert.textContent)
+          .filter(Boolean);
+        expect(continueRequest).toHaveBeenCalledOnce();
+        expect(connectionState.context.recovery.canContinue).toBe(false);
+        expect(
+          testid('session-recovery-banner')?.querySelector('button'),
+        ).toBeFalsy();
+        if (replaceOwner) {
+          expect(onError).not.toHaveBeenCalled();
+          expect(inlineErrors).toEqual([]);
+          expect(addNotice).not.toHaveBeenCalled();
+        } else {
+          expect(addNotice).toHaveBeenCalledOnce();
+          expect(inlineErrors).toEqual([
+            'Could not continue the conversation.',
+          ]);
+        }
+      } finally {
+        Reflect.deleteProperty(daemonActions, 'continueSession');
+      }
+    },
+  );
+});
+
+it('requires an explicit resume for a stopped pane', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  connectionState.sessionId = 'stopped';
+  connectionState.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+  loadSession.mockClear();
+  render();
+  expect(testid('workspace-runtime-stopped')).not.toBeNull();
+  expect(loadSession).not.toHaveBeenCalled();
+  await act(async () => {
+    [...container!.querySelectorAll('button')]
+      .find((node) => node.textContent === 'Resume conversation')!
+      .click();
+  });
+  expect(loadSession).toHaveBeenCalledWith('stopped', {
+    sessionContext: { kind: 'workspace', cwd: '/workspace' },
+  });
+});
+
+it('fences pane submits while the runtime is stopped and says why', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  // The parked state retains sessionId, so the status-based submit guard
+  // alone does not catch this.
+  connectionState.sessionId = 'stopped';
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  await act(async () => {
+    testid('pane-submit')!.click();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+});
+
+it('does not submit a deferred /plan prompt after the runtime stops', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  render();
+  act(() => {
+    latestOnSubmit!('/plan explain the migration');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  // The runtime stops while the plan-mode switch is still in flight; the
+  // deferred continuation must re-check the fence before submitting.
+  connectionState = {
+    ...connectionState,
+    runtimeStopped: true,
+    status: 'disconnected',
+  };
+  rerender();
+  await act(async () => prepared.resolve({ mode: 'plan' }));
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it.each(['/auth', '/login', '/connect'])(
+  'blocks rewritten /plan %s before changing mode',
+  (command) => {
+    const notice = vi.fn();
+    connectionState.commands = [
+      {
+        name: 'auth',
+        source: 'builtin-command',
+        altNames: ['login', 'connect'],
+      },
+    ];
+    render({
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice: notice,
+    });
+    act(() => {
+      expect(latestOnSubmit!(`/plan ${command}`)).toBe(true);
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledWith(
+      'warning',
+      'Adding models is disabled by the host.',
+    );
+  },
+);
+it('rechecks model policy after asynchronous plan preparation', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  act(() => {
+    latestOnSubmit!('/plan /auth');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  rerender({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  await act(async () => {
+    prepared.resolve({ mode: 'yolo' });
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'Adding models is disabled by the host.',
+  );
+});
+it('preserves a stopped pane draft even when model setup is disabled', () => {
+  connectionState.runtimeStopped = true;
+  const notice = vi.fn();
+  render({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  act(() => {
+    expect(latestOnSubmit!('/auth')).toBe(false);
+  });
+  expect(notice).toHaveBeenCalledExactlyOnceWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+it.each(['builtin-command', 'project', 'missing'])(
+  'uses loaded %s identity for the auth menu and dispatch',
+  async (source) => {
+    connectionState.commands = [
+      { name: 'clear', source: 'builtin-command' },
+      // A ready snapshot without any auth entry (disabled list, SSH
+      // whitelist) must fail closed exactly like the builtin identity does.
+      ...(source === 'missing' ? [] : [{ name: 'auth', source }]),
+    ];
+    render({ modelManagement: { allowAdd: false } });
+    const names = latestChatEditorProps.commands.map(
+      (command: { name: string }) => command.name,
+    );
+    expect(names.includes('auth')).toBe(source === 'project');
+    await act(async () => {
+      latestOnSubmit!('/auth');
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(source === 'project' ? 1 : 0);
+  },
+);

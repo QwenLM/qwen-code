@@ -44,6 +44,7 @@ import {
   LIVE_SESSION_SOURCE_PREFIX,
 } from '../../runtime/live-session-source.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { getErrorMessage } from '../../utils/errors.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
 export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
@@ -259,9 +260,11 @@ interface CollectedTurn {
 }
 
 function errorMessage(error: unknown): string {
-  return stripTerminalControlSequences(
-    error instanceof Error ? error.message : String(error),
-  ).slice(0, 500);
+  // The ACP bridge rejects with the JSON-RPC error object itself rather than an
+  // Error, and `String()` renders that as "[object Object]", hiding the cause
+  // from everything downstream: the call banner, the provider blocker and the
+  // daemon log. `getErrorMessage` reads `message` off such an object.
+  return stripTerminalControlSequences(getErrorMessage(error)).slice(0, 500);
 }
 
 type ProviderFailureBlocker =
@@ -295,6 +298,12 @@ function updateSource(update: Record<string, unknown>): string | undefined {
     return undefined;
   const source = (meta as Record<string, unknown>)['source'];
   return typeof source === 'string' ? source : undefined;
+}
+
+function isDiscreteMessageUpdate(update: Record<string, unknown>): boolean {
+  const meta = update['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  return (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true;
 }
 
 function updateBackgroundTaskId(
@@ -520,7 +529,7 @@ export class LiveSessionCoordinator {
         try {
           context.runtime?.bridge.updateSessionMetadata(
             context.coordinator.sessionId,
-            { displayName: 'Voice chat' },
+            { displayName: 'Voice chat', titleSource: 'auto' },
           );
         } catch {
           /* the session remains usable when a title write fails */
@@ -1632,6 +1641,10 @@ export class LiveSessionCoordinator {
         const update = sessionUpdate(event);
         this.updateCoordinatorStatus(context, update);
         if (update?.['sessionUpdate'] === 'agent_message_chunk') {
+          // Discrete frames (background status, realtime transcript echoes)
+          // carry the live RPC's promptId when a same-turn background result
+          // is consumed inline; they are never the turn's answer.
+          if (isDiscreteMessageUpdate(update)) continue;
           const chunk = updateText(update);
           text = appendBounded(text, chunk);
           agentMessage = appendBounded(agentMessage, chunk);
@@ -1759,9 +1772,19 @@ export class LiveSessionCoordinator {
           if (update?.['sessionUpdate'] === 'agent_message_chunk') {
             const source = updateSource(update);
             if (source === 'background_notification') {
-              announcement = updateText(update);
-              response = '';
-              backgroundTaskId = updateBackgroundTaskId(update);
+              const text = updateText(update);
+              announcement = announcement
+                ? appendBounded(announcement, `\n${text}`)
+                : text;
+              // A frame arriving after reply chunks is a same-execution
+              // inline consumption, not a new announcement: keep the
+              // accumulated response and the worker-gate key so the
+              // executing turn's reply stays speakable. Cycle state resets
+              // on `background_notification_turn_complete`.
+              if (response === '') {
+                const taskId = updateBackgroundTaskId(update);
+                if (taskId !== undefined) backgroundTaskId = taskId;
+              }
             } else if (source === 'background_notification_response') {
               response = appendBounded(response, updateText(update));
             }

@@ -426,6 +426,12 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     ).toEqual({ route: 'GET /workspaces/:workspace/sessions/live-state' });
   });
 
+  it('maps the sessionless language route', () => {
+    expect(resolveDaemonTelemetryRoute(mockReq('POST', '/language'))).toEqual({
+      route: 'POST /language',
+    });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
@@ -441,6 +447,28 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       expect.objectContaining({
         method: 'GET',
         route: 'GET /workspaces/:workspace/session/:id/transcript',
+        sessionId: 'session/1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('attributes workspace turn-index reads to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/session/session%2F1/turn-index'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/turn-index',
         sessionId: 'session/1',
         workspaceHash: 'hash:/workspace/secondary',
       }),
@@ -539,6 +567,11 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/primary');
 
     for (const [method, path, route] of [
+      [
+        'GET',
+        '/session/secondary-session/artifacts/saved-version/content',
+        'GET /session/:id/artifacts/:artifactId/content',
+      ],
       [
         'GET',
         '/session/secondary-session/rewind/snapshots',
@@ -963,6 +996,38 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it.each(['/sessions/catalog', '/sessions/catalog/', '/SESSIONS/CATALOG'])(
+    'records batch catalog metrics without attributing %s to primary',
+    (path) => {
+      const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
+      const recordRequest = vi.fn();
+      const res = mockRes(200);
+      const req = mockReq('POST', path);
+      expect(resolveDaemonTelemetryRoute(req)).toEqual({
+        route: 'POST /sessions/catalog',
+        attribution: 'handler_resolved',
+      });
+
+      daemonTelemetryMiddleware(resolveWorkspaceCwd, recordRequest)(
+        req,
+        res,
+        vi.fn() as unknown as NextFunction,
+      );
+      res.emit('finish');
+
+      expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 200);
+      expect(coreMocks.recordDaemonHttpRequest).toHaveBeenCalledWith(
+        expect.any(Number),
+        'POST /sessions/catalog',
+        200,
+        undefined,
+      );
+      expect(resolveWorkspaceCwd).not.toHaveBeenCalled();
+      expect(coreMocks.hashDaemonWorkspace).not.toHaveBeenCalled();
+      expect(coreMocks.spanSetAttribute).not.toHaveBeenCalled();
+    },
+  );
+
   it('omits workspace hash when a dynamic target is never resolved', () => {
     const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
     const mw = daemonTelemetryMiddleware(resolveWorkspaceCwd);
@@ -1062,17 +1127,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 61 unique routes with the audited 59/2 attribution split', () => {
+  it('contains 74 unique routes with the audited 72/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(61);
-    expect(new Set(keys).size).toBe(61);
+    expect(keys).toHaveLength(74);
+    expect(new Set(keys).size).toBe(74);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(59);
+    ).toHaveLength(72);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

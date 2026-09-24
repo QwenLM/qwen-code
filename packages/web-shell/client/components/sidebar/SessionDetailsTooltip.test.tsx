@@ -1,12 +1,29 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, createRef, forwardRef, type ComponentProps } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { Button } from '../ui/button';
+import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from '../SessionPrStateIcon.module.css';
+
+const popoverContentProps = vi.hoisted(() => vi.fn());
+vi.mock('../ui/popover', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../ui/popover')>();
+  return {
+    ...actual,
+    PopoverContent: forwardRef<
+      HTMLDivElement,
+      ComponentProps<typeof actual.PopoverContent>
+    >(function ObservedPopoverContent(props, ref) {
+      popoverContentProps(props);
+      return <actual.PopoverContent {...props} ref={ref} />;
+    }),
+  };
+});
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,6 +58,183 @@ afterEach(() => {
 });
 
 describe('SessionDetailsTooltip', () => {
+  it.each([
+    [
+      {
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: true,
+      },
+      'Needs approval',
+    ],
+    [
+      { hasActivePrompt: true, isWaitingForUserQuestion: true },
+      'User input needed',
+    ],
+    [{ hasActivePrompt: true, activeWorkState: 'active' as const }, 'Running'],
+    [{ activeWorkState: 'active' as const }, 'Active work'],
+    [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
+  ])(
+    'prioritizes blocked states over an active prompt: %s',
+    async (flags, expected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'status',
+                  workspaceCwd: '/workspace',
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (expected !== 'Running')
+          expect(details?.textContent).not.toContain('Running');
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('supports a ref-forwarding click trigger, keyboard dismissal and the host portal', async () => {
+    const container = document.createElement('div');
+    container.setAttribute('data-web-shell-root', '');
+    const portal = document.createElement('div');
+    document.body.append(container, portal);
+    const root = createRoot(container);
+    const ref = createRef<HTMLButtonElement>();
+    const onRowClick = vi.fn();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <WebShellPortalRootContext.Provider value={portal}>
+              <div onClick={onRowClick}>
+                <SessionDetailsTooltip
+                  session={{
+                    sessionId: 'click-details',
+                    workspaceCwd: '/workspace',
+                  }}
+                  label="Session"
+                  time=""
+                  completedUnread={false}
+                  openOnClick
+                >
+                  <Button ref={ref}>Details</Button>
+                </SessionDetailsTooltip>
+              </div>
+            </WebShellPortalRootContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+      expect(ref.current).toBe(container.querySelector('button'));
+      expect(ref.current?.getAttribute('aria-expanded')).toBe('false');
+      await act(async () => ref.current!.click());
+      onRowClick.mockClear();
+      const details = portal.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(details).not.toBeNull();
+      expect(ref.current?.getAttribute('aria-expanded')).toBe('true');
+      const copy = details.querySelector<HTMLButtonElement>(
+        '[data-web-shell-session-id-copy]',
+      )!;
+      expect(copy.tabIndex).toBe(0);
+      expect(document.activeElement).toBe(copy);
+      await act(async () => {
+        details.dispatchEvent(new Event('pointerout', { bubbles: true }));
+        copy.click();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+      expect(writeText).toHaveBeenCalledExactlyOnceWith('click-details');
+      expect(onRowClick).not.toHaveBeenCalled();
+      expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+      await act(async () => {
+        copy.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(portal.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(ref.current);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("leaves another owner's pinned details open and focused on hover", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{ sessionId: 'a', workspaceCwd: '/w' }}
+              label="Alpha"
+              time=""
+              completedUnread={false}
+              openOnClick
+            >
+              <button type="button">Alpha details</button>
+            </SessionDetailsTooltip>
+            <SessionDetailsTooltip
+              session={{ sessionId: 'b', workspaceCwd: '/w' }}
+              label="Bravo"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Bravo title</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      const [detailsButton, hoverTitle] = container.querySelectorAll('button');
+      await act(async () => detailsButton!.click());
+      const alpha = document.querySelector(
+        '[role="dialog"][aria-label="Alpha"]',
+      );
+      const copy = alpha?.querySelector('[data-web-shell-session-id-copy]');
+      expect(document.activeElement).toBe(copy);
+      await act(async () => {
+        hoverTitle!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => vi.advanceTimersByTime(0));
+      // A hover from a different owner must not steal focus from — or
+      // dismiss — this pinned popover.
+      expect(
+        document.querySelector('[role="dialog"][aria-label="Bravo"]'),
+      ).not.toBeNull();
+      expect(alpha?.getAttribute('data-state')).toBe('open');
+      expect(document.activeElement).toBe(copy);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('shows the same structured details on row hover', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
@@ -69,6 +263,9 @@ describe('SessionDetailsTooltip', () => {
 
     await openDetails(container);
 
+    expect(popoverContentProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ side: 'right' }),
+    );
     const details = document.querySelector('[role="dialog"]');
     expect(details?.textContent).toContain('Improve sidebar');
     expect(details?.textContent).toContain('2 weeks ago');
@@ -79,6 +276,39 @@ describe('SessionDetailsTooltip', () => {
     expect(details?.querySelector('svg path.fill-popover')).not.toBeNull();
 
     act(() => root.unmount());
+  });
+
+  it('preserves the standalone workspace label from the sidebar', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'standalone',
+                workspaceCwd: '/internal/fallback',
+              }}
+              label="Standalone"
+              time=""
+              completedUnread={false}
+              workspaceLabel="No workspace"
+            >
+              <button type="button">Standalone</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('No workspace');
+      expect(details?.textContent).not.toContain('/internal/fallback');
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('shows the bound pull request as a link', async () => {
@@ -213,6 +443,165 @@ describe('SessionDetailsTooltip', () => {
     expect(byNumber(9500)?.textContent).toBe('Pull Request #9500 · Merged');
     expect(byNumber(9501)?.textContent).toBe('Pull Request #9501 · Closed');
     expect(byNumber(9502)?.textContent).toBe('Pull Request #9502');
+
+    act(() => root.unmount());
+  });
+
+  it('lists the issues the bound pull requests close, once each, with state icons', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionDetailsTooltip
+            session={{
+              sessionId: 'session-1',
+              workspaceCwd: '/work/qwen-code',
+              clientCount: 1,
+              // Binding order, not number order: the lower-numbered PR
+              // was bound last and is therefore the newest.
+              prs: [
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open',
+                  issues: [
+                    // The older PR's copy of #7 carries a stale state.
+                    {
+                      number: 7,
+                      url: 'https://github.com/o/r/issues/7',
+                      state: 'open',
+                    },
+                    // Same number in another repository: a distinct issue.
+                    {
+                      number: 7,
+                      url: 'https://github.com/other-org/other-repo/issues/7',
+                    },
+                    {
+                      number: 8,
+                      url: 'https://github.com/o/r/issues/8',
+                      state: 'not_planned',
+                    },
+                    { number: 9, url: 'https://github.com/o/r/issues/9' },
+                    {
+                      number: 10,
+                      url: 'https://github.com/o/r/issues/10',
+                      state: 'open',
+                    },
+                  ],
+                },
+                // A hand-edited sidecar can carry non-openable schemes; a
+                // filtered PR takes its issues with it.
+                {
+                  number: 9998,
+                  url: 'javascript:alert(1)',
+                  issues: [
+                    {
+                      number: 5,
+                      url: 'https://github.com/o/r/issues/5',
+                      state: 'open',
+                    },
+                  ],
+                },
+                {
+                  number: 9500,
+                  url: 'https://github.com/o/r/pull/9500',
+                  state: 'merged',
+                  issues: [
+                    // Newest PR: its copy of #7 wins the dedupe.
+                    {
+                      number: 7,
+                      url: 'https://github.com/o/r/issues/7',
+                      state: 'completed',
+                    },
+                    { number: 99, url: 'javascript:alert(1)' },
+                    {
+                      number: 11,
+                      url: 'https://github.com/o/r/issues/11',
+                      state: 'completed',
+                    },
+                  ],
+                },
+              ],
+            }}
+            label="Fix CI"
+            time=""
+            completedUnread={false}
+          >
+            <button type="button">Fix CI</button>
+          </SessionDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    await openDetails(container);
+
+    const details = document.querySelector('[role="dialog"]');
+    const issueLinks = details?.querySelectorAll('a[href*="/issues/"]');
+    // Newest PR's issues first (binding order, not number order), then the
+    // older PR's, minus the url-deduped copy of #7.
+    expect(
+      [...(issueLinks ?? [])].map((link) => link.getAttribute('href')),
+    ).toEqual([
+      'https://github.com/o/r/issues/7',
+      'https://github.com/o/r/issues/11',
+      'https://github.com/other-org/other-repo/issues/7',
+      'https://github.com/o/r/issues/8',
+      'https://github.com/o/r/issues/9',
+      'https://github.com/o/r/issues/10',
+    ]);
+    expect(details?.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(details?.textContent).not.toContain('Issue #99');
+    expect(details?.textContent).not.toContain('Issue #5');
+    const byNumber = (number: number) =>
+      details?.querySelector(
+        `a[href="https://github.com/o/r/issues/${number}"]`,
+      );
+    const rowIcon = (number: number) =>
+      byNumber(number)?.parentElement?.querySelector('svg');
+    expect(rowIcon(7)?.classList.contains('lucide-circle-check')).toBe(true);
+    expect(
+      rowIcon(7)?.classList.contains(styles.sessionIssueStateCompleted),
+    ).toBe(true);
+    expect(rowIcon(8)?.classList.contains('lucide-circle-slash')).toBe(true);
+    expect(
+      rowIcon(8)?.classList.contains(styles.sessionIssueStateNotPlanned),
+    ).toBe(true);
+    // State-less: the neutral glyph with no state color (an SVG's
+    // className is an SVGAnimatedString in jsdom, so check the token list).
+    expect(rowIcon(9)?.classList.contains('lucide-circle-dot')).toBe(true);
+    for (const stateClass of [
+      styles.sessionIssueStateOpen,
+      styles.sessionIssueStateCompleted,
+      styles.sessionIssueStateNotPlanned,
+    ]) {
+      expect(rowIcon(9)?.classList.contains(stateClass)).toBe(false);
+    }
+    // Open is the dominant live state: green circle-dot, no sr-only suffix.
+    expect(rowIcon(10)?.classList.contains('lucide-circle-dot')).toBe(true);
+    expect(rowIcon(10)?.classList.contains(styles.sessionIssueStateOpen)).toBe(
+      true,
+    );
+    expect(byNumber(7)?.textContent).toBe('Issue #7 · Completed');
+    expect(byNumber(8)?.textContent).toBe('Issue #8 · Not planned');
+    expect(byNumber(9)?.textContent).toBe('Issue #9');
+    expect(byNumber(10)?.textContent).toBe('Issue #10');
+    expect(byNumber(11)?.textContent).toBe('Issue #11 · Completed');
+    // Issues follow the PR rows.
+    const links = [...(details?.querySelectorAll('a[href^="https://"]') ?? [])];
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      'https://github.com/o/r/pull/9500',
+      'https://github.com/o/r/pull/9517',
+      'https://github.com/o/r/issues/7',
+      'https://github.com/o/r/issues/11',
+      'https://github.com/other-org/other-repo/issues/7',
+      'https://github.com/o/r/issues/8',
+      'https://github.com/o/r/issues/9',
+      'https://github.com/o/r/issues/10',
+    ]);
 
     act(() => root.unmount());
   });

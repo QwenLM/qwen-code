@@ -32,6 +32,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   useChannels,
+  useStatusReport,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -136,6 +137,16 @@ export function ChannelsManagerPage({
   const workspace = useWorkspace();
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
+  const bearerConfigured = Boolean(workspace.token);
+  const { report: statusReport, loading: statusLoading } = useStatusReport({
+    autoLoad: supportsManagement && !bearerConfigured,
+    enabled: supportsManagement && !bearerConfigured,
+  });
+  const hasOperatorAuthority =
+    bearerConfigured ||
+    (statusReport?.security.loopbackBind === true &&
+      statusReport.security.tokenConfigured === false &&
+      statusReport.security.requireAuth === false);
   const registeredWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
     const listed = (workspace.capabilities?.workspaces ?? []).filter(
       (entry) => entry.kind !== 'live',
@@ -197,7 +208,7 @@ export function ChannelsManagerPage({
   });
   const canManage =
     supportsManagement &&
-    Boolean(workspace.token) &&
+    hasOperatorAuthority &&
     Boolean(activeWorkspaceCwd) &&
     activeWorkspace?.trusted === true;
   const [busyByWorkspace, setBusyByWorkspace] = useState<
@@ -510,7 +521,7 @@ export function ChannelsManagerPage({
           </Alert>
         ) : null}
 
-        {supportsManagement && !workspace.token ? (
+        {supportsManagement && !hasOperatorAuthority && !statusLoading ? (
           <Alert>
             <AlertCircleIcon />
             <AlertTitle>{t('channels.readOnly.title')}</AlertTitle>

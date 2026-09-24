@@ -21,6 +21,7 @@ import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudge
 import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import type {
   AuthType,
+  ModelWireApi,
   InputModalities,
   MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
@@ -59,11 +60,34 @@ export interface ServeOptions {
   port: number;
   /**
    * Bearer token required on every request. Optional when bound to loopback
-   * (developer convenience); required when bound beyond loopback (boot fails
-   * without one — see runQwenServe).
+   * (developer convenience). On a non-loopback bind with neither this option
+   * nor QWEN_SERVER_TOKEN set, runQwenServe generates an ephemeral bearer and
+   * prints it once instead of refusing; read it back from
+   * `RunHandle.resolvedToken` — the only programmatic channel: the generated
+   * value is never written back into `QWEN_SERVER_TOKEN` in the daemon's own
+   * environment (spawned channel workers receive it as `QWEN_DAEMON_TOKEN`).
+   * An explicitly empty value is a supplied source, not an absent one, and
+   * still fails the remote-bind check.
    */
   token?: string;
+  /**
+   * Print the token-bearing QR even when it would be withheld —
+   * an operator-supplied (stable) token on captured (non-TTY) stdout. The
+   * default suppression keeps stable credentials out of collected logs; this
+   * opt-in declares the log pipeline as trusted as the daemon host. An
+   * explicit value (either polarity) wins over the `serve.tokenQr` setting;
+   * `undefined` means the flag was omitted and the setting applies. `true`
+   * has no effect for generated tokens or interactive terminals, where the QR
+   * already prints; `false` suppresses it on every path, including those two
+   * — a generated bearer still reaches the operator as its own plain-text
+   * line, so the veto costs access to nothing.
+   */
+  tokenQr?: boolean;
   mode: ServeMode;
+  /** Registration capacity, including primary and user scratch workspaces.
+   * Defaults to QWEN_SERVE_MAX_WORKSPACES or 256; accepts integers 1..256.
+   */
+  maxRegisteredWorkspaces?: number;
   /**
    * Per-workspace cap on concurrent live sessions. Once a runtime's
    * `bridge.sessionCount` reaches
@@ -83,10 +107,11 @@ export interface ServeOptions {
   maxSessions?: number;
   /**
    * Non-negative integer cap on concurrent live sessions across all workspace
-   * runtimes. `runQwenServe` derives a default once from the per-workspace cap
-   * and startup workspace count when several startup/restored workspaces are
-   * present; direct embeds may leave it unlimited. Dynamic registration does
-   * not recompute it. `0` or `Infinity` disables the cap.
+   * runtimes. `runQwenServe` defaults to 800 when registration capacity exceeds
+   * 25; otherwise it derives the default from the per-workspace cap and startup
+   * workspace count when several startup/restored workspaces are present.
+   * Direct embeds may leave it unlimited. Dynamic registration does not
+   * recompute it. `0` or `Infinity` disables the cap.
    */
   maxTotalSessions?: number;
   /**
@@ -190,7 +215,8 @@ export interface ServeOptions {
   requireAuth?: boolean;
   /**
    * Opt in to direct session shell execution. The effective policy also
-   * requires a configured bearer token and a session-bound client id.
+   * requires either a configured bearer token or trusted-loopback mode, plus
+   * a session-bound client id.
    */
   enableSessionShell?: boolean;
   /**
@@ -249,11 +275,10 @@ export interface ServeOptions {
    * plus every `qwen --acp` child it spawns. When unset, derived as half of
    * the cgroup-constrained or host memory.
    *
-   * Observed and reported only. No child is sized from it and no spawn is
-   * refused on its basis: `childHeapMode: 'observe'` models a partition of it
-   * and publishes the model, but there is no mode that applies one. Sizing
-   * children arrives with the peak old-space measurement that can tell an
-   * operator beforehand whether their workload fits the partition.
+   * `childHeapMode: 'admit'` limits child starts using the modeled slot count;
+   * `observe` only reports the partition. Experimental `enforce` also applies
+   * the fixed modeled old-space ceiling to each managed child. It does not
+   * bound total process RSS.
    */
   memoryBudgetMb?: number;
   /**
@@ -274,18 +299,16 @@ export interface ServeOptions {
    * Whether the daemon models a per-child heap partition of the budget.
    *
    * `observe` (default) computes the partition and counts the spawns it would
-   * have refused; nothing is applied. There is no `enforce` yet — applying it
-   * needs a way to tell an operator in advance whether their workload fits
-   * the ceiling, and `refusals` cannot answer that: it counts admission
-   * pressure, while children still run on the far larger host-derived
-   * ceiling. `off` models nothing.
+   * have refused; nothing is applied. `admit` enforces only the child count,
+   * retaining the legacy heap arguments. Experimental `enforce` also applies
+   * the fixed modeled old-space ceiling to each managed child. A zero refusal
+   * count does not prove the workload fits that ceiling. `off` models nothing.
    */
   childHeapMode?: ChildHeapMode;
   /**
-   * Resolved at boot by `runQwenServe`. Not an operator input, and not
-   * consumed by any spawn path — it is reported under `limits.memory` on
-   * `GET /daemon/status` so the daemon's memory denominator is observable
-   * before a child-capacity policy is designed against it.
+   * Resolved once at boot by `runQwenServe` for journal growth and the child
+   * policy, and reported under `limits.memory` on `GET /daemon/status`.
+   * Not an operator input.
    */
   daemonMemoryBudget?: DaemonMemoryBudget;
   /**
@@ -300,7 +323,7 @@ export interface ServeOptions {
     timeoutMs?: number;
   };
   /**
-   * Cross-origin allowlist for browser webui
+   * Cross-origin allowlist for browser clients
    * deployments.
    */
   allowOrigins?: string[];
@@ -320,12 +343,19 @@ export interface ServeOptions {
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  /** ACP child auto-reap delay. Keepalive windows may extend it. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Grace period after a prompt settles before an otherwise-idle session may
+   * be auto-closed, in ms. 0 = disabled (original behavior). Set to a value
+   * greater than the client's max SSE poll interval to prevent session rebuilds
+   * for poll-based clients. Default: 0.
+   */
+  sessionPromptSettledCloseGraceMs?: number;
   /**
    * ACP child request timeout, including the `initialize` handshake,
    * in ms. Must be a positive
@@ -406,6 +436,8 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   qwenCodeVersion?: string;
+  /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
+  sessionLiveStatePollIntervalMs?: number;
   mode: ServeMode;
   features: string[];
   /**
@@ -439,8 +471,10 @@ export interface CapabilitiesEnvelope {
     id: string;
     cwd: string;
     displayName?: string;
+    ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
+    workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
   }>;
@@ -474,6 +508,8 @@ export interface CapabilitiesEnvelope {
    * `null` means the operator explicitly disabled that cap.
    */
   limits?: {
+    maxRegisteredWorkspaces?: number;
+    maxChannelControlWorkspaces?: number;
     maxPendingPromptsPerSession?: number | null;
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;
@@ -523,7 +559,9 @@ export interface ServeAuthProviderDescriptor {
     flowTitle?: string;
     baseUrlStepTitle?: string;
   };
-  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+  steps: Array<
+    'protocol' | 'wireApi' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
+  >;
 }
 
 export interface ServeAuthProviderCatalog {
@@ -541,10 +579,14 @@ export interface ServeAuthProviderCatalog {
 export interface ServeAuthProviderInstallRequest {
   providerId: string;
   protocol?: AuthType;
+  wireApi?: ModelWireApi;
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];
   advancedConfig?: {
+    /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
+    replaceExisting?: boolean;
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;
     contextWindowSize?: number;
@@ -560,6 +602,11 @@ export interface ServeAuthProviderInstallResult {
   modelId?: string;
   baseUrl?: string;
   message: string;
+  runtimeSync?: ServeModelProviderRuntimeSyncResult;
+}
+
+export interface ServeModelProviderRuntimeSyncResult {
+  status: 'applied' | 'deferred' | 'failed';
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

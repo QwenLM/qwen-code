@@ -275,6 +275,31 @@ describe('createChannelManagementService', () => {
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
+  it('rejects an upsert that omits cwd on a stored cross-workspace config', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          bot: {
+            type: 'dingtalk',
+            cwd: '../secondary',
+            senderPolicy: 'pairing',
+          },
+        },
+      }),
+    });
+
+    await expect(
+      service.upsert('bot', {
+        expectedRevision: 'rev-1',
+        config: { type: 'dingtalk', senderPolicy: 'open' },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_workspace_mismatch' });
+
+    expect(store.upsert).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
   it('fails closed for lifecycle and pairing on a legacy cross-workspace config', async () => {
     const { service, store, manager } = setup({
       committedNames: ['bot'],
@@ -929,7 +954,12 @@ describe('createChannelManagementService', () => {
       const { service } = setup({
         snapshot: settingsSnapshot({
           channels: {
-            bot: { type: 'dingtalk', senderPolicy: 'pairing' },
+            bot: {
+              type: 'dingtalk',
+              privatePolicy: 'pairing',
+              senderPolicy: 'open',
+              dmPolicy: 'disabled',
+            },
           },
         }),
       });
@@ -946,6 +976,9 @@ describe('createChannelManagementService', () => {
 
   it('rejects pairing operations on a channel without pairing mode', async () => {
     for (const config of [
+      { type: 'dingtalk', privatePolicy: 'open', senderPolicy: 'pairing' },
+      { type: 'dingtalk', privatePolicy: 'disabled', senderPolicy: 'pairing' },
+      { type: 'dingtalk', dmPolicy: 'disabled', senderPolicy: 'pairing' },
       { type: 'dingtalk', senderPolicy: 'open' },
       { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'allowlist' },
       { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'disabled' },

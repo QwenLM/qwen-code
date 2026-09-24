@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Regression tests for #9833: a /resume or /branch that fails AFTER the
@@ -169,6 +170,7 @@ function makeFakeEnv() {
   const fakeChat = {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
+    setCompletedToolCallIds: vi.fn(),
   };
 
   // One shared session-service object: every getSessionService() call sees

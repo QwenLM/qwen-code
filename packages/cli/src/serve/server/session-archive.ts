@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import {
   SessionIdCaseConflictError,
   SessionService,
@@ -27,6 +28,13 @@ import {
   enableTasksForSessions,
   removeTasksForSessions,
 } from '../scheduled-task-session-lifecycle.js';
+import {
+  acquireWorktreeCleanupLock,
+  executeWorktreeCleanup,
+  logWorktreeCleanupPreserve,
+  preclassifyWorktreeCleanup,
+  verifyWorktreeCleanupOwnership,
+} from './worktree-orphan-cleanup.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -225,6 +233,7 @@ async function runWithDaemonWriterLease<T>(params: {
   service: SessionService;
   mutate: (
     assertOwnedAndUnchanged: () => Promise<void>,
+    assertCleanupOwned: () => void,
   ) => Promise<{ value: T; mutationApplied: boolean }>;
   mutationAppliedAfterError: () => Promise<boolean>;
   afterMutationApplied: () => Promise<void>;
@@ -266,7 +275,10 @@ async function runWithDaemonWriterLease<T>(params: {
   let mutationApplied = false;
   let mutationError: unknown;
   try {
-    const mutation = await mutate(() => lease.assertOwnedAndUnchanged());
+    const mutation = await mutate(
+      () => lease.assertOwnedAndUnchanged(),
+      () => lease.assertCleanupOwned(),
+    );
     value = mutation.value;
     mutationApplied = mutation.mutationApplied;
   } catch (error) {
@@ -438,7 +450,7 @@ async function deletePersistedSessionWithLease(
     action: 'delete',
     sessionId,
     service,
-    mutate: async (assertOwnedAndUnchanged) => {
+    mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
       const lockedLocation = await classifySessionLocation(service, sessionId);
       if (lockedLocation === undefined) {
         return {
@@ -449,6 +461,7 @@ async function deletePersistedSessionWithLease(
       const removed = await service.removeSession(sessionId, {
         assertStorageUnchanged: assertOwnedAndUnchanged,
         assertCanMutate,
+        assertCleanupOwned,
       });
       return {
         value: removed ? ('removed' as const) : ('notFound' as const),
@@ -489,6 +502,7 @@ export async function deleteDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   assertCanMutate?: () => void;
+  runtimeWorkspaceCwd?: string;
   onError?: (entry: {
     phase: DaemonDeleteErrorPhase;
     sessionId: string;
@@ -502,6 +516,7 @@ export async function deleteDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
     assertCanMutate,
+    runtimeWorkspaceCwd,
     onError,
   } = params;
   const uniqueSessionIds = [
@@ -512,6 +527,71 @@ export async function deleteDaemonSessions(params: {
       coordinator.assertNotTransitioning(sessionId);
     }
   }
+  // Ownership-verified worktree cleanup (#11024): classify before the
+  // record deletion (the deletion destroys the sidecar), execute only
+  // after a confirmed removal, all under the worktree ownership lock so
+  // no restore or reset can interleave. Only the caller-locked path is
+  // armed: with `coordinatorLockHeld` an outer batch lock is already
+  // held, taking the worktree lock there would invert the
+  // worktree→coordinator order restores and resets follow — and
+  // internal-runtime sessions never own Part 4A worktrees.
+  const runWithWorktreeCleanup = async (
+    sessionId: string,
+    mutateSession: () => Promise<DeleteOneResult>,
+  ): Promise<DeleteOneResult> => {
+    // Fast path for sessions with no worktree sidecar at either
+    // location: nothing to classify, so go straight to the coordinator
+    // without awaiting. Keeping the coordinator call on the task's
+    // synchronous prefix preserves the pre-cleanup batch scheduling —
+    // an awaited pre-read here reshuffles which sibling reaches
+    // `runExclusiveMany` first and made the gate-race test
+    // non-deterministic (#11024).
+    const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
+    const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    if (
+      !fs.existsSync(activeSidecarPath) &&
+      (archivedSidecarPath === activeSidecarPath ||
+        !fs.existsSync(archivedSidecarPath))
+    ) {
+      return coordinator.runExclusiveMany([sessionId], mutateSession);
+    }
+    const cleanupPlan = await preclassifyWorktreeCleanup(
+      service,
+      sessionId,
+      runtimeWorkspaceCwd,
+    );
+    if (!cleanupPlan) {
+      return coordinator.runExclusiveMany([sessionId], mutateSession);
+    }
+    const releaseCleanupLock = await acquireWorktreeCleanupLock(cleanupPlan);
+    try {
+      const ownership = await verifyWorktreeCleanupOwnership(cleanupPlan);
+      if (!ownership.ok) {
+        logWorktreeCleanupPreserve(sessionId, ownership.reason);
+      }
+      const result = await coordinator.runExclusiveMany(
+        [sessionId],
+        mutateSession,
+      );
+      if (ownership.ok && result.kind === 'removed') {
+        try {
+          assertCanMutate?.();
+          await executeWorktreeCleanup(cleanupPlan);
+        } catch (error) {
+          logWorktreeCleanupPreserve(
+            sessionId,
+            `cleanup execution failed: ${errorMessage(error)}`,
+          );
+        }
+      }
+      return result;
+    } finally {
+      releaseCleanupLock();
+    }
+  };
   const results = await Promise.all(
     uniqueSessionIds.map(async (sessionId) => {
       try {
@@ -557,7 +637,15 @@ export async function deleteDaemonSessions(params: {
           try {
             await bridge.closeSession(sessionId);
           } catch (error) {
-            if (isSessionNotFoundError(error)) {
+            // A 'session_closing' refusal means a bridge-internal
+            // auto-close (last-detach, idle reaper) is in flight — the
+            // child may still hold the checkout as its cwd, so the
+            // record must NOT fold into a removal that would arm the
+            // destructive cleanup. Only a genuine not-found folds.
+            if (
+              isSessionNotFoundError(error) &&
+              (error as SessionNotFoundError).code !== 'session_closing'
+            ) {
               return await removePersistedSession();
             }
             onError?.({
@@ -576,7 +664,7 @@ export async function deleteDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : runWithWorktreeCleanup(sessionId, mutateSession));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -622,7 +710,13 @@ export async function deleteDaemonSessions(params: {
 export async function deleteDaemonSessionIfOrphan(params: {
   sessionId: string;
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'killSession' | 'markSessionCatalogChanged'>;
+  bridge: Pick<
+    AcpSessionBridge,
+    | 'deleteSessionAttachments'
+    | 'getSessionSummary'
+    | 'killSession'
+    | 'markSessionCatalogChanged'
+  >;
   coordinator: SessionArchiveCoordinator;
 }): Promise<boolean> {
   const { sessionId, service, bridge, coordinator } = params;
@@ -638,9 +732,21 @@ export async function deleteDaemonSessionIfOrphan(params: {
       killed = true;
     }
     if (!killed) {
-      return undefined;
+      try {
+        bridge.getSessionSummary(sessionId);
+        return undefined;
+      } catch (error) {
+        if (!isSessionNotFoundError(error)) throw error;
+      }
     }
-    return deletePersistedSessionWithLease(service, sessionId);
+    const removal = await deletePersistedSessionWithLease(service, sessionId);
+    if (removal.kind !== 'error') {
+      // Mirror deleteDaemonSessions: a reaped orphan is never looked up
+      // again, and close() on a persistent store deletes nothing — without
+      // this the attachment bytes leak from both storage roots.
+      await bridge.deleteSessionAttachments(sessionId);
+    }
+    return removal;
   });
   if (result === undefined) {
     return false;
@@ -858,31 +964,6 @@ export async function archiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'archived') {
-            let maintenanceError: unknown;
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'archive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-            return {
-              kind: 'alreadyArchived' as const,
-              mutationApplied: false,
-              maintenanceError,
-            };
-          }
           if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
@@ -895,7 +976,7 @@ export async function archiveDaemonSessions(params: {
             action: 'archive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -906,12 +987,6 @@ export async function archiveDaemonSessions(params: {
                   mutationApplied: false,
                 };
               }
-              if (lockedLocation === 'archived') {
-                return {
-                  value: 'alreadyArchived' as const,
-                  mutationApplied: false,
-                };
-              }
               if (lockedLocation === 'conflict' && !resolveConflicts) {
                 throw sessionLocationError(sessionId);
               }
@@ -919,6 +994,7 @@ export async function archiveDaemonSessions(params: {
                 resolveConflicts,
                 assertStorageUnchanged: assertOwnedAndUnchanged,
                 assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.archived.length > 0) {
@@ -958,10 +1034,30 @@ export async function archiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyArchived') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'archive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
+          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError: mutation.maintenanceError,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld
@@ -1055,31 +1151,6 @@ export async function unarchiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'active') {
-            let maintenanceError: unknown;
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'unarchive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-            return {
-              kind: 'alreadyActive' as const,
-              mutationApplied: false,
-              maintenanceError,
-            };
-          }
           if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
@@ -1092,7 +1163,7 @@ export async function unarchiveDaemonSessions(params: {
             action: 'unarchive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -1103,12 +1174,6 @@ export async function unarchiveDaemonSessions(params: {
                   mutationApplied: false,
                 };
               }
-              if (lockedLocation === 'active') {
-                return {
-                  value: 'alreadyActive' as const,
-                  mutationApplied: false,
-                };
-              }
               if (lockedLocation === 'conflict' && !resolveConflicts) {
                 throw sessionLocationError(sessionId);
               }
@@ -1116,6 +1181,7 @@ export async function unarchiveDaemonSessions(params: {
                 resolveConflicts,
                 assertStorageUnchanged: assertOwnedAndUnchanged,
                 assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.unarchived.length > 0) {
@@ -1154,10 +1220,30 @@ export async function unarchiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyActive') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'unarchive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
+          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError: mutation.maintenanceError,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld

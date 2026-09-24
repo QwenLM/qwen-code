@@ -114,6 +114,25 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected getResponseMessageId(_sessionId: string): string | undefined {
         return undefined;
       }
+      protected getResponseSourceLabel(_sessionId: string): undefined {
+        return undefined;
+      }
+      protected formatMarkdownAttributedText(
+        text: string,
+        sourceLabel?: string,
+      ): string {
+        const label = sourceLabel?.replace(
+          /([\\`*_[\]{}()#+.!|>~-])/gu,
+          '\\$1',
+        );
+        return label ? `${label}\n${text}` : text;
+      }
+      protected formatAttributedText(
+        text: string,
+        sourceLabel?: string,
+      ): string {
+        return sourceLabel ? `${sourceLabel} ${text}` : text;
+      }
       protected onTaskLifecycle(_event: unknown): void {}
     },
     SessionRouter: class {
@@ -400,6 +419,94 @@ describe('group sender-name sanitization', () => {
     // when finalIsAtBot is forced — text becomes the clean slash command.
     expect(env.text).toBe('/clear');
     expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('keeps another member mention display-only for an unprefixed group slash command', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-slash-other-mention',
+      group_openid: 'grp-1',
+      content: '<@OPENID_OTHER> /clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toBe('/clear');
+  });
+
+  it('keeps a sanitizer-shaped group command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-sanitized-command-group',
+      group_openid: 'grp-1',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
+  it('keeps a sanitizer-shaped C2C command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+
+    (ch as unknown as { handleC2C: (event: unknown) => void }).handleC2C({
+      id: 'evt-sanitized-command-c2c',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'user-openid' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
+  it('audits the command that ran', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
+      () => Promise.resolve();
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-command-audit',
+      group_openid: 'grp-1',
+      content: '/clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      mentions: [{ is_you: true, member_openid: 'bot-openid' }],
+    });
+
+    spy.mockRestore();
+
+    const audit = writes.find((w) => w.includes('Slash cmd from'));
+    expect(audit).toBeDefined();
+    expect(audit).toContain('/clear');
+    expect(audit!.split('\n')).toHaveLength(2);
   });
 
   it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {
@@ -873,6 +980,66 @@ describe('sendMessage', () => {
       msg_type: 2,
       markdown: { content: 'background' },
     });
+  });
+
+  it('checks the raw no-reply sentinel before rendering a source label', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const channel = ch as unknown as {
+      sendResponseMessage(
+        chatId: string,
+        text: string,
+        sessionId: string,
+        sourceLabel?: string,
+      ): Promise<void>;
+    };
+
+    await channel.sendResponseMessage(
+      'test-chat-id',
+      '<noreply>',
+      'session-1',
+      '[review_*]',
+    );
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    await channel.sendResponseMessage(
+      'test-chat-id',
+      'result',
+      'session-1',
+      '[review_*]',
+    );
+    expect(mockSendQQMessage.mock.calls[0]?.[3]).toMatchObject({
+      markdown: { content: '\\[review\\_\\*\\]\nresult' },
+    });
+  });
+
+  it('keeps source-label escapes out of the plain-text fallback', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const channel = ch as unknown as {
+      sendResponseMessage(
+        chatId: string,
+        text: string,
+        sessionId: string,
+        sourceLabel?: string,
+      ): Promise<void>;
+    };
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 400, 'markdown unsupported'))
+      .mockResolvedValueOnce(mockResponse(true));
+
+    await channel.sendResponseMessage(
+      'test-chat-id',
+      'result',
+      'session-1',
+      '[review_*]',
+    );
+
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      2,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { content: '[review_*] result', msg_type: 0 },
+    );
   });
 
   it('keeps overlapping inbound replies bound to their own messages', async () => {

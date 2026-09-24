@@ -34,6 +34,7 @@ import {
   SettingScope as CliSettingScope,
 } from '../../../../config/settings.js';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import type { ExtensionUpdateState } from '../../../state/extensions.js';
 import type {
   InstalledItem,
   InstalledGroup,
@@ -77,6 +78,8 @@ interface InstalledTabProps {
   onStatus: (status: StatusMessage | null) => void;
   extensionsUpdateState: Map<string, string>;
   reloadSignal: number;
+  /** Adopt the state an update settled on into the app's update-state map. */
+  onUpdateStateChange?: (name: string, state: ExtensionUpdateState) => void;
 }
 
 function groupFor(
@@ -97,6 +100,7 @@ export const InstalledTab = ({
   onStatus,
   extensionsUpdateState,
   reloadSignal,
+  onUpdateStateChange,
 }: InstalledTabProps) => {
   const [items, setItems] = useState<InstalledItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -692,6 +696,7 @@ export const InstalledTab = ({
         onStatus={onStatus}
         onReload={load}
         onExit={goToList}
+        onUpdateStateChange={onUpdateStateChange}
       />
     );
   }

@@ -43,8 +43,27 @@ const mocks = vi.hoisted(() => ({
   errorNotifications: { current: 0 },
 }));
 
+interface RewindSnapshotStub {
+  promptId: string;
+  turnIndex: number;
+  timestamp: string;
+  diffStats: { filesChanged: number; insertions: number; deletions: number };
+}
+
 const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
+  getRewindSnapshots: vi.fn<
+    (sessionId: string) => Promise<{
+      snapshots: Array<{ turnIndex: number; promptId: string }>;
+    }>
+  >(async () => ({ snapshots: [] })),
+  rewindSession: vi.fn<
+    (
+      sessionId: string,
+      promptId: string,
+      opts?: { clientId?: string; rewindFiles?: boolean },
+    ) => Promise<unknown>
+  >(async () => ({})),
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
@@ -56,8 +75,8 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
         deleteSessionsData: vi.fn(async () => ({})),
       };
     }
-    getRewindSnapshots = vi.fn(async () => ({ snapshots: [] }));
-    rewindSession = vi.fn(async () => ({}));
+    getRewindSnapshots = sdkMocks.getRewindSnapshots;
+    rewindSession = sdkMocks.rewindSession;
   },
 }));
 
@@ -168,12 +187,144 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
-  it('attributes its sessions to the VS Code channel', async () => {
+  it('attributes new sessions to the VS Code channel', async () => {
+    const initialSessionId = document.body.dataset.qwenSessionId;
+    delete document.body.dataset.qwenSessionId;
+    try {
+      const props = await renderApp();
+      expect(props['sessionSourceType']).toBe('vscode');
+    } finally {
+      document.body.dataset.qwenSessionId = initialSessionId;
+    }
+  });
+
+  it('restores an existing session without setting its source', async () => {
     const props = await renderApp();
-    // The daemon is shared with the CLI and the browser Web Shell for this
-    // workspace; without a distinct source type the panel cannot tell its own
-    // conversations apart from theirs.
-    expect(props['sessionSourceType']).toBe('vscode');
+    expect(props.sessionSourceType).toBeUndefined();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              sessionId: 'cli-1',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+    });
+    expect(mocks.embeddedProps.current?.sessionId).toBe('cli-1');
+    expect(mocks.embeddedProps.current?.sessionSourceType).toBeUndefined();
+  });
+
+  it('keeps a persisted VS Code current session visible outside the first page', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [],
+      nextCursor: 'next-page',
+    });
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              sessionId: 'vscode-current',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+    ).toBeUndefined();
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="vscode-current"]'),
+      ).not.toBeNull();
+    });
+  });
+
+  it('closes stale history when the host bootstraps again', async () => {
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(container.querySelector('#qwen-session-history')).not.toBeNull();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+    });
+    expect(container.querySelector('#qwen-session-history')).toBeNull();
+  });
+
+  it('attributes an internal new session to VS Code after a foreign clear', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              sessionId: 'cli-1',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(
+      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+    ).toBeUndefined();
+
+    await act(async () => {
+      callback<(sessionId: string | undefined) => void>(
+        mocks.embeddedProps.current as CapturedProps,
+        'onSessionIdChange',
+      )(undefined);
+      await Promise.resolve();
+    });
+
+    expect(
+      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+    ).toBe('vscode');
   });
 
   it('injects the active editor reference into prepared submissions', async () => {
@@ -222,6 +373,97 @@ describe('EmbeddedApp host wiring', () => {
     });
   });
 
+  it('relativizes the active file across a symlinked workspace', async () => {
+    await renderApp();
+
+    // The daemon matches workspaces by canonical path while every
+    // `activeEditorChanged` sender posts VS Code's raw `uri.fsPath`, so the
+    // bootstrap carries both spellings of a symlinked folder.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              clientId: 'client-1',
+              workspaceCwd: '/private/workspace',
+              editorWorkspaceCwd: '/workspace',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'activeEditorChanged',
+            data: {
+              fileName: 'editor.ts',
+              filePath: '/workspace/nested/editor.ts',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        sessionId?: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    // A bare `@editor.ts` is what the prefix strip degrades to when the two
+    // sides sit in different path spaces; the agent then resolves it against
+    // the workspace root and finds nothing, or the wrong sibling.
+    await expect(
+      prepareSubmit({ prompt: 'Explain this', inputAnnotations: [] }),
+    ).resolves.toEqual({
+      prompt: '@nested/editor.ts Explain this',
+      inputAnnotations: [
+        expect.objectContaining({
+          type: 'reference',
+          reference: expect.objectContaining({
+            value: '/workspace/nested/editor.ts',
+            serialized: '@nested/editor.ts',
+          }),
+        }),
+      ],
+    });
+
+    // The file picker produces a true workspace-relative annotation value, so
+    // the dedup has to see the same string or it attaches the file twice.
+    const pickerAnnotation = {
+      type: 'reference',
+      start: 0,
+      end: '@nested/editor.ts'.length,
+      text: '@nested/editor.ts',
+      reference: {
+        id: 'picker:nested/editor.ts',
+        kind: 'file',
+        label: 'editor.ts',
+        value: 'nested/editor.ts',
+        serialized: '@nested/editor.ts',
+      },
+    };
+    await expect(
+      prepareSubmit({
+        prompt: 'Explain this',
+        inputAnnotations: [pickerAnnotation],
+      }),
+    ).resolves.toEqual({
+      prompt: 'Explain this',
+      inputAnnotations: [pickerAnnotation],
+    });
+  });
+
   it('keeps an authenticated session visible when auth is cancelled', async () => {
     await renderApp();
     const { container } = mounted[mounted.length - 1];
@@ -261,7 +503,7 @@ describe('EmbeddedApp host wiring', () => {
     expect(container.textContent).toContain('Get Started');
   });
 
-  it('keeps an explicit active-file exclusion across same-file editor changes', async () => {
+  it('keeps an explicit active-file exclusion across editor changes', async () => {
     await renderApp();
 
     const dispatchEditorChanged = (fileName: string, filePath: string) =>
@@ -319,7 +561,7 @@ describe('EmbeddedApp host wiring', () => {
         prepareSubmitAfterSameFile({ prompt: 'hi', inputAnnotations: [] }),
       ).resolves.toBeUndefined();
 
-      // Switching to a different file re-arms inclusion.
+      // Switching to a different file must preserve the explicit exclusion.
       await dispatchEditorChanged('other.ts', '/workspace/other.ts');
       const prepareSubmitAfterSwitch = callback<
         (submission: {
@@ -331,7 +573,7 @@ describe('EmbeddedApp host wiring', () => {
       >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
       await expect(
         prepareSubmitAfterSwitch({ prompt: 'hi', inputAnnotations: [] }),
-      ).resolves.toMatchObject({ prompt: '@other.ts hi' });
+      ).resolves.toBeUndefined();
     } finally {
       act(() => toolbarRoot.unmount());
       toolbarContainer.remove();
@@ -479,8 +721,118 @@ describe('EmbeddedApp host wiring', () => {
         oldText: 'header\nconst value = 1;\nfooter',
         newText: 'header\nconst value = 2;\nfooter',
         source: 'web-shell',
+        requestId: 'req-write',
       },
     });
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-write' },
+    });
+  });
+
+  it('keeps host permission ownership in sync while pending stays true', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    const permissionBlock = (id: string, path: string) => ({
+      id,
+      kind: 'permission',
+      requestId: id,
+      title: path,
+      options: [],
+      preview: { kind: 'key_value', rows: [] },
+      toolCall: {
+        content: [{ type: 'diff', path, oldText: 'old', newText: 'new' }],
+      },
+    });
+
+    await act(async () => {
+      onTranscriptChange([
+        permissionBlock('req-a', '/workspace/a.ts'),
+        permissionBlock('req-b', '/workspace/b.ts'),
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-a' },
+    });
+
+    await act(async () => {
+      onTranscriptChange([
+        { ...permissionBlock('req-a', '/workspace/a.ts'), resolved: true },
+        permissionBlock('req-b', '/workspace/b.ts'),
+      ]);
+      await Promise.resolve();
+    });
+
+    // Pending stays true, but ownership moves to the remaining request so a
+    // stale accept cannot vote on the wrong approval.
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-b' },
+    });
+  });
+
+  it('posts pending: false when pending permission diffs are torn down', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([
+        {
+          id: 'perm-a',
+          kind: 'permission',
+          requestId: 'req-a',
+          title: 'update a.ts',
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/a.ts',
+                oldText: 'old',
+                newText: 'new',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-a' },
+    });
+
+    // Closing the host tab/view unmounts the app. The teardown must tell
+    // the extension the pending set is gone; otherwise the vote gate stays
+    // open for an approval the user can no longer see.
+    const { container, root } = mounted.splice(mounted.length - 1, 1)[0];
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+    container.remove();
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: false },
+    });
+    expect(postMessagesOfType('closeDiff')).toEqual([
+      {
+        type: 'closeDiff',
+        data: { path: '/workspace/a.ts', requestId: 'req-a' },
+      },
+    ]);
   });
 
   it('routes auth and session-change host actions to the extension', async () => {
@@ -505,7 +857,10 @@ describe('EmbeddedApp host wiring', () => {
     expect(postMessagesOfType('getAccountInfo')).toHaveLength(1);
     expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
       type: 'webShellSessionChanged',
-      data: { sessionId: 'session-2', workspaceCwd: '/workspace' },
+      data: {
+        sessionId: 'session-2',
+        workspaceCwd: '/workspace',
+      },
     });
     expect(postMessagesOfType('updatePanelTitle').at(-1)).toEqual({
       type: 'updatePanelTitle',
@@ -558,7 +913,7 @@ describe('EmbeddedApp host wiring', () => {
   });
 
   it('releases the panel when a session switch times out', async () => {
-    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [
         {
           sessionId: 'session-2',
@@ -566,7 +921,6 @@ describe('EmbeddedApp host wiring', () => {
           displayName: 'Other session',
         },
       ],
-      nextCursor: undefined,
     });
     vi.useFakeTimers();
     try {
@@ -582,29 +936,859 @@ describe('EmbeddedApp host wiring', () => {
         await Promise.resolve();
       });
 
-      const row = document.querySelector(
-        '[data-session-id="session-2"]',
-      ) as HTMLElement;
-      expect(row).not.toBeNull();
+      const row = await vi.waitFor(() => {
+        const session = document.querySelector(
+          '[data-session-id="session-2"]',
+        ) as HTMLElement;
+        expect(session).not.toBeNull();
+        return session;
+      });
       await act(async () => {
         row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         await Promise.resolve();
       });
+      expect(
+        (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+      ).toBeUndefined();
 
-      expect(container.textContent).toContain('Loading conversation…');
+      expect(
+        container.querySelector(
+          '[role="status"][aria-label="Loading conversation…"]',
+        ),
+      ).not.toBeNull();
 
-      // A retriable connection failure that never settles must not lock the
-      // panel behind the overlay forever.
+      // A retriable connection failure that never settles must not leave the
+      // header loading state active forever.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(15_000);
       });
 
-      expect(container.textContent).not.toContain('Loading conversation…');
+      expect(
+        container.querySelector(
+          '[role="status"][aria-label="Loading conversation…"]',
+        ),
+      ).toBeNull();
       expect(container.textContent).toContain(
         'The conversation switch timed out. Try again.',
+      );
+      expect(
+        (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
+      ).toBeUndefined();
+      expect((mocks.embeddedProps.current as CapturedProps).sessionId).toBe(
+        'session-2',
+      );
+
+      await act(async () => {
+        callback<(sessionId: string | undefined) => void>(
+          mocks.embeddedProps.current as CapturedProps,
+          'onSessionIdChange',
+        )('session-2');
+        await Promise.resolve();
+      });
+      expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
+        type: 'webShellSessionChanged',
+        data: {
+          sessionId: 'session-2',
+          workspaceCwd: '/workspace',
+        },
+      });
+      expect((mocks.embeddedProps.current as CapturedProps).sessionId).toBe(
+        'session-2',
       );
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('lists and opens workspace conversations together without a source switch', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'vscode-1',
+          sourceType: 'vscode',
+          displayName: 'VS Code chat',
+        },
+        { sessionId: 'cli-1', displayName: 'Terminal chat' },
+        {
+          sessionId: 'web-1',
+          sourceType: 'default',
+          displayName: 'Browser chat',
+        },
+        { sessionId: 'legacy-1', displayName: 'Pre-upgrade chat' },
+        { sessionId: 'child-1', parentSessionId: 'cli-1' },
+        { sessionId: 'scheduled-1', sourceType: 'scheduled_task' },
+        {
+          sessionId: 'live-1',
+          sourceType: 'default',
+          sourceId: 'realtime_voice:call-1',
+        },
+      ].map((session) => ({ ...session, workspaceCwd: '/workspace' })),
+    });
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledExactlyOnceWith({
+      pageSize: 20,
+      cursor: undefined,
+      archiveState: 'active',
+      view: 'organized',
+      group: 'all',
+    });
+    expect(container.querySelector('[data-session-source]')).toBeNull();
+    for (const id of ['vscode-1', 'cli-1', 'web-1', 'legacy-1']) {
+      const row = container.querySelector('[data-session-id="' + id + '"]');
+      expect(row).not.toBeNull();
+      expect(
+        row?.querySelectorAll('.qwen-session-row-actions button'),
+      ).toHaveLength(2);
+    }
+    expect(container.querySelector('[data-session-id="child-1"]')).toBeNull();
+    expect(container.querySelector('[data-session-id="live-1"]')).toBeNull();
+    expect(
+      container.querySelector('[data-session-id="scheduled-1"]'),
+    ).toBeNull();
+    await act(async () => {
+      (
+        container.querySelector('[data-session-id="cli-1"]') as HTMLElement
+      ).click();
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+    });
+    expect(mocks.embeddedProps.current?.sessionId).toBe('cli-1');
+    expect(mocks.embeddedProps.current?.sessionSourceType).toBeUndefined();
+    await act(async () => {
+      callback<(sessionId: string | undefined) => void>(
+        mocks.embeddedProps.current as CapturedProps,
+        'onSessionIdChange',
+      )('cli-1');
+    });
+    expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
+      type: 'webShellSessionChanged',
+      data: { sessionId: 'cli-1', workspaceCwd: '/workspace' },
+    });
+  });
+
+  it('loads past a filtered page and retains the cursor after a failed request', async () => {
+    sdkMocks.listWorkspaceSessionsPage
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'child-1',
+            parentSessionId: 'parent-1',
+            workspaceCwd: '/workspace',
+          },
+        ],
+        nextCursor: 'opaque-page-2',
+      })
+      .mockRejectedValueOnce(new Error('Temporary catalog failure'))
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'cli-2',
+            workspaceCwd: '/workspace',
+            displayName: 'Older terminal chat',
+          },
+        ],
+        truncated: true,
+      });
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    const loadMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Load more',
+      );
+    expect(loadMore()).toBeDefined();
+    expect(container.querySelector('[data-session-id="child-1"]')).toBeNull();
+    await act(async () => loadMore()!.click());
+    expect(container.textContent).toContain('Temporary catalog failure');
+    expect(
+      container.querySelector('[data-session-id="session-1"]'),
+    ).not.toBeNull();
+    expect(loadMore()).toBeDefined();
+    await act(async () => loadMore()!.click());
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenLastCalledWith({
+      pageSize: 20,
+      cursor: 'opaque-page-2',
+      archiveState: 'active',
+      view: 'organized',
+      group: 'all',
+    });
+    expect(container.querySelector('[data-session-id="cli-2"]')).not.toBeNull();
+    expect(container.textContent).toContain(
+      'Some conversations could not be loaded.',
+    );
+    expect(loadMore()).toBeUndefined();
+  });
+});
+
+describe('web shell permission decision messages', () => {
+  function installShellApi(
+    api: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const props = mocks.embeddedProps.current;
+    expect(props).not.toBeNull();
+    const shellRef = (props as CapturedProps)['shellRef'] as {
+      current: unknown;
+    };
+    expect(shellRef).toBeTruthy();
+    shellRef.current = api;
+    return api;
+  }
+
+  async function setPendingPermission(
+    props: CapturedProps,
+    requestId = 'req-1',
+  ) {
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    await act(async () => {
+      onTranscriptChange([
+        {
+          id: 'permission-1',
+          kind: 'permission',
+          requestId,
+          title: 'Edit fixture.txt',
+          resolved: false,
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/fixture.txt',
+                oldText: 'before',
+                newText: 'after',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+  }
+
+  async function dispatchDecision(
+    decision: string,
+    source: Window | null,
+    requestId = 'req-1',
+  ) {
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellPermissionDecision',
+            data: { decision, requestId },
+          },
+          source,
+        }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it('forwards host-relayed decisions to the web shell', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    // Extension-host messages arrive via the webview preload frame, i.e.
+    // with this frame's parent as their source.
+    await dispatchDecision('allow', window.parent);
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'allow');
+  });
+
+  it('ignores decisions posted by a nested iframe window', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    // MCP apps and artifact previews run in scriptable sandboxed iframes
+    // inside this webview; they can postMessage to this window and must
+    // not be able to vote on the pending approval, even when they know the
+    // active request id. Their source is their own child window, not the
+    // preload parent frame.
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    try {
+      const childWindow = iframe.contentWindow;
+      expect(childWindow).not.toBeNull();
+      await dispatchDecision('allow', childWindow as Window);
+      await dispatchDecision('reject', childWindow as Window);
+    } finally {
+      iframe.remove();
+    }
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  it('ignores decisions delivered without a source window', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    // Fail closed on synthetic deliveries: real host messages always carry
+    // the preload frame as their source.
+    await dispatchDecision('allow', null);
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  // R3-5: the host-side binding gates the vote on the id the host believes is
+  // pending. Only the matching-id path was exercised, so a regression that
+  // dropped the comparison would have gone unnoticed.
+  it('ignores a decision bound to a different request id', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props, 'req-1');
+
+    await dispatchDecision('allow', window.parent, 'req-stale');
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  // R3-6: 'reject' is half the decision vocabulary and had no forwarding
+  // witness; the guard admits exactly 'allow' and 'reject'.
+  it('forwards a host-relayed reject', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    await dispatchDecision('reject', window.parent);
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'reject');
+  });
+
+  it('surfaces a notice when the shell resolves the vote to false', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(false);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+    const { container } = mounted[mounted.length - 1];
+
+    await dispatchDecision('allow', window.parent);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'allow');
+    // A resolved `false` must not die silently: it covers both the benign
+    // race (the approval was resolved elsewhere one tick earlier) and hung
+    // votes (e.g. while catching up after a session switch). Notify the
+    // user without the hard-error state reset of `handleShellError`.
+    expect(container.textContent).toContain(
+      'The approval decision could not be applied.',
+    );
+  });
+});
+
+describe('EmbeddedApp permission diff dismissal', () => {
+  const permissionBlock = {
+    id: 'perm-write',
+    kind: 'permission',
+    requestId: 'req-write',
+    title: 'Write new.ts',
+    options: [],
+    preview: { kind: 'key_value', rows: [] },
+    toolCall: {
+      content: [
+        {
+          type: 'diff',
+          path: '/workspace/new.ts',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+    },
+  };
+
+  function latestProps(): CapturedProps {
+    const props = mocks.embeddedProps.current;
+    expect(props).not.toBeNull();
+    return props as CapturedProps;
+  }
+
+  async function dismiss(
+    requestId: string,
+    source: Window | null = window.parent,
+  ): Promise<void> {
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'permissionDiffClosed', data: { requestId } },
+          source,
+        }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it('hands the edit preview back when the user closes the diff unvoted', async () => {
+    const props = await renderApp();
+    expect(props['hostOwnsEditDiffPreview']).toBe(true);
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await dismiss('req-write');
+
+    // The row unlocks and the web shell renders the diff inline, so the user
+    // can still see what they are approving (#10557).
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    // ...and the host does not reopen the tab the user just closed.
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+  });
+
+  it('takes the preview back for the next permission request', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    await dismiss('req-write');
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    await act(async () => {
+      onTranscriptChange([
+        {
+          ...permissionBlock,
+          id: 'perm-second',
+          requestId: 'req-second',
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/other.ts',
+                oldText: 'x',
+                newText: 'y',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+    const opened = postMessagesOfType('openDiff');
+    expect(opened).toHaveLength(2);
+    expect((opened[1]?.data as { requestId?: string })?.requestId).toBe(
+      'req-second',
+    );
+  });
+
+  // R5-3/R5-4: the teardown half of the recovery path the Risk & Scope section
+  // rests on. `closeOpenPermissionDiffs` hands the preview back and forgets the
+  // dismissed id, and the dismissal handler drops the request from the
+  // open-diff map — reverting any of the three lines left every test green.
+  it('returns preview ownership to the host when the pending diffs are torn down', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await dismiss('req-write');
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    // Moving to an automatic approval mode tears every pending diff down.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'modeChanged', data: { modeId: 'yolo' } },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+    // The tab the user already closed is not closed a second time: the
+    // dismissal dropped it from the open-diff map, so the teardown loop has
+    // nothing left to post for that request.
+    expect(postMessagesOfType('closeDiff')).toEqual([]);
+
+    // With the dismissed id forgotten, the same request can own a native diff
+    // again once the mode allows approvals.
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(2);
+  });
+
+  it('ignores a dismissal posted by a nested iframe window', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+
+    // MCP apps and artifact previews run in scriptable sandboxed iframes inside
+    // this webview. Handing the edit preview back is not a vote, but it is a
+    // state flip they must not be able to trigger.
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    try {
+      await dismiss('req-write', iframe.contentWindow);
+      await dismiss('req-write', null);
+    } finally {
+      iframe.remove();
+    }
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+  });
+
+  it('ignores a dismissal for a request that is not the pending one', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    await dismiss('req-stale');
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+  });
+});
+
+describe('EmbeddedApp permission diff request-id wiring', () => {
+  function permission(requestId: string, path: string) {
+    return {
+      id: `block-${requestId}`,
+      kind: 'permission',
+      requestId,
+      title: `Edit ${path}`,
+      resolved: false,
+      options: [],
+      preview: { kind: 'key_value', rows: [] },
+      toolCall: {
+        content: [{ type: 'diff', path, oldText: 'before', newText: 'after' }],
+      },
+    };
+  }
+
+  // R3-16: the host used to open a native diff for every pending permission.
+  // Only the first one gets a tab now, and nothing asserted the count.
+  it('opens a native diff only for the first pending permission', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([
+        permission('req-a', '/workspace/a.txt'),
+        permission('req-b', '/workspace/b.txt'),
+      ]);
+      await Promise.resolve();
+    });
+
+    const opened = postMessagesOfType('openDiff');
+    expect(opened).toHaveLength(1);
+    expect((opened[0]?.data as { requestId?: string })?.requestId).toBe(
+      'req-a',
+    );
+  });
+
+  // R3-13: the host file-open hand-off had zero coverage in either package.
+  // It is what makes a workspace file open in a real VS Code editor instead of
+  // the web shell's own attachment panel.
+  it('routes a workspace file open to the extension host', async () => {
+    const props = await renderApp();
+    const onWorkspaceFileOpen = callback<(path: string) => void>(
+      props,
+      'onWorkspaceFileOpen',
+    );
+
+    await act(async () => {
+      onWorkspaceFileOpen('src/app.ts');
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('openFile')).toEqual([
+      { type: 'openFile', data: { path: 'src/app.ts' } },
+    ]);
+  });
+
+  // R3-4: the cleanup loop closes by (path, requestId) rather than by path, so
+  // a resolved approval cannot close a diff another request owns.
+  it('closes the diff scoped to the request that no longer needs it', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permission('req-a', '/workspace/a.txt')]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await act(async () => {
+      onTranscriptChange([
+        { ...permission('req-a', '/workspace/a.txt'), resolved: true },
+      ]);
+      await Promise.resolve();
+    });
+
+    const closed = postMessagesOfType('closeDiff');
+    expect(closed).toHaveLength(1);
+    expect(closed[0]).toEqual({
+      type: 'closeDiff',
+      data: { path: '/workspace/a.txt', requestId: 'req-a' },
+    });
+  });
+});
+
+describe('EmbeddedApp message edit rewind', () => {
+  interface PrepareSubmission {
+    sessionId?: string;
+    prompt: string;
+    inputAnnotations: unknown[];
+  }
+
+  function snapshot(turnIndex: number): RewindSnapshotStub {
+    return {
+      promptId: `prompt-${turnIndex}`,
+      turnIndex,
+      timestamp: '2026-09-06T00:00:00.000Z',
+      diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+    };
+  }
+
+  async function startEditing(
+    props: CapturedProps,
+    turnIndex: number,
+  ): Promise<(submission: PrepareSubmission) => Promise<unknown>> {
+    const onEdit = callback<(turnIndex: number, content: string) => boolean>(
+      props,
+      'onUserMessageEditRequest',
+    );
+    await act(async () => {
+      onEdit(turnIndex, 'original text');
+      await Promise.resolve();
+    });
+    const latest = mocks.embeddedProps.current;
+    expect(latest).not.toBeNull();
+    return callback<(submission: PrepareSubmission) => Promise<unknown>>(
+      latest as CapturedProps,
+      'prepareSubmit',
+    );
+  }
+
+  beforeEach(() => {
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [] });
+    sdkMocks.rewindSession.mockResolvedValue({});
+  });
+
+  // The daemon-backed edit/rewind shipped with the cutover but nothing ever
+  // exercised it: getRewindSnapshots and rewindSession appeared in this file
+  // only as mock stubs (#9911).
+  it('rewinds to the snapshot for the edited turn, not the newest one', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(2), snapshot(5), snapshot(3)],
+    });
+    const prepareSubmit = await startEditing(props, 3);
+
+    await act(async () => {
+      await prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
+    // Turn 3, even though turn 5 is newer and listed before it.
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+    // The rewind must be unattributed: the daemon only accepts the client id
+    // it registered for the session at create/load (`client_<uuid>`), which a
+    // raw DaemonClient never learns — the host's own `vscode-<uuid>` is not
+    // registered, and passing it makes the daemon reject the rewind with 400
+    // `invalid_client_id`, surfacing as the localized "Failed to edit the
+    // message" toast on every edit attempt.
+    expect(sdkMocks.rewindSession.mock.lastCall?.[2]).not.toHaveProperty(
+      'clientId',
+    );
+  });
+
+  it('refuses the edit when the turn no longer has a snapshot', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(2)],
+    });
+    const prepareSubmit = await startEditing(props, 7);
+
+    await expect(
+      prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }),
+    ).rejects.toThrow('The original message can no longer be edited.');
+
+    // The rejection is what the web shell now surfaces to the user; rewinding
+    // to some other turn would silently discard different work.
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  });
+
+  it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
+    const props = await renderApp();
+
+    // Hold the snapshot fetch open so the session can switch while it is in
+    // flight.
+    let resolveSnapshots!: (value: { snapshots: RewindSnapshotStub[] }) => void;
+    sdkMocks.getRewindSnapshots.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSnapshots = resolve;
+        }),
+    );
+
+    const prepareSubmit = await startEditing(props, 3);
+    const submission = prepareSubmit({
+      sessionId: 'session-1',
+      prompt: 'edited text',
+      inputAnnotations: [],
+    });
+
+    // The user navigates to another session before the fetch resolves; the
+    // rewind must still target the session the submission was captured for.
+    await act(async () => {
+      callback<(sessionId: string | undefined) => void>(
+        props,
+        'onSessionIdChange',
+      )('session-2');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolveSnapshots({ snapshots: [snapshot(2), snapshot(3), snapshot(5)] });
+      await submission;
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
+});
+
+describe('EmbeddedApp rewind preflight localization', () => {
+  it('rethrows a localized error when getRewindSnapshots rejects', async () => {
+    await renderApp();
+    const props = mocks.embeddedProps.current as CapturedProps;
+
+    const onUserMessageEditRequest = callback<
+      (turnIndex: number, content: string) => boolean
+    >(props, 'onUserMessageEditRequest');
+    await act(async () => {
+      onUserMessageEditRequest(0, 'original text');
+      await Promise.resolve();
+    });
+
+    sdkMocks.getRewindSnapshots.mockRejectedValueOnce(new Error('HTTP 503'));
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    await expect(
+      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+    ).rejects.toThrow('Failed to edit the message. Please try again.');
+  });
+
+  it('rethrows a localized error when rewindSession rejects', async () => {
+    await renderApp();
+    const props = mocks.embeddedProps.current as CapturedProps;
+
+    const onUserMessageEditRequest = callback<
+      (turnIndex: number, content: string) => boolean
+    >(props, 'onUserMessageEditRequest');
+    await act(async () => {
+      onUserMessageEditRequest(0, 'original text');
+      await Promise.resolve();
+    });
+
+    sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
+      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
+    });
+    sdkMocks.rewindSession.mockRejectedValueOnce(new Error('HTTP 503'));
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    await expect(
+      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+    ).rejects.toThrow('Failed to edit the message. Please try again.');
   });
 });

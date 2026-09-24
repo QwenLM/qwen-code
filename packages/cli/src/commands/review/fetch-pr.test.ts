@@ -24,9 +24,19 @@ import {
   createReviewWorktreeLease,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
+  recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
 } from '../../services/review-worktree-lease.js';
+import * as environment from '../../config/environment.js';
 import { classifyHeavy } from './lib/heavy.js';
-import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
+import {
+  DEADLINE_ENV,
+  hasReviewDeadline,
+  DEFAULT_DEADLINE_SECONDS,
+  RESERVE_ENV,
+  COMPOSE_FLOOR_ENV,
+} from './lib/deadline.js';
+import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
@@ -34,6 +44,7 @@ import { buildDiffPlan } from './lib/diff-plan.js';
 import { buildPlanReport } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { makeDiff } from './lib/test-utils.js';
+import { requiredAgents } from './lib/roster.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -277,6 +288,18 @@ const producerMocks = vi.hoisted(() => ({
   buildDiffPlan: vi.fn(),
   actualBuildDiffPlan: undefined as unknown as (...a: unknown[]) => unknown,
   writeStderrLine: vi.fn(),
+  // Admits by default, which is what the real one answers for every checkout
+  // outside a review temp dir — the shape all but one of these tests are in.
+  // The ordering test steers it to a refusal; nothing else touches it.
+  untrustedRepositoryFrom: vi.fn((..._args: unknown[]): string | null => null),
+  // The prebuild runs Agent 7's real build-test against the plan just
+  // written; stubbed here because this suite's fs is a mock and the wiring —
+  // when it runs, against what, and what lands in the plan — is the contract.
+  // The cover gate beside it is exercised here but owned by prebuild.test.ts;
+  // default-covered so the wiring tests run the prebuild they set the env
+  // for, overridable for the skip path.
+  prebuildCovered: vi.fn(() => true),
+  prebuildWorktree: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -324,15 +347,33 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: producerMocks.writeStderrLine,
 }));
 
-vi.mock('../../services/review-worktree-lease.js', () => ({
-  clearReviewWorktreeLease: vi.fn(),
-  clearReviewWorktreeLeaseIfOwned: vi.fn(),
-  createReviewWorktreeLease: vi.fn(),
-  readReviewWorktreeLease: vi.fn((): unknown => null),
-  reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
-  reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
-}));
+vi.mock('../../services/review-worktree-lease.js', () => {
+  const readReviewWorktreeLease = vi.fn(
+    (_repositoryRoot: string, _target: string): unknown => null,
+  );
+  return {
+    clearReviewWorktreeLease: vi.fn(),
+    clearReviewWorktreeLeaseIfOwned: vi.fn(),
+    createReviewWorktreeLease: vi.fn(),
+    recordReviewWorktreeLeaseMergeBase: vi.fn(),
+    restoreReviewWorktreeLeaseMergeBase: vi.fn(),
+    readReviewWorktreeLease,
+    // The found-at variant the held-lease refusal uses: delegate so the
+    // `mockReturnValueOnce` steering above reaches both.
+    readReviewWorktreeLeaseAt: (repositoryRoot: string, target: string) => {
+      const lease = readReviewWorktreeLease(repositoryRoot, target);
+      return lease
+        ? {
+            lease,
+            path: `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
+          }
+        : null;
+    },
+    reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
+    reviewLeasePath: (_repositoryRoot: string, target: string) =>
+      `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
+  };
+});
 
 vi.mock('./lib/gh.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/gh.js')>();
@@ -352,6 +393,14 @@ vi.mock('./lib/git.js', () => ({
   gitWithInput: vi.fn((): string => ''),
   refExists: producerMocks.refExists,
   releaseWorktree: producerMocks.releaseWorktree,
+}));
+
+// PARTIAL: only the launch-directory gate is steered. The rest of this module
+// — `sanitizedGitEnv`, `untrustedGitfile` — has to stay real, because the
+// worktree gate is one of the things the report-assembly path exercises.
+vi.mock('./lib/worktree.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/worktree.js')>()),
+  untrustedRepositoryFrom: producerMocks.untrustedRepositoryFrom,
 }));
 
 vi.mock('./lib/merge-base.js', () => ({
@@ -405,9 +454,43 @@ vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   ) => unknown;
   return { ...actual, buildDiffPlan: producerMocks.buildDiffPlan };
 });
+vi.mock('./lib/prebuild.js', async (importOriginal) => {
+  // `prebuildRequested` stays real: the env gate — and its refusal of a
+  // .env-sourced value — is what the wiring tests below exercise.
+  const actual = await importOriginal<typeof import('./lib/prebuild.js')>();
+  return {
+    ...actual,
+    prebuildCovered: producerMocks.prebuildCovered,
+    prebuildWorktree: producerMocks.prebuildWorktree,
+  };
+});
+
+// Hermetic against the ambient opt-in this same PR welds into CI's review
+// sessions: post-merge every review-session shell inherits
+// QWEN_REVIEW_PREBUILD=1, and every suite in this FILE that drives the
+// handler passes the REAL env gate (the prebuild module mock keeps
+// prebuildRequested real) before dereferencing the bare prebuildWorktree
+// stub — so the scrub must cover the whole file, not one describe (R5-1).
+// The prebuild describe re-sets the variable for the tests that are about
+// it: its describe-level beforeEach runs after this file-level one.
+const ambientPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
+beforeEach(() => {
+  delete process.env['QWEN_REVIEW_PREBUILD'];
+});
+afterAll(() => {
+  if (ambientPrebuild === undefined) {
+    delete process.env['QWEN_REVIEW_PREBUILD'];
+  } else {
+    process.env['QWEN_REVIEW_PREBUILD'] = ambientPrebuild;
+  }
+});
 
 describe('fetch-pr report assembly', () => {
-  const savedEnv: { sessionId?: string; promptId?: string } = {};
+  const savedEnv: {
+    sessionId?: string;
+    promptId?: string;
+    automatic?: string;
+  } = {};
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -423,6 +506,7 @@ describe('fetch-pr report assembly', () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     producerMocks.refExists.mockReturnValue(false);
+    producerMocks.untrustedRepositoryFrom.mockReturnValue(null);
     producerMocks.git.mockImplementation((...args: string[]) =>
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
@@ -462,11 +546,16 @@ describe('fetch-pr report assembly', () => {
     // sessions), so every path this suite drives starts registered.
     savedEnv.sessionId = process.env['QWEN_CODE_SESSION_ID'];
     savedEnv.promptId = process.env['QWEN_CODE_PROMPT_ID'];
+    savedEnv.automatic = process.env['QWEN_REVIEW_AUTOMATIC'];
+    delete process.env['QWEN_REVIEW_AUTOMATIC'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-self';
     process.env['QWEN_CODE_PROMPT_ID'] = 'prompt-now';
   });
 
   afterEach(() => {
+    if (savedEnv.automatic === undefined)
+      delete process.env['QWEN_REVIEW_AUTOMATIC'];
+    else process.env['QWEN_REVIEW_AUTOMATIC'] = savedEnv.automatic;
     if (savedEnv.sessionId === undefined) {
       delete process.env['QWEN_CODE_SESSION_ID'];
     } else {
@@ -791,6 +880,11 @@ describe('fetch-pr report assembly', () => {
       expect(noClock.srcDiffLines).toBeGreaterThanOrEqual(3000);
       expect(noClock.budget.reverseAuditRounds).toBe(5);
 
+      // The default wall rides along, and is why the tier still reads 5: a
+      // default is not an explicit clock.
+      expect(noClock.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.huge);
+      expect(noClock.deadlineSource).toBe('default');
+
       process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
       producerMocks.writeFileSync.mockClear();
       const withClock = await reportFor({});
@@ -800,10 +894,250 @@ describe('fetch-pr report assembly', () => {
       else process.env[DEADLINE_ENV] = before;
     }
   });
+  it('records an explicit --deadline as a flag wall — and `none` as no wall', async () => {
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'beef0000',
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockReturnValue(
+      Buffer.from(makeDiff('src/huge.ts', 9000)),
+    );
+    // Isolate the reserve / compose-floor overrides too: the shell-priced
+    // leg reads them from the ambient environment, and this repository's
+    // own review job exports a reserve.
+    const before = process.env[DEADLINE_ENV];
+    const beforeReserve = process.env[RESERVE_ENV];
+    const beforeFloor = process.env[COMPOSE_FLOOR_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      delete process.env[RESERVE_ENV];
+      delete process.env[COMPOSE_FLOOR_ENV];
+      producerMocks.writeFileSync.mockClear();
+      const flagged = await reportFor({ deadline: '120' });
+      expect(flagged.deadlineSeconds).toBe(7200);
+      expect(flagged.deadlineSource).toBe('flag');
+      // The flag is an explicit clock: it flips the huge tier like the env.
+      expect(flagged.budget.reverseAuditRounds).toBe(3);
+
+      producerMocks.writeFileSync.mockClear();
+      const none = await reportFor({ deadline: 'none' });
+      expect(none).not.toHaveProperty('deadlineSeconds');
+      expect(none).not.toHaveProperty('deadlineSource');
+      expect(none.budget.reverseAuditRounds).toBe(5);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+      if (beforeReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = beforeReserve;
+      if (beforeFloor === undefined) delete process.env[COMPOSE_FLOOR_ENV];
+      else process.env[COMPOSE_FLOOR_ENV] = beforeFloor;
+    }
+  });
+  it('refuses a malformed --deadline before any side effect', async () => {
+    await expect(reportFor({ deadline: 'soon' })).rejects.toThrow(
+      /--deadline must be a whole number of minutes or `none`, got "soon"/,
+    );
+    // All three legs the production comment names: detection/auth (gh),
+    // git, and the worktree lease — the destructive one (#9205).
+    expect(producerMocks.gh).not.toHaveBeenCalled();
+    expect(producerMocks.git).not.toHaveBeenCalled();
+    expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+  });
+  it('refuses a --deadline this shell cannot hold a convergence under before any side effect, too', async () => {
+    // The shell-priced bar is the second half of the same early check: a
+    // wall the env-free rule admits (120 > 90) that this shell's reserve
+    // override puts out of reach must fail here, not at the plan write
+    // after detection, auth, the lease and the fetch have run.
+    // The shell bar is skipped under an env epoch, and this repository's
+    // own review job exports one — isolate it, or the case passes vacuously
+    // there and fails here.
+    const before = process.env[RESERVE_ENV];
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      process.env[RESERVE_ENV] = '4800';
+      delete process.env[DEADLINE_ENV];
+      await expect(reportFor({ deadline: '120' })).rejects.toThrow(
+        /shortest wall that can hold one here is 141 minutes/,
+      );
+      expect(producerMocks.gh).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+    } finally {
+      if (before === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = before;
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
+  });
 
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
   // stale-clean the holder's worktree before failing on, destroying it. The
   // refusal must precede every destructive step, including the lease write.
+  describe('prebuild (issue #10108)', () => {
+    const OUT = '/tmp/fetch-report.json';
+    const DEPS = {
+      installed: true,
+      built: true,
+      note: '',
+      report: tmpFile('pr-42', 'prebuild.json'),
+      durationMs: 1234,
+    };
+    let savedPrebuild: string | undefined;
+
+    beforeEach(() => {
+      savedPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
+      process.env['QWEN_REVIEW_PREBUILD'] = '1';
+      producerMocks.prebuildWorktree.mockReturnValue(DEPS);
+      // Same reason as the defaults above: clearAllMocks keeps a
+      // mockReturnValue the skip test below sets, so re-assert the
+      // covered default every test starts from.
+      producerMocks.prebuildCovered.mockReturnValue(true);
+    });
+
+    afterEach(() => {
+      if (savedPrebuild === undefined) {
+        delete process.env['QWEN_REVIEW_PREBUILD'];
+      } else {
+        process.env['QWEN_REVIEW_PREBUILD'] = savedPrebuild;
+      }
+    });
+
+    /** Every write of the plan, in order, parsed. */
+    function planWrites(): Array<Record<string, unknown>> {
+      return producerMocks.writeFileSync.mock.calls
+        .filter(([path]: unknown[]) => path === OUT)
+        .map(([, body]: unknown[]) => JSON.parse(String(body)));
+    }
+
+    it('runs the prebuild against the fresh worktree and records it in the plan', async () => {
+      const report = await reportFor({});
+      expect(report.dependencies).toEqual(DEPS);
+      // Agent 7's build-test reads the plan this command wrote, builds in
+      // the worktree this command created, and writes beside the plan.
+      expect(producerMocks.prebuildWorktree).toHaveBeenCalledTimes(1);
+      expect(producerMocks.prebuildWorktree).toHaveBeenCalledWith({
+        plan: OUT,
+        worktree: worktreePath('42'),
+        report: tmpFile('pr-42', 'prebuild.json'),
+      });
+    });
+
+    it('writes the plan first, rewrites it with the outcome, and ledgers the FINAL write', async () => {
+      await reportFor({});
+      // build-test reads the plan for its file list, so the plan exists
+      // before the prebuild runs; the outcome then lands in a rewrite.
+      const writes = planWrites();
+      expect(writes).toHaveLength(2);
+      expect(writes[0]).not.toHaveProperty('dependencies');
+      expect(writes[1]).toHaveProperty('dependencies', DEPS);
+      const [firstWrite, secondWrite] =
+        producerMocks.writeFileSync.mock.invocationCallOrder.filter(
+          (_order: number, i: number) =>
+            producerMocks.writeFileSync.mock.calls[i][0] === OUT,
+        );
+      const prebuildOrder =
+        producerMocks.prebuildWorktree.mock.invocationCallOrder[0];
+      expect(prebuildOrder).toBeGreaterThan(firstWrite);
+      expect(prebuildOrder).toBeLessThan(secondWrite);
+      // The session ledger keys on the plan's mtime — the run epoch every
+      // downstream fence reads through — so it must record the rewrite,
+      // not the write the prebuild superseded.
+      const { appendRunSession } = await import('./lib/run-ledger.js');
+      expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+      expect(
+        vi.mocked(appendRunSession).mock.invocationCallOrder[0],
+      ).toBeGreaterThan(secondWrite);
+    });
+
+    it('is absent from the plan when the environment did not ask for it', async () => {
+      delete process.env['QWEN_REVIEW_PREBUILD'];
+      const report = await reportFor({});
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+      // And the plan is written exactly once — byte-for-byte the pre-prebuild
+      // fetch, for every local review.
+      expect(planWrites()).toHaveLength(1);
+    });
+
+    it('skips the prebuild and warns when the session-shell cover is absent', async () => {
+      // The local shape: the opt-in is set, but no covering session
+      // default is welded — a prebuild started under the built-in 120s
+      // default dies mid-install with the whole fetch-pr call, so the
+      // review degrades to the pre-prebuild flow instead.
+      producerMocks.prebuildCovered.mockReturnValue(false);
+      const report = await reportFor({});
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+      expect(planWrites()).toHaveLength(1);
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild skipped:'));
+      expect(line).toContain(PREBUILD_ENV);
+    });
+
+    it('skips the prebuild on an empty diff, where the skill stops before any agent runs', async () => {
+      // A resolvable base whose range diffs to nothing: the capture
+      // succeeds and is empty, which is the one shape `emptyDiff` accepts.
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: 'b'.repeat(40),
+        baseFetchFailed: false,
+      });
+      const report = await reportFor({});
+      expect(report.emptyDiff).toBe(true);
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+    });
+
+    it('announces the prebuild on stderr before the call, and the outcome after', async () => {
+      // The call is a blocking prefix that emits nothing until it returns,
+      // so the start line must precede it — a run killed mid-prebuild
+      // otherwise ends its log at the plan write with no trace of where it
+      // died. DEPS' 1234ms rounds to the 1s the success line quotes.
+      await reportFor({});
+      const calls = producerMocks.writeStderrLine.mock.calls;
+      const startIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilding the worktree via build-test'),
+      );
+      expect(startIdx).toBeGreaterThanOrEqual(0);
+      const prebuildOrder =
+        producerMocks.prebuildWorktree.mock.invocationCallOrder[0];
+      expect(
+        producerMocks.writeStderrLine.mock.invocationCallOrder[startIdx],
+      ).toBeLessThan(prebuildOrder);
+      expect(String(calls[startIdx][0])).toContain(
+        `(${PREBUILD_ENV}=1, budget ${PREBUILD_BUDGET_S}s)`,
+      );
+      const doneIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilt the worktree in'),
+      );
+      expect(doneIdx).toBeGreaterThan(startIdx);
+      expect(String(calls[doneIdx][0])).toBe(
+        'Prebuilt the worktree in 1s: dependencies installed and the ' +
+          "scoped build closure compiled; build-test's install is a no-op " +
+          'on this tree.',
+      );
+    });
+
+    it('discloses an incomplete prebuild on stderr, with the note', async () => {
+      producerMocks.prebuildWorktree.mockReturnValue({
+        installed: false,
+        built: false,
+        note: 'npm ci exited 1',
+        report: null,
+        durationMs: 4321,
+      });
+      await reportFor({});
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild did not complete in'));
+      expect(line).toBe(
+        'Prebuild did not complete in 4s (installed: false, built: false; ' +
+          'npm ci exited 1); build-test installs and builds on its own ' +
+          'path as before.',
+      );
+    });
+  });
+
   describe('lease lock', () => {
     const foreignLease = {
       sessionId: 'session-other',
@@ -953,8 +1287,37 @@ describe('fetch-pr report assembly', () => {
         producerMocks.git.mock.invocationCallOrder[0]!,
       );
       expect(leaseOrder).toBeLessThan(
-        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
+        producerMocks.gitOpt.mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('refuses a poisoned launch directory before the sweep and the fetch', async () => {
+      // The launch directory is where every git command here without an
+      // explicit `-C` finds its repository, and in the nested geometry that
+      // directory sits inside the OUTER review's read-write mount. Gating only
+      // the `worktree add` at step 4 left `cleanStale`'s force-remove and the
+      // PR fetch resolving through the very pointer the gate distrusts — a
+      // fetch through a planted repository loads its transport config and runs
+      // it on the host.
+      //
+      // So the assertion is ordering, not just refusal: NOTHING may have run.
+      // Not the lease read, not the sweep, not one git call.
+      producerMocks.untrustedRepositoryFrom.mockReturnValue(
+        'the launch dir resolves to an admin entry inside the review temp dir',
+      );
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to review PR #42 from this directory/,
+      );
+
+      expect(producerMocks.untrustedRepositoryFrom).toHaveBeenCalledWith(
+        process.cwd(),
+      );
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(producerMocks.execFileSync).not.toHaveBeenCalled();
+      expect(vi.mocked(readReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
     });
   });
 
@@ -1011,13 +1374,17 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         'Failed to fetch PR #42 metadata',
       );
-      expect(producerMocks.execFileSync).toHaveBeenCalledWith(
-        'git',
-        ['branch', '-D', 'qwen-review/pr-42'],
-        // Sanitized env: a delete must land in the repository the caller
-        // named, not the one an exported `GIT_DIR` points at.
-        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
+      // Through `lib/git`'s gated wrapper, not a direct `execFileSync`: the
+      // rollback runs from the launch directory, `branch -D` is a
+      // reference-transaction hook channel, and an ungated spawn there executes
+      // whatever hooks a planted pointer configures. The wrapper also carries
+      // the sanitized env and the timeout the direct spawn lacked.
+      expect(producerMocks.gitOpt).toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
       );
+      expect(producerMocks.execFileSync).not.toHaveBeenCalled();
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
@@ -1028,11 +1395,157 @@ describe('fetch-pr report assembly', () => {
       // `branch -D` lets another session through the emptied gate while the
       // deletion is still pending. Compare the FIRST clear: the outer catch's
       // second clear fires after the branch leg anyway.
-      expect(
-        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
-      ).toBeLessThan(
+      expect(producerMocks.gitOpt.mock.invocationCallOrder[0]!).toBeLessThan(
         vi.mocked(clearReviewWorktreeLeaseIfOwned).mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('records the resolved merge base host-side, fetch failure or not (R3-5, R3-7)', async () => {
+      // The only production caller of the host-side anchor `base-tree` rules
+      // on. The anchor has to belong to the capture that OWNS the plan:
+      // skipping the record on a failed base fetch left a previous round's
+      // value standing in the lease, and the anchor then AUTHENTICATED a plan
+      // the mount had rewritten back to that stale sha.
+      const recorded = vi.mocked(recordReviewWorktreeLeaseMergeBase);
+
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: 'mb-resolved',
+        baseFetchFailed: false,
+      }));
+      await reportFor({});
+      // The session id is passed too, so a capture that lost the
+      // acquisition race cannot write its base over the live review's lease.
+      expect(recorded).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+        'mb-resolved',
+        expect.any(String),
+        { stale: false },
+      );
+
+      // The failed-fetch round records too — WITH the capture's ruling that
+      // the sha may be stale, which `base-tree` refuses on. Left in the plan
+      // alone, that ruling was the reviewed code's to flip (R5-7); and it is
+      // not a reason to leave the anchor pointing at someone else's round.
+      recorded.mockClear();
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: 'mb-stale',
+        baseFetchFailed: true,
+      }));
+      await reportFor({});
+      expect(recorded).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+        'mb-stale',
+        expect.any(String),
+        { stale: true },
+      );
+
+      // No merge base at all: nothing to anchor, and nothing recorded.
+      recorded.mockClear();
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: null,
+        baseFetchFailed: false,
+      }));
+      await reportFor({});
+      expect(recorded).not.toHaveBeenCalled();
+    });
+
+    it('lets the step-4 launch-dir refusal propagate unwrapped, with no rollback', async () => {
+      // The second ask sits OUTSIDE the try whose catch rolls the fetched ref
+      // back. Thrown inside, the refusal was caught by that rollback, which
+      // deleted the ref through the very pointer the refusal had just declared
+      // untrusted — `branch -D` is a reference-transaction hook channel — and
+      // then re-wrapped the refusal as `Failed to create worktree at …`,
+      // indistinguishable from an infrastructure failure. Outside, it reaches
+      // the lease rollback, which spawns no git at all, and the user unmangled.
+      producerMocks.untrustedRepositoryFrom
+        .mockReturnValueOnce(null) // the hoisted gate at the top of the run
+        .mockReturnValueOnce(
+          '/repo/.qwen/tmp/review-pr-42 resolves to an admin entry inside the review temp dir',
+        );
+
+      await expect(reportFor({})).rejects.toThrow(
+        /^refusing to create a review worktree: /,
+      );
+      expect(producerMocks.gitOpt).not.toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
+    });
+
+    it('refuses the step-4 create when a symlinked ancestor of the worktree path survived the sweep (R27-9)', async () => {
+      // `cleanStale`'s releaseWorktree DECLINES to free through a symlinked
+      // ancestor — it prints a line and leaves the link standing — so "the
+      // sweep just ran" is not proof the parent of `wt` is real. Without the
+      // ancestor arm beside the launch-dir gate, `mkdirSync(dirname(wt))`
+      // creates through the link and `git worktree add` checks the PR's code
+      // out at the link's target: outside the review temp dir, where
+      // `mountRootFor` answers null and the build/test phase runs
+      // unsandboxed in a directory the planter chose.
+      const tmpParent = join(process.cwd(), '.qwen', 'tmp');
+      const linkStat = {
+        isSymbolicLink: () => true,
+        isFile: () => false,
+      };
+      producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+        if (String(path) === tmpParent) return linkStat;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to create a review worktree at .*is a symlink/,
+      );
+      // Nothing was created through the link — no mkdir, no worktree add —
+      // and the fetched ref survives the refusal for the next run's
+      // cleanStale to sweep (the arm sits outside the rollback try).
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalledWith(
+        'worktree',
+        'add',
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(producerMocks.gitOpt).not.toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
+    });
+
+    it('refuses the step-4 create when the link sits AT the worktree path (R32-11)', async () => {
+      // The ancestor arm asked `dirname(wt)` and never `wt` itself, so a link
+      // planted at the destination — the cheaper plant of the two — walked
+      // straight through it. `releaseWorktree` unlinks a leaf link it can
+      // reach, but `cleanStale` only WARNS when the release reports
+      // `freed: false` (an EACCES on `.qwen/tmp` is enough) and runs on to
+      // here; `mkdirSync(dirname(wt))` is then a no-op on the real parent and
+      // `git worktree add wt ref` creates and checks out THROUGH the link —
+      // measured on git 2.43, exit 0 with the tree in the external directory.
+      const wt = join(process.cwd(), '.qwen', 'tmp', 'review-pr-42');
+      const linkStat = {
+        isSymbolicLink: () => true,
+        isFile: () => false,
+      };
+      producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+        if (String(path) === wt) return linkStat;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to create a review worktree at .*is a symlink/,
+      );
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalledWith(
+        'worktree',
+        'add',
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
     });
 
     it('clears the lease when the worktree add fails', async () => {
@@ -1321,6 +1834,307 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toContain('b/b.ts');
   });
 
+  it('resolves the critical posture from the side file (#10104)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        // The previous posted round: round 7, so this round is 8 — past
+        // the auto floor's round schedule.
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.postureCause).toBe('round');
+    // The widening is unchanged by the posture: the interaction file
+    // re-enters with its full-range section, exactly as on any other
+    // incremental round.
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    expect(writtenDiff() ?? '').toContain('+y2');
+    // The recorded round cap prices the territory tier the posture flips
+    // to, not the small tier the narrowed sizes would read — while the
+    // default wall stays the one those sizes earn: a posture is not a size.
+    expect(report.budget.reverseAuditRounds).toBe(5);
+    expect(report.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.small);
+    // …and the capture says so, naming both halves of the narrowed wave.
+    expect(
+      producerMocks.writeStderrLine.mock.calls.some((c) =>
+        String(c[0]).includes(
+          'reverse-audit waves narrowed to the delta territories plus the non-delta territories the previous waves could not certify dry',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  // The capture-time recovery of the operator's RECORDED floor (#10136
+  // R1-5): the same record compose and submit read, bound to the same
+  // identity axes. Each test plants the CLI's own args record beside a side
+  // file that would otherwise resolve the posture.
+  function postureSideFile(path: unknown): string | null {
+    if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+      return JSON.stringify({
+        round: 7,
+        findings: [],
+        posted: 1,
+        floor: 'c',
+      });
+    }
+    return null;
+  }
+
+  it('a recorded `--severity-floor suggestion` turns the posture off at capture (#10136)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      const side = postureSideFile(path);
+      if (side !== null) return side;
+      // The session's own record: this PR, posture explicitly off.
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return '42 --severity-floor suggestion';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    // The side file alone would resolve `round`; the record wins, and the
+    // round keeps the full shape: no posture, and the interaction file
+    // republished in full.
+    expect(report.incremental.posture).toBeUndefined();
+    expect(report.incremental.postureCause).toBeUndefined();
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    expect(writtenDiff() ?? '').toContain('+y2');
+  });
+
+  it('a recorded `--severity-floor critical` engages the posture on an early anchored re-review (#10136)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return "import { added } from './a.js';\nadded();\n";
+      }
+      // Round 2 — years short of the schedule, no streak.
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({ round: 1, findings: [], posted: 1 });
+      }
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return '42 --severity-floor critical';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.postureCause).toBe('explicit');
+    expect(report.budget.reverseAuditRounds).toBe(5);
+  });
+
+  it("binds a URL-shaped record's host to the remote under review, as submit does (#10136 R1-12)", async () => {
+    // The record names a GHE host; no `--host` flag and no GH_HOST reach
+    // this capture. `resolveGhHost` alone reads github.com and the record
+    // would not bind — the operator's posture-off would be missed and the
+    // narrowed shape spent against it. The remote under review carries the
+    // host, and the chain reads it.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse'
+        ? 'f00df00df00d'
+        : args[0] === 'remote' && args[1] === 'get-url'
+          ? 'git@ghe.example.com:acme/widgets.git\n'
+          : '',
+    );
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return "import { added } from './a.js';\nadded();\n";
+      }
+      const side = postureSideFile(path);
+      if (side !== null) return side;
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return 'https://ghe.example.com/acme/widgets/pull/42 --severity-floor suggestion';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const savedHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    try {
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.posture).toBeUndefined();
+      expect(report.incremental.postureCause).toBeUndefined();
+    } finally {
+      if (savedHost !== undefined) process.env['GH_HOST'] = savedHost;
+    }
+
+    // The control: the same record with a remote on ANOTHER host does not
+    // bind, and the side file resolves the posture — the axis is live.
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse'
+        ? 'f00df00df00d'
+        : args[0] === 'remote' && args[1] === 'get-url'
+          ? 'git@github.com:acme/widgets.git\n'
+          : '',
+    );
+    delete process.env['GH_HOST'];
+    try {
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.posture).toBe('critical');
+      expect(report.incremental.postureCause).toBe('round');
+    } finally {
+      if (savedHost !== undefined) process.env['GH_HOST'] = savedHost;
+    }
+  });
+
+  it('a heavy interaction file keeps its invariant agents on a fix-audit round (#10136)', async () => {
+    // The fix-audit roster is the territory fan-out yet keeps the
+    // whole-file invariant agents, and heaviness is classified from the
+    // published slice — so a still-clean file the widening pulls back in, heavy in
+    // its own right, must republish whole and must still roster the three
+    // agents that read it from the worktree. They are the only auditors of
+    // hunks a backward base move smuggles into a full-range slice.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    const heavyBulk = Array.from({ length: 800 }, (_, i) => `+heavy ${i}`);
+    const HEAVY_FULL = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,3 +1,4 @@',
+      ' line',
+      '+added',
+      ' line2',
+      ' line3',
+      '',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      // Hunk on the seam (the import + its one use)…
+      '@@ -1,1 +1,2 @@',
+      " import { added } from './a.js';",
+      '+added();',
+      // …and a heavy hunk far from it. Full-range changedLines = 801.
+      '@@ -100,2 +101,802 @@',
+      ' ctx',
+      ...heavyBulk,
+      ' ctx2',
+      '',
+    ].join('\n');
+    // fileLines 1102 — preLines = 1102 - 801 = 301 clears the heavy bar's
+    // pre-image floor beside the 801 changed lines.
+    const B_SOURCE =
+      "import { added } from './a.js';\nadded();\n" +
+      Array.from({ length: 1100 }, (_, i) => `filler ${i}`).join('\n');
+    servesBothRanges(HEAVY_FULL, DELTA_DIFF);
+    // The plan report resolves post-image line counts via `git show
+    // <sha>:<path>` — serve b.ts's content there too, or the plan sees a
+    // zero-line file and classifies it non-heavy whatever the bound did.
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args[0] === 'show' && args[1] === 'f00df00df00d:b.ts'
+        ? Buffer.from(B_SOURCE)
+        : args.includes(`${ANCHOR}..f00df00df00d`)
+          ? Buffer.from(DELTA_DIFF)
+          : args.includes(`${BASE}..f00df00df00d`)
+            ? Buffer.from(HEAVY_FULL)
+            : Buffer.from(''),
+    );
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return B_SOURCE;
+      }
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+          mergeBaseSha: BASE,
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    const diff = writtenDiff() ?? '';
+    expect(diff).toContain('+added();');
+    expect(diff).toContain('+heavy 0');
+    expect(diff).toContain('+heavy 799');
+    // The plan classifies it heavy from the published slice, and the roster
+    // requires the whole-file invariant agents for it.
+    const b = (report.files as Array<{ path: string; heavy: boolean }>).find(
+      (f) => f.path === 'b.ts',
+    );
+    expect(b?.heavy).toBe(true);
+    const agentKeys = requiredAgents(report).map((a) => a.key);
+    expect(agentKeys).toContain('invariant-a--b.ts');
+    expect(agentKeys).toContain('invariant-b--b.ts');
+    expect(agentKeys).toContain('invariant-c--b.ts');
+  });
+
   it('drops a widening candidate whose real path leaves the worktree', async () => {
     // Wiring, not the rule itself — `worktree-reader.test.ts` proves the rule
     // against a real filesystem, where the kernel does the resolving. What
@@ -1446,6 +2260,17 @@ describe('fetch-pr report assembly', () => {
     // diffPath leak this PR shipped and fixed.
     expect(writtenDiff()).toBe(NARROWED);
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
+    // …and the recorded identity is over that payload. `fullText` is in scope
+    // at the same call site and is a `string` too: recorded over it, the
+    // coverage reader reports drift on every incremental round of a plan
+    // nothing touched.
+    const narrowedSha = createHash('sha256')
+      .update(NARROWED, 'utf8')
+      .digest('hex');
+    expect(
+      (report.selection as { sourceArtifactSha256: string })
+        .sourceArtifactSha256,
+    ).toBe(narrowedSha);
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(NARROWED.trimEnd().split('\n').length);
@@ -1969,10 +2794,10 @@ describe('fetch-pr report assembly', () => {
       .spyOn(mod, 'gitProbe')
       .mockImplementation((...args: string[]) =>
         args[0] === 'merge-base'
-          ? { out: null, status: 128 }
+          ? { out: null, status: 128, refusal: null }
           : args[0] === 'rev-parse'
-            ? { out: ANCHOR, status: 0 }
-            : { out: '', status: 0 },
+            ? { out: ANCHOR, status: 0, refusal: null }
+            : { out: '', status: 0, refusal: null },
       );
     try {
       const report = await reportFor({ since: ANCHOR });
@@ -2059,10 +2884,13 @@ describe('fetch-pr report assembly', () => {
         .spyOn(mod, 'gitProbe')
         .mockImplementation((...args: string[]) =>
           args[0] === probe
-            ? (answer as { out: string | null; status: number })
+            ? {
+                ...(answer as { out: string | null; status: number }),
+                refusal: null,
+              }
             : args[0] === 'rev-parse'
-              ? { out: ANCHOR, status: 0 }
-              : { out: '', status: 0 },
+              ? { out: ANCHOR, status: 0, refusal: null }
+              : { out: '', status: 0, refusal: null },
         );
       try {
         const report = await reportFor({ since: ANCHOR });
@@ -2359,6 +3187,15 @@ describe('fetch-pr report assembly', () => {
     // The rescue republished the FULL range — the file agents read must be
     // the range the report now describes.
     expect(writtenDiff()).toBe(FULL_DIFF);
+    // …and so must the recorded identity. This is the one branch where the
+    // diff text is reassigned AFTER a plan was already built, which is where
+    // a digest of the wrong text hides: recorded over the delta, the
+    // coverage reader would report drift on every rescued round.
+    const sha = (text: string): string =>
+      createHash('sha256').update(text, 'utf8').digest('hex');
+    const selection = report.selection as { sourceArtifactSha256: string };
+    expect(selection.sourceArtifactSha256).toBe(sha(FULL_DIFF));
+    expect(selection.sourceArtifactSha256).not.toBe(sha(NARROWED));
     // The anchor cannot stay effective over a full-range plan — one round,
     // two scopes is what that would mean for Agent 7's welded --base — and
     // the reason names what actually happened, not a capture that worked.
@@ -2652,6 +3489,99 @@ describe('fetch-pr report assembly', () => {
       .map((c) => String(c[0]))
       .some((l) => l.includes('could not read the previous fetch report'));
     expect(warned).toBe(true);
+  });
+
+  describe('automatic navigation profile', () => {
+    const navDiff = [
+      'diff --git a/docs/developers/_meta.ts b/docs/developers/_meta.ts',
+      'index 1234567..2345678 100644',
+      '--- a/docs/developers/_meta.ts',
+      '+++ b/docs/developers/_meta.ts',
+      '@@ -1 +1 @@',
+      "-export default { examples: { title: 'Examples', display: 'hidden' } };",
+      "+export default { examples: 'Examples' };",
+      '',
+    ].join('\n');
+
+    beforeEach(() => {
+      process.env['QWEN_REVIEW_AUTOMATIC'] = 'true';
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: BASE,
+        baseFetchFailed: false,
+      });
+      producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+        Buffer.from(
+          args[0] === 'show'
+            ? args[1].startsWith(`${BASE}:`)
+              ? "export default { examples: { title: 'Examples', display: 'hidden' } };"
+              : "export default { examples: 'Examples' };"
+            : navDiff,
+        ),
+      );
+    });
+
+    it('classifies the full immutable base/head capture and skips prebuild', async () => {
+      process.env[PREBUILD_ENV] = '1';
+      const report = await reportFor({ effort: 'high' });
+      expect(report.reviewProfile).toBe('docs-nav');
+      expect(report.effort).toBe('high');
+      expect(producerMocks.gitRaw).toHaveBeenCalledWith(
+        'show',
+        `${BASE}:docs/developers/_meta.ts`,
+      );
+      expect(producerMocks.gitRaw).toHaveBeenCalledWith(
+        'show',
+        'f00df00df00d:docs/developers/_meta.ts',
+      );
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, 'false'])(
+      'keeps manual captures on the normal path (%s)',
+      async (automatic) => {
+        if (automatic === undefined)
+          delete process.env['QWEN_REVIEW_AUTOMATIC'];
+        else process.env['QWEN_REVIEW_AUTOMATIC'] = automatic;
+        expect(await reportFor({})).not.toHaveProperty('reviewProfile');
+      },
+    );
+
+    it('ignores the marker when its value came from a file', async () => {
+      // The beforeEach above sets the variable directly; the read must
+      // distinguish provenance — a value the environment loader sourced
+      // from a FILE (a repository's `.env` / `.qwen/.env`) is not the
+      // operator's, and the reviewed checkout must not choose its own
+      // review depth.
+      const spy = vi
+        .spyOn(environment, 'isFileSourcedEnvKey')
+        .mockImplementation((key) => key === 'QWEN_REVIEW_AUTOMATIC');
+      try {
+        expect(await reportFor({})).not.toHaveProperty('reviewProfile');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('does not classify a degraded base', async () => {
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: BASE,
+        baseFetchFailed: true,
+      });
+      expect(await reportFor({})).not.toHaveProperty('reviewProfile');
+    });
+
+    it('does not classify a requested resume', async () => {
+      expect(await reportFor({ resume: true })).not.toHaveProperty(
+        'reviewProfile',
+      );
+    });
+
+    it('does not classify an effective incremental capture', async () => {
+      anchorIsValid();
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.effective).toBe(true);
+      expect(report).not.toHaveProperty('reviewProfile');
+    });
   });
 
   describe('effort threading', () => {
@@ -3545,6 +4475,32 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     );
   });
 
+  it('records the selection identity over the text it planned from', async () => {
+    // A different question from `diffSha256` above (see lib/selection.ts):
+    // this one is re-checked by the coverage reader against the diff on disk,
+    // so it must digest the decoded text the chunks were cut from.
+    // Not ASCII: the reader decodes the file as utf8, and a writer that
+    // decoded its bytes any other way would agree with it on an ASCII diff
+    // and report drift on every real one.
+    const diff =
+      'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+const s = "变更 é";\n';
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: 'base123',
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('diff') ? Buffer.from(diff) : Buffer.from(''),
+    );
+
+    const report = await reportFor();
+    const selection = report.selection as { sourceArtifactSha256: string };
+    expect(selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(diff, 'utf8').digest('hex'),
+    );
+  });
+
   it('hashes the BYTES, not a utf8 decode of them', async () => {
     // A pure-ASCII fixture cannot see the difference: digests of the Buffer
     // and of its utf8-decoded string coincide for every valid-UTF-8 diff and
@@ -3685,10 +4641,17 @@ describe('fetch-pr run-session ledger wiring', () => {
 // count the gitRaw mock answers every `git show` with (the diff's own five
 // lines).
 function resumePlanFields(diffBytes: string): Record<string, unknown> {
-  return buildPlanReport(buildDiffPlan(diffBytes, 400), () => 5, {
-    operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-    hasDeadline: hasReviewDeadline(process.env),
-  }) as unknown as Record<string, unknown>;
+  return buildPlanReport(
+    buildDiffPlan(diffBytes, 400),
+    () => 5,
+    {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    },
+    // The same bytes the plan was built from — the fixture stands in for what
+    // a real `fetch-pr` wrote, and a real one records its own diff text here.
+    diffBytes,
+  ) as unknown as Record<string, unknown>;
 }
 
 describe('fetch-pr --resume', () => {
@@ -3858,7 +4821,247 @@ describe('fetch-pr --resume', () => {
     );
     expect(vi.mocked(recordResume)).toHaveBeenCalledWith(OUT);
     expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+    // The continuation returns before the resolution that records the
+    // host-side merge base, and the lease acquisition has already dropped
+    // it — so the anchor is put back from the lease's own prior, or every
+    // `base-tree` ask of the resumed review refuses (R5-2).
+    expect(vi.mocked(restoreReviewWorktreeLeaseMergeBase)).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-42',
+      process.env['QWEN_CODE_SESSION_ID'],
+    );
+    expect(
+      vi.mocked(recordReviewWorktreeLeaseMergeBase),
+    ).not.toHaveBeenCalled();
   });
+
+  it('a --resume is not refused by a --deadline this shell would refuse at capture — the flag is ignored on the resumed plan', async () => {
+    const before = process.env[RESERVE_ENV];
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      process.env[RESERVE_ENV] = '4800';
+      delete process.env[DEADLINE_ENV];
+      producerMocks.writeStderrLine.mockClear();
+      await run({ deadline: '120' });
+      expect(reportWritten()).toBe(false);
+      expect(
+        producerMocks.writeStderrLine.mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ).toContain('--deadline is ignored on a resumed run');
+      // The grammar and the default rule still rule on a resume — and the
+      // message's figure is the default rule's, the only bar applied here.
+      await expect(run({ deadline: '90' })).rejects.toThrow(
+        /under the default rule need more than 90 minutes \(a longer wall keeps a larger reserve\); the shortest wall that can hold one here is 91 minutes/,
+      );
+    } finally {
+      if (before === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = before;
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
+  });
+
+  it('a --resume that falls through to a fresh review meets the shell bar BEFORE the stale worktree is destroyed', async () => {
+    // Head moved → fresh review → the flag WILL be recorded, so the bar the
+    // resume check skipped is owed before cleanStale / fetch — a refusal
+    // after them would leave a half-built worktree behind a crash.
+    producerMocks.gh.mockImplementation((...args: string[]) => {
+      if (args.includes('headRefOid') && !args.includes('headRefName')) {
+        return JSON.stringify({ headRefOid: 'aaaa1111bbbb' });
+      }
+      return JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'aaaa1111bbbb',
+        baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      });
+    });
+    const before = process.env[RESERVE_ENV];
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      process.env[RESERVE_ENV] = '4800';
+      delete process.env[DEADLINE_ENV];
+      await expect(run({ deadline: '120' })).rejects.toThrow(
+        /Cannot resume PR #42 \(head-moved\); the fresh review it falls through to refuses --deadline: .*shortest wall that can hold one here is 141 minutes/,
+      );
+      expect(reportWritten()).toBe(false);
+      // The destroyer itself: `cleanStale` frees the prior attempt's tree
+      // through `releaseWorktree` — the one call this test's name is about.
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      const gitCalls = producerMocks.git.mock.calls.map((c) => String(c[0]));
+      expect(gitCalls).not.toContain('fetch');
+      expect(gitCalls).not.toContain('worktree');
+      // Refused BEFORE the fallthrough is announced: the stdout line is a
+      // machine contract ("the report at --out is new"), and no fresh
+      // review happened.
+      expect(await stdoutJsonLines()).toEqual([]);
+    } finally {
+      if (before === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = before;
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
+  });
+
+  it('says so when a --deadline rides a resume — the plan is not rewritten, so the flag cannot land', async () => {
+    // The inherited-wall notes are silent under a well-formed epoch, and
+    // this repository's own review job exports one: isolate it (and the
+    // reserve), or the case passes vacuously there and fails here.
+    const ambientEpoch = process.env[DEADLINE_ENV];
+    const ambientReserve = process.env[RESERVE_ENV];
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    try {
+      await deadlineRidesAResume();
+    } finally {
+      if (ambientEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = ambientEpoch;
+      if (ambientReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = ambientReserve;
+    }
+  });
+
+  async function deadlineRidesAResume(): Promise<void> {
+    // The fixture plan records no wall (it predates the field, or was
+    // captured with `--deadline none`): the note must say so, not assert a
+    // wall the plan does not hold.
+    producerMocks.writeStderrLine.mockClear();
+    await run({ deadline: '120' });
+    expect(reportWritten()).toBe(false);
+    const err = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain('--deadline is ignored on a resumed run');
+    expect(err).toContain('the plan recorded no wall');
+    expect(err).not.toContain('keeps the');
+    // The ledger is mocked away here, but with no wall to date there is
+    // nothing for the ledger note to say — it would contradict the line
+    // above.
+    expect(err).not.toContain('did not record this attempt');
+
+    // A plan that DID record a wall names it, in minutes.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT)
+        return prevReport({
+          deadlineSeconds: 28_800,
+          deadlineSource: 'default',
+        });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.writeStderrLine.mockClear();
+    await run({ deadline: '120' });
+    expect(
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n'),
+    ).toContain(
+      'the plan keeps the 480-minute default wall it recorded at capture',
+    );
+
+    // A plan whose wall came from its own --deadline says so — the
+    // distinction the huge tier's reduction turns on.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT)
+        return prevReport({ deadlineSeconds: 14_400, deadlineSource: 'flag' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.writeStderrLine.mockClear();
+    await run({ deadline: '120' });
+    const flagNote = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(flagNote).toContain(
+      'the plan keeps the 240-minute wall its own --deadline recorded at capture',
+    );
+    expect(flagNote).not.toContain('default wall');
+    // The inherited-wall note rides the same resume: the fixture plan's
+    // mtime is a month old (the statSync mock), so the wall has run out and
+    // the note says so — and what to do — before any fan-out is spent.
+    expect(flagNote).toContain(
+      "the plan's 240-minute wall (its --deadline) ran out",
+    );
+    expect(flagNote).toContain(
+      'the round builder will refuse every further reverse-audit round',
+    );
+    // Information, not an instruction: the orchestrator reads this line.
+    expect(flagNote).not.toMatch(/drop --resume|--deadline none/);
+    // With a wall to date and the ledger mocked away, the resume says the
+    // attempt was not recorded — the wall dates from the first attempt.
+    expect(flagNote).toContain('did not record this attempt');
+
+    // "The environment's epoch takes precedence" only when the gates would
+    // honour it: a finite, positive value — never a malformed one.
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      for (const bad of ['soon', '0', '-5', '  ']) {
+        process.env[DEADLINE_ENV] = bad;
+        producerMocks.writeStderrLine.mockClear();
+        await run({ deadline: '120' });
+        const malformed = producerMocks.writeStderrLine.mock.calls
+          .map((c) => String(c[0]))
+          .join('\n');
+        expect(malformed).not.toContain('takes precedence');
+        // A malformed epoch is no clock: the plan's wall is described, and
+        // the ledger note rides with it exactly as under no epoch at all.
+        expect(malformed).toContain('did not record this attempt');
+        expect(malformed).toContain(
+          "the plan's 240-minute wall (its --deadline) ran out",
+        );
+      }
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      producerMocks.writeStderrLine.mockClear();
+      await run({ deadline: '120' });
+      const wallUnderEpoch = producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(wallUnderEpoch).toContain('takes precedence while it stands');
+      // A wall recorded but the epoch in force: the wall is not what
+      // bounds this continuation, so the ledger note has nothing to date.
+      expect(wallUnderEpoch).not.toContain('did not record this attempt');
+      // No wall recorded, epoch in force: the epoch bounds the continuation.
+      producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+        if (path === OUT) return prevReport();
+        if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+          return Buffer.from(DIFF_BYTES) as unknown as string;
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      producerMocks.writeStderrLine.mockClear();
+      await run({ deadline: '120' });
+      const noWallEpoch = producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(noWallEpoch).toContain(
+        "the plan recorded no wall; the environment's epoch bounds this continuation",
+      );
+      expect(noWallEpoch).not.toContain('round cap alone');
+      expect(noWallEpoch).not.toContain('did not record this attempt');
+    } finally {
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
+
+    // The default carries no such note: there is nothing being dropped.
+    producerMocks.writeStderrLine.mockClear();
+    await run();
+    expect(
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n'),
+    ).not.toContain('--deadline is ignored');
+  }
 
   it('falls through to a fresh fetch when the head moved, and says so', async () => {
     producerMocks.gh.mockImplementation((...args: string[]) => {
@@ -3879,6 +5082,10 @@ describe('fetch-pr --resume', () => {
     });
     await run();
     expect(reportWritten()).toBe(true);
+    // A real recapture records its own merge base; nothing is restored.
+    expect(
+      vi.mocked(restoreReviewWorktreeLeaseMergeBase),
+    ).not.toHaveBeenCalled();
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'head-moved' }]);
     // The once-per-review restart bound becomes a fact on disk here.

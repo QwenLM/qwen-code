@@ -28,8 +28,13 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import {
+  assertWritableOutPath,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
   REVIEW_TMP_DIR,
@@ -37,7 +42,11 @@ import {
 } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
-import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
+import {
+  deadlineOption,
+  EFFORT_OPTION,
+  type ReviewEffort,
+} from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import {
   buildDiffPlan,
@@ -52,7 +61,7 @@ import {
   type PlanReport,
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
+import { captureDeadline, validateDeadlineFlag } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
@@ -61,7 +70,8 @@ import {
   movedSince,
   hashWorktreeFiles,
   isPathProvablyAbsent,
-  readLocalCache,
+  type readLocalCache,
+  readLocalCacheFromBytes,
   revisionIdentities,
   stateIdOf,
   UNHASHABLE,
@@ -78,6 +88,8 @@ interface CaptureLocalArgs {
   target: string;
   untracked: boolean;
   effort?: ReviewEffort;
+  /** `--deadline`: minutes, or `none`; omitted for the tier's default wall. */
+  deadline?: string;
   cache?: string;
 }
 
@@ -736,8 +748,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     args.cache !== undefined
       ? resolveCachePath(args.cache, target, sourcePath)
       : null;
+  // ONE read of the ledger's bytes: the stop DECISION below parses this
+  // buffer and the stop stamp hashes the SAME buffer — a second disk read
+  // at stamp time let a concurrent round's ledger rewrite land in the
+  // decision→stamp window and be baked into the stamp, invisible to the
+  // compose fence (which then verified a baseline the decision never
+  // consulted). Raw bytes are kept beside the parse because the stamp is
+  // sha256 of the FILE's bytes, malformed JSON included — the parse
+  // fail-quiets, the hash must not.
+  let cacheEarlyBytes: Buffer | null = null;
+  if (cachePathEarly !== null) {
+    try {
+      cacheEarlyBytes = readFileSync(cachePathEarly);
+    } catch {
+      // No cache file — the decision sees no anchor and the stamp is null.
+    }
+  }
   const cacheEarly =
-    cachePathEarly === null ? null : readLocalCache(cachePathEarly);
+    cacheEarlyBytes === null ? null : readLocalCacheFromBytes(cacheEarlyBytes);
   const vanishedPresent: readonly string[] =
     cacheEarly === null
       ? []
@@ -1146,7 +1174,43 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // so a parent polling `qwen-review-<target>-plan.json` found nothing for
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
+  // ONE resolved value for every consumer: the stop DECISION above read the
+  // `--cache`-resolved ledger (`cachePathEarly` — a file-form `--cache` is
+  // returned unchanged, directory form resolves the canonical basename), so
+  // the stamp below and the plan's published `cachePath` must name that
+  // same file. Stamping the canonical `.qwen/review-cache/…` path while the
+  // decision consulted a caller-named file had the fence faithfully verify
+  // a baseline the stop never saw — an ENOENT hash over a nonexistent
+  // canonical file, an empty grant baseline, and an exit 0 over the open
+  // Critical the stop had just consumed.
+  const cachePath = cachePathEarly ?? cachePathFor(target, sourcePath);
   if (nothingToReview) {
+    // The baseline's content bound into the stamp: the compose grant
+    // re-hashes the cache the plan names and refuses on any departure, so
+    // a ledger edited between capture and compose fails closed like a
+    // foreign stamp. Null is a stampable value — no cache existed at this
+    // stop, so no findings were seen, and the fence fails closed on a file
+    // appearing since. The hash is of the DECISION-time bytes when a
+    // `--cache` scoped this round — stamp and decision are projections of
+    // the one read above, so an edit landing in the decision→stamp window
+    // cannot be baked into the stamp. Only the no-`--cache` canonical
+    // path still reads the disk here: that decision consulted no ledger,
+    // so there is no decision-time buffer to prefer.
+    let findingsHash: string | null = null;
+    if (cachePathEarly !== null) {
+      findingsHash =
+        cacheEarlyBytes === null
+          ? null
+          : createHash('sha256').update(cacheEarlyBytes).digest('hex');
+    } else {
+      try {
+        findingsHash = createHash('sha256')
+          .update(readFileSync(cachePath))
+          .digest('hex');
+      } catch {
+        // No cache file at this stop.
+      }
+    }
     writeFileSync(
       tmpFile(target, 'stop.json'),
       `${JSON.stringify(
@@ -1161,12 +1225,37 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           ...(process.env['QWEN_REVIEW_RUN_ID']
             ? { runId: process.env['QWEN_REVIEW_RUN_ID'] }
             : {}),
+          // The compose fence's binding fields: the cache the grant must
+          // read, and the hash its content must still carry.
+          cachePath,
+          findingsHash,
+          // The scope-emptied split, capture-certified: the `superseded`
+          // deduction's input must be THIS list, and the plan it also
+          // rides in is model-editable after this write — a split edited
+          // between capture and compose could blanket-supersede a live
+          // blocker past a fence that binds only reason/cache/hash.
+          // Stamped in the interactive (no-run-id) shape too.
+          ...(nothingToReview.reason === 'scope-emptied'
+            ? { supersededPaths: incremental?.scope?.supersededPaths ?? [] }
+            : {}),
         },
         null,
         2,
       )}\n`,
       'utf8',
     );
+  } else {
+    // This capture proves the tree MOVED past whatever an earlier stop
+    // certified, so an earlier round's sidecar at this stable name is now
+    // a stale stamp: left in place, it stays fence-valid (same reason,
+    // same cache path, same hash if the ledger did not change) and a
+    // later hand-written stop plan could ride it. Absent IS the truthful
+    // state — this round decided no stop.
+    try {
+      unlinkSync(tmpFile(target, 'stop.json'));
+    } catch {
+      // nothing to remove
+    }
   }
 
   const diffPath = tmpFile(target, 'diff.txt');
@@ -1174,6 +1263,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every hunk touching a file git handed us in a non-UTF-8 encoding.
   writeFileSync(diffPath, diffBytes);
 
+  const wall = captureDeadline(process.env, args.deadline, plan);
   const result: CaptureLocalResult = {
     // The token the CLI derived, so nothing downstream has to re-derive it.
     // `qwen review run` pins the artifact name it waits for from the same
@@ -1186,10 +1276,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // No ref to `git show` a pre-change file out of, so per-file line counts and
     // heaviness are unavailable — same as `plan-diff`. Chunk coverage, which is
     // what the topology needs, is not.
-    ...buildPlanReport(plan, null, {
-      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-      hasDeadline: hasReviewDeadline(process.env),
-    }),
+    ...buildPlanReport(
+      plan,
+      null,
+      {
+        operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+        hasDeadline: wall.explicit,
+      },
+      diffBytes.toString('utf8'),
+    ),
+    ...wall.fields,
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...(incremental ? { incremental } : {}),
@@ -1202,7 +1298,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // diverges from any hand recipe). A round-2 medium review of
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
-    cachePath: cachePathFor(target, sourcePath),
+    cachePath,
     cacheCandidatePath,
     ...(candidateWritten ? { cacheCandidateStateId: candidate.stateId } : {}),
     ...planEffortField(args.effort),
@@ -1355,6 +1451,7 @@ export const captureLocalCommand: CommandModule = {
           'Include untracked, non-ignored files. On by default: `git diff` cannot see them, so without this a brand-new file goes unreviewed.',
       })
       .option('effort', EFFORT_OPTION)
+      .option('deadline', deadlineOption({ resumes: false }))
       .option('cache', {
         type: 'string',
         describe:
@@ -1371,6 +1468,33 @@ export const captureLocalCommand: CommandModule = {
           'says why.',
       }),
   handler: (argv) => {
-    runCaptureLocal(argv as unknown as CaptureLocalArgs);
+    const args = argv as unknown as CaptureLocalArgs;
+    // plan-diff's contract: a usage error (a TypeError) exits 2 and anything
+    // else exits 1, each on one stderr line — a repairable invocation gets no
+    // crash banner. Two rulings run first, before the tree is captured and
+    // planned rather than at the plan write after that work is done: an
+    // --out that is blank, repeated or names a directory (the check
+    // `fetch-diff` and `issue-context` make), and the --deadline ruling, which covers both
+    // bars and runs again inside `captureDeadline` (it is pure given the
+    // environment).
+    //
+    // The one line is for the operator. It cannot say where an internal fault
+    // happened — and a TypeError from a bug is classified as a usage error
+    // here, as in plan-diff — so --debug prints the stack after it. Only
+    // the flag: debug variables in the environment are set for other tools
+    // (and by the dev launcher), and must not change what an operator sees.
+    try {
+      assertWritableOutPath(args.out);
+      validateDeadlineFlag(process.env, args.deadline);
+      runCaptureLocal(args);
+    } catch (err) {
+      // writeStderrLineSafe, as in plan-diff: a broken stderr must not let
+      // the throw escape the catch and lose the exit classification.
+      writeStderrLineSafe(`capture-local: ${(err as Error).message}`);
+      if (argv['debug'] === true && err instanceof Error && err.stack) {
+        writeStderrLineSafe(err.stack);
+      }
+      process.exitCode = err instanceof TypeError ? 2 : 1;
+    }
   },
 };

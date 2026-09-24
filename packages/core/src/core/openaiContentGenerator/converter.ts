@@ -28,7 +28,10 @@ import {
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
 } from '../../utils/request-tokenizer/textTokenizer.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
-import { parseTaggedThinkingText } from './taggedThinkingParser.js';
+import {
+  parseTaggedThinkingText,
+  TaggedThinkingParser,
+} from './taggedThinkingParser.js';
 import {
   convertSchema,
   relaxSchemaForFunctionCalling,
@@ -40,7 +43,10 @@ import {
 } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { isDisclosureText } from '../../omni/disclosure.js';
+import { evictOldestImagesBeyondCap } from './image-budget.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -331,6 +337,32 @@ export function convertLlmToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
+const grammarSchemaValidationCache = new WeakMap<object, boolean>();
+
+const PARAMETERLESS_SCHEMA_KEYS = new Set([
+  '$comment',
+  '$schema',
+  'additionalProperties',
+  'deprecated',
+  'description',
+  'examples',
+  'properties',
+  'readOnly',
+  'title',
+  'type',
+  'writeOnly',
+]);
+
+function isStrictlyValidSchema(schema: object): boolean {
+  const cached = grammarSchemaValidationCache.get(schema);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const valid = SchemaValidator.compileStrict(schema) === null;
+  grammarSchemaValidationCache.set(schema, valid);
+  return valid;
+}
+
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
@@ -370,6 +402,34 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
+            const sourceSchema =
+              typeof func.parametersJsonSchema === 'object' &&
+              func.parametersJsonSchema !== null &&
+              !Array.isArray(func.parametersJsonSchema)
+                ? (func.parametersJsonSchema as Record<string, unknown>)
+                : undefined;
+            const canValidateLocally =
+              sourceSchema !== undefined &&
+              !('$id' in sourceSchema) &&
+              isStrictlyValidSchema(sourceSchema);
+            const sourceProperties = sourceSchema?.['properties'];
+            const sourceAdditionalProperties =
+              sourceSchema?.['additionalProperties'];
+            const hasEmptyProperties =
+              typeof sourceProperties === 'object' &&
+              sourceProperties !== null &&
+              !Array.isArray(sourceProperties) &&
+              Object.keys(sourceProperties).length === 0;
+            const declaresEmptyArgumentList =
+              sourceSchema !== undefined &&
+              ((hasEmptyProperties &&
+                (sourceAdditionalProperties === false ||
+                  sourceAdditionalProperties === undefined)) ||
+                (sourceProperties === undefined &&
+                  sourceAdditionalProperties === false)) &&
+              Object.keys(sourceSchema).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              );
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -377,7 +437,20 @@ export async function convertLlmToolsToOpenAI(
             // mutually exclusive optional fields (Agent working_dir vs
             // isolation). Relax the wire schema; client-side
             // validateToolParams still enforces the source schema.
-            parameters = relaxSchemaForFunctionCalling(parameters);
+            parameters = relaxSchemaForFunctionCalling(
+              parameters,
+              canValidateLocally,
+            );
+            if (
+              canValidateLocally &&
+              declaresEmptyArgumentList &&
+              parameters['type'] === 'object' &&
+              Object.keys(parameters).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              )
+            ) {
+              parameters = undefined;
+            }
           }
 
           openAITools.push({
@@ -417,6 +490,12 @@ export function convertLlmRequestToOpenAI(
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
   }
+
+  // Bound the number of images in the assembled request below the backing
+  // API's hard per-request image cap (256 on qwen-omni). Omni keyframes
+  // accumulate across turns; without this a long look-closer trajectory
+  // eventually sends >256 image parts and the API rejects the whole request.
+  evictOldestImagesBeyondCap(messages);
 
   return messages;
 }
@@ -668,6 +747,15 @@ function processContent(
         ) {
           const mediaParts: OpenAIContentPart[] = [];
           const textParts: OpenAI.Chat.ChatCompletionContentPartText[] = [];
+          // Track the previous part so an omni media-degradation disclosure
+          // (emitted immediately before its media part) moves WITH the media
+          // into the follow-up user message instead of being stranded in the
+          // text-only tool message, where the model could not attribute it.
+          // The asymmetry with transcript text (§6.2) is deliberate:
+          // transcripts FOLLOW their media part and read fine as plain text
+          // in the tool message — only the disclosure carries the D8
+          // adjacency requirement, so only the preceding disclosure migrates.
+          let prev: OpenAIContentPart | undefined;
           for (const cp of toolMessage.content as OpenAIContentPart[]) {
             if (
               cp &&
@@ -676,10 +764,17 @@ function processContent(
                 cp.type === 'video_url' ||
                 cp.type === 'file')
             ) {
+              if (prev?.type === 'text' && isDisclosureText(prev.text)) {
+                textParts.pop();
+                mediaParts.push(prev);
+              }
               mediaParts.push(cp);
             } else if (cp && cp.type === 'text') {
               textParts.push(cp);
             }
+            // Consecutive media parts after one disclosure must not each
+            // claim it: only the part directly following the text does.
+            prev = cp;
           }
           if (mediaParts.length > 0) {
             const textOnly = textParts.map((p) => p.text).join('\n');
@@ -921,7 +1016,9 @@ function createMediaContentPart(
           type: 'input_audio' as const,
           input_audio: {
             data: `data:${mimeType};base64,${part.inlineData.data}`,
-            format,
+            // DashScope accepts flac/ogg/m4a beyond the OpenAI SDK's
+            // wav|mp3 union; the request wire format is identical.
+            format: format as 'wav' | 'mp3',
           },
         };
       }
@@ -998,6 +1095,33 @@ function createMediaContentPart(
       };
     }
 
+    if (mediaType === 'audio') {
+      if (!modalities.audio) {
+        return unsupportedModalityPlaceholder(
+          'audio',
+          filename,
+          requestContext,
+        );
+      }
+      const format = getAudioFormat(mimeType);
+      if (format) {
+        // Unlike the inline branch (data: URI), the upload channel passes
+        // the bare URL — DashScope's input_audio.data accepts either, and
+        // oss:// references are resolved server-side via the
+        // X-DashScope-OssResourceResolve header (verified live 2026-08-03
+        // on qwen3.5-omni-plus).
+        return {
+          type: 'input_audio' as const,
+          input_audio: {
+            data: fileUri,
+            // See inline branch: DashScope accepts a wider format set
+            // than the OpenAI SDK union.
+            format: format as 'wav' | 'mp3',
+          },
+        };
+      }
+    }
+
     const displayNameStr = part.fileData.displayName
       ? ` (${part.fileData.displayName})`
       : '';
@@ -1042,9 +1166,26 @@ function getMediaType(mimeType: string): 'image' | 'audio' | 'video' | 'file' {
   return 'file';
 }
 
-function getAudioFormat(mimeType: string): 'wav' | 'mp3' | null {
+/**
+ * Audio formats the DashScope input_audio channel accepts. Kept in
+ * lockstep with the omni recognizer's audio sniff set — an upload the
+ * recognizer accepts must never textify here after paying for transfer.
+ *
+ * flac/ogg/m4a are a DashScope acceptance extension beyond the OpenAI
+ * SDK's wav|mp3 union, applied unconditionally because RequestContext
+ * carries no provider identity to scope on. The trade is deliberate:
+ * a non-DashScope endpoint that rejects the format returns an explicit
+ * 400, whereas textifying would silently drop the audio. Revisit if a
+ * provider flag ever lands on RequestContext.
+ */
+function getAudioFormat(
+  mimeType: string,
+): 'wav' | 'mp3' | 'flac' | 'ogg' | 'm4a' | null {
   if (mimeType.includes('wav')) return 'wav';
   if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
+  if (mimeType.includes('flac')) return 'flac';
+  if (mimeType.includes('ogg')) return 'ogg';
+  if (mimeType === 'audio/mp4' || mimeType.includes('m4a')) return 'm4a';
   return null;
 }
 
@@ -1096,7 +1237,10 @@ function convertOpenAITextToParts(
   requestContext: RequestContext,
   final = true,
 ): Part[] {
-  if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+  if (
+    !requestContext.responseParsingOptions?.taggedThinkingTags &&
+    !requestContext.taggedThinkingParser
+  ) {
     return text ? [{ text }] : [];
   }
 
@@ -1369,17 +1513,51 @@ export function convertOpenAIChunkToLlm(
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
-      const normalizedContent = normalizeStreamingTextDelta(
-        choice.delta.content,
-        (requestContext.textDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
-      );
-      // Skip empty-string push mid-stream; still call on finish_reason to
-      // flush any buffered tagged-thinking content.
-      if (normalizedContent || choice.finish_reason) {
+      const rawContent = choice.delta.content;
+      const replayState = requestContext.textDeltaState;
+      const replayedTaggedThinkingSnapshot =
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning === true &&
+        requestContext.taggedThinkingParser !== undefined &&
+        replayState !== undefined &&
+        (replayState.emittedText === rawContent ||
+          (rawContent.length === replayState.emittedLength &&
+            rawContent.startsWith(replayState.emittedText))) &&
+        THINKING_TAG_PATTERN.test(rawContent);
+      if (replayedTaggedThinkingSnapshot) {
+        replayState.emittedText = rawContent;
+        replayState.emittedLength = rawContent.length;
+        replayState.cumulativeMode = true;
+      }
+      const normalizedContent = replayedTaggedThinkingSnapshot
+        ? ''
+        : normalizeStreamingTextDelta(
+            rawContent,
+            (requestContext.textDeltaState ??= {
+              emittedText: '',
+              emittedLength: 0,
+              cumulativeMode: false,
+            }),
+          );
+      const taggedThinkingCandidate =
+        (requestContext.pendingThinkingTagCandidate?.text ?? '') +
+        normalizedContent;
+      if (
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning &&
+        (requestContext.hasStructuredReasoningContent || reasoningText) &&
+        LEADING_THINKING_TAG_PATTERN.test(taggedThinkingCandidate) &&
+        !taggedThinkingCandidate.trimStart().startsWith('</')
+      ) {
+        requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
+        requestContext.pendingThinkingTagCandidate = undefined;
+        contentParts = requestContext.taggedThinkingParser.parse(
+          taggedThinkingCandidate,
+          Boolean(choice.finish_reason),
+        );
+      } else if (normalizedContent || choice.finish_reason) {
+        // Skip empty-string push mid-stream; still call on finish_reason to
+        // flush any buffered tagged-thinking content.
         contentParts = convertOpenAITextToParts(
           normalizedContent,
           requestContext,
@@ -1389,6 +1567,14 @@ export function convertOpenAIChunkToLlm(
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
       contentParts = convertOpenAITextToParts('', requestContext, true);
+    }
+
+    if (
+      choice.finish_reason &&
+      requestContext.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+      requestContext.taggedThinkingParser?.hasUnclosedThought()
+    ) {
+      throwProtocolTagLeak(requestContext);
     }
 
     if (hasThoughtPart(contentParts)) {

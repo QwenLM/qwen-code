@@ -15,11 +15,18 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
+  isPrivateProvenanceEnvKey,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { publishPendingCompileCache } from './compile-cache.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import {
+  captureEnvironmentBeforeLoad,
+  resetEnvironmentSnapshotForTesting,
+} from './environment-snapshot.js';
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
   ENV_CORRUPTED_PATH,
@@ -46,9 +53,6 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'ENV',
   'PATH',
   'HOME',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
 ]);
 
 // Windows env lookup is case-insensitive, so a reload matching only the
@@ -73,6 +77,43 @@ function isReloadExcludedKey(key: string): boolean {
 
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
+// Inherited provenance marks trust, not ownership of this process's reload scope.
+const inheritedDotEnvKeys = new Set<string>();
+const inheritedSettingsEnvKeys = new Set<string>();
+
+// Validate inherited metadata before loading files, then preserve it for child CLIs.
+const inheritedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+if (inheritedProvenance) {
+  const sources: unknown = JSON.parse(inheritedProvenance);
+  if (
+    !sources ||
+    typeof sources !== 'object' ||
+    !('dotEnv' in sources) ||
+    !('settingsEnv' in sources) ||
+    !Array.isArray(sources.dotEnv) ||
+    !Array.isArray(sources.settingsEnv) ||
+    !sources.dotEnv.every((key) => typeof key === 'string') ||
+    !sources.settingsEnv.every((key) => typeof key === 'string')
+  ) {
+    throw new Error('Invalid inherited environment provenance.');
+  }
+  for (const key of sources.dotEnv) inheritedDotEnvKeys.add(key);
+  for (const key of sources.settingsEnv) inheritedSettingsEnvKeys.add(key);
+  Object.assign(process.env, getRelaunchEnvProvenance());
+}
+
+export function getRelaunchEnvProvenance(): Record<string, string> {
+  return {
+    [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
+      dotEnv: [...new Set([...inheritedDotEnvKeys, ...dotEnvSourcedKeys])],
+      settingsEnv: [
+        ...new Set([...inheritedSettingsEnvKeys, ...settingsEnvSourcedKeys]),
+      ],
+    }),
+  };
+}
+
 const lastReloadSnapshot = new Map<string, string>();
 let lastReloadSnapshotSeeded = false;
 
@@ -165,8 +206,12 @@ export function resetHomeEnvBootstrapForTesting(): void {
 /** Test-only: reset environment reload provenance between tests. */
 export function resetEnvironmentTrackingForTesting(): void {
   resetLoaderKeyRejectionReportingForTesting();
+  resetEnvironmentSnapshotForTesting();
   dotEnvSourcedKeys.clear();
   settingsEnvSourcedKeys.clear();
+  inheritedDotEnvKeys.clear();
+  inheritedSettingsEnvKeys.clear();
+  delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
   lastReloadSnapshotSeeded = false;
 }
@@ -190,7 +235,13 @@ export function resetEnvironmentTrackingForTesting(): void {
  * variable and not file-sourced.
  */
 export function isFileSourcedEnvKey(key: string): boolean {
-  if (dotEnvSourcedKeys.has(key) || settingsEnvSourcedKeys.has(key)) {
+  const sources = [
+    dotEnvSourcedKeys,
+    settingsEnvSourcedKeys,
+    inheritedDotEnvKeys,
+    inheritedSettingsEnvKeys,
+  ];
+  if (sources.some((keys) => keys.has(key))) {
     return true;
   }
   // Case-INSENSITIVELY on Windows, where env lookup is: a `.env` committed as
@@ -201,11 +252,10 @@ export function isFileSourcedEnvKey(key: string): boolean {
   // question rather than a bookkeeping one.
   if (process.platform !== 'win32') return false;
   const lower = key.toLowerCase();
-  for (const tracked of dotEnvSourcedKeys) {
-    if (tracked.toLowerCase() === lower) return true;
-  }
-  for (const tracked of settingsEnvSourcedKeys) {
-    if (tracked.toLowerCase() === lower) return true;
+  for (const keys of sources) {
+    for (const tracked of keys) {
+      if (tracked.toLowerCase() === lower) return true;
+    }
   }
   return false;
 }
@@ -255,10 +305,18 @@ export function getHomeEnvFallbackVars(
 /**
  * Finds the .env files to load, respecting workspace trust settings.
  *
- * When workspace is untrusted, only allow user-level .env files at:
+ * When workspace is untrusted (or has no recorded trust decision yet), only
+ * allow user-level .env files at:
  * - ~/.qwen/.env
  * - ~/.env
  * - <QWEN_HOME>/.env (when set)
+ *
+ * When the workspace IS trusted, the upward walk also accepts ancestor .env
+ * files: trust is a decision about the workspace, and re-resolving it per
+ * ancestor would reject every ancestor above a `TRUST_FOLDER` rule (the rule
+ * is keyed on the workspace path, so it cannot match a directory above it).
+ * An ancestor carrying its own explicit `DO_NOT_TRUST` rule still blocks its
+ * own .env.
  *
  * Exported so `settings-cache.ts` can re-run the exact same discovery when
  * validating its fingerprint; keep the discovery semantics in this single
@@ -283,19 +341,29 @@ export function findEnvFiles(
   const found: string[] = [];
   const seen = new Set<string>();
 
+  // Resolve the workspace's own decision once. An ancestor .env is inside the
+  // workspace's trust boundary: re-resolving trust against the ancestor itself
+  // would return `undefined` for every directory above a TRUST_FOLDER rule and
+  // silently drop values the user's explicit decision was meant to keep.
+  const workspaceIsTrusted =
+    workspaceTrusted ??
+    isWorkspaceTrusted(settings, undefined, realStartDir).isTrusted === true;
+
   const canUseEnvFile = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (userLevelPaths.has(normalized)) return true;
+    if (!workspaceIsTrusted) return false;
     const dirPath = path.dirname(normalized);
     const workspaceDir =
       path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
         ? path.dirname(dirPath)
         : dirPath;
-    const trusted =
-      workspaceTrusted !== undefined && workspaceDir === realStartDir
-        ? workspaceTrusted
-        : isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted;
-    return trusted !== false;
+    if (workspaceDir === realStartDir) return true;
+    // Ancestor: honour an explicit untrusted rule of its own, but do not treat
+    // "no rule recorded for this directory" as a refusal.
+    return (
+      isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted !== false
+    );
   };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
@@ -324,6 +392,11 @@ export function findEnvFiles(
       pushCandidate(candidate);
     }
   };
+
+  if (path.resolve(startDir) === path.resolve(homeDir)) {
+    pushHomeCandidates();
+    return found;
+  }
 
   let currentDir = realStartDir;
   let visitedHomeDir = false;
@@ -458,6 +531,10 @@ function canApplyParsedEnvKey(
   // repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
   // #8653 cross-workspace vector.
   if (isLoaderEnvKey(key)) return false;
+  // Launcher→child provenance markers are fixed constants, so unlike the
+  // hardcoded project tier they are rejected at every scope — a home `.env`
+  // must not be able to forge sandbox or Conversations runtime state either.
+  if (isPrivateProvenanceEnvKey(key)) return false;
   if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;
@@ -485,6 +562,26 @@ function setRuntimeEnvIfUnset(
 ): void {
   if (isEffectivelyUnset(env, key)) {
     env[key] = value;
+  }
+}
+
+function reportRejectedSettingsEnv(
+  env: Record<string, unknown>,
+  startDir: string,
+): void {
+  const source = `settings.env (${startDir})`;
+  reportRejectedLoaderKeys(source, Object.keys(env));
+  if (
+    Object.entries(env).some(
+      ([key, value]) =>
+        key.toUpperCase() === 'QWEN_AGENT_EXECUTION_BACKEND' &&
+        typeof value === 'string' &&
+        value.trim() !== '',
+    )
+  ) {
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.`,
+    );
   }
 }
 
@@ -537,10 +634,7 @@ export function buildRuntimeEnvironment(
       if (typeof value !== 'string') continue;
       setRuntimeEnvIfUnset(effectiveEnv, key, value);
     }
-    reportRejectedLoaderKeys(
-      `settings.env (${startDir})`,
-      Object.keys(settings.env),
-    );
+    reportRejectedSettingsEnv(settings.env, startDir);
   }
 
   const overlayKeys = Object.keys(effectiveEnv)
@@ -569,6 +663,7 @@ export function loadEnvironment(
   settings: Settings,
   startDir: string = process.cwd(),
 ): void {
+  captureEnvironmentBeforeLoad();
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
@@ -642,18 +737,21 @@ export function loadEnvironment(
         lastReloadSnapshot.set(key, value);
       }
     }
-    reportRejectedLoaderKeys(
-      `settings.env (${startDir})`,
-      Object.keys(settings.env),
-    );
+    reportRejectedSettingsEnv(settings.env, startDir);
   }
   lastReloadSnapshotSeeded = true;
+  Object.assign(process.env, getRelaunchEnvProvenance());
   publishPendingCompileCache();
 }
 
 export interface EnvReloadResult {
   updatedKeys: string[];
   removedKeys: string[];
+  envFileReadFailed?: boolean;
+}
+
+export interface EnvReloadOptions {
+  failClosedOnEnvFileReadError?: boolean;
 }
 
 /**
@@ -665,6 +763,7 @@ export function reloadEnvironment(
   settings: Settings,
   workspaceCwd: string,
   workspaceTrusted?: boolean,
+  options: EnvReloadOptions = {},
 ): EnvReloadResult {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(
@@ -674,6 +773,14 @@ export function reloadEnvironment(
     workspaceTrusted,
   );
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
+
+  if (parsedEnvFiles.readFailed && options.failClosedOnEnvFileReadError) {
+    return {
+      updatedKeys: [],
+      removedKeys: [],
+      envFileReadFailed: true,
+    };
+  }
 
   if (process.env['CLOUD_SHELL'] === 'true') {
     setUpCloudShellEnvironmentInEnv(process.env, parsedEnvFiles.files);
@@ -715,10 +822,7 @@ export function reloadEnvironment(
       if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
       newSettingsEnvKeys.set(key, value);
     }
-    reportRejectedLoaderKeys(
-      `settings.env (${workspaceCwd})`,
-      Object.keys(settings.env),
-    );
+    reportRejectedSettingsEnv(settings.env, workspaceCwd);
   }
 
   // Union of all new keys
@@ -744,6 +848,8 @@ export function reloadEnvironment(
     for (const key of previouslyKnown) {
       if (!allNewKeys.has(key) && !isReloadExcludedKey(key)) {
         delete process.env[key];
+        inheritedDotEnvKeys.delete(key);
+        inheritedSettingsEnvKeys.delete(key);
         removedKeys.push(key);
       }
     }
@@ -767,13 +873,12 @@ export function reloadEnvironment(
     process.env[key] = value;
   }
 
-  // Update tracking sets and snapshot only when the .env file was readable.
-  // A transient read failure must not wipe provenance — the stale tracking
-  // state is needed so the next successful reload can still detect deletions.
+  // Frozen values and values retained after an I/O failure keep their provenance.
   if (!dotEnvReadFailed) {
-    dotEnvSourcedKeys.clear();
-    for (const key of newDotEnvKeys.keys()) {
-      dotEnvSourcedKeys.add(key);
+    for (const sources of [dotEnvSourcedKeys, settingsEnvSourcedKeys]) {
+      for (const key of sources) {
+        if (!isReloadExcludedKey(key)) sources.delete(key);
+      }
     }
     lastReloadSnapshot.clear();
     for (const [key, value] of newDotEnvKeys) {
@@ -783,12 +888,17 @@ export function reloadEnvironment(
       lastReloadSnapshot.set(key, value);
     }
   }
-  // settings.env is always readable (from settings.json, not a file),
-  // so its tracking set is always updated.
-  settingsEnvSourcedKeys.clear();
+  for (const key of newDotEnvKeys.keys()) {
+    dotEnvSourcedKeys.add(key);
+  }
   for (const key of newSettingsEnvKeys.keys()) {
     settingsEnvSourcedKeys.add(key);
   }
+  Object.assign(process.env, getRelaunchEnvProvenance());
 
-  return { updatedKeys, removedKeys };
+  return {
+    updatedKeys,
+    removedKeys,
+    ...(dotEnvReadFailed ? { envFileReadFailed: true } : {}),
+  };
 }

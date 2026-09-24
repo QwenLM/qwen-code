@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import { runInNewContext } from 'node:vm';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import {
@@ -82,6 +83,42 @@ describe('MCP App sandbox', () => {
     expect(response.text).not.toContain("geolocation: 'geolocation'");
     expect(response.text).toContain('inner.srcdoc = params.html');
     expect(response.text).toContain("event.origin === 'null'");
+
+    const script = response.text.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+
+    const runSandbox = (hostOrigin: string) => {
+      const appendChild = vi.fn();
+      const postMessage = vi.fn();
+      const window = {
+        self: {},
+        top: {},
+        location: {
+          href: `http://127.0.0.2:4170/mcp-app-sandbox?hostOrigin=${encodeURIComponent(hostOrigin)}`,
+        },
+        parent: { postMessage },
+        addEventListener: vi.fn(),
+      };
+      const document = {
+        referrer: '',
+        createElement: () => ({
+          setAttribute: vi.fn(),
+          style: { cssText: '' },
+          contentWindow: { postMessage: vi.fn() },
+        }),
+        body: { appendChild },
+      };
+      runInNewContext(script!, { window, document, URL });
+      return { appendChild, postMessage };
+    };
+
+    const loopback = runSandbox('http://127.0.0.2:4170');
+    expect(loopback.appendChild).toHaveBeenCalledOnce();
+    expect(loopback.postMessage).toHaveBeenCalledOnce();
+
+    const nonLoopback = runSandbox('https://example.com');
+    expect(nonLoopback.appendChild).not.toHaveBeenCalled();
+    expect(nonLoopback.postMessage).not.toHaveBeenCalled();
   });
 
   it.each([

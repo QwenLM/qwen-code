@@ -2,15 +2,29 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
+import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import type { SessionContentGenerator } from './AssistantMessage';
-import { hasActiveAgents } from '../../adapters/toolClassification';
+import {
+  hasActiveAgents,
+  isSubAgentToolCall,
+} from '../../adapters/toolClassification';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { getTranslator, I18nProvider } from '../../i18n';
-import { WebShellCustomizationProvider } from '../../customization';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import {
+  WebShellCustomizationProvider,
+  type MarkdownRenderContext,
+} from '../../customization';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
+import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 
 vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -21,7 +35,6 @@ vi.mock('../../WebShellContexts', async () => {
 });
 
 const {
-  buildUnifiedDiff,
   extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,
@@ -87,13 +100,26 @@ function renderToolGroup(
     isStreaming?: boolean;
     beforeToolCallId?: string;
   }>,
-  compactSummary = false,
+  renderModeOrCompactSummary:
+    | 'interactive'
+    | 'readonly'
+    | 'document'
+    | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
   language: 'en' | 'zh-CN' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
+  documentExpanded = true,
 ): HTMLElement {
+  const renderMode =
+    typeof renderModeOrCompactSummary === 'string'
+      ? renderModeOrCompactSummary
+      : 'interactive';
+  const compactSummary =
+    typeof renderModeOrCompactSummary === 'boolean'
+      ? renderModeOrCompactSummary
+      : false;
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -115,19 +141,23 @@ function renderToolGroup(
     );
     root.render(
       <I18nProvider language={language}>
-        <WebShellCustomizationProvider value={customization}>
-          {onOpenMonitor ? (
-            <MonitorDetailsProvider onOpen={onOpenMonitor}>
-              {group}
-            </MonitorDetailsProvider>
-          ) : onOpenSubagent ? (
-            <SubagentDetailsProvider onOpen={onOpenSubagent}>
-              {group}
-            </SubagentDetailsProvider>
-          ) : (
-            group
-          )}
-        </WebShellCustomizationProvider>
+        <TranscriptRenderModeProvider value={renderMode}>
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            <WebShellCustomizationProvider value={customization}>
+              {onOpenMonitor ? (
+                <MonitorDetailsProvider onOpen={onOpenMonitor}>
+                  {group}
+                </MonitorDetailsProvider>
+              ) : onOpenSubagent ? (
+                <SubagentDetailsProvider onOpen={onOpenSubagent}>
+                  {group}
+                </SubagentDetailsProvider>
+              ) : (
+                group
+              )}
+            </WebShellCustomizationProvider>
+          </TranscriptDocumentExpandedProvider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -551,26 +581,52 @@ describe('tool group summary logic', () => {
     expect((content as HTMLElement | null)?.style.display).toBe('');
   });
 
-  it('renders fallbackText for a compacted MCP App without mounting the iframe', () => {
-    const container = renderToolLine(
-      makeTool({
-        toolName: 'mcp__demo__show_dashboard',
-        rawOutput: {
-          type: 'mcp_app',
-          serverName: 'demo',
-          resourceUri: 'ui://demo/dashboard',
-          html: '',
-          toolResult: {},
-          toolArguments: {},
-          fallbackText: 'Dashboard ready',
-        },
-      }),
-    );
+  it.each([
+    { scenario: 'compacted', fallbackText: 'Dashboard ready' },
+    {
+      scenario: 'failed to load',
+      fallbackText:
+        "Warning: MCP App 'ui://demo/dashboard' from 'demo' could not be displayed: resource read timed out (limit: 10000 ms)\n\nDashboard ready",
+    },
+  ])(
+    'renders a $scenario MCP App fallback without an iframe',
+    ({ fallbackText }) => {
+      const container = renderToolGroup(
+        [
+          makeTool({
+            toolName: 'mcp__demo__show_dashboard',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'Dashboard ready' },
+              },
+            ],
+            rawOutput: {
+              type: 'mcp_app',
+              serverName: 'demo',
+              resourceUri: 'ui://demo/dashboard',
+              html: '',
+              toolResult: {},
+              toolArguments: {},
+              fallbackText,
+            },
+          }),
+        ],
+        {},
+        undefined,
+        false,
+        undefined,
+        undefined,
+        'en',
+        undefined,
+        'http://localhost:5173',
+      );
 
-    expect(container.textContent).toContain('Dashboard ready');
-    expect(container.querySelector('iframe')).toBeNull();
-    expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
-  });
+      expect(container.textContent).toContain(fallbackText);
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+    },
+  );
 
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
@@ -659,6 +715,20 @@ describe('tool output session links', () => {
   });
 });
 
+describe('workflow tool classification', () => {
+  it('does not mistake workflow live output for a subagent panel', () => {
+    expect(
+      isSubAgentToolCall(
+        makeTool({
+          toolName: 'workflow',
+          status: 'in_progress',
+          subContent: '{"runId":"wf_expected"}',
+        }),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe('tool kind logic', () => {
   it('classifies common tool names for summary icons', () => {
     expect(getToolHeaderKind(makeTool({ toolName: 'Shell' }))).toBe('shell');
@@ -702,6 +772,133 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('expands a workflow tool into its live execution graph', () => {
+    const tool = makeTool({
+      toolName: 'workflow',
+      status: 'in_progress',
+      subContent: '```json\n{"runId":"wf_channel","status":"running"}\n```',
+    });
+    const task: DaemonSessionWorkflowTaskStatus = {
+      kind: 'workflow',
+      id: 'wf_channel',
+      label: 'Channel analysis',
+      description: 'Analyze channel packages',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 200,
+      isBackgrounded: false,
+      currentPhase: 'Inspect',
+      phaseVisits: [
+        {
+          id: 'phase-inspect',
+          index: 0,
+          title: 'Inspect',
+          startedAt: 1_010,
+        },
+      ],
+      dispatches: [
+        {
+          id: 'dispatch-architecture',
+          phaseVisitId: 'phase-inspect',
+          label: 'Architecture Agent',
+          prompt: 'Inspect the channel architecture',
+          status: 'running',
+          dependsOn: [],
+          queuedAt: 1_020,
+          startedAt: 1_030,
+        },
+      ],
+      agentsDispatched: 1,
+      agentsCompleted: 0,
+      tokensSpent: 120,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowDetailsProvider tasks={[task]}>
+            <ToolGroup tools={[tool]} />
+          </WorkflowDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    const content = container.querySelector(
+      '[class*="chatSummaryContentClip"]',
+    ) as HTMLElement;
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+    expect(content.className).toContain('chatSummaryContentCollapsed');
+    expect(content.getAttribute('aria-hidden')).toBe('true');
+    expect(content.hasAttribute('inert')).toBe(true);
+    expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+    act(() => summary.click());
+
+    expect(summary.getAttribute('aria-expanded')).toBe('true');
+    expect(content.className).not.toContain('chatSummaryContentCollapsed');
+    expect(content.getAttribute('aria-hidden')).toBe('false');
+    expect(content.hasAttribute('inert')).toBe(false);
+    expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
+    expect(container.textContent).toContain('Architecture Agent');
+  });
+
+  it('keeps grouped tools and thoughts fully expanded in document mode', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'shell-1',
+          rawOutput: 'first document output',
+        }),
+        makeTool({
+          callId: 'shell-2',
+          rawOutput: 'second document output',
+        }),
+      ],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+    );
+
+    expect(container.textContent).toContain('first document output');
+    expect(container.textContent).toContain('second document output');
+    expect(container.textContent).toContain('document thought');
+    expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
+    expect(
+      (
+        container.querySelector(
+          '[class*="chatSummaryContentClip"]',
+        ) as HTMLElement | null
+      )?.style.display,
+    ).not.toBe('none');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
+  });
+
+  it('honors the document-wide collapsed state for tools and thoughts', () => {
+    const container = renderToolGroup(
+      [makeTool({ rawOutput: 'document tool output' })],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      undefined,
+      false,
+    );
+
+    expect(container.textContent).not.toContain('document tool output');
+    expect(container.textContent).not.toContain('document thought');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
+  });
+
   it('renders the aggregate summary for a multi-tool group', () => {
     const container = renderToolGroup([
       makeTool({
@@ -964,7 +1161,9 @@ describe('tool row rendering', () => {
     expect(errorIcon?.getAttribute('role')).toBe('img');
     expect(errorIcon?.getAttribute('aria-label')).toBe('Failed');
     expect(errorIcon?.querySelector('svg')).not.toBeNull();
-    expect(container.textContent).not.toContain('Failed');
+    expect(
+      container.querySelector('[class*="lineMain"]')?.textContent,
+    ).not.toContain('Failed');
   });
 
   it('shows an error icon instead of the failed label on expanded tool rows', () => {
@@ -986,7 +1185,7 @@ describe('tool row rendering', () => {
     expect(errorIcon?.textContent).not.toContain('Failed');
   });
 
-  it('shows an error icon in the expanded single-tool card title', () => {
+  it('shows a failure label in the expanded shell card', () => {
     const container = renderToolGroup([
       makeTool({
         toolName: 'Shell',
@@ -998,13 +1197,13 @@ describe('tool row rendering', () => {
     const summary = container.querySelector('button') as HTMLButtonElement;
     act(() => summary.click());
 
-    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    const titleRow = container.querySelector('[class*="shellHeading"]');
     expect(titleRow).not.toBeNull();
-    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
-    expect(titleRow?.textContent).not.toContain('Failed');
+    expect(titleRow?.textContent).toContain('Failed');
+    expect(titleRow?.querySelector('.lucide-circle-x')).not.toBeNull();
   });
 
-  it('renders no status icon in the expanded completed tool card title', () => {
+  it('shows completion without claiming success for unstructured shell output', () => {
     const container = renderToolGroup([
       makeTool({
         toolName: 'Shell',
@@ -1016,9 +1215,10 @@ describe('tool row rendering', () => {
     const summary = container.querySelector('button') as HTMLButtonElement;
     act(() => summary.click());
 
-    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    const titleRow = container.querySelector('[class*="shellHeading"]');
     expect(titleRow).not.toBeNull();
-    expect(titleRow?.querySelector('[class*="iconError"]')).toBeNull();
+    expect(titleRow?.textContent).toContain('Completed');
+    expect(titleRow?.textContent).not.toContain('Succeeded');
   });
 
   it('shows an error icon in the expanded failed todo card title', () => {
@@ -1504,6 +1704,11 @@ describe('tool row rendering', () => {
     expect(
       container.querySelector('[class*="chatSummaryTextActive"]'),
     ).toBeNull();
+    // The marker is scoped to "a background agent is the row's only active
+    // work", not to single-tool rows, so a mixed row must keep it too.
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).not.toBeNull();
   });
 
   it('keeps a mixed group animated while a foreground tool is active', () => {
@@ -1526,6 +1731,245 @@ describe('tool row rendering', () => {
       container.querySelector('[class*="chatSummaryTextActive"]'),
     ).not.toBeNull();
   });
+
+  it('marks the summary icon while only a background agent is active', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        executionMode: 'background',
+      }),
+    ]);
+
+    // The icon marker is the only liveness cue a detached card gets, so it
+    // must not come with the shimmer or a timer the design keeps off it.
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toMatch(/\b\d+s\b/);
+  });
+
+  it('leaves the summary icon unmarked while a foreground tool animates it', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        executionMode: 'background',
+      }),
+      makeTool({
+        callId: 'foreground',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      }),
+    ]);
+
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).toBeNull();
+  });
+
+  it('leaves the summary icon unmarked once the background agent settles', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'completed',
+        executionMode: 'background',
+      }),
+    ]);
+
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).toBeNull();
+  });
+
+  it('shows a live elapsed and current activity for a running foreground agent', () => {
+    // Fake timers: the elapsed string is rounded from a wall-clock gap, so a
+    // live-clock fixture flips 45s to 46s on a loaded worker with no code
+    // regression.
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+          subTools: [
+            makeTool({
+              callId: 'sub-read',
+              toolName: 'read',
+              status: 'in_progress',
+              args: { file_path: 'src/app.ts' },
+            }),
+          ],
+        }),
+      ]);
+
+      expect(container.textContent).toContain('Running');
+      expect(container.textContent).toContain('(ReadFile src/app.ts)');
+      expect(container.textContent).toContain('45s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the task description on a running foreground agent row', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'foreground-agent',
+        toolName: 'agent',
+        status: 'in_progress',
+        executionMode: 'foreground',
+        startTime: Date.now() - 45_000,
+        args: { description: 'Trace the retry loop to its root cause' },
+        subTools: [
+          makeTool({
+            callId: 'sub-read',
+            toolName: 'read',
+            status: 'in_progress',
+            args: { file_path: 'src/app.ts' },
+          }),
+        ],
+      }),
+    ]);
+
+    expect(container.textContent).toContain(
+      'Trace the retry loop to its root cause',
+    );
+    expect(container.textContent).toContain('(ReadFile src/app.ts)');
+  });
+
+  it('renders no empty parentheses without a live sub-tool', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+          subTools: [
+            makeTool({
+              callId: 'sub-done',
+              toolName: 'read',
+              status: 'completed',
+            }),
+          ],
+        }),
+      ]);
+
+      expect(container.textContent).toContain('45s');
+      expect(container.textContent).not.toContain('()');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the running foreground agent summary elapsed ticking', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+        }),
+      ]);
+
+      expect(container.textContent).toContain('45s');
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain('46s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not tick an elapsed on the background agent summary', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'background',
+          toolName: 'agent',
+          status: 'pending',
+          executionMode: 'background',
+          startTime: 1_000,
+        }),
+      ]);
+
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(container.textContent).not.toMatch(/\b\d+s\b/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['line', 'summary'] as const)(
+    'keeps the %s unavailable until the subagent session is ready',
+    (mode) => {
+      const onOpen = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const render = (subagentSessionReady: boolean) => {
+        const tool = makeTool({
+          toolName: 'agent',
+          status: 'in_progress',
+          title: undefined,
+          subagentSessionReady,
+        });
+        act(() =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <SubagentDetailsProvider onOpen={onOpen}>
+                {mode === 'line' ? (
+                  <ToolLine tool={tool} />
+                ) : (
+                  <ToolGroup tools={[tool]} />
+                )}
+              </SubagentDetailsProvider>
+            </I18nProvider>,
+          ),
+        );
+        return tool;
+      };
+      render(false);
+      const button = container.querySelector('button')!;
+      expect(button.getAttribute('aria-disabled')).toBe('true');
+      expect(button.title).toBe('创建中');
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      act(() => button.click());
+      expect(onOpen).not.toHaveBeenCalled();
+      const ready = render(true);
+      expect(button.hasAttribute('aria-disabled')).toBe(false);
+      act(() => button.click());
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(ready);
+    },
+  );
 
   it('opens on-demand agent details without mounting inline content', () => {
     const onOpen = vi.fn();
@@ -1694,7 +2138,7 @@ describe('tool row rendering', () => {
     expect(header.textContent).toContain('packages/web-shell/client');
   });
 
-  it('uses the shell tool name for expanded cards from action summaries', () => {
+  it('keeps the shell title with a separate output section in expanded cards', () => {
     const container = renderToolLine(
       makeTool({
         toolName: 'run_shell_command',
@@ -1720,9 +2164,15 @@ describe('tool row rendering', () => {
     act(() => header.click());
 
     const cardTitle = container.querySelector(
-      '[class*="expandedCardTitleRow"] [class*="expandedCardTitle"]',
+      '[data-shell-command-card] [class*="expandedCardTitle"]',
     );
     expect(cardTitle?.textContent).toBe('Shell');
+    expect(
+      container.querySelector('[data-shell-command-card] summary')?.textContent,
+    ).toBe('Command');
+    expect(container.querySelectorAll('pre')[0]?.textContent).toBe(
+      'dataworks-infra workspace list',
+    );
   });
 
   it('shows complete skill content in the expanded card body', () => {
@@ -1776,6 +2226,53 @@ describe('tool row rendering', () => {
 });
 
 describe('thinking rows in the compact summary', () => {
+  it('passes each expanded thought streaming state to the Markdown customization', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const transformMarkdown = vi.fn(
+      (content: string, context: MarkdownRenderContext) =>
+        `${content} ${context.isStreaming ? 'pending' : 'settled'}`,
+    );
+    const customization = { markdown: { transformMarkdown } };
+    const tools = [makeTool({ toolName: 'ReadFile' })];
+    const render = (isStreaming: boolean) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={customization}>
+              <ToolGroup
+                tools={tools}
+                thoughts={[{ content: 'thought citation', isStreaming }]}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+    };
+
+    render(true);
+    act(() => container.querySelector('button')?.click());
+    const thoughtHeader = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    );
+    expect(thoughtHeader).not.toBeNull();
+    act(() => thoughtHeader?.click());
+    expect(container.textContent).toContain('thought citation pending');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: true,
+    });
+
+    render(false);
+    expect(container.textContent).toContain('thought citation settled');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: false,
+    });
+  });
+
   it('expands a single-agent compact summary before opening agent details', () => {
     const onOpenSubagent = vi.fn();
     const container = renderToolGroup(
@@ -2203,9 +2700,291 @@ describe('tool output logic', () => {
     ).toBe(fileDiff);
   });
 
+  it('keeps confirmed diff content on a subsequently cancelled tool', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          wasCancelled: true,
+          content: [
+            {
+              type: 'diff',
+              oldText: 'old content',
+              newText: 'confirmed content',
+            },
+          ],
+        }),
+      ),
+    ).toContain('confirmed content');
+  });
+
   it('builds a unified diff for changed content blocks', () => {
     expect(buildUnifiedDiff('same\nold', 'same\nnew')).toBe(
       ' same\n-old\n+new',
     );
+  });
+
+  it('uses a typed file-diff preview without raw output', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'DOCUMENT_DIFF_DETAIL',
+          },
+        }),
+      ),
+    ).toContain('DOCUMENT_DIFF_DETAIL');
+  });
+
+  it('uses an old-text-only preview for a delete-only diff', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'deleted content',
+          },
+        }),
+      ),
+    ).toContain('-deleted content');
+  });
+
+  it('does not render an attempted typed diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
+  });
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted typed diff for a %s safe projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-edit',
+        kind: 'tool',
+        toolCallId: 'edit-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: {
+          kind: 'file_diff',
+          path: 'document.ts',
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block], {
+        safeToolProjection: true,
+      });
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toBeDefined();
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted raw-input diff for a %s default projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-default-edit',
+        kind: 'tool',
+        toolCallId: 'edit-default-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: { kind: 'generic' },
+        rawInput: {
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block]);
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toMatchObject({
+        status: 'completed',
+        wasCancelled: true,
+      });
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
+});
+
+describe('pending edit approval rows', () => {
+  it('locks the row while an approval is pending, even for mixed-case tool names', () => {
+    // Daemon adapters pass tool names through unnormalized; the pending-edit
+    // treatment must not silently stop applying when the wire value carries
+    // case variations (every sibling is*ToolName helper lowercases
+    // internally).
+    const tool = makeTool({
+      toolName: 'WriteFile',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+    });
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: tool.callId,
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+
+    // The native diff editor owns the approval interaction: no auto-expand
+    // and no expand affordance while the approval is outstanding.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+  });
+
+  // R3-11: the approval reaches sub-agent rows through a different path than a
+  // top-level edit — hasSubToolApproval keeps the agent row shown and the panel
+  // only receives the approval while the host owns the diff preview. Neither
+  // half had a witness.
+  it('keeps a sub-agent row open for a nested edit approval the host owns', () => {
+    const tool = makeTool({
+      callId: 'agent-1',
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [
+        { callId: 'sub-edit', toolName: 'WriteFile', status: 'pending' },
+      ],
+    });
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: 'sub-edit',
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+
+    // The approval belongs to a tool call inside the agent, not to the agent's
+    // own launch, so the row must stay open — collapsing it would hide the
+    // edit the user is being asked to approve.
+    expect(container.textContent).toContain('WriteFile');
+
+    // Control: the same agent with nothing pending stays collapsed, so the
+    // assertion above is about the approval and not about agent rows always
+    // rendering their sub-tools.
+    const withoutApproval = renderToolLine(
+      tool,
+      {},
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(withoutApproval.textContent).not.toContain('WriteFile');
+  });
+
+  it('keeps pending edit rows expandable when the host does not own the diff', () => {
+    const tool = makeTool({
+      toolName: 'WriteFile',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+    });
+    const container = renderToolLine(tool, {
+      approval: {
+        id: 'perm-edit',
+        toolCallId: tool.callId,
+        toolName: 'WriteFile',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
+
+    expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
+  });
+
+  it('hands a pending bare-write row back to the shell already expanded', () => {
+    const tool = makeTool({
+      toolName: 'write',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+      // The hand-back only matters if the edit is on screen again, so the
+      // fixture has to carry the diff the lock presupposes — without content
+      // `extractDiff` returns '' and the expanded card renders empty.
+      content: [
+        {
+          type: 'diff',
+          oldText: 'old content',
+          newText: 'handed back content',
+        },
+      ],
+    });
+
+    // While the host shows the diff natively the row is deliberately locked:
+    // `write` is an edit alias, so the native editor owns the interaction.
+    const hostOwned = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-write',
+          toolCallId: tool.callId,
+          toolName: 'write',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(hostOwned.querySelector('[class*="lineExpandable"]')).toBeNull();
+
+    // Handing the preview back has to unlock *and* auto-expand it, or the user
+    // is left with an approval whose content is nowhere on screen. The expanded
+    // renderer already handles the bare name, so only shouldAutoExpand has to
+    // agree with isEditToolName about it.
+    const handedBack = renderToolLine(tool, {
+      approval: {
+        id: 'perm-write',
+        toolCallId: tool.callId,
+        toolName: 'write',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
+    expect(
+      handedBack.querySelector('[class*="lineExpandable"]'),
+    ).not.toBeNull();
+    expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+    // ...and the edit itself is lookable again — the whole point of the
+    // hand-back (#10557). Without content in the fixture the expanded card is
+    // empty and the two assertions above pass with nothing on screen.
+    expect(handedBack.textContent).toContain('handed back content');
   });
 });

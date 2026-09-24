@@ -5,8 +5,8 @@
  */
 
 // Centralised path constants and helpers for the `qwen review` subcommands.
-// Review artifacts are relative to the project root; user-private runtime
-// preferences resolve under Storage's project directory. Use `path.join`
+// Review artifacts are relative to the project root; host-trusted state and
+// user-private runtime preferences resolve through Storage. Use `path.join`
 // rather than string concatenation so Windows backslashes are produced.
 
 import { createHash } from 'node:crypto';
@@ -19,6 +19,7 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sanitizeFilenameComponent, Storage } from '@qwen-code/qwen-code-core';
+import { getProjectHash } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { safeTarget } from '../../../utils/paths.js';
 
 /**
@@ -28,7 +29,17 @@ import { safeTarget } from '../../../utils/paths.js';
  * dies EISDIR there — AFTER the fetches — and exit-codes as a runtime
  * failure instead of the repairable-invocation class the caller keys on.
  */
-export function assertWritableOutPath(out: string): void {
+export function assertWritableOutPath(out: unknown): asserts out is string {
+  // yargs hands a repeated `--out` over as an array and `--no-out` as
+  // `false`: name the mistake, rather than `out.trim is not a function` — a
+  // usage error worded like a crash.
+  if (typeof out !== 'string') {
+    throw new TypeError(
+      Array.isArray(out)
+        ? '--out must be given once, as a file path'
+        : '--out must name a file path',
+    );
+  }
   if (out.trim() === '') {
     throw new TypeError('--out must name a file path');
   }
@@ -46,8 +57,64 @@ export function assertWritableOutPath(out: string): void {
 }
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
+
+/**
+ * The retired in-workspace lease directory. New code never reads authority
+ * from here, but local-diff still excludes residue left by an older build.
+ */
+export const RETIRED_REVIEW_LEASE_DIR = join('.qwen', 'review-leases');
+export const REVIEW_TRUST_STATE_DIR = 'review-state';
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
+
+function outermostReviewRepositoryRoot(repositoryRoot: string): string {
+  const resolved = resolve(repositoryRoot);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = (resolved + sep).indexOf(marker);
+  return at < 0 ? resolved : resolved.slice(0, at);
+}
+
+function canonicalReviewRepositoryRoot(repositoryRoot: string): string {
+  let canonical = outermostReviewRepositoryRoot(repositoryRoot);
+  try {
+    canonical = realpathSync.native(canonical);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Review repositories exist in production. Keeping the lexical fallback
+    // makes this path helper side-effect free and lets the eventual lease
+    // operation report the real filesystem error.
+  }
+  // A caller may have reached a nested review worktree through a symlink
+  // whose lexical spelling contains no `.qwen/tmp` segment. Re-apply the
+  // boundary rule after canonicalization so that spelling still shares the
+  // outer review's namespace.
+  canonical = outermostReviewRepositoryRoot(canonical);
+  return canonical;
+}
+
+/** Host-trusted review state, outside every repository workspace. */
+export function reviewTrustStateDir(repositoryRoot: string): string {
+  const digest = getProjectHash(canonicalReviewRepositoryRoot(repositoryRoot));
+  return join(Storage.getGlobalQwenDir(), REVIEW_TRUST_STATE_DIR, digest);
+}
+
+/**
+ * The outermost repository root encoded by a review worktree path. Derive it
+ * from path geometry, never Git metadata inside the reviewed worktree.
+ */
+export function reviewRepositoryRootForWorktree(worktree: string): string {
+  const resolved = resolve(worktree);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = resolved.indexOf(marker);
+  if (at < 0) {
+    throw new Error(
+      `cannot place the base-tree trust artifact for ${worktree}: the ` +
+        'worktree is not shaped like <root>/.qwen/tmp/<name>, so there is ' +
+        'no host-side review directory to key it under',
+    );
+  }
+  return resolved.slice(0, at);
+}
 
 /**
  * Where a generated review fan-out script has to live.
@@ -177,12 +244,12 @@ export function ensureWritableReviewWorkflowsDir(
 /**
  * The generated fan-out script for one plan.
  *
- * Named by a digest of the plan path so two reviews running in one session
- * do not overwrite each other's script, and so re-running `emit-workflow`
- * for the same review replaces its own file rather than accumulating.
+ * Both the canonical plan path and script content identify the file. A later
+ * wave cannot overwrite a previous run's script while it is resumable.
  */
 export function reviewWorkflowScriptPath(
   planPath: string,
+  script: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const resolved = resolve(planPath);
@@ -200,11 +267,16 @@ export function reviewWorkflowScriptPath(
     .update(canonical)
     .digest('hex')
     .slice(0, 10);
-  return join(reviewWorkflowsDir(env), `${REVIEW_WORKFLOW_PREFIX}${digest}.js`);
+  const contentDigest = createHash('sha256').update(script).digest('hex');
+  return join(
+    reviewWorkflowsDir(env),
+    `${REVIEW_WORKFLOW_PREFIX}${digest}-${contentDigest}.js`,
+  );
 }
 
 /**
- * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.
+ * Filename prefix for review-worktree lease files under the trusted review
+ * state directory.
  * Lives here, not in `review-worktree-lease.ts`, because the review
  * workflow's cleanup sweep deletes leases by glob — the sweep pattern and
  * the lease writer must share one definition (the cleanup spec pins both).

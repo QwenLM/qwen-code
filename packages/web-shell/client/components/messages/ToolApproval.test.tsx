@@ -10,7 +10,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
+import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
+import type { SessionContentGenerator } from './AssistantMessage';
+import { WebShellCustomizationProvider } from '../../customization';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -70,6 +73,9 @@ function rerender(
   req: PermissionRequest = request,
   planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
+  generateContent?: SessionContentGenerator,
+  planExecutionMode?: string,
+  disabled?: boolean,
 ): void {
   act(() =>
     root!.render(
@@ -79,6 +85,9 @@ function rerender(
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
           planTodos={planTodos}
+          generateContent={generateContent}
+          planExecutionMode={planExecutionMode}
+          disabled={disabled}
         />
       </I18nProvider>,
     ),
@@ -90,11 +99,22 @@ function render(
   req: PermissionRequest = request,
   planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
+  generateContent?: SessionContentGenerator,
+  planExecutionMode?: string,
+  disabled?: boolean,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req, planTodos, language);
+  rerender(
+    keyboardActive,
+    req,
+    planTodos,
+    language,
+    generateContent,
+    planExecutionMode,
+    disabled,
+  );
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -118,6 +138,419 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it.each([false, true])(
+    'preserves edit approval changes and warnings (host owns preview: %s)',
+    (hostOwnsEditDiffPreview) => {
+      const adapted = extractPendingPermission([
+        {
+          id: 'permission-edit',
+          kind: 'permission',
+          requestId: 'request-edit',
+          sessionId: 'session-edit',
+          title: 'Edit: /outside/example.txt',
+          options: [],
+          toolCall: {
+            kind: 'edit',
+            _meta: { toolName: 'replace' },
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: 'Path is outside the workspace',
+                },
+              },
+              {
+                type: 'diff',
+                path: '/outside/example.txt',
+                oldText: 'before11966',
+                newText: 'after11966',
+              },
+            ],
+          },
+          preview: { kind: 'generic' },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ])!;
+      render();
+      act(() =>
+        root!.render(
+          <WebShellCustomizationProvider value={{ hostOwnsEditDiffPreview }}>
+            <I18nProvider language="en">
+              <ToolApproval
+                request={{ ...adapted, options: request.options }}
+                onConfirm={onConfirm}
+              />
+            </I18nProvider>
+          </WebShellCustomizationProvider>,
+        ),
+      );
+      expect(container!.textContent).toContain('Path is outside the workspace');
+      expect(container!.textContent?.includes('before11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      expect(container!.textContent?.includes('after11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      if (!hostOwnsEditDiffPreview) {
+        const dialog = container!.querySelector('[role="alertdialog"]')!;
+        const descriptions = dialog
+          .getAttribute('aria-describedby')!
+          .split(' ')
+          .map((id) => document.getElementById(id)?.textContent)
+          .join(' ');
+        expect(descriptions).not.toContain('before11966');
+        expect(descriptions).not.toContain('after11966');
+        const diffRegion = container!.querySelector<HTMLElement>(
+          '[aria-label="File diff"]',
+        )!;
+        expect(diffRegion.tabIndex).toBe(0);
+        const arrowDown = new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => diffRegion.dispatchEvent(arrowDown));
+        expect(arrowDown.defaultPrevented).toBe(false);
+      }
+      act(() =>
+        optionButtons()
+          .find((button) => button.dataset.optionId === 'reject')!
+          .click(),
+      );
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        'request-edit',
+        'reject',
+      );
+    },
+  );
+
+  it('rejects on Escape even when focus is inside the edit diff', () => {
+    // The approval panel documents "Escape rejects" and the diff region is
+    // focusable so users can inspect the change before answering. Regression
+    // guard: a blanket stopPropagation on DiffView used to swallow Escape too,
+    // silently breaking the fastest way to decline.
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-esc',
+        kind: 'permission',
+        requestId: 'request-edit-esc',
+        sessionId: 'session-edit-esc',
+        title: 'Edit: /outside/example.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/example.txt',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    const diffRegion = container!.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    diffRegion.focus();
+    pressKey(diffRegion, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-edit-esc',
+      'reject',
+    );
+  });
+
+  it('omits oversized edit diffs at the approval boundary', () => {
+    // The approval card renders synchronously into an [role=alertdialog], so
+    // an outsized edit would freeze the panel and drown the accessible
+    // description — surface a short notice instead. The transcript
+    // completed-edit path stays coarse but visible; the cap belongs to the
+    // approval boundary, not to buildUnifiedDiff itself.
+    const bigOld = 'line\n'.repeat(2_000);
+    const bigNew = 'line\n'.repeat(2_000) + 'extra';
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-big',
+        kind: 'permission',
+        requestId: 'request-edit-big',
+        sessionId: 'session-edit-big',
+        title: 'Edit: /outside/big.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/big.txt',
+              oldText: bigOld,
+              newText: bigNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('line\nline\nline\nline');
+  });
+
+  it('omits edit diffs that exceed the character budget while staying under the line budget', () => {
+    // The sibling test above uses many short lines, so it only ever trips
+    // `tooManyLines`. The char gate decides on its own for any edit with
+    // ≤1000 total lines and >100_000 total chars — 400 long lines per side is
+    // 800 lines but ~119k chars, and also lands on n*m = 160_000, i.e. under
+    // MAX_DIFF_PRODUCT, so nothing else would have stopped the LCS table.
+    const longOld = Array.from(
+      { length: 400 },
+      (_, i) => `old-${i}-${'x'.repeat(140)}`,
+    ).join('\n');
+    const longNew = Array.from(
+      { length: 400 },
+      (_, i) => `new-${i}-${'y'.repeat(140)}`,
+    ).join('\n');
+    expect(longOld.length + longNew.length).toBeGreaterThan(100_000);
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-wide',
+        kind: 'permission',
+        requestId: 'request-edit-wide',
+        sessionId: 'session-edit-wide',
+        title: 'Edit: /outside/wide.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/wide.txt',
+              oldText: longOld,
+              newText: longNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('x'.repeat(140));
+    expect(container!.textContent).not.toContain('y'.repeat(140));
+  });
+
+  it('renders generic parameter content even when it equals the title', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-input',
+        kind: 'permission',
+        requestId: 'request-input',
+        sessionId: 'session-input',
+        title: '{}',
+        options: [],
+        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const preview = container!.querySelector('pre');
+    expect(preview?.textContent).toBe('{}');
+    const describedBy = container!
+      .querySelector('[role="alertdialog"]')
+      ?.getAttribute('aria-describedby')
+      ?.split(' ');
+    expect(describedBy).toContain(preview?.id);
+    pressKey(container!.querySelector('[role="alertdialog"]')!, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-input',
+      'reject',
+    );
+  });
+
+  it('keeps the complete literal parameter body available without interpreting markup', () => {
+    const input = {
+      content: '<b>' + '😀'.repeat(3970) + '\n LAST_CHARACTER </b>  ',
+    };
+    render(undefined, {
+      ...request,
+      title: 'Save',
+      contentIsInput: true,
+      content: [{ type: 'text', text: JSON.stringify(input, null, 2) }],
+    });
+    const preview = container!.querySelector('pre');
+    expect(JSON.parse(preview?.textContent ?? '')).toEqual(input);
+    expect(preview?.querySelector('b')).toBeNull();
+  });
+
+  it('explains Shell commands through session generation', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-1',
+        seq: 0,
+        text: '该命令会删除临时数据。',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 10,
+        outputTokens: 6,
+      };
+    });
+    render(undefined, execRequest, undefined, 'zh-CN', generateContent);
+
+    const explain =
+      container!.querySelector<HTMLButtonElement>('button[title="解释"]');
+    expect(explain?.textContent).toContain('解释');
+
+    await act(async () => explain?.click());
+
+    expect(generateContent).toHaveBeenCalledWith(
+      expect.stringContaining('rm -rf /tmp/data'),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(generateContent.mock.calls[0]?.[0]).toContain('Simplified Chinese');
+    expect(document.body.textContent).toContain('该命令会删除临时数据。');
+
+    const popover = document.body.querySelector(
+      '[data-approval-shortcuts-ignore]:not(button)',
+    )!;
+    pressKey(popover, '1');
+    pressKey(popover, 'Escape');
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('only offers explanations for Shell commands', () => {
+    const generateContent = async function* () {};
+    render(undefined, request, undefined, 'en', generateContent);
+
+    expect(container!.querySelector('button[title="Explain"]')).toBeNull();
+  });
+
+  it('resets an open explanation when a new request arrives', async () => {
+    const generateContent = vi.fn(async function* (prompt: string) {
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-reset',
+        seq: 0,
+        text: prompt.includes('pwd') ? 'New explanation' : 'Old explanation',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-reset',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    });
+    render(undefined, execRequest, undefined, 'en', generateContent);
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+    expect(document.body.textContent).toContain('Old explanation');
+
+    rerender(
+      true,
+      {
+        ...execRequest,
+        id: 'req-exec-2',
+        rawInput: { command: 'pwd', description: 'Print directory' },
+      },
+      undefined,
+      'en',
+      generateContent,
+    );
+    expect(document.body.textContent).not.toContain('Old explanation');
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+    expect(document.body.textContent).toContain('New explanation');
+  });
+
+  it('keeps Escape rejection when the closed explanation trigger is focused', () => {
+    render(undefined, execRequest, undefined, 'en', async function* () {});
+    const explain = container!.querySelector<HTMLButtonElement>(
+      'button[title="Explain"]',
+    )!;
+    explain.focus();
+
+    pressKey(explain, 'Escape');
+
+    expect(onConfirm).toHaveBeenCalledWith('req-exec', 'reject');
+  });
+
   it('shows the active Todo workflow before exiting Plan Mode', () => {
     render(undefined, planRequest, [
       { id: 'prepare', content: 'Prepare', status: 'completed' },
@@ -135,6 +568,127 @@ describe('ToolApproval accessibility', () => {
     expect(container!.textContent).toContain(
       'Implement the approved workflow.',
     );
+  });
+
+  it('localizes Workflow approval without changing ordinary approvals', () => {
+    const planTodos = [
+      { id: 'review', content: 'Review', status: 'pending' as const },
+    ];
+    render(undefined, planRequest, planTodos, 'zh-CN');
+
+    expect(container!.textContent).toContain('计划并审阅');
+    expect(container!.textContent).toContain('确认计划并开始协作？');
+    expect(optionLabels()).toEqual(['继续完善计划', '确认并开始']);
+
+    rerender(undefined, planRequest, planTodos, 'en');
+    expect(container!.textContent).toContain('Plan & Review');
+    expect(container!.textContent).toContain(
+      'Confirm the plan and start collaboration?',
+    );
+    expect(optionLabels()).toEqual(['Continue planning', 'Confirm and start']);
+
+    rerender(undefined, request, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('是否继续？');
+    expect(container!.textContent).not.toContain('确认计划并开始协作？');
+  });
+
+  it('blocks plan handoff clicks and shortcuts while disabled, then allows confirmation', () => {
+    render(undefined, request, undefined, 'en', undefined, undefined, true);
+    act(() => optionButtons()[1].click());
+    pressKey(container!.querySelector('[role="alertdialog"]')!, '2');
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(optionButtons().every((button) => button.disabled)).toBe(true);
+    rerender(undefined, request, undefined, 'en', undefined, undefined, false);
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(request.id, 'proceed');
+  });
+
+  it('re-arms a plan handoff after the parent rejects a same-tick busy confirmation', async () => {
+    onConfirm.mockRejectedValueOnce(
+      new Error('Approval mode is still pending'),
+    );
+    render();
+    await act(async () => optionButtons()[1].click());
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the latest execution permission without automatically approving the plan', () => {
+    const req: PermissionRequest = {
+      ...planRequest,
+      options: [
+        { id: 'restore_previous', label: 'Restore YOLO', kind: 'allow_once' },
+        { id: 'proceed_always', label: 'Auto edits', kind: 'allow_always' },
+        { id: 'proceed_once', label: 'Default', kind: 'allow_once' },
+        { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionLabels()).toEqual([
+      'Continue planning',
+      'Approve and execute · Full Access',
+    ]);
+    rerender(undefined, req, undefined, 'en', undefined, 'default');
+    expect(optionLabels()).toEqual([
+      'Continue planning',
+      'Approve and execute · Ask Approval',
+    ]);
+    expect(onConfirm).not.toHaveBeenCalled();
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'restore_previous');
+  });
+
+  it('does not invent a plan approval option missing from the server request', () => {
+    render(undefined, planRequest, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'reject',
+    ]);
+    act(() => optionButtons()[0].click());
+    expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
+  });
+
+  it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {
+    render(undefined, request, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'reject',
+      'proceed',
+    ]);
+  });
+
+  it('keeps restore_previous distinct from confirm in a Workflow approval', () => {
+    // The production exit_plan_mode option set: two `allow_once` options whose
+    // outcomes differ materially, so they must never share one label.
+    const productionPlanRequest: PermissionRequest = {
+      ...planRequest,
+      options: [
+        {
+          id: 'restore_previous',
+          label: 'Yes, restore previous mode (yolo)',
+          kind: 'allow_once',
+        },
+        {
+          id: 'proceed_always',
+          label: 'Yes, and auto-accept edits',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_once',
+          label: 'Yes, and manually approve edits',
+          kind: 'allow_once',
+        },
+        { id: 'cancel', label: 'No, keep planning (esc)', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, productionPlanRequest, [
+      { id: 'review', content: 'Review', status: 'pending' },
+    ]);
+
+    const labels = optionLabels();
+    expect(labels).toContain('Confirm and start');
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(
+      labels.filter((label) => label === 'Confirm and start'),
+    ).toHaveLength(1);
   });
 
   it('keeps the text-only Plan Mode approval when there are no Todos', () => {
@@ -699,6 +1253,56 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
   });
 
+  it('re-enables confirmation when submission rejects', async () => {
+    onConfirm
+      .mockRejectedValueOnce(new Error('submit failed'))
+      .mockResolvedValueOnce(undefined);
+    render(undefined);
+
+    act(() => optionButtons()[1]!.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[1]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-arm the submit guard on a stale rejection from a previous request', async () => {
+    let rejectStale: ((err: Error) => void) | undefined;
+    const staleSubmission = new Promise<void>((_resolve, reject) => {
+      rejectStale = reject;
+    });
+    const successorSubmission = new Promise<void>(() => {});
+    onConfirm
+      .mockReturnValueOnce(staleSubmission)
+      .mockReturnValueOnce(successorSubmission);
+    render(undefined);
+
+    // Confirm request A; its submission stays in flight.
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    // The daemon replaces A with request B (this instance is reused — no key
+    // at the mount sites); the id-keyed reset effect re-arms the guard, and
+    // confirming B arms it again while B's submission is in flight.
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+
+    // A's stale submission rejects late (the daemon answers duplicates with
+    // "No pending permission request"). It must not disarm B's guard.
+    await act(async () => {
+      rejectStale?.(new Error('No pending permission request'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[0]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
   it('does not re-arm the submit guard when the same request changes options', () => {
     render(undefined, {
       id: 'same-id',
@@ -723,5 +1327,200 @@ describe('ToolApproval accessibility', () => {
     });
     act(() => optionButtons()[0]!.click());
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+});
+
+const goalObjective =
+  'Outcome: Audit open PRs. Done when: Every PR has evidence. Must not: Push or comment. Budget: 20 turns. On block: Report missing access. Context: Preserve the exact budget assumption.';
+const goalNotice =
+  'Replace the paused Goal and start working toward this objective?';
+const goalRequest: PermissionRequest = {
+  ...request,
+  id: 'goal-request',
+  toolName: 'propose_goal',
+  title: `Propose Goal: ${goalObjective}`,
+  rawInput: { objective: goalObjective },
+  content: [{ type: 'text', text: `${goalNotice}\n\n${goalObjective}` }],
+};
+
+function switchGoalTab(value: string) {
+  const tab =
+    container!.querySelectorAll<HTMLButtonElement>('[role="tab"]')[
+      value === 'full' ? 1 : 0
+    ];
+  act(() => {
+    tab.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+    );
+  });
+}
+
+describe('goal approval', () => {
+  it('formats the draft without hiding constraints or the replacement notice', () => {
+    render(false, goalRequest, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('确认会话目标');
+    expect(container!.textContent).toContain('设置并继续');
+    expect(container!.textContent).toContain('暂不设置');
+    expect(container!.textContent).toContain(goalNotice);
+    expect(container!.textContent).toContain('Push or comment.');
+    expect(container!.textContent).toContain(
+      'Preserve the exact budget assumption.',
+    );
+    expect(container!.textContent).not.toContain('Propose Goal:');
+    expect(container!.querySelector('pre')).toBeNull();
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('retains arbitrary objectives and fallback confirmation content', () => {
+    render(false, { ...goalRequest, rawInput: undefined });
+    expect(container!.textContent!.split(goalNotice)).toHaveLength(2);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    rerender(false, {
+      ...goalRequest,
+      id: 'plain',
+      rawInput: { objective: '原样保留\n  command --flag' },
+      content: [],
+    });
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe('原样保留\n  command --flag');
+  });
+
+  it('does not invoke approval shortcuts while reading goal tabs or text', () => {
+    render(false, goalRequest);
+    const panel = container!.querySelector(
+      '[role="tabpanel"][data-state="active"]',
+    )!;
+    act(() => {
+      for (const key of ['1', '2', 'j', 'k', 'Home', 'End', 'Escape']) {
+        panel.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true }),
+        );
+      }
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('disables duplicate submissions and retains the full view when retrying', async () => {
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    render(false, goalRequest);
+    switchGoalTab('full');
+    const approve = container!.querySelector<HTMLButtonElement>(
+      '[data-option-id="proceed"]',
+    )!;
+    act(() => {
+      approve.click();
+      approve.click();
+    });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(approve.disabled).toBe(true);
+    await act(async () => {
+      fail(new Error('offline'));
+    });
+    expect(approve.disabled).toBe(false);
+    expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+      'Please try again',
+    );
+    expect(
+      container!.querySelector('[role="tab"][data-state="active"]')!
+        .textContent,
+    ).toBe('Full content');
+    act(() => approve.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('goal-request', 'proceed');
+  });
+
+  it('rearms synchronous failures and ignores late rejection of an older request', async () => {
+    onConfirm.mockImplementationOnce(() => {
+      throw new Error('offline');
+    });
+    render(false, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(container!.querySelector('[role="alert"]')).not.toBeNull();
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    rerender(false, { ...goalRequest, id: 'next-goal' });
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    await act(async () => {
+      fail(new Error('old request'));
+    });
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe('successive goal approvals', () => {
+  it('focuses the safe default when a pending request is replaced', () => {
+    render(true, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    rerender(true, { ...goalRequest, id: 'new-goal' });
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-option-id="reject"]'),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="reject"]')!
+        .disabled,
+    ).toBe(false);
+  });
+});
+
+describe('goal approval objective whitespace', () => {
+  it('does not repeat an objective trimmed by the confirmation producer', () => {
+    render(false, {
+      ...goalRequest,
+      rawInput: { objective: `  ${goalObjective}\n` },
+    });
+    expect(container!.textContent!.split('Audit open PRs.')).toHaveLength(2);
+    expect(container!.textContent).toContain(goalNotice);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
   });
 });

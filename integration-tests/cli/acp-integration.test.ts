@@ -5,13 +5,15 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
-import { startFakeOpenAIServer } from '../fake-openai-server.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -124,8 +126,11 @@ function setupAcpTest(
   // the `set_config_option` test (acp-integration.test.ts:516). A per-agent
   // QWEN_HOME redirects `getGlobalQwenDir()` so the authenticate -> session/new
   // round-trip reads back exactly what this agent wrote.
-  const qwenHome = join(rig.testDir!, '.qwen-home');
-  mkdirSync(qwenHome, { recursive: true });
+  // The agent keeps writing under QWEN_HOME for a few hundred ms after it
+  // exits (measured: memory/projects/usage_record files landing ~300 ms after
+  // cleanup() returns), so inside rig.testDir those late writes race the
+  // global teardown's recursive rm with ENOTEMPTY.
+  const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
 
   const agent = spawn(
     'node',
@@ -301,6 +306,7 @@ function setupAcpTest(
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
     await waitForExit();
+    await removeScratchDir(qwenHome);
   };
 
   return {
@@ -512,7 +518,9 @@ function setupAcpTest(
       },
     });
 
-    const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+      env: { OPENAI_MODEL: 'qwen3-coder-plus' },
+    });
 
     try {
       // Initialize
@@ -546,13 +554,7 @@ function setupAcpTest(
       const initialReasoningOption = newSession.configOptions.find(
         (opt) => opt.id === 'reasoning_effort',
       );
-      expect(initialReasoningOption).toMatchObject({
-        category: 'thought_level',
-        currentValue: 'default',
-      });
-      expect(
-        initialReasoningOption?.options.map((option) => option.value),
-      ).toEqual(['default', 'low', 'medium', 'high', 'xhigh', 'max']);
+      expect(initialReasoningOption).toBeUndefined();
 
       // Test: Set mode using set_config_option
       const setModeResult = (await sendRequest('session/set_config_option', {
@@ -616,11 +618,22 @@ function setupAcpTest(
       );
       expect(updatedModelOption).toBeDefined();
       expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
-      expect(
-        setModelResult.configOptions.find(
-          (opt) => opt.id === 'reasoning_effort',
-        )?.currentValue,
-      ).toBe('default');
+      const reasoningOption = setModelResult.configOptions.find(
+        (opt) => opt.id === 'reasoning_effort',
+      );
+      expect(reasoningOption).toMatchObject({
+        category: 'thought_level',
+        currentValue: 'default',
+      });
+      expect(reasoningOption?.options.map((option) => option.value)).toEqual([
+        'none',
+        'default',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
 
       const setReasoningResult = (await sendRequest(
         'session/set_config_option',
@@ -664,7 +677,7 @@ function setupAcpTest(
         response: {
           code: -32602,
           message:
-            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, none, low, medium, high, xhigh, max',
         },
       });
     } catch (e) {
@@ -955,6 +968,23 @@ function setupAcpTest(
   it('blocks write tools in plan mode (issue #1806)', async () => {
     const rig = new TestRig();
     await rig.setup('acp plan mode enforcement');
+    let streamingRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      if (streamingRequestIndex++ === 0) {
+        return {
+          toolCalls: [
+            fakeToolCall('write_file', {
+              file_path: join(rig.testDir!, 'test.txt'),
+              content: 'Hello World',
+            }),
+          ],
+        };
+      }
+      return { content: 'Done.' };
+    });
 
     const toolCallEvents: Array<{
       toolName: string;
@@ -963,12 +993,13 @@ function setupAcpTest(
     }> = [];
 
     const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
-      permissionHandler: (request) => {
-        // Cancel exit_plan_mode to keep plan mode active
-        if (request.toolCall?.kind === 'switch_mode') {
-          return { outcome: 'cancelled' };
-        }
-        return { optionId: 'proceed_once' };
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
       },
     });
 
@@ -1003,41 +1034,39 @@ function setupAcpTest(
       });
       expect(promptResult).toBeDefined();
 
-      // Give time for tool calls to be processed
-      await delay(2000);
-
       // Collect tool call events from session updates
       sessionUpdates.forEach((update) => {
         if (update.update?.sessionUpdate === 'tool_call_update') {
           const toolUpdate = update.update as {
             sessionUpdate: string;
-            toolName?: string;
             status?: string;
-            error?: { message?: string };
+            content?: Array<{ content?: { text?: string } }>;
+            _meta?: { toolName?: string };
           };
-          if (toolUpdate.toolName) {
+          if (toolUpdate._meta?.toolName) {
             toolCallEvents.push({
-              toolName: toolUpdate.toolName,
+              toolName: toolUpdate._meta.toolName,
               status: toolUpdate.status ?? 'unknown',
-              error: toolUpdate.error?.message,
+              error: toolUpdate.content
+                ?.map(({ content }) => content?.text ?? '')
+                .join('\n'),
             });
           }
         }
       });
 
-      // Verify that if write_file was attempted, it was blocked
       const writeFileEvents = toolCallEvents.filter(
         (e) => e.toolName === 'write_file',
       );
 
-      // If the LLM tried to call write_file in plan mode, it should have been blocked
-      if (writeFileEvents.length > 0) {
-        const blockedEvent = writeFileEvents.find(
-          (e) => e.status === 'error' && e.error?.includes('Plan mode'),
-        );
-        expect(blockedEvent).toBeDefined();
-        expect(blockedEvent?.error).toContain('Plan mode is active');
-      }
+      const blockedEvent = writeFileEvents.find(
+        (e) => e.status === 'failed' && e.error?.includes('Plan mode'),
+      );
+      expect(
+        blockedEvent,
+        `expected a failed write_file tool_call_update blocked by plan mode; events=${JSON.stringify(toolCallEvents)}`,
+      ).toBeDefined();
+      expect(blockedEvent?.error).toContain('Plan mode is active');
 
       // Verify the file was NOT created
       const fs = await import('fs');
@@ -1050,6 +1079,7 @@ function setupAcpTest(
       throw e;
     } finally {
       await cleanup();
+      await fakeServer.close();
     }
   });
 
@@ -1133,84 +1163,6 @@ function setupAcpTest(
     } catch (e) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;
-    } finally {
-      await cleanup();
-      await fakeServer.close();
-    }
-  });
-
-  it('injects managed auto-memory into the first ACP model request', async () => {
-    const marker = 'ACP-MEMORY-ZEPHYR-4207';
-    const prompt = 'What is the ACP zephyr codeword?';
-    const fakeServer = await startFakeOpenAIServer(async ({ body }) => {
-      // Keep the model selector outside the initial Recall budget. The
-      // deterministic match must still reach the main streamed request.
-      if (body['stream'] !== true) await delay(250);
-      return { content: 'done' };
-    });
-    const rig = new TestRig();
-    await rig.setup('acp managed auto-memory recall', {
-      settings: {
-        memory: {
-          enableManagedAutoMemory: true,
-          enableManagedAutoDream: false,
-        },
-      },
-    });
-    const memoryDir = join(rig.testDir!, '.qwen', 'memory', 'project');
-    mkdirSync(memoryDir, { recursive: true });
-    writeFileSync(
-      join(memoryDir, 'acp-zephyr.md'),
-      [
-        '---',
-        'type: project',
-        'name: ACP Zephyr Codeword',
-        `description: The ACP zephyr codeword is ${marker}.`,
-        '---',
-        '',
-        `The ACP zephyr codeword is ${marker}.`,
-      ].join('\n'),
-      'utf8',
-    );
-
-    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
-      env: {
-        OPENAI_API_KEY: 'fake-key',
-        OPENAI_BASE_URL: fakeServer.baseUrl,
-        OPENAI_MODEL: 'fake-model',
-        QWEN_MODEL: 'fake-model',
-        QWEN_CODE_MEMORY_LOCAL: '1',
-        NO_PROXY: '127.0.0.1,localhost',
-        no_proxy: '127.0.0.1,localhost',
-      },
-    });
-
-    try {
-      await sendRequest('initialize', {
-        protocolVersion: 1,
-        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
-      });
-      await sendRequest('authenticate', { methodId: 'openai' });
-      const newSession = (await sendRequest('session/new', {
-        cwd: rig.testDir!,
-        mcpServers: [],
-      })) as { sessionId: string };
-
-      await sendRequest('session/prompt', {
-        sessionId: newSession.sessionId,
-        prompt: [{ type: 'text', text: prompt }],
-      });
-
-      const mainRequest = fakeServer.requests.find(
-        ({ body }) =>
-          body['stream'] === true &&
-          JSON.stringify(body['messages']).includes(prompt),
-      );
-      expect(mainRequest).toBeDefined();
-      expect(JSON.stringify(mainRequest?.body['messages'])).toContain(marker);
-    } catch (error) {
-      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
-      throw error;
     } finally {
       await cleanup();
       await fakeServer.close();

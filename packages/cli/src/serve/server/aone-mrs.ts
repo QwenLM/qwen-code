@@ -94,12 +94,6 @@ export const AONE_DETAIL_URL_HOST = 'code.alibaba-inc.com';
 export const AONE_MR_LIST_PAGE_SIZE = 20;
 
 /**
- * Pages read per state when backfill maps branches to MRs (newest-first by
- * updatedAt) — a bounded window where gh reads 500 entries in one call.
- */
-export const AONE_BACKFILL_PAGES_PER_STATE = 3;
-
-/**
  * Bound on `mr view` calls per backfill run / refresh sweep. A view is the
  * only sanctioned source of an Aone MR URL, and every newly bound or
  * state-refreshed number costs one; the excess degrades to "unresolved /
@@ -128,13 +122,13 @@ export interface AoneMrView {
   state: SessionPrState;
 }
 
-/** Test seam: the two a1 operations the binding paths need. */
+/**
+ * Test seam: the a1 operation the binding paths need. Backfill and the
+ * refresh sweep resolve NUMBERS (worktree convention, `/review` commands,
+ * persisted bindings) through `mr view`; neither maps branches, so the
+ * list primitive below is not part of the seam.
+ */
 export interface AoneMrBackend {
-  list(
-    repoPath: string,
-    state: 'opened' | 'merged',
-    pages: number,
-  ): Promise<AoneMrListEntry[]>;
   view(repoPath: string, id: number): Promise<AoneMrView>;
 }
 
@@ -462,7 +456,5 @@ export async function viewAoneMergeRequest(
 }
 
 export const defaultAoneMrBackend: AoneMrBackend = {
-  list: (repoPath, state, pages) =>
-    listAoneMergeRequests(repoPath, { state, pages }),
   view: viewAoneMergeRequest,
 };

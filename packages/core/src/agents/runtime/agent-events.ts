@@ -120,6 +120,8 @@ export interface AgentToolCallEvent {
   callId: string;
   name: string;
   args: Record<string, unknown>;
+  modelFacingName?: string;
+  modelFacingArgs?: Record<string, unknown>;
   description: string;
   /** Whether the tool's output should be rendered as markdown. */
   isOutputMarkdown?: boolean;
@@ -204,6 +206,12 @@ export interface AgentExternalMessageEvent {
 export interface AgentFinishEvent {
   subagentId: string;
   terminateReason: string;
+  /**
+   * Which loop detector fired when terminateReason is LOOP_DETECTED
+   * (issue #9450), so stops are attributable in journals/telemetry instead
+   * of collapsing into one generic label.
+   */
+  loopType?: string;
   timestamp: number;
   rounds?: number;
   totalDurationMs?: number;
