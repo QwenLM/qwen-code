@@ -1060,10 +1060,7 @@ export const modelCommand: SlashCommand = {
     if (modelName) {
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
-      if (
-        parsed.authType === AuthType.QWEN_OAUTH &&
-        !parsed.modelId.startsWith(`$runtime|${AuthType.QWEN_OAUTH}|`)
-      ) {
+      if (parsed.authType === AuthType.QWEN_OAUTH) {
         return {
           type: 'message',
           messageType: 'error',
