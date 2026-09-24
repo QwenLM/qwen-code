@@ -47,6 +47,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   monitor: 'Monitor',
   notebook_edit: 'NotebookEdit',
   tool_search: 'ToolSearch',
+  tool_call: 'ToolCall',
   read_mcp_resource: 'ReadMcpResource',
   enter_worktree: 'EnterWorktree',
   exit_worktree: 'ExitWorktree',
@@ -65,6 +66,21 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   report_findings: 'ReportFindings',
   web_search: 'WebSearch',
   image_gen: 'ImageGen',
+  omni_downsample_image: 'DownsampleImage',
+  omni_downscale_video: 'DownscaleVideo',
+  omni_downsample_audio: 'DownsampleAudio',
+  omni_extract_keyframes: 'ExtractKeyframes',
+  omni_extract_audio: 'ExtractAudio',
+  omni_clip_video: 'ClipVideo',
+  omni_convert_image: 'ConvertImage',
+  omni_transcribe_audio: 'TranscribeAudio',
+  omni_clip_image: 'ClipImage',
+  omni_clip_audio: 'ClipAudio',
+  omni_caption_image: 'CaptionImage',
+  omni_caption_audio: 'CaptionAudio',
+  omni_ocr_image: 'OcrImage',
+  omni_understand_video_segments: 'UnderstandVideoSegments',
+  omni_recall_media_memory: 'RecallMediaMemory',
   display_image: 'DisplayImage',
   bash: 'Shell',
   shell: 'Shell Command',
@@ -388,7 +404,8 @@ function getDescriptionFromArgs(
     return description;
   }
   if (args.file_path) {
-    if (args.description) return String(args.description);
+    const description = getStringArg(args, 'description');
+    if (description) return description;
     return pathForDisplay(String(args.file_path), workspaceCwd);
   }
   if (args.url) {
@@ -406,8 +423,7 @@ function getDescriptionFromArgs(
     const candidate = args.path || args.directory || '';
     return pathForDisplay(String(candidate), workspaceCwd);
   }
-  if (args.description) return String(args.description);
-  return '';
+  return getStringArg(args, 'description');
 }
 
 function getStringArg(
@@ -462,8 +478,10 @@ function formatDescriptionPaths(
     return pathForDisplay(trimmed, workspaceCwd);
   }
 
-  return trimmed.replace(/(?:[A-Za-z]:)?\/[^\s'")]+/g, (match) =>
-    pathForDisplay(match, workspaceCwd),
+  return trimmed.replace(
+    /(^|[\s'"(])((?:[A-Za-z]:)?\/[^\s'")]+)/g,
+    (_match, prefix: string, filePath: string) =>
+      prefix + pathForDisplay(filePath, workspaceCwd),
   );
 }
 

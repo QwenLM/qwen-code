@@ -24,6 +24,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 
 const archiveMocks = vi.hoisted(() => ({
   assertSessionLoadable: vi.fn(),
@@ -73,6 +74,10 @@ function makeFixture(
       primary: true,
       trusted: true,
       bridge,
+      routeFileSystemFactory: {
+        forRequest: vi.fn(),
+        assertCanWrite: vi.fn(),
+      } as WorkspaceFileSystemFactory,
     } as WorkspaceRuntime,
   };
 }

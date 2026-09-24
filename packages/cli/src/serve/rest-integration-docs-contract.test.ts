@@ -27,6 +27,10 @@ const OPENAPI = path.join(
   REPO_ROOT,
   'docs/developers/daemon-rest-api.openapi.json',
 );
+const QUICKSTART = path.join(
+  REPO_ROOT,
+  'docs/developers/examples/daemon-client-quickstart.md',
+);
 const SERVE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /** Operations the guide presents as the supported integration surface. */
@@ -57,6 +61,35 @@ const GUIDE_OPERATIONS: readonly string[] = [
   'GET /list',
   'GET /glob',
 ];
+
+const SDK_METHOD_BY_OPERATION: Readonly<Record<string, string>> = {
+  'GET /health': 'DaemonClient.health',
+  'GET /capabilities': 'DaemonClient.capabilities',
+  'POST /session': 'DaemonClient.createOrAttachSession',
+  'DELETE /session/:id': 'DaemonClient.closeSession',
+  'POST /session/:id/load': 'DaemonClient.loadSession',
+  'POST /session/:id/resume': 'DaemonClient.resumeSession',
+  'POST /session/:id/heartbeat': 'DaemonClient.heartbeat',
+  'PATCH /session/:id/metadata': 'DaemonClient.updateSessionMetadata',
+  'POST /session/:id/model': 'DaemonClient.setSessionModel',
+  'GET /session/:id/status': 'DaemonClient.sessionStatus',
+  'POST /session/:id/prompt': 'DaemonClient.promptNonBlocking',
+  'POST /session/:id/cancel': 'DaemonClient.cancel',
+  'GET /session/:id/events': 'DaemonClient.subscribeEvents',
+  'GET /session/:id/transcript': 'DaemonClient.getSessionTranscriptPage',
+  'GET /session/:id/context': 'DaemonClient.sessionContext',
+  'GET /session/:id/export': 'DaemonClient.exportSession',
+  'GET /session/:id/pending-prompts': 'DaemonClient.getPendingPrompts',
+  'POST /session/:id/permission/:requestId':
+    'DaemonClient.respondToSessionPermission',
+  'POST /permission/:requestId': 'DaemonClient.respondToPermission',
+  'GET /workspace/tools': 'DaemonClient.workspaceTools',
+  'GET /file': 'DaemonClient.readWorkspaceFile',
+  'GET /file/bytes': 'DaemonClient.readWorkspaceFileBytes',
+  'GET /stat': 'DaemonClient.fileStat',
+  'GET /list': 'DaemonClient.dirList',
+  'GET /glob': 'DaemonClient.glob',
+};
 
 const HTTP_METHODS = ['get', 'post', 'patch', 'put', 'delete'] as const;
 const REGISTERED_METHODS = new Set<string>([...HTTP_METHODS, 'all']);
@@ -220,14 +253,21 @@ function slug(heading: string): string {
     .replace(/ /g, '-');
 }
 
-/** Protocol headings outside fenced code blocks, where # starts a comment. */
-function protocolHeadings(): string[] {
+/** Markdown headings outside fenced code blocks, where # starts a comment. */
+function markdownHeadings(source: string): string[] {
   const headings: string[] = [];
-  let fence: string | undefined;
-  for (const line of readFileSync(PROTOCOL, 'utf8').split('\n')) {
-    const marker = /^\s*(```|~~~)/.exec(line)?.[1];
+  let fence: '`' | '~' | undefined;
+  for (const line of readFileSync(source, 'utf8').split('\n')) {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0] as
+      | '`'
+      | '~'
+      | undefined;
     if (marker) {
-      fence = fence === undefined ? marker : undefined;
+      if (fence === undefined) {
+        fence = marker;
+      } else if (marker === fence) {
+        fence = undefined;
+      }
       continue;
     }
     if (fence !== undefined) {
@@ -239,6 +279,10 @@ function protocolHeadings(): string[] {
     }
   }
   return headings;
+}
+
+function protocolHeadings(): string[] {
+  return markdownHeadings(PROTOCOL);
 }
 
 function protocolAnchors(): Set<string> {
@@ -300,7 +344,9 @@ function sdkMethods(): Set<string> {
     proto && proto !== Object.prototype;
     proto = Object.getPrototypeOf(proto) as object | null
   ) {
-    Object.getOwnPropertyNames(proto).forEach((name) => names.add(name));
+    Object.getOwnPropertyNames(proto)
+      .filter((name) => name !== 'constructor')
+      .forEach((name) => names.add(name));
   }
   return names;
 }
@@ -326,19 +372,51 @@ describe('REST integration documentation contract', () => {
     expect([...openApiOperations(openApi).keys()].sort()).toEqual(expected);
   });
 
+  it('links every guide operation to its own protocol section', () => {
+    const guide = readFileSync(GUIDE, 'utf8');
+    const links = guideRouteRows(guide).flatMap((row) => [
+      ...routeCell(row).matchAll(/\[`([^`]+)`\]\(([^)\s]+)\)/g),
+    ]);
+    expect(
+      links.length,
+      'guide operation links must not be empty',
+    ).toBeGreaterThan(0);
+    expect(links.map((link) => link[1]).sort()).toEqual(
+      [...GUIDE_OPERATIONS].sort(),
+    );
+
+    const headings = protocolHeadings();
+    const routePattern = new RegExp('^' + ROUTE_METHODS + ' /[^`]+$');
+    const routeLinks = [...guide.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)];
+    for (const link of routeLinks) {
+      const operation = link[1].replace(/^`([^`]+)`$/, '$1');
+      if (!routePattern.test(operation)) {
+        continue;
+      }
+      const ownHeadings = headings.filter((heading) =>
+        heading.startsWith(`\`${operation}\``),
+      );
+      expect(
+        ownHeadings,
+        `${operation} must have exactly one heading in qwen-serve-protocol.md`,
+      ).toHaveLength(1);
+      expect(link[2]).toBe(`./qwen-serve-protocol.md#${slug(ownHeadings[0])}`);
+    }
+  });
+
   it('keeps the OpenAPI contract self-describing', () => {
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
     ) as OpenApiDocument;
     expect(openApi.openapi).toBe('3.1.0');
-    const anchors = protocolAnchors();
+    const protocol = protocolHeadings();
     const capabilities = new Set(Object.keys(SERVE_CAPABILITY_REGISTRY));
     const schemes = new Set(
       Object.keys(openApi.components?.securitySchemes ?? {}),
     );
     const methods = sdkMethods();
     const operationIds: string[] = [];
-    for (const operation of openApiOperations(openApi).values()) {
+    for (const [name, operation] of openApiOperations(openApi)) {
       const operationId = operation.operationId;
       expect(operationId).toBeTruthy();
       if (operationId) {
@@ -351,18 +429,21 @@ describe('REST integration documentation contract', () => {
       ).toBe(true);
       expect(SCOPES.has(operation['x-qwen-scope'] as string)).toBe(true);
       expect(operation['x-qwen-stability']).toBe('stable');
+      expect(operation['x-qwen-sdk-method']).toBe(
+        SDK_METHOD_BY_OPERATION[name],
+      );
       expect(
         methods.has(
           (operation['x-qwen-sdk-method'] ?? '').replace(/^DaemonClient\./, ''),
         ),
       ).toBe(true);
-      const anchor = operation.externalDocs?.url?.match(
-        /qwen-serve-protocol\/#([a-z0-9_-]+)$/,
-      )?.[1];
-      expect(anchor).toBeTruthy();
-      if (anchor) {
-        expect(anchors.has(anchor)).toBe(true);
-      }
+      const ownHeadings = protocol.filter((heading) =>
+        heading.startsWith(`\`${name}\``),
+      );
+      expect(ownHeadings).toHaveLength(1);
+      expect(operation.externalDocs?.url).toBe(
+        `https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#${slug(ownHeadings[0])}`,
+      );
       const security = operation.security ?? [];
       expect(security.length).toBeGreaterThan(0);
       for (const requirement of security) {
@@ -479,16 +560,67 @@ describe('REST integration documentation contract', () => {
     expect([...operations.keys()].filter((key) => !seen.has(key))).toEqual([]);
   });
 
+  it('indexes every operation with a dedicated protocol section', () => {
+    const headings = protocolHeadings();
+    const operationPattern = /`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`/g;
+    const expected = headings.flatMap((heading) =>
+      [...heading.matchAll(operationPattern)].map((match) => match[1]),
+    );
+    const links = [
+      ...readFileSync(REFERENCE, 'utf8').matchAll(
+        /\[`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)/g,
+      ),
+    ];
+    expect(links.map((link) => link[1]).sort()).toEqual(expected.sort());
+
+    for (const link of links) {
+      const ownHeadings = headings.filter((heading) =>
+        [...heading.matchAll(operationPattern)].some(
+          (match) => match[1] === link[1],
+        ),
+      );
+      expect(ownHeadings).toHaveLength(1);
+      expect(link[2]).toBe(slug(ownHeadings[0]));
+    }
+  });
+
+  it('keeps the quickstart versioned and lifecycle-complete', () => {
+    const quickstart = readFileSync(QUICKSTART, 'utf8');
+    const sdkVersion = quickstart.match(
+      /targets Qwen Code `v\d+\.\d+\.\d+` and\s+`@qwen-code\/sdk@(\d+\.\d+\.\d+)`/,
+    )?.[1];
+    expect(sdkVersion).toBeTruthy();
+    expect(quickstart).toContain(`npm install @qwen-code/sdk@${sdkVersion}`);
+    for (const method of [
+      'loadSession',
+      'resumeSession',
+      'sessionStatus',
+      'getSessionTranscriptPage',
+    ]) {
+      expect(quickstart).toContain(`client.${method}(`);
+    }
+  });
+
   it('links only to documentation files and protocol anchors that exist', () => {
     const guide = readFileSync(GUIDE, 'utf8');
     const targets = [
-      ...guide.matchAll(/\]\((\.\.?\/[^)#\s]+\.md)(?:#[^)]*)?\)/g),
-    ].map((match) => match[1]);
+      ...guide.matchAll(/\]\((\.\.?\/[^)#\s]+\.md)(?:#([^)]*))?\)/g),
+    ].map((match) => ({ file: match[1], fragment: match[2] }));
     expect(targets.length).toBeGreaterThan(0);
     expect(
       targets.filter(
-        (target) => !existsSync(path.resolve(path.dirname(GUIDE), target)),
+        ({ file }) => !existsSync(path.resolve(path.dirname(GUIDE), file)),
       ),
+    ).toEqual([]);
+    expect(
+      targets.filter(({ file, fragment }) => {
+        const target = path.resolve(path.dirname(GUIDE), file);
+        return (
+          fragment !== undefined &&
+          existsSync(target) &&
+          !new Set(markdownHeadings(target).map(slug)).has(fragment)
+        );
+      }),
     ).toEqual([]);
 
     const repoLinks = [
@@ -500,17 +632,23 @@ describe('REST integration documentation contract', () => {
     expect(
       repoLinks.filter((target) => !existsSync(path.join(REPO_ROOT, target))),
     ).toEqual([]);
-
-    const anchors = protocolAnchors();
-    const protocolLinks = [
-      ...guide.matchAll(/\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)/g),
-    ].map((match) => match[1]);
-    expect(protocolLinks.length).toBeGreaterThan(0);
-    expect(protocolLinks.filter((anchor) => !anchors.has(anchor))).toEqual([]);
   });
 
   it('points every guide flow command at the published server', () => {
     const guide = readFileSync(GUIDE, 'utf8');
+    const minimalFlow = guide.match(
+      /## Minimal flow\n([\s\S]*?)\n## Operations/,
+    )?.[1];
+    expect(minimalFlow).toBeTruthy();
+    const flowCommands = [
+      ...(minimalFlow ?? '').matchAll(/```bash\n([\s\S]*?)```/g),
+    ]
+      .map((match) => match[1])
+      .filter((block) => /\bcurl\s+-/.test(block));
+    expect(flowCommands).toHaveLength(5);
+    expect(
+      flowCommands.filter((command) => !command.includes('$DAEMON_URL/')),
+    ).toEqual([]);
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
     ) as OpenApiDocument;
@@ -535,22 +673,52 @@ describe('REST integration documentation contract', () => {
     ).toEqual([]);
   });
 
+  it('documents exactly the environment variables the MCP bridge reads', () => {
+    const bridgeBin = readFileSync(
+      path.join(
+        REPO_ROOT,
+        'packages/sdk-typescript/src/daemon-mcp/serve-bridge/bin.ts',
+      ),
+      'utf8',
+    );
+    const bridgeVars = [
+      ...new Set(
+        [...bridgeBin.matchAll(/process\.env\['([A-Z0-9_]+)'\]/g)].map(
+          (match) => match[1],
+        ),
+      ),
+    ];
+    expect(bridgeVars.length).toBeGreaterThan(0);
+
+    const guide = readFileSync(GUIDE, 'utf8');
+    expect(bridgeVars.filter((name) => !guide.includes(`\`${name}\``))).toEqual(
+      [],
+    );
+
+    // The copy-pasteable env block must not name a variable the bridge never
+    // reads.
+    const mcpSection = guide.slice(
+      guide.indexOf('### Drive the daemon through MCP'),
+      guide.indexOf('### Embed the Web Shell'),
+    );
+    const documentedVars = [
+      ...(mcpSection.match(/```json\n([\s\S]*?)```/)?.[1] ?? '').matchAll(
+        /"([A-Z0-9_]+)":/g,
+      ),
+    ].map((match) => match[1]);
+    expect(documentedVars.length).toBeGreaterThan(0);
+    expect(documentedVars.filter((name) => !bridgeVars.includes(name))).toEqual(
+      [],
+    );
+  });
+
   it('gives every supported operation a dedicated protocol heading', () => {
     const headings = new Set(
-      [
-        ...readFileSync(PROTOCOL, 'utf8').matchAll(
-          /^#{3,4} `(GET|POST|PATCH|PUT|DELETE) ([^`]+)`/gm,
-        ),
-      ].map((match) => `${match[1]} ${match[2]}`),
+      protocolHeadings().flatMap((heading) => {
+        const match = /^`(GET|POST|PATCH|PUT|DELETE) ([^`]+)`/.exec(heading);
+        return match ? [`${match[1]} ${match[2]}`] : [];
+      }),
     );
-    const unfenced = readFileSync(PROTOCOL, 'utf8').replace(
-      /```[\s\S]*?```/g,
-      '',
-    );
-    const outside = new Set(
-      [...unfenced.matchAll(/^#{1,6} (.+)$/gm)].map((match) => slug(match[1])),
-    );
-    expect([...protocolAnchors()].sort()).toEqual([...outside].sort());
     expect(GUIDE_OPERATIONS.filter((entry) => !headings.has(entry))).toEqual(
       [],
     );

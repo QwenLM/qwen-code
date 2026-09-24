@@ -38,7 +38,7 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
-    'packages/acp-bridge/src/bridge.ts',
+    'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
       accesses: { 'key:QWEN_SERVE_DEBUG': 1 },
@@ -237,16 +237,12 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
         'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move. The bwrap backend forwards its launch environment ' +
-        'through whole-environment references; proxy settings are read from ' +
-        'the resulting baseEnv parameter rather than process.env. It also reads ' +
-        'XDG_CACHE_HOME to grant the cache directory the Seatbelt profiles ' +
-        'already grant.',
+        'leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
-        'key:BUILD_SANDBOX': 3,
+        'key:BUILD_SANDBOX': 2,
         'key:COLORTERM': 2,
-        'key:DEBUG': 6,
+        'key:DEBUG': 5,
         'key:DEBUG_MODE': 1,
         'key:DEBUG_PORT': 2,
         'key:GEMINI_API_KEY': 2,
@@ -261,7 +257,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:HTTPS_PROXY': 2,
         'key:NO_PROXY': 2,
         'key:NODE_ENV': 1,
-        'key:NODE_OPTIONS': 2,
+        'key:NODE_OPTIONS': 1,
         'key:OPENAI_API_KEY': 2,
         'key:OPENAI_BASE_URL': 2,
         'key:OPENAI_MODEL': 2,
@@ -270,7 +266,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
         'key:QWEN_CODE_WARNINGS_FILE': 2,
-        'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 2,
+        'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,
         'key:QWEN_CODE_TEST_VAR': 2,
         'key:QWEN_SANDBOX_PROXY_COMMAND': 2,
         'key:SANDBOX_ENV': 2,
@@ -281,12 +277,20 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:SEATBELT_PROFILE': 1,
         'key:TERM': 2,
         'key:VIRTUAL_ENV': 1,
-        'key:XDG_CACHE_HOME': 1,
         'key:http_proxy': 2,
         'key:https_proxy': 2,
         'key:no_proxy': 2,
-        whole: 9,
+        whole: 6,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-git-branches.ts',
+    {
+      reason:
+        "The git error redaction mirrors the daemon process's own HOME/" +
+        'XDG_CONFIG_HOME to label the inherited config paths git echoes.',
+      accesses: { 'key:HOME': 1, 'key:XDG_CONFIG_HOME': 1 },
     },
   ],
   [

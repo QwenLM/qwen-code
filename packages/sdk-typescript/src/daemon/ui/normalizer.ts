@@ -68,6 +68,14 @@ const SESSION_RECORDING_DEGRADED_MESSAGE =
 
 const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
 
+// Wire close-reason tokens are internal identifiers; render known ones as
+// copy and never echo an unknown token into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
+
 export function normalizeDaemonEvent(
   event: DaemonEvent,
   opts: NormalizeDaemonEventOptions = {},
@@ -133,11 +141,29 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'session_closed':
+      if (
+        isRecord(event.data) &&
+        event.data['persistenceUnconfirmed'] === true
+      ) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: false,
+            text: 'Workspace runtime stopped; session persistence is unconfirmed.',
+          },
+        ];
+      }
       return [
         {
           ...base,
           type: 'status',
-          text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
+          text:
+            getString(event.data, 'cause') === 'workspace_runtime_stop'
+              ? 'Workspace runtime stopped.'
+              : (SESSION_CLOSED_REASON_COPY[
+                  getString(event.data, 'reason') ?? ''
+                ] ?? 'Session closed'),
         },
       ];
     case 'session_recording_degraded': {
@@ -688,7 +714,10 @@ function createBase(
       : undefined) ??
       (isRecord(event.data) ? event.data['backgroundTurn'] : undefined),
   );
-  const promptId = event.promptId ?? backgroundTurn?.turnId;
+  const promptId =
+    event.promptId ??
+    getString(update?.['_meta'], 'promptId') ??
+    backgroundTurn?.turnId;
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
@@ -840,6 +869,27 @@ function normalizeSessionUpdate(
       }
       const meta = extractUpdateMeta(update);
       const content = update['content'];
+      if (
+        isRecord(content) &&
+        content['type'] === 'resource_link' &&
+        typeof content['uri'] === 'string' &&
+        content['uri'].length > 0 &&
+        typeof content['name'] === 'string'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'user.resource_link.delta',
+            resourceLink: {
+              ...content,
+              type: 'resource_link',
+              uri: content['uri'],
+              name: content['name'],
+            },
+            ...(meta ? { meta } : {}),
+          },
+        ];
+      }
       const part = extractContentPart(content);
       if (part) {
         if (part.kind === 'image') {
@@ -1216,10 +1266,14 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const startedAt = numberField(metadata, 'startedAt');
+  const durationMs = numberField(metadata, 'durationMs');
   return {
     ...base,
     type: 'tool.update',
     toolCallId,
+    ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
+    ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
     ...(status ? { status } : {}),
     ...(title ? { title } : {}),
     ...(toolName ? { toolName } : {}),

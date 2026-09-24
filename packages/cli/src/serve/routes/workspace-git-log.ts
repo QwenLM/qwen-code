@@ -21,6 +21,8 @@ import {
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 
+const MAX_SEARCH_CHARS = 200;
+
 function buildLogList(
   workspaceCwd: string,
   result: GitLogResult | null,
@@ -114,7 +116,18 @@ async function handleLogList(
       typeof rawRange === 'string' && rawRange.trim()
         ? rawRange.trim()
         : undefined;
-    const result = await fetchGitLog(workspaceCwd, { limit, skip, range });
+    const rawSearch = req.query['search'];
+    const search =
+      typeof rawSearch === 'string' && rawSearch.trim()
+        ? rawSearch.trim().slice(0, MAX_SEARCH_CHARS)
+        : undefined;
+    const result = await fetchGitLog(workspaceCwd, {
+      limit,
+      skip,
+      range,
+      all: req.query['all'] === '1',
+      search,
+    });
     res.status(200).json(buildLogList(workspaceCwd, result));
   } catch (err) {
     sendBridgeError(res, err, { route });

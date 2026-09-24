@@ -41,11 +41,146 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
 }
 
 describe('buildInstallPlan', () => {
-  it.each([AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES])(
-    'clears explicitly submitted advanced controls without losing unrelated settings (%s)',
-    (protocol) => {
+  it.each([false, true])(
+    'preserves each preset API and its selected route (same-id siblings: %s)',
+    (siblings) => {
+      const config = makeConfig({
+        models: [{ id: 'model-a', enableThinking: true }, { id: 'model-b' }],
+      });
       const inputs = {
-        protocol,
+        baseUrl: 'https://api.test.com/v1',
+        apiKey: 'test-only-new',
+        modelIds: ['model-a', 'model-b'],
+      };
+      const chat = buildInstallPlanSrc(config, inputs).modelProviders![0]!
+        .models;
+      const responses = buildInstallPlanSrc(config, {
+        ...inputs,
+        wireApi: 'responses',
+      }).modelProviders![0]!.models;
+      const existing = [
+        chat[0]!,
+        ...(siblings ? [responses[0]!] : []),
+        responses[1]!,
+      ];
+      const before = structuredClone(existing);
+      const plan = buildInstallPlanSrc(config, inputs, existing, {
+        id: 'model-b',
+        baseUrl: inputs.baseUrl,
+        authType: AuthType.USE_OPENAI_RESPONSES,
+      });
+      expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(plan.modelSelection).toMatchObject({ modelId: 'model-b' });
+      expect(plan.modelProviders![0]!.models).toEqual(existing);
+      expect(plan.providerState).toEqual({
+        'providerMetadata.test': { version: undefined },
+      });
+      expect(existing).toEqual(before);
+      const explicit = buildInstallPlanSrc(
+        config,
+        {
+          ...inputs,
+          wireApi: 'chat-completions',
+        },
+        existing,
+        {
+          id: 'model-b',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+        },
+      );
+      expect(explicit.authType).toBe(AuthType.USE_OPENAI);
+      expect(
+        explicit.modelProviders![0]!.models.map((model) => model.wireApi),
+      ).toEqual(['chat-completions', 'chat-completions']);
+    },
+  );
+
+  it('keeps a hand-written realtimeOnly route on reconnect and never selects it', () => {
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+    // Listed first on purpose: position must not make it the conversation
+    // model.
+    const existing = [
+      { id: 'omni-realtime', baseUrl, envKey, realtimeOnly: true },
+      { id: 'chat', baseUrl, envKey },
+    ];
+    const plan = buildInstallPlanSrc(
+      customProvider,
+      {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl,
+        apiKey: 'test-only',
+        modelIds: ['omni-realtime', 'chat'],
+      },
+      existing,
+    );
+    expect(
+      plan.modelProviders![0]!.models.find(
+        (model) => model.id === 'omni-realtime',
+      )?.realtimeOnly,
+    ).toBe(true);
+    expect(plan.modelSelection).toMatchObject({ modelId: 'chat' });
+  });
+
+  it.each(['generated', 'prebuilt', 'preserved'] as const)(
+    'rejects a final Responses voice model (%s)',
+    (source) => {
+      const inputs = {
+        protocol: AuthType.USE_OPENAI,
+        wireApi: 'responses' as const,
+        baseUrl: 'https://voice.example/v1',
+        apiKey: 'test-only',
+        modelIds: ['qwen3-asr-flash'],
+      };
+      const model = {
+        id: 'qwen3-asr-flash',
+        baseUrl: inputs.baseUrl,
+        envKey: generateCustomEnvKey(AuthType.USE_OPENAI, inputs.baseUrl),
+        wireApi: 'responses' as const,
+        voiceOnly: true,
+      };
+      expect(() =>
+        buildInstallPlanSrc(
+          customProvider,
+          {
+            ...inputs,
+            ...(source === 'generated'
+              ? { advancedConfig: { purpose: 'voice' as const } }
+              : {}),
+            ...(source === 'prebuilt' ? { prebuiltModels: [model] } : {}),
+          },
+          source === 'preserved' ? [model] : [],
+        ),
+      ).toThrow('Voice transcription requires the OpenAI Chat Completions API');
+    },
+  );
+
+  it.each([
+    { purpose: 'voice' as const, wireApi: undefined },
+    { purpose: 'voice' as const, wireApi: 'chat-completions' as const },
+    { purpose: 'image' as const, wireApi: 'responses' as const },
+    { purpose: undefined, wireApi: 'responses' as const },
+  ])(
+    'accepts supported purpose/wire combinations: %j',
+    ({ purpose, wireApi }) => {
+      expect(() =>
+        buildInstallPlanSrc(customProvider, {
+          baseUrl: 'https://media.example/v1',
+          apiKey: 'test-only',
+          modelIds: ['qwen3-asr-flash'],
+          wireApi,
+          advancedConfig: { purpose },
+        }),
+      ).not.toThrow();
+    },
+  );
+
+  it.each(['chat-completions', 'responses'] as const)(
+    'clears explicitly submitted advanced controls without losing unrelated settings (%s)',
+    (wireApi) => {
+      const inputs = {
+        protocol: AuthType.USE_OPENAI,
+        wireApi,
         baseUrl: 'https://custom.example/v1',
         apiKey: 'new-key',
         modelIds: ['custom-model'],
@@ -95,8 +230,7 @@ describe('buildInstallPlan', () => {
       ).modelProviders![0]!.models[0]!;
       const expectedDisabled = structuredClone(existing[0]!.generationConfig!);
       delete expectedDisabled.extra_body!['enable_thinking'];
-      if (protocol === AuthType.USE_OPENAI_RESPONSES)
-        delete expectedDisabled.reasoning;
+      if (wireApi === 'responses') delete expectedDisabled.reasoning;
       expect(disabled.generationConfig).toEqual(expectedDisabled);
       const withoutModalities = buildInstallPlanSrc(
         customProvider,
@@ -133,7 +267,7 @@ describe('buildInstallPlan', () => {
       ).modelProviders![0]!.models[0]!;
       expect(enabled.generationConfig?.extra_body).toEqual({
         custom_flag: 'retained',
-        ...(protocol === AuthType.USE_OPENAI ? { enable_thinking: true } : {}),
+        ...(wireApi === 'chat-completions' ? { enable_thinking: true } : {}),
       });
       expect(enabled.generationConfig).toEqual(existing[0]!.generationConfig);
       const replaced = buildInstallPlanSrc(
@@ -203,6 +337,49 @@ describe('buildInstallPlan', () => {
     expect(models?.[1]?.generationConfig).toBeUndefined();
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
       computeModelListVersion(models ?? []),
+    );
+  });
+
+  it('retires version metadata when the install stamps an explicit API', () => {
+    const config = makeConfig();
+    const responsesPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      wireApi: 'responses',
+    });
+    // A version hashed from an `wireApi`-stamped model list can never match the
+    // drift check's template rebuild (no `wireApi`, and the default route's
+    // generationConfig shape), so the provider would prompt an "update" on
+    // every launch — and accepting it would duplicate every model. The install
+    // records no version and retires one an earlier default-route install left
+    // behind (adapters treat `undefined` as unset).
+    expect(responsesPlan.providerState).toEqual({
+      'providerMetadata.test': { version: undefined },
+    });
+
+    // The same holds for an explicit `wireApi: 'chat-completions'` on a preset
+    // whose own protocol already is USE_OPENAI — the stamp alone makes the
+    // recorded hash irreproducible by buildProviderTemplate.
+    const chatStampedPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      wireApi: 'chat-completions',
+    });
+    expect(chatStampedPlan.providerState).toEqual({
+      'providerMetadata.test': { version: undefined },
+    });
+
+    const chatPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+    expect(chatPlan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(
+        buildProviderTemplate(config, 'https://api.test.com/v1'),
+      ),
     );
   });
 
@@ -301,13 +478,12 @@ describe('buildInstallPlan', () => {
     const config = makeConfig({
       models: undefined,
       modelNamePrefix: 'C',
-      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES],
     });
     const plan = buildInstallPlan(config, {
       baseUrl: 'https://custom.com/v1',
       apiKey: 'sk-custom',
       modelIds: ['m1'],
-      protocol: AuthType.USE_OPENAI_RESPONSES,
+      wireApi: 'responses',
       advancedConfig: { enableThinking: true },
     });
 
@@ -316,6 +492,69 @@ describe('buildInstallPlan', () => {
       reasoning: { effort: 'medium' },
     });
     expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
+  });
+
+  it('keeps omitted custom wireApi on Chat when the same model has a Responses entry', () => {
+    const config = makeConfig({
+      models: undefined,
+      protocolOptions: [AuthType.USE_OPENAI],
+    });
+    const plan = buildInstallPlan(
+      config,
+      {
+        baseUrl: 'https://api.test.com/v1',
+        apiKey: 'key',
+        modelIds: ['same'],
+        advancedConfig: { enableThinking: true },
+      },
+      [
+        {
+          id: 'same',
+          name: '[Test] same',
+          baseUrl: 'https://api.test.com/v1',
+          envKey: 'TEST_API_KEY',
+          wireApi: 'responses',
+          generationConfig: { reasoning: { effort: 'high' } },
+        },
+      ],
+    );
+    expect(plan.authType).toBe(AuthType.USE_OPENAI);
+    expect(plan.modelProviders![0]!.models[0]!.wireApi).toBeUndefined();
+    expect(plan.modelProviders![0]!.models[0]!.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+    });
+  });
+
+  it('uses the explicit model API for thinking and rejects incompatible setup inputs', () => {
+    const config = makeConfig({ models: undefined });
+    const inputs = {
+      baseUrl: 'https://custom.com/v1',
+      apiKey: 'sk-custom',
+      modelIds: ['m1'],
+      wireApi: 'responses' as const,
+      advancedConfig: { enableThinking: true },
+    };
+    const plan = buildInstallPlan(config, inputs);
+    expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(plan.modelProviders?.[0]).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      models: [
+        {
+          id: 'm1',
+          wireApi: 'responses',
+          generationConfig: { reasoning: { effort: 'medium' } },
+        },
+      ],
+    });
+    expect(() =>
+      buildInstallPlan(config, { ...inputs, protocol: AuthType.USE_ANTHROPIC }),
+    ).toThrow(/api/i);
+    expect(() =>
+      buildInstallPlan(config, {
+        ...inputs,
+        wireApi: 'invalid' as 'responses',
+      }),
+    ).toThrow(/api/i);
   });
 
   it('produces independent generationConfig objects per custom model', () => {
@@ -574,6 +813,23 @@ describe('findExistingProviderModels', () => {
     });
   });
 
+  it.each(['openai'])(
+    'finds saved Responses models in the %s bucket',
+    (bucket) => {
+      const model = {
+        id: 'responses-model',
+        wireApi: 'responses',
+        envKey: 'TEST_API_KEY',
+      };
+      expect(findExistingProviderModels(config, { [bucket]: [model] })).toEqual(
+        {
+          protocol: AuthType.USE_OPENAI_RESPONSES,
+          models: [model],
+        },
+      );
+    },
+  );
+
   it('returns undefined when no saved models are owned by the provider', () => {
     expect(
       findExistingProviderModels(config, {
@@ -597,6 +853,56 @@ describe('findExistingProviderModels', () => {
         [AuthType.USE_OPENAI]: [{ id: 'x', envKey: 'DYNAMIC_KEY' }],
       }),
     ).toBeUndefined();
+  });
+
+  it('reports the current wire after a switch left both APIs in the bucket', () => {
+    // A wire switch preserves the old route's entry and prepends the new one,
+    // so the canonical bucket holds both; the answer must come from the most
+    // recently installed entry, not a hard-coded chat-first preference.
+    const responses = {
+      id: 'same',
+      baseUrl: 'https://proxy.example/v1',
+      wireApi: 'responses' as const,
+      envKey: 'TEST_API_KEY',
+    };
+    const chat = {
+      id: 'same',
+      baseUrl: 'https://proxy.example/v1',
+      envKey: 'TEST_API_KEY',
+    };
+    expect(
+      findExistingProviderModels(config, {
+        [AuthType.USE_OPENAI]: [responses, chat],
+      }),
+    ).toEqual({
+      protocol: AuthType.USE_OPENAI_RESPONSES,
+      models: [responses],
+    });
+  });
+
+  it('skips entries whose api cannot be resolved instead of throwing', () => {
+    expect(
+      findExistingProviderModels(config, {
+        [AuthType.USE_OPENAI]: [
+          {
+            id: 'broken',
+            wireApi: 'Responses' as 'responses',
+            envKey: 'TEST_API_KEY',
+          },
+          { id: 'good', envKey: 'TEST_API_KEY' },
+        ],
+        [AuthType.USE_GEMINI]: [
+          {
+            id: 'wrong-family',
+            wireApi: 'responses' as const,
+            envKey: 'TEST_API_KEY',
+          },
+        ],
+      }),
+    ).toEqual({
+      protocol: AuthType.USE_OPENAI,
+      models: [{ id: 'good', envKey: 'TEST_API_KEY' }],
+    });
   });
 
   it('scans protocolOptions in order and picks the first with owned models', () => {

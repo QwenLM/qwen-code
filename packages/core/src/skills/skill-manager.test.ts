@@ -5,6 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -17,6 +18,7 @@ import {
 } from './skill-manager.js';
 import { type SkillConfig, SkillError } from './types.js';
 import type { Config } from '../config/config.js';
+import type { Extension } from '../extension/extensionManager.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 
 // Mock file system operations
@@ -1622,6 +1624,221 @@ Review content`;
     });
   });
 
+  describe('discovery completeness', () => {
+    function createReadGate() {
+      let resolve!: (value: []) => void;
+      const promise = new Promise<[]>((release) => {
+        resolve = release;
+      });
+      return { promise, resolve };
+    }
+
+    it.each(['failure-first', 'success-first'] as const)(
+      'publishes each overlapping scan with its own completeness (%s)',
+      async (order) => {
+        const gates = [createReadGate(), createReadGate()];
+        let failedRead: Promise<never> | undefined;
+        let projectReads = 0;
+        let gateReads = 0;
+        vi.spyOn(mockConfig, 'getDisabledSkillLevels').mockReturnValue(
+          new Set(['user', 'extension', 'bundled']),
+        );
+        vi.spyOn(manager, 'getSkillsBaseDirs').mockReturnValue([
+          '/overlap/project',
+          '/overlap/gate',
+        ]);
+        vi.mocked(fs.access).mockResolvedValue(undefined);
+        vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
+        vi.mocked(fs.readdir).mockImplementation((directory) => {
+          if (String(directory) === '/overlap/project') {
+            if (++projectReads === 1) {
+              failedRead = Promise.reject(
+                Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+              );
+              return failedRead;
+            }
+            return Promise.resolve([
+              {
+                name: 'test-skill',
+                isDirectory: () => true,
+                isSymbolicLink: () => false,
+              },
+            ]) as unknown as ReturnType<typeof fs.readdir>;
+          }
+          return gates[gateReads++].promise;
+        });
+        const snapshots: Array<{ names: string[]; incomplete: boolean }> = [];
+        manager.addChangeListener(() => {
+          snapshots.push({
+            names: (manager.getCachedSkills() ?? []).map((skill) => skill.name),
+            incomplete: manager.hasDiscoveryErrors(),
+          });
+        });
+        const failure = manager.refreshCache();
+        await expect(failedRead).rejects.toMatchObject({ code: 'EACCES' });
+        const success = manager.refreshCache();
+        try {
+          const first = order === 'failure-first' ? 0 : 1;
+          gates[first].resolve([]);
+          await (first === 0 ? failure : success);
+          gates[1 - first].resolve([]);
+          await (first === 0 ? success : failure);
+          const failed = { names: [], incomplete: true };
+          const succeeded = { names: ['test-skill'], incomplete: false };
+          expect(snapshots).toEqual(
+            first === 0 ? [failed, succeeded] : [succeeded, failed],
+          );
+        } finally {
+          gates.forEach((gate) => gate.resolve([]));
+          await Promise.allSettled([failure, success]);
+        }
+      },
+    );
+
+    it('keeps the committed completeness while a new scan is pending', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(
+        Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+      );
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      const gate = createReadGate();
+      vi.mocked(fs.readdir).mockReturnValue(gate.promise);
+      const refreshing = manager.refreshCache();
+      try {
+        expect(manager.hasDiscoveryErrors()).toBe(true);
+      } finally {
+        gate.resolve([]);
+        await refreshing;
+      }
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it('retains external validation diagnostics without changing scan completeness', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      await manager.refreshCache();
+      expect(() =>
+        manager.parseSkillContent(
+          'invalid frontmatter',
+          '/draft/SKILL.md',
+          'project',
+        ),
+      ).toThrow();
+      expect(manager.getParseErrors().has('/draft/SKILL.md')).toBe(true);
+      expect(manager.getCachedSkills()).toEqual([]);
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'distinguishes a bundled directory %s error even when existsSync returns false',
+      async (code) => {
+        const bundledDir = manager.getSkillsBaseDirs('bundled')[0];
+        vi.mocked(fsSync.existsSync).mockReturnValue(false);
+        vi.mocked(fs.readdir).mockImplementation(async (directory) => {
+          if (String(directory) === bundledDir)
+            throw Object.assign(new Error(code), { code });
+          return [];
+        });
+        await manager.refreshCache();
+        expect(manager.hasDiscoveryErrors()).toBe(code !== 'ENOENT');
+        expect(fs.readdir).toHaveBeenCalledWith(bundledDir, {
+          withFileTypes: true,
+        });
+      },
+    );
+
+    it('propagates an active extension skill scan failure and clears it after recovery', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      const extension: Extension = {
+        id: 'suite-id',
+        name: 'suite',
+        version: '1.0.0',
+        isActive: true,
+        path: '/extensions/suite',
+        config: { name: 'suite', version: '1.0.0' },
+        contextFiles: [],
+        skills: [],
+        skillsDiscoveryHasErrors: true,
+      };
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([extension]);
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      extension.skillsDiscoveryHasErrors = false;
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'distinguishes an unreadable skill symlink from a removed target: %s',
+      async (code) => {
+        const projectDir = manager.getSkillsBaseDirs('project')[0];
+        vi.mocked(fs.readdir).mockImplementation(async (directory) =>
+          String(directory) === projectDir
+            ? ([
+                {
+                  name: 'linked',
+                  isDirectory: () => false,
+                  isSymbolicLink: () => true,
+                },
+              ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+            : [],
+        );
+        vi.mocked(fs.realpath).mockRejectedValue(
+          Object.assign(new Error(code), { code }),
+        );
+        await manager.refreshCache();
+        expect(manager.getCachedSkills()).toEqual([]);
+        expect(manager.hasDiscoveryErrors()).toBe(code !== 'ENOENT');
+      },
+    );
+
+    it('does not treat absent optional directories as discovery errors', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(
+        Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      );
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it('reports directory read errors until a successful refresh', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(
+        Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+      );
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it('reports a failed level even when other levels can be listed', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockImplementation(() => {
+        throw new Error('Unavailable');
+      });
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+    });
+
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'distinguishes unreadable skill files from confirmed removal: %s',
+      async (code) => {
+        vi.mocked(fs.readdir).mockResolvedValue([
+          {
+            name: 'unreadable',
+            isDirectory: () => true,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        vi.mocked(fs.access).mockRejectedValue(
+          Object.assign(new Error(code), { code }),
+        );
+        await manager.refreshCache();
+        expect(manager.getCachedSkills()).toEqual([]);
+        expect(manager.hasDiscoveryErrors()).toBe(code !== 'ENOENT');
+      },
+    );
+  });
+
   describe('conditional skill activation', () => {
     // Minimal setup: a project dir containing one conditional skill whose
     // paths glob matches `src/**/*.tsx`. After refreshCache() loads it,
@@ -1920,6 +2137,10 @@ Body.
       expect(oversizedEntry).toBeDefined();
       expect(oversizedEntry![1].message).toMatch(/Invalid glob in "paths"/);
       expect(oversizedEntry![1].skillName).toBe('bad-glob-skill');
+      expect(manager.getCachedSkills()?.map((skill) => skill.name)).toContain(
+        'bad-glob-skill',
+      );
+      expect(manager.hasDiscoveryErrors()).toBe(false);
     });
   });
 
@@ -2055,6 +2276,46 @@ Symlinked skill content`);
   });
 
   describe('file watchers', () => {
+    it('detaches skill events without native close during macOS process exit', async () => {
+      vi.resetModules();
+      const { SkillManager: FreshSkillManager } = await import(
+        './skill-manager.js'
+      );
+      const { prepareFileWatchersForProcessExit } = await import(
+        '../utils/file-watcher-cleanup.js'
+      );
+      const platform = process.platform;
+      const projectSkillsDir = path.join(TEST_PROJECT_ROOT, '.qwen', 'skills');
+      vi.mocked(fsSync.existsSync).mockImplementation(
+        (p) => String(p) === projectSkillsDir,
+      );
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+      const nativeWatcher = Object.assign(new EventEmitter(), {
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      mockWatch.mockReturnValueOnce(nativeWatcher);
+      const freshManager = new FreshSkillManager(mockConfig);
+      try {
+        await freshManager.startWatching();
+        expect(nativeWatcher.listenerCount('all')).toBe(1);
+        expect(nativeWatcher.listenerCount('error')).toBe(1);
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        prepareFileWatchersForProcessExit();
+
+        freshManager.stopWatching();
+
+        expect(nativeWatcher.close).not.toHaveBeenCalled();
+        expect(nativeWatcher.listenerCount('all')).toBe(0);
+        expect(nativeWatcher.listenerCount('error')).toBe(1);
+      } finally {
+        freshManager.stopWatching();
+        Object.defineProperty(process, 'platform', { value: platform });
+        vi.resetModules();
+      }
+    });
+
     it('should pass ignored function and shallow depth to chokidar', async () => {
       const projectSkillsDir = path.join(TEST_PROJECT_ROOT, '.qwen', 'skills');
       vi.mocked(fsSync.existsSync).mockImplementation(

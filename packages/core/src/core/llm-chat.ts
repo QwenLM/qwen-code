@@ -71,6 +71,7 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
+import { completedToolCallBoundary } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -2183,6 +2184,14 @@ export class LlmChat {
   private lastOutputTokenCount = 0;
 
   /**
+   * Per-chat last cached-content token count from usageMetadata. Mirrors
+   * UiTelemetryService for the main session so /context in a `serve`
+   * daemon does not subtract another session's cache from this chat's
+   * total (#12047).
+   */
+  private lastCachedContentTokenCount = 0;
+
+  /**
    * Route identity (model + auth type + endpoint; see
    * Config.getModelRouteIdentity) of the content generator that produced
    * the counts above. API-reported sizes are wire-specific: one route's
@@ -2278,6 +2287,25 @@ export class LlmChat {
    */
   private userContentPushCount = 0;
   private manualPlanExitNoticesEnabled = false;
+  private completedToolCallIds: string[] = [];
+
+  setCompletedToolCallIds(toolCallIds: readonly string[] | undefined): void {
+    this.completedToolCallIds = [...new Set(toolCallIds)].filter(
+      (id) => completedToolCallBoundary(this.history, [id]) > 0,
+    );
+  }
+
+  getCompletedToolCallIds(): readonly string[] {
+    return [...this.completedToolCallIds];
+  }
+
+  getHistoryForRecovery(): Content[] {
+    const boundary = completedToolCallBoundary(
+      this.history,
+      this.completedToolCallIds,
+    );
+    return this.history.slice(boundary).map(copyContentContainer);
+  }
 
   /**
    * True for forked/speculative chats built by `createForkedChat` on the
@@ -2408,6 +2436,7 @@ export class LlmChat {
       this.lastPromptTokenCountIsEstimated =
         retained.promptTokenCountIsEstimated;
       this.lastOutputTokenCount = retained.outputTokenCount;
+      this.lastCachedContentTokenCount = retained.cachedContentTokenCount;
       this.tokenCountsRouteKey = targetRouteKey;
       this.telemetryService?.setLastPromptTokenCount(retained.promptTokenCount);
       this.telemetryService?.setLastCachedContentTokenCount(
@@ -2429,6 +2458,7 @@ export class LlmChat {
     this.lastPromptTokenCount = 0;
     this.lastPromptTokenCountIsEstimated = false;
     this.lastOutputTokenCount = 0;
+    this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = targetRouteKey;
     // Keep the telemetry mirror in sync, or the UI context counters
     // and compression banners keep reading the foreign count. The cached
@@ -2441,8 +2471,8 @@ export class LlmChat {
    * Save the current slots into {@link tokenCountsByRouteKey} under their
    * owning route key so a later read keyed back to that route restores the
    * exact API-reported values. Zero slots carry nothing worth retaining;
-   * the telemetry mirror still holds the owning route's cached-content
-   * count at this point, so it is captured here too.
+   * the cached-content count is carried in the per-chat slot and retained
+   * with it so a route switch cannot substitute another session's value.
    */
   private retainCurrentTokenCounts(): void {
     if (
@@ -2461,10 +2491,7 @@ export class LlmChat {
       promptTokenCount: this.lastPromptTokenCount,
       promptTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
       outputTokenCount: this.lastOutputTokenCount,
-      // Optional chaining keeps partial telemetry test mocks from throwing
-      // (same convention as currentRouteKey's Config lookups).
-      cachedContentTokenCount:
-        this.telemetryService?.getLastCachedContentTokenCount?.() ?? 0,
+      cachedContentTokenCount: this.lastCachedContentTokenCount,
     });
   }
 
@@ -2484,6 +2511,16 @@ export class LlmChat {
   getLastOutputTokenCount(): number {
     this.adoptTokenCountsForRoute();
     return this.lastOutputTokenCount;
+  }
+
+  /**
+   * Most recent cached-content token count reported by the model for *this*
+   * chat. Prefer this over {@link UiTelemetryService} in multi-session
+   * daemons (#12047).
+   */
+  getLastCachedContentTokenCount(targetRouteKey?: string): number {
+    this.adoptTokenCountsForRoute(targetRouteKey);
+    return this.lastCachedContentTokenCount;
   }
 
   /**
@@ -2549,14 +2586,16 @@ export class LlmChat {
    * threshold check sees `0` and refuses to compress — so the first API call
    * can 400 from oversized history. Callers pass the parent chat's
    * `getLastPromptTokenCount()` here. This also clears any remembered
-   * previous-response output token count because the seeded prompt count
-   * comes from a different chat instance and should not inherit this chat's
-   * last response size.
+   * previous-response output and cached-content token counts because the
+   * seeded prompt count comes from a different chat instance and should not
+   * inherit this chat's last response metadata.
    */
   setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+    this.lastCachedContentTokenCount = 0;
+    this.telemetryService?.setLastCachedContentTokenCount(0);
     this.tokenCountsRouteKey = this.currentRouteKey();
     // A fresh count supersedes anything this route retained while another
     // route owned the slots. Without the delete this writer alone among the
@@ -2700,11 +2739,20 @@ export class LlmChat {
         this.chatRecordingService?.recordChatCompression({
           info,
           compressedHistory: newHistory,
+          completedToolCallIds: this.completedToolCallIds,
         });
       }
-      this.setHistory(newHistory);
+      this.setHistory(newHistory, this.completedToolCallIds);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      try {
+        await this.config.getExecutionEnvironment?.()?.invalidateReadCache();
+      } catch (error) {
+        debugLogger.warn(
+          'Execution cache invalidation after compression failed',
+          error,
+        );
+      }
       // Compression rewrote the shared history every retained entry sizes,
       // so ALL retained counts are stale — not just the current route's.
       // Drop them, or a later keyed read adopts a pre-compression count and
@@ -2833,6 +2881,7 @@ export class LlmChat {
     this.chatRecordingService?.recordChatCompression({
       info,
       compressedHistory: newHistory,
+      completedToolCallIds: this.completedToolCallIds,
     });
     logChatCompression(
       this.config,
@@ -2841,15 +2890,17 @@ export class LlmChat {
         tokens_after: info.newTokenCount,
       }),
     );
-    this.setHistory(newHistory);
+    this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
+    this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
     // Fast compression rewrote the shared history every retained entry
     // sizes, so ALL retained counts are stale — the other routes' entries
     // describe the same pre-compression history (#9506).
     this.tokenCountsByRouteKey.clear();
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
+    this.telemetryService?.setLastCachedContentTokenCount(0);
     this.consecutiveFailures = 0;
 
     return { info, microcompactMeta: mcMeta };
@@ -3092,15 +3143,15 @@ export class LlmChat {
       const historyBeforeHardRescue = shouldForceFromHard
         ? this.getHistoryShallow()
         : undefined;
+      const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       const lastPromptTokenCountWasEstimatedBeforeHardRescue =
         this.lastPromptTokenCountIsEstimated;
-      // The rescue's COMPRESSED stamp zeroes lastOutputTokenCount (via
-      // setLastPromptTokenCount), so the rollback below must restore the
-      // output half of the resurrected count pair alongside the prompt
-      // half, or the next turn's additive prompt estimate under-counts by
-      // the last response's size (#9506).
+      // The rescue's COMPRESSED stamp clears response metadata (via
+      // setLastPromptTokenCount), so rollback must restore both counts.
       const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
+      const lastCachedContentTokenCountBeforeHardRescue =
+        this.lastCachedContentTokenCount;
       // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
       // setLastPromptTokenCount on the success path) even though this send
       // targets the REQUEST route — and hard-rescue only fires for
@@ -3190,13 +3241,18 @@ export class LlmChat {
           // prompt is still too large to send, restore the pre-compression
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
-          this.setHistory(historyBeforeHardRescue);
+          this.setHistory(
+            historyBeforeHardRescue,
+            completedToolCallIdsBeforeHardRescue,
+          );
           // setHistory conservatively cleared loaded-skill tracking; the
           // restored bodies re-arm it on their next invoke.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
+          this.lastCachedContentTokenCount =
+            lastCachedContentTokenCountBeforeHardRescue;
           this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
           // Restore the retention map alongside the slots: the rescue's
           // compression consumed/cleared entries mid-flight, and without
@@ -3213,6 +3269,9 @@ export class LlmChat {
           }
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
+          );
+          this.telemetryService?.setLastCachedContentTokenCount(
+            lastCachedContentTokenCountBeforeHardRescue,
           );
         }
         const compressionStatus =
@@ -3237,6 +3296,7 @@ export class LlmChat {
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
           compressedHistory: this.getHistoryShallow(),
+          completedToolCallIds: this.completedToolCallIds,
         });
       }
 
@@ -3454,6 +3514,7 @@ export class LlmChat {
         // model's answer starting mid-sentence.
         let transportContinuationPrefix: Part[] = [];
         let reactiveCompressionAttempted = false;
+        let omniMediaDegradeAttempts = 0;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
 
@@ -4029,6 +4090,72 @@ export class LlmChat {
               contextOverflow.isExceeded ||
               requestPayloadOverflow.isTooLarge
             ) {
+              // Server-limit fallback for omni media (server-feedback-driven
+              // transport guard): a request carrying oss:// media that the
+              // server rejected as over its input limit is retried with the
+              // media degraded one guard-ladder rung further. Runs BEFORE
+              // reactive compression — history compression cannot shrink
+              // media tokens, which dominate these rejections. Bounded by
+              // the guard's maxTransportPasses and only armed when a
+              // normalized omni processing config exists (omni sessions).
+              const omniDegradeMaxAttempts =
+                self.config.getOmniProcessingConfig?.()?.limits
+                  .maxTransportPasses ?? 0;
+              if (
+                contextOverflow.isExceeded &&
+                !exactRoute &&
+                omniMediaDegradeAttempts < omniDegradeMaxAttempts
+              ) {
+                const degradeAttempt = omniMediaDegradeAttempts++;
+                let degradeOutcome:
+                  | { replacedParts: number; degradedResources: number }
+                  | undefined;
+                try {
+                  // Dynamic import keeps the omni pipeline out of the send
+                  // path for non-omni sessions (mirrors fileUtils).
+                  const { degradeOmniMediaAfterServerReject } = await import(
+                    '../omni/reactive-degrade.js'
+                  );
+                  degradeOutcome = await degradeOmniMediaAfterServerReject(
+                    self.config,
+                    self.history,
+                    degradeAttempt,
+                    {
+                      signal: params.config?.abortSignal,
+                      observedLimitTokens: contextOverflow.limitTokens,
+                    },
+                  );
+                } catch (degradeError) {
+                  if (
+                    params.config?.abortSignal?.aborted ||
+                    isAbortError(degradeError)
+                  ) {
+                    throw degradeError;
+                  }
+                  debugLogger.warn(
+                    'Omni media degradation fallback failed.',
+                    degradeError,
+                  );
+                }
+                if (degradeOutcome && degradeOutcome.replacedParts > 0) {
+                  self.popPendingPartialAssistantTurn();
+                  requestContents = self.getRequestHistoryForRoute(
+                    currentUserContent,
+                    requestModalities,
+                  );
+                  debugLogger.warn(
+                    `Server input limit exceeded; degraded ` +
+                      `${degradeOutcome.degradedResources} omni media ` +
+                      `resource(s) in place (attempt ${degradeAttempt + 1}/` +
+                      `${omniDegradeMaxAttempts}); retrying.`,
+                  );
+                  resetTransportContinuation();
+                  yield { type: StreamEventType.RETRY };
+                  suppressNextRetryEvent = true;
+                  rearmQuietAcceptanceIfBudgetSpent();
+                  continue;
+                }
+              }
               // Whether this pass (or a previous one) spent the one-shot
               // payload-overflow recovery; when it did and the error is
               // still a payload overflow, the wrap below turns it into an
@@ -5349,6 +5476,7 @@ export class LlmChat {
    */
   clearHistory(): void {
     this.history = [];
+    this.completedToolCallIds = [];
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -5500,8 +5628,12 @@ export class LlmChat {
     }
   }
 
-  setHistory(history: Content[]): void {
+  setHistory(
+    history: Content[],
+    completedToolCallIds?: readonly string[],
+  ): void {
     this.history = history;
+    this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
     // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find
@@ -5524,6 +5656,7 @@ export class LlmChat {
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    this.setCompletedToolCallIds(this.completedToolCallIds);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and
@@ -5545,6 +5678,7 @@ export class LlmChat {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    this.setCompletedToolCallIds(this.completedToolCallIds);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
     // exists. Clear it for the same reason setHistory does — and drop
@@ -5560,8 +5694,12 @@ export class LlmChat {
    */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
+    const boundary = completedToolCallBoundary(
+      this.history,
+      this.completedToolCallIds,
+    );
     while (
-      this.history.length > 0 &&
+      this.history.length > boundary &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,
@@ -5936,11 +6074,13 @@ export class LlmChat {
             this.telemetryService?.setLastPromptTokenCount(
               lastPromptTokenCount,
             );
-            if (cachedContentTokenCount && this.telemetryService) {
-              this.telemetryService.setLastCachedContentTokenCount(
-                cachedContentTokenCount,
-              );
-            }
+            // Always mirror onto the chat — including zero — so a later
+            // /context in this session cannot keep another session's cache
+            // hit, and route retain/restore has a per-chat source (#12047).
+            this.lastCachedContentTokenCount = cachedContentTokenCount;
+            this.telemetryService?.setLastCachedContentTokenCount(
+              cachedContentTokenCount,
+            );
           }
         }
 

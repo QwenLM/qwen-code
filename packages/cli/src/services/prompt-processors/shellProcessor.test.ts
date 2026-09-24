@@ -54,6 +54,11 @@ function createPromptPipelineContent(text: string): PromptPipelineContent {
 const mockCheckCommandPermissions = vi.hoisted(() => vi.fn());
 const mockShellExecute = vi.hoisted(() => vi.fn());
 
+const runtimeShellMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core/sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: runtimeShellMock,
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original = await importOriginal<object>();
   return {
@@ -79,6 +84,9 @@ describe('ShellProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runtimeShellMock.mockImplementation((_runtime, ...args) =>
+      mockShellExecute(...args),
+    );
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
@@ -112,6 +120,30 @@ describe('ShellProcessor', () => {
       allAllowed: true,
       disallowedCommands: [],
     });
+  });
+
+  it('keeps YOLO prompt injections bound to the runtime sandbox', async () => {
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ filesystem: 'read-only', network: 'closed' });
+    mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+    mockCheckCommandPermissions.mockResolvedValue({
+      allAllowed: false,
+      disallowedCommands: ['touch forbidden'],
+    });
+    await new ShellProcessor('test-command').process(
+      createPromptPipelineContent('!{touch forbidden}'),
+      context,
+    );
+    expect(runtimeShellMock).toHaveBeenCalledWith(
+      context.services.config,
+      'touch forbidden',
+      expect.any(String),
+      expect.any(Function),
+      expect.any(AbortSignal),
+      false,
+      expect.any(Object),
+    );
   });
 
   it('should throw an error if config is missing', async () => {
