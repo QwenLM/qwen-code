@@ -11813,6 +11813,7 @@ describe('DaemonSessionProvider', () => {
     // the repair resolves. Dropping `!repairTargetsTerminal` from the publish
     // condition turns this red.
     const terminalGate = createDeferred<void>();
+    const repairGate = createDeferred<void>();
     const initialSession = createMockSession({
       sessionId: 'session-settle-repair',
       hasActivePrompt: true,
@@ -11917,7 +11918,16 @@ describe('DaemonSessionProvider', () => {
         liveJournal: [],
       },
     });
-    sdkMocks.sessions.push(initialSession, repairedSession);
+    sdkMocks.MockDaemonSessionClient.load
+      .mockImplementationOnce(async (client: unknown) => {
+        initialSession.client = client as MockClient;
+        return initialSession;
+      })
+      .mockImplementationOnce(async (client: unknown) => {
+        await repairGate.promise;
+        repairedSession.client = client as MockClient;
+        return repairedSession;
+      });
     const settlements: DaemonPromptSettledEvent[] = [];
 
     function Harness() {
@@ -11927,7 +11937,10 @@ describe('DaemonSessionProvider', () => {
       return null;
     }
 
-    await renderWithProvider(<Harness />, { autoConnect: true });
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: initialSession.sessionId,
+    });
     await act(async () => {
       terminalGate.resolve();
       await flushPromises();
@@ -11935,18 +11948,31 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(settlements).toEqual([]);
-    // Positive control: the episode really was armed for this prompt, and the
-    // terminal really did trigger the repair reload rather than being ignored.
-    await act(async () => {
-      await vi.waitFor(() =>
-        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
-      );
-      await flushPromises();
-    });
-    // Current behavior, not desired, pinned deliberately: the replay publish is
-    // gated on local admission and this prompt was never admitted, so the
-    // settlement the live path withheld is never re-published (#12230).
+    // Positive control: the episode really was armed for this prompt and the
+    // terminal started the repair, while publication is still withheld until
+    // the repaired projection is available.
+    await vi.waitFor(() =>
+      expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+    );
     expect(settlements).toEqual([]);
+
+    await act(async () => {
+      repairGate.resolve();
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    // The repair reapplies the complete transcript before releasing the exact
+    // settlement withheld from the live path. A never-admitted prompt does not
+    // need to pass the ordinary replay admission gate to receive that settlement.
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-repair',
+        promptId: 'prompt-live',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
   });
 
   it('does not let replay state events overwrite fresh connection status', async () => {
