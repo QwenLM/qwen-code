@@ -469,6 +469,7 @@ describe('qwen serve — capabilities envelope', () => {
       ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_list_details',
       'extension_state',
       'extension_git_credentials',
       'extension_local_path_install',
