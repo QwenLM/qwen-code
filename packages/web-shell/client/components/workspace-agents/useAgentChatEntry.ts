@@ -146,7 +146,8 @@ export function useAgentChatEntry({
                         ? agent.execution.provider
                         : undefined,
                     )} · ${
-                      agent.runtime.kind === 'local'
+                      // An older daemon sends no runtime: it runs here.
+                      !agent.runtime || agent.runtime.kind === 'local'
                         ? t('collab.agent.thisComputer')
                         : agent.runtime.label
                     }`,

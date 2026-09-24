@@ -127,7 +127,8 @@ export interface WorkspaceAgentSummaryView {
   execution?: AgentConfigPatch['execution'];
   enabled: boolean;
   status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
-  runtime: WorkspaceAgentRuntimeView;
+  /** Absent from a daemon older than runtimes; that agent runs here. */
+  runtime?: WorkspaceAgentRuntimeView;
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
   workingOn?: {
@@ -301,8 +302,10 @@ export function ThreadsPage({
   const [taskAssignee, setTaskAssignee] = useState('');
   const statusLabel = (status: string) =>
     AGENT_STATUSES.has(status) ? t(`collab.agentStatus.${status}`) : status;
-  const hostLabel = (entry: WorkspaceAgentRuntimeView) =>
-    entry.kind === 'local' ? t('collab.agent.thisComputer') : entry.label;
+  const hostLabel = (entry?: WorkspaceAgentRuntimeView) =>
+    !entry || entry.kind === 'local'
+      ? t('collab.agent.thisComputer')
+      : entry.label;
   // "Program · Runtime": what the agent runs as, then where.
   const agentPlace = (agent: WorkspaceAgentSummaryView) =>
     `${programLabel(
