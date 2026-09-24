@@ -553,7 +553,11 @@ export function ThreadsPage({
                   </button>
                 ) : (
                   <span className={styles.agentActivity}>
-                    {agent.retiredAt ? '已退役' : statusLabel(agent.status)}
+                    {agent.retiredAt
+                      ? t('collab.agentStatus.retired')
+                      : !agent.enabled
+                        ? t('collab.agentStatus.paused')
+                        : statusLabel(agent.status)}
                   </span>
                 )}
                 <span className={styles.agentWaiting}>

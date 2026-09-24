@@ -5,6 +5,10 @@ import {
   installMockDaemon,
 } from './utils/mockDaemon';
 
+// Every assertion is the Chinese copy. The browser locale, not a ?language=
+// param, keeps it Chinese across the reloads below.
+test.use({ locale: 'zh-CN' });
+
 async function openChat(page: Page, id: string, cwd: string) {
   await page.addInitScript(
     ({ id, cwd }) => {
@@ -19,7 +23,7 @@ async function openChat(page: Page, id: string, cwd: string) {
     },
     { id, cwd },
   );
-  await page.goto('/?language=en');
+  await page.goto('/');
 }
 
 async function send(page: Page, text: string) {
@@ -62,6 +66,9 @@ test('mesh shows growing replies before completion, survives reload, and replace
   });
   await page.route('**/workspaces/*/agent/**', async (route) => {
     const pathname = new URL(route.request().url()).pathname;
+    // No live stream here: the page falls back to polling, which this test
+    // drives by editing the thread between reads.
+    if (pathname.endsWith('/events')) return route.abort();
     if (pathname.endsWith('/agents'))
       return route.fulfill({ json: { agents: [agent] } });
     if (pathname.endsWith('/preview'))
@@ -157,7 +164,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await expect(
     page.getByRole('status').filter({ hasText: '正在唤起 stream-worker…' }),
   ).toBeVisible();
-  await expect(activity).toContainText('等待执行端确认');
+  await expect(activity).toContainText('等待开始运行');
   await expect(activity).not.toContainText('暂无过程上报');
   await expect(activity).not.toContainText('思考中');
   run.progress = {
@@ -166,7 +173,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
     receivedAt: Date.now(),
   };
   const starting = page.getByRole('status').filter({
-    hasText: 'stream-worker 正在启动…',
+    hasText: '正在唤起 stream-worker…',
   });
   await expect(starting).toBeVisible();
   await page.getByRole('button', { name: 'Close 团队', exact: true }).click();
@@ -218,8 +225,15 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await page.getByRole('button', { name: '团队', exact: true }).click();
   await expect(transcript).toContainText('First fragment. Second fragment.');
   expect(sent).toBe(1);
-  run.progress = { ...run.progress!, receivedAt: Date.now() - 25000 };
-  await expect(activity).toContainText('连接中断待确认');
+  // A quiet agent reads as waiting for output, not as a lost connection: a
+  // long tool call writes no snapshot and is still working.
+  run.progress = {
+    ...run.progress!,
+    receivedAt: Date.now() - 25000,
+    activityAt: Date.now() - 25000,
+  };
+  await expect(activity).toContainText('等待新输出');
+  await expect(activity).not.toContainText('连接中断');
   await expect(transcript).toContainText('First fragment. Second fragment.');
   run.status = 'completed';
   run.closeKind = 'review';

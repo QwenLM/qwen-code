@@ -61,9 +61,11 @@
 
 .agentRow {
   display: grid;
+  /* Every row is its own grid, so the waiting count gets a fixed track: an
+     auto one let a row with "1 waiting" shift its columns off the others. */
   grid-template-columns:
     10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr)
-    auto auto auto auto auto;
+    6.5rem auto auto;
   gap: 10px;
   align-items: center;
   min-height: 34px;
@@ -126,6 +128,7 @@
 
 .agentWaiting {
   font-variant-numeric: tabular-nums;
+  text-align: end;
 }
 
 .agentAction {

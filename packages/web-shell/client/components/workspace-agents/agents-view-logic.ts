@@ -26,6 +26,13 @@ import type {
   AgentRunStepView,
 } from './agent-events';
 
+/**
+ * Opens a thread body that carries the conversation it was started from. The
+ * agents read it as-is; the chat view shows it folded instead of as a message.
+ */
+export const CONVERSATION_CONTEXT_PREFIX =
+  'Context from the conversation this was sent from:\n\n';
+
 /** Wire shape of a thread row, as the REST layer returns it. */
 export interface ThreadSummaryView {
   id: string;

@@ -18224,6 +18224,7 @@ export function App({
       workspace.capabilities?.features?.includes('agent_collaboration_v1'),
     ),
     getContext: getMentionContext,
+    t,
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,

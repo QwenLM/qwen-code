@@ -13,7 +13,11 @@ import { ChatEditor } from '../ChatEditor';
 import { Button } from '../ui/button';
 import type { Message } from '../../adapters/types';
 import { RunRowView, type ThreadDetailView } from './ThreadView';
-import { buildRunRows, type RoutingPreviewTarget } from './agents-view-logic';
+import {
+  buildRunRows,
+  CONVERSATION_CONTEXT_PREFIX,
+  type RoutingPreviewTarget,
+} from './agents-view-logic';
 import {
   useWebShellCustomization,
   WebShellCustomizationProvider,
@@ -76,6 +80,10 @@ function describeLiveRun(
   }
   const elapsed = formatElapsed(now - (run.startedAt ?? now), t);
   switch (progress.stage) {
+    case 'starting':
+      return { text: t('collab.run.starting', { agent }), stalled: false };
+    case 'resuming':
+      return { text: t('collab.run.resuming', { agent }), stalled: false };
     case 'thinking':
       return {
         text: t('collab.run.thinking', { agent, elapsed }),
@@ -297,7 +305,7 @@ export function ThreadChat({
   const messages = useMemo<Message[]>(
     () =>
       [
-        ...(thread.body
+        ...(thread.body && !thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX)
           ? [
               {
                 id: `${thread.id}:description`,
@@ -526,6 +534,16 @@ export function ThreadChat({
       <p className="px-4 py-2 text-xs text-muted-foreground">{thread.reason}</p>
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
+          {thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX) && (
+            <details className="mx-4 mb-2 rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer">
+                {t('collab.thread.context')}
+              </summary>
+              <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                {thread.body.slice(CONVERSATION_CONTEXT_PREFIX.length)}
+              </div>
+            </details>
+          )}
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <WebShellCustomizationProvider
               value={{ ...customization, collapseCompletedTurns: false }}
