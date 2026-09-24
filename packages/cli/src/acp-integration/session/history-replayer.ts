@@ -13,7 +13,7 @@ import type {
 import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
-  projectGoalStateToLegacy,
+  projectGoalCard,
 } from '@qwen-code/qwen-code-core';
 import {
   createTranscriptReplayMachine,
@@ -37,8 +37,17 @@ export const MISSING_TOOL_RESULT_MESSAGE =
 export interface PendingReplayToolCall {
   callId: string;
   toolName: string;
+  resolvedToolName?: string;
   timestamp?: string;
   recordId: string;
+  /**
+   * The id the transcript recorded, when it differs from `callId` because a
+   * collision forced a rewrite. Carried across pages so a timing frame on a
+   * later page still resolves to the call the tool_call update went out with.
+   */
+  rawCallId?: string;
+  /** Set once a timing frame has claimed this call. */
+  timingMatched?: true;
 }
 
 export interface HistoryReplayPageOptions {
@@ -48,6 +57,11 @@ export interface HistoryReplayPageOptions {
   gaps?: HistoryGap[];
   goalState?: GoalSnapshotV2;
   goalCause?: GoalStateCause;
+  /**
+   * Emit a timing frame per `ui_telemetry` record. Paged replay opts in; the
+   * bulk `replay()` path, which runs against a fixed update cap, does not.
+   */
+  includeTiming?: boolean;
 }
 
 export interface HistoryReplayPageState {
@@ -135,12 +149,11 @@ export class HistoryReplayer {
     if (!goalState?.goal || goalState.goal.status !== 'active' || !goalCause) {
       return undefined;
     }
-    const projection = projectGoalStateToLegacy({
+    const { kind, ...goalStatus } = projectGoalCard({
       v: 2,
       cause: goalCause,
       snapshot: goalState,
     });
-    const { type: _type, kind, ...goalStatus } = projection.goalStatus;
     if (kind !== 'set' && kind !== 'checking') {
       return undefined;
     }
@@ -238,6 +251,7 @@ export class HistoryReplayer {
       ...(options.skipFinalizeCallIds
         ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
         : {}),
+      ...(options.includeTiming ? { includeTiming: true } : {}),
       onDiagnostic: (diagnostic) => {
         if (
           diagnostic.code === 'malformed_part' &&
@@ -289,8 +303,13 @@ function toPendingTranscriptToolCall(
   return {
     callId: pending.callId,
     toolName: pending.toolName,
+    ...(pending.resolvedToolName
+      ? { resolvedToolName: pending.resolvedToolName }
+      : {}),
     sourceRecordId: pending.recordId,
     ...(pending.timestamp ? { sourceTimestamp: pending.timestamp } : {}),
+    ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+    ...(pending.timingMatched ? { timingMatched: true as const } : {}),
   };
 }
 
@@ -300,7 +319,12 @@ function toLegacyPendingToolCall(
   return {
     callId: pending.callId,
     toolName: pending.toolName,
+    ...(pending.resolvedToolName
+      ? { resolvedToolName: pending.resolvedToolName }
+      : {}),
     recordId: pending.sourceRecordId,
     ...(pending.sourceTimestamp ? { timestamp: pending.sourceTimestamp } : {}),
+    ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+    ...(pending.timingMatched ? { timingMatched: true as const } : {}),
   };
 }

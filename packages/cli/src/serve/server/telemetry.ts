@@ -45,6 +45,12 @@ interface LegacySessionTelemetryRoute {
 export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
+    path: '/sessions/catalog',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/catalog',
+  },
+  {
+    method: 'POST',
     path: '/session',
     attribution: 'handler_resolved',
     route: 'POST /session',
@@ -620,6 +626,15 @@ export function resolveDaemonTelemetryRoute(
     return {
       route: 'GET /workspaces/:workspace/session/:id/turn-index',
       sessionId: decodePathSegment(workspaceTurnIndex[1]),
+    };
+  }
+  const workspaceToolCalls = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/tool-calls$/,
+  );
+  if (workspaceToolCalls?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: decodePathSegment(workspaceToolCalls[1]),
     };
   }
   const workspaceExport = path.match(

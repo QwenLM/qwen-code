@@ -61,6 +61,7 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { workflowRequestErrorStatus } from '../workflow-errors.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import {
@@ -411,7 +412,26 @@ export function sendBridgeError(
               err.code === 'working_directory_recovery_failed'
             ? 500
             : 409;
-    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
+    if (status === 500) {
+      const safeError = err.creationDiagnostic
+        ? Object.assign(new Error(err.message), {
+            name: err.name,
+            code: err.code,
+            stack: err.stack,
+          })
+        : err;
+      recordExpectedBridgeError(
+        safeError,
+        {
+          ...ctx,
+          sessionId:
+            ctx?.sessionId ??
+            err.creationDiagnostic?.sessionId ??
+            err.sessionId,
+        },
+        daemonLog,
+      );
+    }
     if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,
@@ -938,6 +958,14 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      const workflowStatus = workflowRequestErrorStatus(kind);
+      if (workflowStatus !== undefined) {
+        res.status(workflowStatus).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
       if (kind === 'session_busy') {
         res.set('Retry-After', '5');
         res.status(409).json({

@@ -1217,6 +1217,17 @@ pub fn activate_window_for_input_target(
     )
 }
 
+pub(crate) fn focused_app_window(pid: u32) -> Option<u64> {
+    sway_ipc::list_windows()
+        .and_then(|windows| {
+            windows
+                .into_iter()
+                .find(|window| window.pid == pid && window.focused)
+        })
+        .map(|window| window.id)
+        .or_else(|| shell_helper::trusted_focused_window_for_pid(pid))
+}
+
 /// Run a focus-bound keyboard transaction only after a compositor adapter has
 /// confirmed the exact PID/window pair, and restore the previously focused
 /// toplevel afterward. Global virtual-keyboard/libei input is refused when the

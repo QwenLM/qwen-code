@@ -30,9 +30,13 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 ### Browsing your hooks
 
-Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills, `/goal` or the SDK are listed with the source Session.
+Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
 
-When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top. It does not change anything: to add, edit or remove a hook, edit `settings.json`.
+The browser never edits your configuration: to add, change or remove a hook, edit `settings.json`. It does re-read it. Opening the interactive menu reloads hook definitions from the user, workspace and system (System and SystemDefaults) settings files used by this session, including when the session runs in a worktree, so definitions you added, changed or removed since the session started take effect without a restart. If the user or workspace file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown. If a system settings file cannot be read or parsed, the hooks from the system files stay as they were, your other edits still take effect, the file is left untouched, and an error names it.
+
+Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
+
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
 
 ## Hook Types
 
@@ -746,7 +750,7 @@ This two-field payload is written only for this kind of user-prompt record.
 `hookContext` intentionally duplicates the tagged part so offline and
 third-party consumers can identify its provenance without parsing model text.
 `displayText` is the pre-hook display projection and never includes the hook
-context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection or attachment references require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
+context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection, attachment references, or input annotations require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
 
 Transcript display consumers treat `displayText` as this user-prompt projection
 when `systemPayload.hookContext` is a string. For compatibility with released
@@ -940,6 +944,8 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 - `hookSpecificOutput.additionalContext`: additional context information
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
+
+**Blocking cap**: consecutive blocking decisions are counted per prompt and keep counting across tool round trips, so a hook that blocks on every check ends the turn after `stopHookBlockingCap` blocks (default 8; `QWEN_CODE_STOP_HOOK_BLOCK_CAP` overrides it for one run). The count and `stop_hook_active` share the same record: both restart when the stop is allowed, when you steer or send new input, when a turn is retried, when a goal turn starts, and when the turn ends abnormally. In non-interactive text mode, Stop hook messages and cap warnings are written to stderr; JSON output is unchanged.
 
 **Example Output**:
 
@@ -1466,7 +1472,7 @@ It fires when the session starts, when context files are reloaded during the ses
 
 ## Hook Configuration
 
-Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files:
+Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
 
 ```json
 {
@@ -1733,6 +1739,8 @@ sys.exit(0)
    - `[HTTP_HOOK_RUNNER]`, `[URL_VALIDATOR]`, `[PROMPT_HOOK_RUNNER]`, `[FUNCTION_HOOK_RUNNER]`, `[SKILL_HOOKS]`, `[SESSION_HOOKS_MANAGER]`, `[ASYNC_HOOK_REGISTRY]` and `[HOOK_AGGREGATOR]`: details from the individual runners and registries
 
    Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
+
+6. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls and HTTP security settings require a restart.
 
 ### Other checks
 

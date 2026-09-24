@@ -806,7 +806,7 @@ export interface LiveSpeakToUserInfo {
 
 export type LiveSpeakToUserHandler = (
   info: LiveSpeakToUserInfo,
-) => Promise<void>;
+) => Promise<void | boolean>;
 
 // Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
 // sdk-typescript events.ts carries an independent copy with a cross-check test.

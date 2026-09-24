@@ -191,7 +191,7 @@ export class TelegramChannel extends ChannelBase {
           );
           writeFileSync(filePath, buf);
 
-          envelope.text = msg.caption || '';
+          envelope.text = msg.caption ? envelope.text : '';
           envelope.attachments = [
             {
               type: 'file',
@@ -206,7 +206,7 @@ export class TelegramChannel extends ChannelBase {
           );
           // Mirrors the success branch: the placeholder is adapter text, so
           // only a real caption may survive into the prompt.
-          const promptText = msg.caption || '';
+          const promptText = msg.caption ? envelope.text : '';
           envelope.text = `${promptText}\n\n(User sent a file "${fileName}" but download failed)`;
         }
       }).catch((err) => {
@@ -245,7 +245,7 @@ export class TelegramChannel extends ChannelBase {
           const filePath = join(dir, fileName);
           writeFileSync(filePath, buf);
 
-          envelope.text = msg.caption || '';
+          envelope.text = msg.caption ? envelope.text : '';
           envelope.attachments = [
             {
               type: 'audio',
@@ -260,7 +260,7 @@ export class TelegramChannel extends ChannelBase {
           );
           // Mirrors the success branch: the placeholder is adapter text, so
           // only a real caption may survive into the prompt.
-          const promptText = msg.caption || '';
+          const promptText = msg.caption ? envelope.text : '';
           envelope.text = `${promptText}\n\n(User sent a voice message but download failed)`;
         }
       }).catch((err) => {

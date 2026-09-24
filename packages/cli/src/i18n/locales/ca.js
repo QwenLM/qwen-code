@@ -432,6 +432,12 @@ export default {
   active: 'activa',
   disabled: 'desactivada',
   enabled: 'activada',
+  'disabled (bare mode)': 'desactivada (mode mínim)',
+  'disabled (safe mode)': 'desactivada (mode segur)',
+  'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
+  'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
+  'disabled (turned off for this session)':
+    'desactivada (apagada en aquesta sessió)',
   'View Details': 'Visualitza els detalls',
   'Update failed:': "Error en l'actualització:",
   'Updating {{name}}...': 'Actualitzant {{name}}...',
@@ -792,6 +798,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurats',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Torneu a obrir aquest menú per recarregar les definicions dels hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Els controls dels hooks i la configuració de seguretat HTTP requereixen un reinici.',
+  'Failed to reload hook definitions: {{error}}':
+    'No s’han pogut recarregar les definicions dels hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Return per seleccionar · Esc per cancel·lar',
   'Exit codes:': 'Codis de sortida:',
@@ -1600,6 +1612,11 @@ export default {
   'No tasks currently running': 'No hi ha cap tasca en execució',
   'No entry to show.': 'No hi ha cap entrada per mostrar.',
   'needs approval': 'necessita aprovació',
+  'Large workflow': 'Workflow gran',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow gran: {{agents}} agents programats (llindar d’avís {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow gran: ~{{tokens}} tokens de sortida previstos (llindar d’avís {{cap}}).',
   'rejected — edit config to re-approve':
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
@@ -1890,6 +1907,9 @@ export default {
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
+  'Startup context': "Context d'inici",
+  Unattributed: 'No atribuït',
+  'Cached prefix': 'Prefix en memòria cau',
   'Run /context detail for per-item breakdown.':
     'Executeu /context detail per a un desglossament per element.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2445,6 +2465,7 @@ export default {
   'toolDisplayName.Monitor': 'Monitor',
   'toolDisplayName.NotebookEdit': 'Edita notebook',
   'toolDisplayName.ToolSearch': "Cerca d'eines",
+  'toolDisplayName.ToolCall': "Crida d'eina",
   'toolDisplayName.EnterWorktree': "Entra a l'arbre de treball",
   'toolDisplayName.ExitWorktree': "Surt de l'arbre de treball",
   'toolDisplayName.Workflow': 'Flux de treball',
@@ -2740,8 +2761,6 @@ export default {
   // ============================================================================
   // Ordres diverses
   // ============================================================================
-  'Set a goal — keep working until the condition is met':
-    'Estableix un objectiu — continua treballant fins que es compleixi la condició',
   'Show current process memory diagnostics':
     'Mostra els diagnòstics de memòria del procés actual',
   'Record a CPU profile for Chrome DevTools analysis':

@@ -28,7 +28,7 @@ Add the channel to `~/.qwen/settings.json`:
   "channels": {
     "my-weixin": {
       "type": "weixin",
-      "senderPolicy": "pairing",
+      "privatePolicy": "pairing",
       "allowedUsers": [],
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
@@ -82,7 +82,7 @@ WeChat channels support all the standard channel options (see [Channel Overview]
 - **Use plain text instructions** — Since WeChat strips all markdown, add instructions like "Use plain text only" to avoid the agent producing formatted responses that look messy.
 - **Keep responses short** — WeChat message bubbles work best with concise text. Adding a character limit to your instructions helps (e.g., "Keep responses under 500 characters").
 - **Session expiry** — If you see "Session expired (errcode -14)" in the logs, your WeChat login has expired. Stop the channel and re-run `qwen channel configure-weixin` to log in again.
-- **Restrict access** — Use `senderPolicy: "pairing"` or `"allowlist"` to control who can talk to the bot. See [DM Pairing](./overview#dm-pairing) for details.
+- **Restrict access** — Use `privatePolicy: "pairing"` or `"allowlist"` to control who can talk to the bot. See [DM Pairing](./overview#dm-pairing) for details.
 
 ## Troubleshooting
 
@@ -98,7 +98,7 @@ Your WeChat login session has expired. Stop the channel and run `qwen channel co
 
 - Check the terminal output for errors
 - Verify the channel is running (`qwen channel start my-weixin`)
-- If using `senderPolicy: "allowlist"`, make sure your WeChat user ID is in `allowedUsers`
+- If using `privatePolicy: "allowlist"`, make sure your WeChat user ID is in `allowedUsers`
 
 ### Images not working
 

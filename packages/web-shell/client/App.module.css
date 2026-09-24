@@ -59,6 +59,10 @@
   overflow: hidden;
 }
 
+.app:global(.qwen-code-macos-titlebar) {
+  --web-shell-desktop-titlebar-height: 38px;
+}
+
 .appChat {
   height: 100%;
   min-height: 0;
@@ -84,6 +88,7 @@
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+  padding-top: var(--web-shell-desktop-titlebar-height, 0);
   overflow: hidden;
 }
 
@@ -1188,13 +1193,15 @@
   height: 14px;
 }
 
-@container (max-width: 699px) {
-  .queuedPromptStateLabel {
-    display: none;
-  }
+@supports (container-type: inline-size) {
+  @container (max-width: 699px) {
+    .queuedPromptStateLabel {
+      display: none;
+    }
 
-  .queuedPromptState:not(.queuedPromptStateLoading) {
-    display: none;
+    .queuedPromptState:not(.queuedPromptStateLoading) {
+      display: none;
+    }
   }
 }
 
@@ -1234,4 +1241,33 @@
 .tokenUsageHeaderButton:focus-visible {
   color: var(--foreground);
   background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.conversationSearchButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  margin-left: -5px;
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.conversationSearchButton:hover,
+.conversationSearchButton:focus-visible {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.conversationSearchButton:focus-visible {
+  outline: 1px solid var(--foreground);
+  outline-offset: 2px;
 }
