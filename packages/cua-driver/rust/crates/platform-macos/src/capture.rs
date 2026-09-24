@@ -12,6 +12,10 @@
 //! the same window id so warm hits skip `SCShareableContent::get` and plan
 //! construction. This is not a persistent `SCStream` or frame cache.
 //!
+//! On macOS VMs without Metal, display-filtered capture can crash WindowServer.
+//! Attached windows use a window-only CoreGraphics image clipped to their frame
+//! on those machines; ordinary windows keep desktop-independent SCK capture.
+//!
 //! Sources:
 //! - https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager
 //! - https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(desktopindependentwindow:)
@@ -590,11 +594,19 @@ fn relative_capture_rect(
 ///
 /// https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager
 fn capture_window_from_plan(window_id: u32, plan: &WindowCapturePlan) -> anyhow::Result<Vec<u8>> {
-    use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
+    use screencapturekit::screenshot_manager::SCScreenshotManager;
 
     let image = SCScreenshotManager::capture_image(&plan.filter, &plan.config).map_err(|e| {
         anyhow::anyhow!("SCScreenshotManager::capture_image failed for window {window_id}: {e}")
     })?;
+    encode_window_image(window_id, &image)
+}
+
+fn encode_window_image(
+    window_id: u32,
+    image: &screencapturekit::CGImage,
+) -> anyhow::Result<Vec<u8>> {
+    use screencapturekit::screenshot_manager::CGImageExt;
 
     let w = checked_image_dim(image.width(), "CGImage width")?;
     let h = checked_image_dim(image.height(), "CGImage height")?;
@@ -615,6 +627,59 @@ fn capture_window_from_plan(window_id: u32, plan: &WindowCapturePlan) -> anyhow:
     }
 
     cua_driver_core::image_utils::encode_rgba_to_png(&rgba, w, h)
+}
+
+fn has_metal_device() -> bool {
+    #[link(name = "Metal", kind = "framework")]
+    extern "C" {
+        fn MTLCreateSystemDefaultDevice() -> *mut objc2::runtime::AnyObject;
+    }
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| unsafe {
+        // The Create function transfers one retain; release it after the probe.
+        objc2::rc::Retained::from_raw(MTLCreateSystemDefaultDevice()).is_some()
+    })
+}
+
+fn capture_window_without_metal(
+    window_id: u32,
+    identity: WindowCaptureIdentity,
+) -> anyhow::Result<Vec<u8>> {
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    use core_graphics::window::{
+        create_image, kCGWindowImageBestResolution, kCGWindowImageBoundsIgnoreFraming,
+        kCGWindowListOptionIncludingWindow,
+    };
+    use foreign_types::ForeignType;
+
+    let x = f64::from_bits(identity.x);
+    let y = f64::from_bits(identity.y);
+    let width = f64::from_bits(identity.width);
+    let height = f64::from_bits(identity.height);
+    if !identity.is_on_screen || !x.is_finite() || !y.is_finite() {
+        anyhow::bail!("window {window_id} has no usable on-screen capture frame");
+    }
+    rounded_pixel_dim(width, "window width")?;
+    rounded_pixel_dim(height, "window height")?;
+
+    // A null/infinite frame would capture the whole attachment group. An explicit
+    // screen-space frame clips that group without scaling it into the sheet.
+    // IncludingWindow restricts the source; no desktop or foreign window is read.
+    let image = create_image(
+        CGRect::new(&CGPoint::new(x, y), &CGSize::new(width, height)),
+        kCGWindowListOptionIncludingWindow,
+        window_id,
+        kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution,
+    )
+    .ok_or_else(|| anyhow::anyhow!("CoreGraphics could not capture window {window_id}"))?;
+    // Both wrappers own CGImageRef. Transfer its +1 retain to the existing PNG
+    // encoder so pixel format, color conversion and dimension bounds stay shared.
+    let image = unsafe { screencapturekit::CGImage::from_raw(image.into_ptr().cast()) };
+    let bytes = encode_window_image(window_id, &image)?;
+    if current_window_capture_identity(window_id)? != identity {
+        anyhow::bail!("window {window_id} changed identity during CoreGraphics capture");
+    }
+    Ok(bytes)
 }
 
 enum CaptureIdentityValidation {
@@ -668,6 +733,9 @@ fn retry_after_identity_change(
     actual_identity: WindowCaptureIdentity,
 ) -> anyhow::Result<Vec<u8>> {
     evict_window_capture_plan(window_id, stale_plan);
+    if actual_identity.requires_display_crop && !has_metal_device() {
+        return capture_window_without_metal(window_id, actual_identity);
+    }
     let rebuilt = build_window_capture_plan(window_id, actual_identity)?;
     {
         let mut cache = lock_window_plan_cache();
@@ -696,6 +764,12 @@ fn retry_after_identity_change(
 /// Warm hits reuse a bounded two-second filter/config plan cache.
 fn screenshot_window_bytes_sck_inner(window_id: u32) -> anyhow::Result<Vec<u8>> {
     let identity = current_window_capture_identity(window_id)?;
+    // Sonoma's software compositor crashes in WSSelectiveSharingUpdateDisplayStreamSurface
+    // when SCK starts a display filter including a window. Select the compatibility
+    // path before creating that stream; an error fallback would be too late.
+    if identity.requires_display_crop && !has_metal_device() {
+        return capture_window_without_metal(window_id, identity);
+    }
     let cached = {
         let mut cache = lock_window_plan_cache();
         cache.get_cloned_at(&window_id, Instant::now())

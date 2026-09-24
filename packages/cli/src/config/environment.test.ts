@@ -21,7 +21,7 @@ import {
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
 } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
-import { TrustLevel } from './trustedFolders.js';
+import { TrustLevel, resetTrustedFoldersForTesting } from './trustedFolders.js';
 import {
   AGENT_EXECUTION_BACKEND_ENV,
   agentExecutionBackend,
@@ -808,6 +808,49 @@ describe('buildRuntimeEnvironment', () => {
 
     expect(snapshot.envFilePaths).not.toContain(path.join(parent, '.env'));
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('loads an ancestor .env of an explicitly trusted child workspace', () => {
+    const parent = makeWorkspace();
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child);
+    fs.writeFileSync(
+      path.join(parent, '.env'),
+      'TRUST_ANCESTOR_MARKER=from-ancestor-env\n',
+    );
+    const trustedFoldersPath = path.join(parent, 'trustedFolders.json');
+    // The rule is keyed on the child workspace, so it cannot match the
+    // ancestor being walked: the ancestor has no decision of its own, and the
+    // child's explicit TRUST_FOLDER must still keep the ancestor's .env alive.
+    fs.writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({ [child]: TrustLevel.TRUST_FOLDER }),
+    );
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+    resetTrustedFoldersForTesting();
+
+    try {
+      const snapshot = buildRuntimeEnvironment(
+        testSettings({ security: { folderTrust: { enabled: true } } }),
+        child,
+        {},
+      );
+
+      expect(snapshot.envFilePaths).toContain(path.join(parent, '.env'));
+      expect(snapshot.effectiveEnv['TRUST_ANCESTOR_MARKER']).toEqual(
+        'from-ancestor-env',
+      );
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
   });
 });
 
@@ -1629,12 +1672,10 @@ describe('loadEnvironment', () => {
     expect(process.env['ld_library_path']).toBe('/workspace-a/first');
   });
 
-  // The bwrap backend derives its writable roots from XDG_CACHE_HOME and
-  // os.tmpdir() (TMPDIR/TMP/TEMP), and resolveSandboxNetworkMode flips to
-  // proxied — spawning QWEN_SANDBOX_PROXY_COMMAND through `bash -c` on the
-  // host — purely on that variable's presence. None of them may arrive from
-  // repository content: the project .env/settings.env application and reload
-  // paths must reject them like the other hardcoded exclusions.
+  // Sandbox selection, host-side proxy commands, and process-wide cache/temp
+  // roots are operator inputs. The tool boundary also derives writable scratch
+  // from os.tmpdir() (TMPDIR/TMP/TEMP). None may arrive from repository content:
+  // project .env/settings.env application and reload paths must reject them.
   it('never applies the sandbox confinement keys from project .env or settings.env, including reload', () => {
     resetEnvironmentTrackingForTesting();
     const workspace = makeWorkspace();

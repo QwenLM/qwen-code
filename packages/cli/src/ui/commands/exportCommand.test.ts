@@ -100,6 +100,7 @@ describe('exportCommand', () => {
       services: {
         config: {
           getWorkingDir: vi.fn().mockReturnValue(mockWorkingDir),
+          getTargetDir: vi.fn().mockReturnValue(mockWorkingDir),
           getProjectRoot: vi.fn().mockReturnValue(mockProjectRoot),
           getSessionId: vi.fn().mockReturnValue('test-session-id'),
         },
@@ -127,6 +128,99 @@ describe('exportCommand', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('ACP artifacts', () => {
+    it.each([
+      ['md', 'text/markdown; charset=utf-8', 'file'],
+      ['html', 'text/html; charset=utf-8', 'html'],
+      ['json', 'application/json; charset=utf-8', 'file'],
+      ['jsonl', 'application/jsonl; charset=utf-8', 'file'],
+    ])(
+      'reports the written %s file in the workspace namespace',
+      async (format, mimeType, kind) => {
+        mockContext.executionMode = 'acp';
+        const filename = `export-2025-01-01T00-00-00-000Z.${format}`;
+        const result = await exportCommand.subCommands!.find(
+          (command) => command.name === format,
+        )!.action!(mockContext, './logs');
+        const [writtenPath, content, options] = vi.mocked(fs.writeFile).mock
+          .calls[0];
+        expect(writtenPath).toBe(path.join(mockWorkingDir, 'logs', filename));
+        expect(options).toEqual({ encoding: 'utf-8', mode: 0o600 });
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'info',
+          artifacts: [
+            {
+              title: filename,
+              workspacePath: `logs/${filename}`,
+              kind,
+              storage: 'workspace',
+              mimeType,
+              sizeBytes: Buffer.byteLength(String(content), 'utf-8'),
+            },
+          ],
+        });
+      },
+    );
+
+    it.each(['interactive', 'non_interactive'] as const)(
+      'keeps %s CLI results unchanged',
+      async (executionMode) => {
+        mockContext.executionMode = executionMode;
+        const result = await exportCommand.subCommands!.find(
+          (command) => command.name === 'md',
+        )!.action!(mockContext, '');
+        expect(result).toEqual({
+          type: 'message',
+          messageType: 'info',
+          content:
+            'Session exported to markdown: export-2025-01-01T00-00-00-000Z.md',
+        });
+        expect(
+          mockContext.services.config!.getTargetDir,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it('maps worktree files to the bound workspace root', async () => {
+      mockContext.executionMode = 'acp';
+      const worktree = path.join(
+        mockProjectRoot,
+        '.qwen/worktrees/export-check',
+      );
+      vi.mocked(mockContext.services.config!.getWorkingDir).mockReturnValue(
+        worktree,
+      );
+      vi.mocked(mockContext.services.config!.getTargetDir).mockReturnValue(
+        worktree,
+      );
+      const result = await exportCommand.subCommands!.find(
+        (command) => command.name === 'md',
+      )!.action!(mockContext, '');
+      expect(result).toMatchObject({
+        artifacts: [
+          expect.objectContaining({
+            workspacePath:
+              '.qwen/worktrees/export-check/export-2025-01-01T00-00-00-000Z.md',
+          }),
+        ],
+      });
+    });
+
+    it('does not advertise files outside the bound workspace', async () => {
+      mockContext.executionMode = 'acp';
+      vi.mocked(mockContext.services.config!.getTargetDir).mockReturnValue(
+        mockProjectRoot,
+      );
+      const result = await exportCommand.subCommands!.find(
+        (command) => command.name === 'md',
+      )!.action!(mockContext, '');
+      expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+      expect(result).not.toHaveProperty('artifacts');
+      expect(fs.writeFile).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('command structure', () => {

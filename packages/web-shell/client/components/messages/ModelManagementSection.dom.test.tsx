@@ -543,3 +543,60 @@ describe('ModelManagementSection', () => {
     expect('baseUrl' in arg).toBe(false);
   });
 });
+
+describe('host model management controls', () => {
+  it.each([
+    [true, true],
+    [true, false],
+    [false, true],
+    [false, false],
+  ])(
+    'independently controls add=%s and delete=%s while retaining selection',
+    (allowAdd, allowDelete) => {
+      const { container, props } = renderSection({ allowAdd, allowDelete });
+      const buttons = Array.from(container.querySelectorAll('button'));
+      expect(
+        buttons.some((button) => button.textContent === '+ Add Model'),
+      ).toBe(allowAdd);
+      expect(
+        buttons.some((button) =>
+          button.getAttribute('aria-label')?.startsWith('Delete '),
+        ),
+      ).toBe(allowDelete);
+      expect(container.textContent).toContain('GPT-4o');
+      const select = buttons.find(
+        (button) =>
+          button.getAttribute('aria-label')?.includes('DeepSeek V4') &&
+          !button.getAttribute('aria-label')?.startsWith('Delete'),
+      );
+      act(() => select!.click());
+      expect(props.onSelectModel).toHaveBeenCalledWith('deepseek-v4(openai)');
+      expect(props.onDeleteModel).not.toHaveBeenCalled();
+    },
+  );
+
+  it('clears an open delete confirmation when deletion is disabled', () => {
+    const { container, props } = renderSection();
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Delete GPT-4o"]',
+    )!;
+    act(() => button.click());
+    const { root } = mounted.at(-1)!;
+    const update = (allowDelete: boolean) =>
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <ModelManagementSection {...props} allowDelete={allowDelete} />
+          </I18nProvider>,
+        ),
+      );
+    expect(
+      container.querySelector('[aria-label="Confirm GPT-4o"]'),
+    ).not.toBeNull();
+    update(false);
+    expect(container.querySelector('[aria-label="Confirm GPT-4o"]')).toBeNull();
+    update(true);
+    expect(container.querySelector('[aria-label="Confirm GPT-4o"]')).toBeNull();
+    expect(props.onDeleteModel).not.toHaveBeenCalled();
+  });
+});
