@@ -4519,8 +4519,14 @@ describe('extension tests', () => {
           fsProbe.delayReadFileFor = undefined;
           fsProbe.failReadFileSyncFor = EXTENSIONS_CONFIG_FILENAME;
           const refreshB = manager.refreshCache();
+          // Attach B's rejection handler before awaiting A: B's scan waits
+          // on A's store mutex, so B can reject in the same microtask window
+          // in which A settles. Awaiting A first leaves B momentarily
+          // handlerless and surfaces an unhandled rejection.
+          // eslint-disable-next-line vitest/valid-expect
+          const refreshBRejection = expect(refreshB).rejects.toThrow('EMFILE');
           await expect(refreshA).rejects.toThrow('EMFILE');
-          await expect(refreshB).rejects.toThrow('EMFILE');
+          await refreshBRejection;
         } finally {
           fsProbe.failReadFileFor = undefined;
           fsProbe.delayReadFileFor = undefined;
