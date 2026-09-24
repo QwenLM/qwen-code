@@ -386,9 +386,10 @@ public final class JdbcRuntimeBindingRepository
 
     private void updateBinding(Connection connection,
             RuntimeBindingRecord record) throws SQLException {
+        // The provision seed is immutable after INSERT, so the update never
+        // re-encrypts it; renewal ticks would otherwise pay an AES-GCM
+        // encryption with a fresh IV for state that cannot change.
         String sql = "UPDATE qwen_runtime_binding SET binding_state = ?, "
-                + "provision_request_id = ?, "
-                + "provision_seed_ciphertext = ?, credential_key_id = ?, "
                 + "resource_handle_version = ?, resource_handle_json = ?, "
                 + "runtime_instance_id = ?, runtime_endpoint = ?, "
                 + "runtime_lease_id = ?, runtime_epoch = ?, "
@@ -401,39 +402,38 @@ public final class JdbcRuntimeBindingRepository
                 + "last_active_at = ? WHERE binding_id = ?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, record.getState().name());
-            setSeedColumns(statement, 2, record);
-            setHandleColumns(statement, 5, record);
+            setHandleColumns(statement, 2, record);
             RuntimeLease lease = record.getLease();
-            statement.setString(7,
+            statement.setString(4,
                     lease == null ? null : lease.getRuntimeInstanceId());
-            statement.setString(8,
+            statement.setString(5,
                     lease == null ? null : lease.getEndpoint().toString());
-            statement.setString(9,
+            statement.setString(6,
                     lease == null ? null : lease.getLeaseId());
             if (lease == null) {
-                statement.setObject(10, null);
+                statement.setObject(7, null);
             } else {
-                statement.setLong(10, lease.getEpoch());
+                statement.setLong(7, lease.getEpoch());
             }
             ProtectedSecret credential = protectLeaseToken(record);
-            statement.setString(11,
+            statement.setString(8,
                     credential == null ? null : credential.getCiphertext());
-            statement.setString(12,
+            statement.setString(9,
                     credential == null ? null : credential.getKeyId());
-            statement.setLong(13, record.getAttestationGeneration());
-            statement.setBoolean(14, record.isDrainRequested());
-            statement.setString(15, record.getOperationOwner());
-            JdbcRepositorySupport.setInstant(statement, 16,
+            statement.setLong(10, record.getAttestationGeneration());
+            statement.setBoolean(11, record.isDrainRequested());
+            statement.setString(12, record.getOperationOwner());
+            JdbcRepositorySupport.setInstant(statement, 13,
                     record.getOperationLeaseUntil());
-            statement.setLong(17, record.getOperationGeneration());
-            statement.setLong(18, record.getVersion());
-            JdbcRepositorySupport.setInstant(statement, 19,
+            statement.setLong(14, record.getOperationGeneration());
+            statement.setLong(15, record.getVersion());
+            JdbcRepositorySupport.setInstant(statement, 16,
                     record.getLastHealthAt());
-            JdbcRepositorySupport.setInstant(statement, 20,
+            JdbcRepositorySupport.setInstant(statement, 17,
                     record.getLastReconciledAt());
-            JdbcRepositorySupport.setInstant(statement, 21,
+            JdbcRepositorySupport.setInstant(statement, 18,
                     record.getLastActiveAt());
-            statement.setString(22, record.getBindingId());
+            statement.setString(19, record.getBindingId());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("Runtime binding update failed");
             }
@@ -661,11 +661,13 @@ public final class JdbcRuntimeBindingRepository
     }
 
     private static String seedContext(String bindingId) {
-        return "runtime-provision-seed:" + bindingId;
+        return "runtime-provision-seed:"
+                + JdbcRepositorySupport.valueKey(bindingId);
     }
 
     private static String leaseTokenContext(String bindingId) {
-        return "runtime-lease-token:" + bindingId;
+        return "runtime-lease-token:"
+                + JdbcRepositorySupport.valueKey(bindingId);
     }
 
     private static void requireRequest(RuntimeProvisionRequest request) {

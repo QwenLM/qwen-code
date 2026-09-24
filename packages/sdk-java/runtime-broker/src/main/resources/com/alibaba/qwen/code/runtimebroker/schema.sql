@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding_slot (
     capability_digest VARCHAR(512) NOT NULL,
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
-    provisioner_kind VARCHAR(128) NOT NULL,
+    provisioner_kind VARCHAR(512) NOT NULL,
     last_generation BIGINT NOT NULL,
     active_binding_id VARCHAR(512)
 );
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     capability_digest VARCHAR(512) NOT NULL,
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
-    provisioner_kind VARCHAR(128) NOT NULL,
+    provisioner_kind VARCHAR(512) NOT NULL,
     runtime_generation BIGINT NOT NULL,
     binding_state VARCHAR(32) NOT NULL,
     provision_request_id VARCHAR(512),
@@ -100,5 +100,7 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session
-        (runtime_session_key, execution_state)
+        (runtime_session_key, execution_state),
+    INDEX idx_tool_execution_binding
+        (binding_id, runtime_generation, execution_state)
 );

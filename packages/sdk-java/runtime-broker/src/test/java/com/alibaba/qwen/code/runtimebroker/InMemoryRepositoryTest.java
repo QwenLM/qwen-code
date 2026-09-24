@@ -38,6 +38,13 @@ class InMemoryRepositoryTest {
             new RuntimeProvisionRequest(SCOPE, "harness");
     private static final RuntimeLease LEASE = new RuntimeLease("runtime",
             URI.create("http://127.0.0.1:4096"), "token", "lease", 1);
+    private static final RuntimeProvisionRequest DURABLE_REQUEST =
+            new RuntimeProvisionRequest(SCOPE, "harness", "local-process");
+    private static final RuntimeProvisionSeed SEED =
+            new RuntimeProvisionSeed("provision-request", "runtime",
+                    "incarnation", "lease", 1, "token");
+    private static final RuntimeResourceHandle LOCAL_HANDLE =
+            new RuntimeResourceHandle("local-process", 1, Map.of("pid", 42));
 
     @Test
     void bindingFindOrCreateIsAtomicAndStartsOneGeneration()
@@ -158,6 +165,69 @@ class InMemoryRepositoryTest {
         assertEquals(clock.instant().plusSeconds(30),
                 renewed.getOperationLeaseUntil());
         assertSame(renewed, repository.findById(created.getBindingId()));
+    }
+
+    @Test
+    void releaseOperationRejectsAMismatchedOwnerOrGeneration() {
+        InMemoryRuntimeBindingRepository repository =
+                new InMemoryRuntimeBindingRepository(
+                        new MutableClock(START), () -> "binding");
+        RuntimeBindingRecord created = repository.findOrCreate(REQUEST);
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), "owner-a", Duration.ofSeconds(30));
+
+        assertNull(repository.releaseOperation(created.getBindingId(),
+                "owner-b", claimed.getOperationGeneration()));
+        assertNull(repository.releaseOperation(created.getBindingId(),
+                "owner-a", claimed.getOperationGeneration() + 1));
+        assertSame(claimed, repository.findById(created.getBindingId()));
+
+        RuntimeBindingRecord released = repository.releaseOperation(
+                created.getBindingId(), "owner-a",
+                claimed.getOperationGeneration());
+        assertEquals(claimed.getOperationGeneration(),
+                released.getOperationGeneration());
+        assertNull(released.getOperationOwner());
+        assertNull(released.getOperationLeaseUntil());
+    }
+
+    @Test
+    void durableBindingRecordRejectsInconsistentAttestationFacts() {
+        RuntimeLease foreignToken = new RuntimeLease("runtime",
+                URI.create("http://127.0.0.1:4096"), "other-token", "lease",
+                1);
+        RuntimeResourceHandle foreignKind = new RuntimeResourceHandle(
+                "static", 1, Map.of("pid", 42));
+
+        assertEquals(RuntimeBindingRecord.State.READY,
+                durableReady(SEED, LEASE, LOCAL_HANDLE, 1, START).getState());
+        assertEquals("lease must preserve provision credentials",
+                assertThrows(IllegalArgumentException.class,
+                        () -> durableReady(SEED, foreignToken, LOCAL_HANDLE,
+                                1, START)).getMessage());
+        assertEquals("resource handle kind must match the provisioner",
+                assertThrows(IllegalArgumentException.class,
+                        () -> durableReady(SEED, LEASE, foreignKind, 1,
+                                START)).getMessage());
+        assertEquals("durable ready binding is not attested",
+                assertThrows(IllegalArgumentException.class,
+                        () -> durableReady(SEED, LEASE, LOCAL_HANDLE, 0,
+                                START)).getMessage());
+        assertEquals("durable ready binding is not attested",
+                assertThrows(IllegalArgumentException.class,
+                        () -> durableReady(SEED, LEASE, LOCAL_HANDLE, 1,
+                                null)).getMessage());
+    }
+
+    @Test
+    void durableBindingRecordBindsTheSeedToTheRuntimeInstance() {
+        RuntimeLease foreignInstance = new RuntimeLease("other-runtime",
+                URI.create("http://127.0.0.1:4096"), "token", "lease", 1);
+
+        assertEquals("lease must preserve provision credentials",
+                assertThrows(IllegalArgumentException.class,
+                        () -> durableReady(SEED, foreignInstance,
+                                LOCAL_HANDLE, 1, START)).getMessage());
     }
 
     @Test
@@ -796,6 +866,16 @@ class InMemoryRepositoryTest {
                         reference("digest"),
                         ToolExecutionRecord.State.CANCEL_REQUESTED, null,
                         null, 0, false, null, null, 0, 0, null));
+    }
+
+    private static RuntimeBindingRecord durableReady(
+            RuntimeProvisionSeed seed, RuntimeLease lease,
+            RuntimeResourceHandle handle, long attestationGeneration,
+            Instant lastReconciledAt) {
+        return new RuntimeBindingRecord("binding", DURABLE_REQUEST, seed, 1,
+                RuntimeBindingRecord.State.READY, lease, handle,
+                attestationGeneration, false, null, null, 0, 0, START,
+                lastReconciledAt, START);
     }
 
     private static ToolExecutionRecord execution(String executionCallId) {

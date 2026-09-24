@@ -31,6 +31,7 @@ import javax.sql.DataSource;
 final class JdbcRepositoryContract {
     private static final Instant START = Instant.parse(
             "2026-09-20T00:00:00Z");
+    private static final Instant HEALTH = START.plusSeconds(30);
 
     private JdbcRepositoryContract() {
     }
@@ -38,6 +39,8 @@ final class JdbcRepositoryContract {
     static void verify(DataSource dataSource, String prefix) throws Exception {
         verifySchema(dataSource);
         verifyBinding(dataSource, prefix);
+        verifyProvisionerKindRoundTrip(dataSource, prefix);
+        verifySeedCiphertextIsImmutable(dataSource, prefix);
         verifySession(dataSource, prefix);
         verifyExecution(dataSource, prefix);
     }
@@ -143,11 +146,11 @@ final class JdbcRepositoryContract {
                 renewedB.withResourceHandle(handle, START)
                         .withAttestation(lease, handle, START, START));
         RuntimeBindingRecord healthy = second.compareAndSet(ready,
-                ready.withLastHealthAt(START, START)
+                ready.withLastHealthAt(HEALTH, START)
                         .withDrainRequested(true, START));
         RuntimeBindingRecord persistedReady = first.findById(bindingId);
         assertTrue(persistedReady.isDrainRequested());
-        assertEquals(START, persistedReady.getLastHealthAt());
+        assertEquals(HEALTH, persistedReady.getLastHealthAt());
         assertEquals(seed.getToken(),
                 persistedReady.getLease().getToken());
         assertEquals(seed, persistedReady.getProvisionSeed());
@@ -173,6 +176,21 @@ final class JdbcRepositoryContract {
                 next.getBindingId(), prefix + "-owner-a",
                 Duration.ofMinutes(30));
         assertNotNull(claimedNext);
+        assertNull(first.releaseOperation(next.getBindingId(),
+                prefix + "-owner-b",
+                claimedNext.getOperationGeneration()));
+        assertNull(first.releaseOperation(next.getBindingId(),
+                prefix + "-owner-a",
+                claimedNext.getOperationGeneration() + 1));
+        RuntimeBindingRecord stillClaimed = first.findById(
+                next.getBindingId());
+        assertEquals(claimedNext.getOperationOwner(),
+                stillClaimed.getOperationOwner());
+        assertEquals(claimedNext.getOperationGeneration(),
+                stillClaimed.getOperationGeneration());
+        assertEquals(claimedNext.getOperationLeaseUntil(),
+                stillClaimed.getOperationLeaseUntil());
+        assertEquals(claimedNext.getVersion(), stillClaimed.getVersion());
         assertNotNull(first.releaseOperation(next.getBindingId(),
                 prefix + "-owner-a",
                 claimedNext.getOperationGeneration()));
@@ -219,6 +237,69 @@ final class JdbcRepositoryContract {
                 .findById(legacy.getBindingId()).getLease().getToken());
         assertLegacyTokenEncrypted(dataSource, legacy.getBindingId(),
                 prefix + "-legacy-token");
+    }
+
+    private static void verifyProvisionerKindRoundTrip(DataSource dataSource,
+            String prefix) {
+        String provisionerKind = "0123456789".repeat(20);
+        assertEquals(200, provisionerKind.length());
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope(prefix + "-kind-tenant"), prefix + "-kind-isolation",
+                provisionerKind);
+        JdbcRuntimeBindingRepository repository =
+                new JdbcRuntimeBindingRepository(dataSource,
+                        protector(prefix));
+
+        RuntimeBindingRecord created = repository.findOrCreate(request);
+        assertEquals(provisionerKind,
+                created.getRequest().getProvisionerKind());
+        RuntimeBindingRecord active = repository.findActive(request);
+        assertEquals(created.getBindingId(), active.getBindingId());
+        assertEquals(provisionerKind,
+                active.getRequest().getProvisionerKind());
+    }
+
+    private static void verifySeedCiphertextIsImmutable(
+            DataSource dataSource, String prefix) throws Exception {
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope(prefix + "-seed-tenant"), prefix + "-seed-isolation",
+                "local-process");
+        AtomicInteger ids = new AtomicInteger();
+        JdbcRuntimeBindingRepository repository =
+                new JdbcRuntimeBindingRepository(dataSource,
+                        protector(prefix),
+                        () -> prefix + "-seed-binding-"
+                                + ids.incrementAndGet());
+        RuntimeBindingRecord created = repository.findOrCreate(request);
+        assertNotNull(created.getProvisionSeed());
+        String stored = seedCiphertext(dataSource, created.getBindingId());
+        assertNotNull(stored);
+
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), prefix + "-owner-a",
+                Duration.ofMinutes(30));
+        assertNotNull(claimed);
+        assertNotNull(repository.renewOperation(created.getBindingId(),
+                prefix + "-owner-a", claimed.getOperationGeneration(),
+                Duration.ofMinutes(30)));
+
+        assertEquals(stored, seedCiphertext(dataSource,
+                created.getBindingId()));
+    }
+
+    private static String seedCiphertext(DataSource dataSource,
+            String bindingId) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "SELECT provision_seed_ciphertext "
+                                + "FROM qwen_runtime_binding "
+                                + "WHERE binding_id = ?")) {
+            statement.setString(1, bindingId);
+            try (ResultSet result = statement.executeQuery()) {
+                assertTrue(result.next());
+                return result.getString(1);
+            }
+        }
     }
 
     private static void assertLegacyTokenEncrypted(DataSource dataSource,
@@ -410,6 +491,9 @@ final class JdbcRepositoryContract {
                 prefix + "-runtime-session"));
         assertFalse(second.hasActiveByRuntimeSession(
                 prefix + "-other-runtime-session"));
+        assertTrue(second.hasActiveByBinding(prefix + "-binding", 1));
+        assertFalse(second.hasActiveByBinding(prefix + "-other-binding", 1));
+        assertFalse(second.hasActiveByBinding(prefix + "-binding", 2));
         expire(dataSource, "qwen_tool_execution",
                 "dispatch_lease_until", "execution_call_id", executionId);
 
@@ -435,6 +519,7 @@ final class JdbcRepositoryContract {
         assertEquals(result, settled.getResult());
         assertFalse(first.hasActiveByRuntimeSession(
                 prefix + "-runtime-session"));
+        assertFalse(first.hasActiveByBinding(prefix + "-binding", 1));
         assertNull(first.claimDispatch(executionId,
                 prefix + "-dispatcher-a", Duration.ofMinutes(1)));
 

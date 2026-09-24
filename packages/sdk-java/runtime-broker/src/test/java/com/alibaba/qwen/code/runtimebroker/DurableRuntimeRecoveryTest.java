@@ -15,9 +15,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 
 class DurableRuntimeRecoveryTest {
@@ -68,6 +70,13 @@ class DurableRuntimeRecoveryTest {
             assertEquals(RuntimeBindingRecord.State.READY,
                     record.getState());
             assertTrue(record.getAttestationGeneration() >= 2);
+            assertEquals(HANDLE, restored.lastReconcileHandle);
+            assertEquals(initial.provisionedLease.getLeaseId(),
+                    restored.lastReconcileLease.getLeaseId());
+            assertEquals(initial.provisionedLease.getRuntimeInstanceId(),
+                    restored.lastReconcileLease.getRuntimeInstanceId());
+            assertEquals(initial.provisionedLease.getEpoch(),
+                    restored.lastReconcileLease.getEpoch());
         }
     }
 
@@ -90,18 +99,26 @@ class DurableRuntimeRecoveryTest {
 
         DurableProvisioner unknown = new DurableProvisioner();
         unknown.outcome = RuntimeObservation.Outcome.UNKNOWN;
-        try (RuntimeBrokerService service = service(unknown,
-                new TestTransport(), bindings, sessions, executions,
-                "broker-two")) {
-            CompletableFuture<RuntimeBindingRecord> warm =
-                    service.warm("harness").toCompletableFuture();
-            await(() -> unknown.reconciliations.get() > 0,
-                    Duration.ofSeconds(1));
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                unknown, new TestTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofMillis(20),
+                Duration.ofSeconds(1))) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
 
-            assertFalse(warm.isDone());
+            assertEquals("runtime_broker_reconcile_timeout",
+                    brokerFailure(failure).getCode());
+            assertTrue(unknown.reconciliations.get() >= 2,
+                    "unknown observation must be retried");
             assertEquals(0, unknown.ensures.get());
+            RuntimeBindingRecord untouched = bindings.findActive(
+                    request(unknown));
             assertEquals(RuntimeBindingRecord.State.READY,
-                    bindings.findActive(request(unknown)).getState());
+                    untouched.getState());
+            assertEquals(HANDLE, untouched.getResourceHandle());
+            assertNull(untouched.getOperationOwner());
         }
     }
 
@@ -266,6 +283,197 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void concurrentRestoredWarmReconcilesOnce() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner restored = new DurableProvisioner();
+        CompletableFuture<Void> attestationGate = new CompletableFuture<>();
+        try (RuntimeBrokerService service = service(restored,
+                new TestTransport(attestationGate, false), bindings,
+                sessions, executions, "broker-two")) {
+            CompletableFuture<RuntimeBindingRecord> firstWarm =
+                    CompletableFuture.supplyAsync(
+                            () -> service.warm("harness")
+                                    .toCompletableFuture().join());
+            await(() -> restored.reconciliations.get() == 1,
+                    Duration.ofSeconds(1));
+            CompletableFuture<RuntimeBindingRecord> secondWarm =
+                    service.warm("harness").toCompletableFuture();
+            attestationGate.complete(null);
+
+            RuntimeBindingRecord firstRecord = firstWarm.get(2,
+                    TimeUnit.SECONDS);
+            RuntimeBindingRecord secondRecord = secondWarm.get(2,
+                    TimeUnit.SECONDS);
+            assertEquals(1, restored.reconciliations.get());
+            assertEquals(firstRecord.getBindingId(),
+                    secondRecord.getBindingId());
+            assertEquals(firstRecord.getGeneration(),
+                    secondRecord.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    secondRecord.getState());
+        }
+    }
+
+    @Test
+    void persistedIdentityMismatchesBlockRecovery() throws Exception {
+        assertIdentityMismatchBlocksRecovery(
+                provisioner -> provisioner.observedRuntimeId =
+                        "wrong-runtime",
+                transport -> { });
+        assertIdentityMismatchBlocksRecovery(
+                provisioner -> provisioner.observedLeaseId = "wrong-lease",
+                transport -> { });
+        assertIdentityMismatchBlocksRecovery(
+                provisioner -> provisioner.observedEpoch = 999L,
+                transport -> { });
+        assertIdentityMismatchBlocksRecovery(
+                provisioner -> provisioner.observedHandle =
+                        new RuntimeResourceHandle("other-scheduler", 1,
+                                Map.of("resourceId", "untrusted")),
+                transport -> { });
+        assertIdentityMismatchBlocksRecovery(provisioner -> { },
+                transport -> transport.attestedIncarnation =
+                        "wrong-incarnation");
+        assertIdentityMismatchBlocksRecovery(provisioner -> { },
+                transport -> transport.attestedLeaseId = "wrong-lease");
+        assertIdentityMismatchBlocksRecovery(provisioner -> { },
+                transport -> transport.attestedEpoch = 999L);
+        assertIdentityMismatchBlocksRecovery(provisioner -> { },
+                transport -> transport.attestedScope = new RuntimeScope(
+                        "other-tenant", "workspace", "generation",
+                        "/workspace", "capability", "workspace"));
+        assertIdentityMismatchBlocksRecovery(provisioner -> { },
+                transport -> transport.attestedProvisionRequestId =
+                        "wrong-request");
+    }
+
+    private void assertIdentityMismatchBlocksRecovery(
+            Consumer<DurableProvisioner> observationMismatch,
+            Consumer<TestTransport> attestationMismatch) throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner restored = new DurableProvisioner();
+        observationMismatch.accept(restored);
+        TestTransport transport = new TestTransport();
+        attestationMismatch.accept(transport);
+        try (RuntimeBrokerService service = service(restored, transport,
+                bindings, sessions, executions, "broker-two")) {
+            assertThrows(Exception.class, () -> service.warm("harness")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+
+            RuntimeBindingRecord blocked = bindings.findActive(
+                    request(restored));
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    blocked.getState());
+            assertEquals(HANDLE, blocked.getResourceHandle());
+        }
+    }
+
+    @Test
+    void defaultEnsureResourceFailsClosedForADurableKind() throws Exception {
+        AtomicInteger bindingIds = new AtomicInteger();
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository(Clock.systemUTC(),
+                        () -> "binding-" + bindingIds.incrementAndGet());
+        DefaultsOnlyProvisioner provisioner = new DefaultsOnlyProvisioner();
+        try (RuntimeBrokerService service = service(provisioner,
+                new BareTransport(), bindings,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-one")) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+
+            assertEquals("runtime_provision_failed",
+                    brokerFailure(failure).getCode());
+            assertTrue(brokerFailure(failure).isRetryable());
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    bindings.findById("binding-1").getState());
+        }
+    }
+
+    @Test
+    void defaultReconcileWaitsInsteadOfGuessing() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DefaultsOnlyProvisioner restored = new DefaultsOnlyProvisioner();
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                restored, new BareTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofMillis(20),
+                Duration.ofSeconds(1))) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+
+            assertEquals("runtime_broker_reconcile_timeout",
+                    brokerFailure(failure).getCode());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    bindings.findActive(request(restored)).getState());
+        }
+    }
+
+    @Test
+    void defaultAttestFailsClosedForDurableProvisioning() throws Exception {
+        AtomicInteger bindingIds = new AtomicInteger();
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository(Clock.systemUTC(),
+                        () -> "binding-" + bindingIds.incrementAndGet());
+        DurableProvisioner provisioner = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(provisioner,
+                new BareTransport(), bindings,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-one")) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+
+            assertEquals("runtime_broker_attestation_unavailable",
+                    brokerFailure(failure).getCode());
+            assertFalse(brokerFailure(failure).isRetryable());
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findById("binding-1").getState());
+        }
+    }
+
+    @Test
     void nonRetryableAttestationFailureBlocksRecovery() throws Exception {
         InMemoryRuntimeBindingRepository bindings =
                 new InMemoryRuntimeBindingRepository();
@@ -416,6 +624,274 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void startingObservationRetriesUntilTheOperationDeadline()
+            throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner starting = new DurableProvisioner();
+        starting.outcome = RuntimeObservation.Outcome.STARTING;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                starting, new TestTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofMillis(20),
+                Duration.ofSeconds(1))) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+
+            assertEquals("runtime_broker_reconcile_timeout",
+                    brokerFailure(failure).getCode());
+            assertTrue(starting.reconciliations.get() >= 2,
+                    "starting observation must be retried");
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    bindings.findActive(request(starting)).getState());
+        }
+    }
+
+    @Test
+    void retryableReconcileFailureTimesOutWithoutBlockingRecovery()
+            throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner failing = new DurableProvisioner();
+        failing.reconcileFailure = new RuntimeBrokerException(503,
+                "runtime_broker_reconcile_failed", "transient", true);
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                failing, new TestTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofMillis(20),
+                Duration.ofSeconds(1))) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+
+            assertEquals("runtime_broker_reconcile_timeout",
+                    brokerFailure(failure).getCode());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    bindings.findActive(request(failing)).getState());
+        }
+    }
+
+    @Test
+    void nonRetryableReconcileFailureBlocksRecovery() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner failing = new DurableProvisioner();
+        failing.reconcileFailure = new RuntimeBrokerException(409,
+                "managed_runtime_identity_conflict", "conflict", false);
+        try (RuntimeBrokerService service = service(failing,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-two")) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+
+            assertEquals("runtime_broker_recovery_failed",
+                    brokerFailure(failure).getCode());
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findActive(request(failing)).getState());
+        }
+    }
+
+    @Test
+    void retryableEnsureFailureFailsAFreshBindingForRetry()
+            throws Exception {
+        AtomicInteger bindingIds = new AtomicInteger();
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository(Clock.systemUTC(),
+                        () -> "binding-" + bindingIds.incrementAndGet());
+        DurableProvisioner provisioner = new DurableProvisioner();
+        provisioner.ensureFailure = new RuntimeBrokerException(503,
+                "runtime_provision_failed", "transient", true);
+        try (RuntimeBrokerService service = service(provisioner,
+                new TestTransport(), bindings,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-one")) {
+            assertThrows(Exception.class, () -> service.warm("harness")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    bindings.findById("binding-1").getState());
+
+            provisioner.ensureFailure = null;
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+
+            RuntimeBindingRecord replacement = bindings.findById(
+                    "binding-2");
+            assertEquals(2, replacement.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    replacement.getState());
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    bindings.findById("binding-1").getState());
+        }
+    }
+
+    @Test
+    void parkedProvisionIsBoundedByTheOperationDeadline() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        DurableProvisioner provisioner = new DurableProvisioner();
+        provisioner.ensureGate = new CompletableFuture<>();
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                provisioner, new TestTransport(), bindings,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-one",
+                Duration.ofMillis(20), Duration.ofSeconds(1))) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_provision_timeout",
+                    brokerFailure(failure).getCode());
+
+            RuntimeBindingRecord timedOut = bindings.findActive(
+                    request(provisioner));
+            assertEquals(RuntimeBindingRecord.State.PROVISIONING,
+                    timedOut.getState());
+            assertNull(timedOut.getOperationOwner());
+
+            provisioner.ensureGate.complete(HANDLE);
+            Thread.sleep(100);
+
+            RuntimeBindingRecord afterLateResult = bindings.findActive(
+                    request(provisioner));
+            assertEquals(RuntimeBindingRecord.State.PROVISIONING,
+                    afterLateResult.getState());
+            assertNull(afterLateResult.getOperationOwner());
+        }
+    }
+
+    @Test
+    void activeExecutionAloneKeepsALostGenerationPinned() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.acquire("harness", "pinned-session", "bootstrap")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+
+        RuntimeBindingRecord first = bindings.findActive(request(initial));
+        executions.findOrCreate(ToolExecutionRecord.prepared("execution",
+                "key", first.getBindingId(), first.getGeneration(),
+                "harness", "pinned-session", "prompt", "call", "digest",
+                Map.of("sessionId", "pinned-session", "promptId", "prompt",
+                        "callId", "call", "argsDigest", "digest")));
+        RuntimeSessionRecord acquired = sessions.findById(SCOPE,
+                "pinned-session");
+        sessions.compareAndSet(acquired, acquired.withState(
+                RuntimeSessionRecord.State.RELEASED, Instant.now()));
+
+        DurableProvisioner recovered = new DurableProvisioner();
+        recovered.notFoundOnce = true;
+        try (RuntimeBrokerService service = service(recovered,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-two")) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_runtime_lost",
+                    brokerFailure(failure).getCode());
+
+            RuntimeBindingRecord pinned = bindings.findActive(
+                    request(recovered));
+            assertEquals(first.getBindingId(), pinned.getBindingId());
+            assertEquals(1, pinned.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    pinned.getState());
+            assertEquals(0, recovered.ensures.get());
+        }
+    }
+
+    @Test
+    void concurrentWarmOnAnIdleLostBindingReclaimsOnce() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        CountDownLatch reclaimGate = new CountDownLatch(1);
+        GatedSessionRepository gated = new GatedSessionRepository(sessions,
+                reclaimGate);
+        DurableProvisioner recovered = new DurableProvisioner();
+        recovered.notFoundOnce = true;
+        try (RuntimeBrokerService service = service(recovered,
+                new TestTransport(), bindings, gated, executions,
+                "broker-two")) {
+            CompletableFuture<RuntimeBindingRecord> firstWarm =
+                    CompletableFuture.supplyAsync(
+                            () -> service.warm("harness")
+                                    .toCompletableFuture().join());
+            await(() -> gated.counts.get() == 1, Duration.ofSeconds(1));
+            CompletableFuture<RuntimeBindingRecord> secondWarm =
+                    service.warm("harness").toCompletableFuture();
+            reclaimGate.countDown();
+
+            RuntimeBindingRecord firstRecord = firstWarm.get(2,
+                    TimeUnit.SECONDS);
+            RuntimeBindingRecord secondRecord = secondWarm.get(2,
+                    TimeUnit.SECONDS);
+            assertEquals(firstRecord.getBindingId(),
+                    secondRecord.getBindingId());
+            assertEquals(2, secondRecord.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    secondRecord.getState());
+            assertEquals(1, recovered.ensures.get());
+        }
+    }
+
+    @Test
     void lateEnsureResultCannotOverwriteANewOperationOwner()
             throws Exception {
         MutableClock clock = new MutableClock();
@@ -431,33 +907,36 @@ class DurableRuntimeRecoveryTest {
         RuntimeBrokerService firstService = service(first,
                 new TestTransport(), bindings, sessions, executions,
                 "broker-one");
-        firstService.warm("harness");
-        await(() -> first.ensures.get() == 1, Duration.ofSeconds(1));
-        firstService.close();
-        clock.advance(Duration.ofSeconds(2));
+        try {
+            firstService.warm("harness");
+            await(() -> first.ensures.get() == 1, Duration.ofSeconds(1));
+            clock.advance(Duration.ofSeconds(2));
 
-        DurableProvisioner second = new DurableProvisioner();
-        try (RuntimeBrokerService secondService = service(second,
-                new TestTransport(), bindings, sessions, executions,
-                "broker-two")) {
-            secondService.warm("harness").toCompletableFuture()
-                    .get(2, TimeUnit.SECONDS);
-            RuntimeBindingRecord current = bindings.findActive(
-                    request(second));
-            assertEquals(HANDLE, current.getResourceHandle());
-            assertEquals(2, current.getOperationGeneration());
+            DurableProvisioner second = new DurableProvisioner();
+            try (RuntimeBrokerService secondService = service(second,
+                    new TestTransport(), bindings, sessions, executions,
+                    "broker-two")) {
+                secondService.warm("harness").toCompletableFuture()
+                        .get(2, TimeUnit.SECONDS);
+                RuntimeBindingRecord current = bindings.findActive(
+                        request(second));
+                assertEquals(HANDLE, current.getResourceHandle());
+                assertEquals(2, current.getOperationGeneration());
 
-            first.ensureGate.complete(new RuntimeResourceHandle(
-                    "test-scheduler", 1,
-                    Map.of("resourceId", "stale-resource")));
-            Thread.sleep(50);
+                first.ensureGate.complete(new RuntimeResourceHandle(
+                        "test-scheduler", 1,
+                        Map.of("resourceId", "stale-resource")));
+                Thread.sleep(50);
 
-            RuntimeBindingRecord afterLateResult = bindings.findActive(
-                    request(second));
-            assertEquals(HANDLE, afterLateResult.getResourceHandle());
-            assertEquals(RuntimeBindingRecord.State.READY,
-                    afterLateResult.getState());
-            assertEquals(2, afterLateResult.getOperationGeneration());
+                RuntimeBindingRecord afterLateResult = bindings.findActive(
+                        request(second));
+                assertEquals(HANDLE, afterLateResult.getResourceHandle());
+                assertEquals(RuntimeBindingRecord.State.READY,
+                        afterLateResult.getState());
+                assertEquals(2, afterLateResult.getOperationGeneration());
+            }
+        } finally {
+            firstService.close();
         }
     }
 
@@ -521,8 +1000,11 @@ class DurableRuntimeRecoveryTest {
         try (RuntimeBrokerService service = service(recovered,
                 new TestTransport(), bindings, sessions, executions,
                 "broker-two")) {
-            assertThrows(Exception.class, () -> service.warm("harness")
-                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            Exception lost = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_runtime_lost",
+                    brokerFailure(lost).getCode());
 
             RuntimeBindingRecord blocked = bindings.findActive(
                     request(recovered));
@@ -564,7 +1046,7 @@ class DurableRuntimeRecoveryTest {
     }
 
     private static RuntimeBrokerService service(
-            DurableProvisioner provisioner, RuntimeTransport transport,
+            RuntimeProvisioner provisioner, RuntimeTransport transport,
             RuntimeBindingRepository bindings,
             RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, String owner) {
@@ -575,7 +1057,7 @@ class DurableRuntimeRecoveryTest {
     }
 
     private static RuntimeProvisionRequest request(
-            DurableProvisioner provisioner) {
+            RuntimeProvisioner provisioner) {
         return new RuntimeProvisionRequest(SCOPE, null, provisioner.kind());
     }
 
@@ -603,6 +1085,102 @@ class DurableRuntimeRecoveryTest {
     @FunctionalInterface
     private interface CheckedCondition {
         boolean evaluate() throws Exception;
+    }
+
+    private static final class DefaultsOnlyProvisioner
+            implements RuntimeProvisioner {
+        @Override
+        public String kind() {
+            return "test-scheduler";
+        }
+
+        @Override
+        public CompletionStage<RuntimeLease> provision(
+                RuntimeProvisionRequest request) {
+            throw new UnsupportedOperationException(
+                    "durable provisioning is not used by this test");
+        }
+    }
+
+    private static final class BareTransport implements RuntimeTransport {
+        @Override
+        public CompletionStage<Void> acquire(RuntimeLease lease,
+                RuntimeSession session) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Object> control(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> operation) {
+            throw new UnsupportedOperationException("unused");
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> execute(
+                RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> reference) {
+            throw new UnsupportedOperationException("unused");
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> cancel(
+                RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> reference) {
+            throw new UnsupportedOperationException("unused");
+        }
+
+        @Override
+        public CompletionStage<Boolean> release(RuntimeLease lease,
+                RuntimeSession session) {
+            throw new UnsupportedOperationException("unused");
+        }
+    }
+
+    private static final class GatedSessionRepository
+            implements RuntimeSessionRepository {
+        private final RuntimeSessionRepository delegate;
+        private final CountDownLatch gate;
+        private final AtomicInteger counts = new AtomicInteger();
+
+        GatedSessionRepository(RuntimeSessionRepository delegate,
+                CountDownLatch gate) {
+            this.delegate = delegate;
+            this.gate = gate;
+        }
+
+        @Override
+        public RuntimeSessionRecord findOrCreate(
+                RuntimeSessionRecord candidate) {
+            return delegate.findOrCreate(candidate);
+        }
+
+        @Override
+        public RuntimeSessionRecord findById(RuntimeScope scope,
+                String runtimeSessionId) {
+            return delegate.findById(scope, runtimeSessionId);
+        }
+
+        @Override
+        public RuntimeSessionRecord compareAndSet(
+                RuntimeSessionRecord expected,
+                RuntimeSessionRecord replacement) {
+            return delegate.compareAndSet(expected, replacement);
+        }
+
+        @Override
+        public long countActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            if (counts.incrementAndGet() == 1) {
+                try {
+                    gate.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+            return delegate.countActiveByBinding(bindingId,
+                    runtimeGeneration);
+        }
     }
 
     private static final class ClaimFailureRepository
@@ -679,9 +1257,16 @@ class DurableRuntimeRecoveryTest {
         private RuntimeResourceHandle conflictHandle = HANDLE;
         private RuntimeException ensureFailure;
         private RuntimeException provisionFailure;
+        private RuntimeException reconcileFailure;
         private CompletableFuture<RuntimeResourceHandle> ensureGate;
         private CompletableFuture<RuntimeObservation> reconcileGate;
         private RuntimeResourceHandle lastKnownHandle;
+        private RuntimeResourceHandle lastReconcileHandle;
+        private RuntimeLease lastReconcileLease;
+        private RuntimeResourceHandle observedHandle;
+        private String observedRuntimeId;
+        private String observedLeaseId;
+        private Long observedEpoch;
         private RuntimeLease provisionedLease;
         private RuntimeLease releasedLease;
         private boolean notFoundOnce;
@@ -739,6 +1324,11 @@ class DurableRuntimeRecoveryTest {
                 RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
                 RuntimeResourceHandle handle, RuntimeLease lastLease) {
             reconciliations.incrementAndGet();
+            lastReconcileHandle = handle;
+            lastReconcileLease = lastLease;
+            if (reconcileFailure != null) {
+                return CompletableFuture.failedFuture(reconcileFailure);
+            }
             if (reconcileGate != null) {
                 return reconcileGate;
             }
@@ -749,10 +1339,21 @@ class DurableRuntimeRecoveryTest {
             }
             if (outcome == RuntimeObservation.Outcome.READY) {
                 return CompletableFuture.completedFuture(
-                        RuntimeObservation.ready(HANDLE,
+                        RuntimeObservation.ready(
+                                observedHandle == null ? HANDLE
+                                        : observedHandle,
                                 URI.create("http://127.0.0.1:4190"),
-                                seed.getProvisionalRuntimeId(),
-                                seed.getLeaseId(), seed.getEpoch()));
+                                observedRuntimeId == null
+                                        ? seed.getProvisionalRuntimeId()
+                                        : observedRuntimeId,
+                                observedLeaseId == null ? seed.getLeaseId()
+                                        : observedLeaseId,
+                                observedEpoch == null ? seed.getEpoch()
+                                        : observedEpoch));
+            }
+            if (outcome == RuntimeObservation.Outcome.STARTING) {
+                return CompletableFuture.completedFuture(
+                        RuntimeObservation.starting(HANDLE));
             }
             if (outcome == RuntimeObservation.Outcome.UNKNOWN) {
                 return CompletableFuture.completedFuture(
@@ -770,6 +1371,11 @@ class DurableRuntimeRecoveryTest {
         private final CompletableFuture<Void> attestationGate;
         private final RuntimeException attestationFailure;
         private volatile boolean mismatch;
+        private String attestedIncarnation;
+        private String attestedLeaseId;
+        private Long attestedEpoch;
+        private RuntimeScope attestedScope;
+        private String attestedProvisionRequestId;
         private final AtomicInteger attestations = new AtomicInteger();
         private final AtomicInteger acquisitions = new AtomicInteger();
 
@@ -806,9 +1412,18 @@ class DurableRuntimeRecoveryTest {
                     new RuntimeAttestation(
                             mismatch ? "wrong-runtime"
                                     : lease.getRuntimeInstanceId(),
-                            seed.getGatewayIncarnation(), lease.getLeaseId(),
-                            lease.getEpoch(), request.getScope(),
-                            seed.getProvisionRequestId()));
+                            attestedIncarnation == null
+                                    ? seed.getGatewayIncarnation()
+                                    : attestedIncarnation,
+                            attestedLeaseId == null ? lease.getLeaseId()
+                                    : attestedLeaseId,
+                            attestedEpoch == null ? lease.getEpoch()
+                                    : attestedEpoch,
+                            attestedScope == null ? request.getScope()
+                                    : attestedScope,
+                            attestedProvisionRequestId == null
+                                    ? seed.getProvisionRequestId()
+                                    : attestedProvisionRequestId));
         }
 
         @Override

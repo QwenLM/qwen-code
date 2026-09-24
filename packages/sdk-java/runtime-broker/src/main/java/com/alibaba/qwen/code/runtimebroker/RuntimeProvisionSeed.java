@@ -86,7 +86,8 @@ public final class RuntimeProvisionSeed {
     boolean matches(RuntimeLease lease) {
         return lease != null && leaseId.equals(lease.getLeaseId())
                 && epoch == lease.getEpoch()
-                && token.equals(lease.getToken());
+                && token.equals(lease.getToken())
+                && provisionalRuntimeId.equals(lease.getRuntimeInstanceId());
     }
 
     byte[] encode() {

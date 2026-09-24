@@ -713,7 +713,29 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         BindingRenewal renewal = new BindingRenewal(claimed);
         renewal.start();
-        return mapFailure(safeStage(() -> provisioner.ensureResource(request,
+        String bindingId = claimed.getBindingId();
+        long operationGeneration = claimed.getOperationGeneration();
+        CompletableFuture<BindingContext> operation =
+                new CompletableFuture<>();
+        // The deadline fires independently of provisioning progress, so a
+        // parked ensureResource, provision or attestation call cannot hold
+        // the binding open forever. Releasing the claim first fences any
+        // late write from this operation.
+        ScheduledFuture<?> deadlineTask;
+        try {
+            deadlineTask = scheduler.schedule(() -> {
+                renewal.close();
+                releaseOperationQuietly(bindingId, operationGeneration);
+                operation.completeExceptionally(unavailable(
+                        "runtime_broker_provision_timeout",
+                        "Managed Runtime provisioning timed out."));
+            }, operationDeadlineNanos(), TimeUnit.NANOSECONDS);
+        } catch (RuntimeException scheduleFailure) {
+            renewal.stopAndGet();
+            releaseOperationQuietly(bindingId, operationGeneration);
+            return failed(scheduleFailure);
+        }
+        mapFailure(safeStage(() -> provisioner.ensureResource(request,
                 seed, claimed.getResourceHandle())), "runtime_provision_failed",
                 "Runtime provisioning failed")
                 .thenCompose(handle -> {
@@ -782,7 +804,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         releaseOperationQuietly(claimed.getBindingId(),
                                 claimed.getOperationGeneration());
                     }
+                })
+                .whenComplete((context, error) -> {
+                    deadlineTask.cancel(false);
+                    if (error == null) {
+                        operation.complete(context);
+                    } else {
+                        operation.completeExceptionally(unwrap(error));
+                    }
                 });
+        return operation;
     }
 
     private CompletionStage<RuntimeLease> provisionAndAttest(
@@ -969,7 +1000,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                 + "timed out."));
                             }
                             long delay = Math.min(2_000,
-                                    50L << Math.min(attempt, 5));
+                                    50L << Math.min(attempt, 6));
                             CompletableFuture<BindingContext> next =
                                     new CompletableFuture<>();
                             try {
@@ -1013,7 +1044,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                         "runtime_provision_fenced",
                                         "Runtime recovery claim expired"));
                             }
-                            return reclaimLostBinding(lost,
+                            return reclaimLostBindingNow(lost,
                                     lost.getRequest());
                         }
                         case BLOCKED:
@@ -1101,9 +1132,32 @@ public final class RuntimeBrokerService implements AutoCloseable {
     /**
      * A binding whose Runtime is proven gone is reclaimed only while nothing
      * references its generation, so an active Session keeps pointing at the
-     * loss instead of silently moving to a replacement Runtime.
+     * loss instead of silently moving to a replacement Runtime. Reclamation
+     * is single-flighted with reconciliation on the same binding key; the
+     * reconciliation loop calls the inner body directly because it already
+     * holds that key.
      */
     private CompletionStage<BindingContext> reclaimLostBinding(
+            RuntimeBindingRecord record, RuntimeProvisionRequest request) {
+        CompletableFuture<BindingContext> created = new CompletableFuture<>();
+        CompletableFuture<BindingContext> existing =
+                bindingOperations.putIfAbsent(record.getBindingId(), created);
+        if (existing != null) {
+            return existing;
+        }
+        safeStage(() -> reclaimLostBindingNow(record, request)).whenComplete(
+                (context, error) -> {
+                    bindingOperations.remove(record.getBindingId(), created);
+                    if (error == null) {
+                        created.complete(context);
+                    } else {
+                        created.completeExceptionally(unwrap(error));
+                    }
+                });
+        return created;
+    }
+
+    private CompletionStage<BindingContext> reclaimLostBindingNow(
             RuntimeBindingRecord record, RuntimeProvisionRequest request) {
         if (sessionRepository.countActiveByBinding(record.getBindingId(),
                 record.getGeneration()) > 0
@@ -1207,21 +1261,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
     }
 
-    private boolean isLiveBinding(RuntimeBindingRecord record) {
+    private LiveBinding matchingLiveBinding(RuntimeBindingRecord record) {
         LiveBinding live = liveBindings.get(record.getBindingId());
         return live != null && live.generation() == record.getGeneration()
                 && record.getLease() != null
-                && sameLease(live.lease(), record.getLease());
+                && sameLease(live.lease(), record.getLease()) ? live : null;
+    }
+
+    private boolean isLiveBinding(RuntimeBindingRecord record) {
+        return matchingLiveBinding(record) != null;
     }
 
     private BindingContext requireLiveBinding(RuntimeBindingRecord record) {
-        if (!isLiveBinding(record)) {
+        LiveBinding live = matchingLiveBinding(record);
+        if (live == null) {
             throw unavailable("runtime_reconciliation_required",
                     "persisted Runtime readiness requires adoption or "
                             + "reconciliation in this Broker process");
         }
-        return new BindingContext(record,
-                liveBindings.get(record.getBindingId()).lease());
+        return new BindingContext(record, live.lease());
     }
 
     private CompletionStage<SessionContext> requireReadySession(
