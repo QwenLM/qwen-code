@@ -35,7 +35,11 @@ const mockInitializeTelemetry = vi.hoisted(() => vi.fn());
 const mockStartBackgroundHousekeeping = vi.hoisted(() => vi.fn());
 const mockStartBatchAutoCollect = vi.hoisted(() => vi.fn());
 const mockResolveEndpoint = vi.hoisted(() =>
-  vi.fn(() => ({ apiKey: 'k', baseUrl: 'http://b', model: 'm' })),
+  vi.fn((..._args: unknown[]) => ({
+    apiKey: 'k',
+    baseUrl: 'http://b',
+    model: 'm',
+  })),
 );
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
