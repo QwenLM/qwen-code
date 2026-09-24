@@ -9,8 +9,8 @@ import {
   parseRule,
   matchesRule,
   resolveToolName,
+  rawCommandCandidatesForRules,
   splitCompoundCommand,
-  splitCompoundCommandSegmentsRaw,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
 } from './rule-parser.js';
@@ -1087,7 +1087,7 @@ export class PermissionManager {
       return decision;
     }
     let upgraded = decision;
-    for (const segment of splitCompoundCommandSegmentsRaw(command)) {
+    for (const segment of rawCommandCandidatesForRules(command)) {
       const candidate = this.evaluateSingle({
         ...ctx,
         command: segment.command,
@@ -1358,11 +1358,9 @@ export class PermissionManager {
         // escalate on: the projection strips heredoc bodies out of the
         // segments, and an ask an explicit rule matches there must not stay
         // invisible to the auto-approval gate that reads this method.
-        const rawCandidates = splitCompoundCommandSegmentsRaw(command);
+        const rawCandidates = rawCommandCandidatesForRules(command);
         return rawCandidates.some((segment) =>
           this.hasMatchingAskRule({ ...ctx, command: segment.command }),
-        );
-      }
         );
       }
     }

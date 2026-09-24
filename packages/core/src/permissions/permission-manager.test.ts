@@ -1271,6 +1271,8 @@ describe('state-tracking heredoc projection', () => {
     expect(heredocSafetyForStateTracking('((a << 1))\ncd /tmp').safe).toBe(
       true,
     );
+  });
+
   it('reports the terminator across a quote the two readings disagree on', async () => {
     // shell-semantics reads `&` as backgrounded, so the `cd` must not move the
     // cwd the write is attributed to — `&&` must, and the merge loop is what

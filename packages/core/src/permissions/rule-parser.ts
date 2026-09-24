@@ -1115,6 +1115,12 @@ function projectHeredocBodies(
   if (UNPROVABLE_RESOLUTION.test(command)) {
     return { command, ambiguous: true, bodyPlaceholders: [] };
   }
+  // No heredoc opener anywhere means there is nothing to project: the raw
+  // splitter below already handles quote and continuation structure, and an
+  // odd trailing backslash only matters when a body boundary exists.
+  if (!command.includes('<<')) {
+    return { command, ambiguous: false, bodyPlaceholders: [] };
+  }
 
   for (const line of lines) {
     if (pending.length > 0) {
@@ -1581,6 +1587,66 @@ interface OperatorBoundary {
   start: number;
   end: number;
   operator: string;
+}
+
+// A `#` opens a comment only at a word start outside quotes (and outside
+// ANSI-C `$'…'` escapes); everything from there to the end of the physical
+// line is comment text bash never executes. Rule evaluation must drop that
+// tail before matching, or a commented-out command looks executable.
+function stripBashCommentTail(line: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let dollarPending = false;
+  let escaped = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !(inSingle && !inAnsiC)) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) {
+      continue;
+    }
+    if (ch === '$') {
+      dollarPending = !ansiCIntroducer;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')) {
+      return line.substring(0, i);
+    }
+  }
+  return line;
+}
+
+/**
+ * Raw per-operator candidates with comment tails stripped per physical line
+ * first: a `;` sitting inside a comment is not a separator in bash, and the
+ * raw splitter does not model comments.
+ */
+export function rawCommandCandidatesForRules(
+  command: string,
+): CompoundCommandSegment[] {
+  const stripped = command
+    .split(/\r?\n/)
+    .map(stripBashCommentTail)
+    .join('\n');
+  return splitCompoundCommandSegmentsRaw(stripped);
 }
 
 type BackslashReading = 'bash' | 'escape-everywhere';
