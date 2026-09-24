@@ -1679,6 +1679,61 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
 
+    // Issue #12496 R1-1: the session-liveness layer cannot accept the
+    // loose `'Method not found'` substring match `isMethodNotFound`
+    // uses for discovery. A server error body containing the phrase
+    // for an unrelated reason (e.g. a generic 404 page or a stream
+    // parser error mentioning the phrase) must still flip DISCONNECTED,
+    // because the numeric JSON-RPC `-32601` code is the only thing
+    // that proves the server explicitly answered "I don't have this
+    // method family".
+    it('still flips DISCONNECTED when the body mentions Method not found without -32601 (#12496 R1-1)', async () => {
+      const mockedClient: Record<string, unknown> = {
+        connect: vi.fn(),
+        discover: vi.fn(),
+        disconnect: vi.fn(),
+        getStatus: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
+        request: vi.fn().mockResolvedValue({ tools: [] }),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const serverName = `phrase-no-code-${Date.now()}`;
+      const client = new McpClient(
+        serverName,
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+
+      const onerror = mockedClient['onerror'] as (error: unknown) => void;
+      // Message contains the substring but no `-32601` JSON-RPC code —
+      // a benign error body that happens to mention the phrase.
+      onerror(
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request: Method not found in registry"},"id":1}',
+        ),
+      );
+
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+    });
+
     it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
       // F2 (#4175) pool path: a single shared McpClient produces this
       // snapshot once; per-session SessionMcpView instances each register
