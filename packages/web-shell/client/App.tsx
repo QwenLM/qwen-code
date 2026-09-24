@@ -1542,7 +1542,7 @@ type SessionActionsWithCreate = {
     branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
-  clearSession: () => Promise<void>;
+  clearSession: (options?: { dropSessionContext?: boolean }) => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
 };
 
@@ -1553,7 +1553,9 @@ type NewSessionIntent =
    * conversation, unless `leaveLive` sends the new chat to the trusted
    * primary workspace the way a cold draft starts (or to a standalone draft
    * when there is no trusted primary, or to a plain cwd-less draft when the
-   * daemon offers neither).
+   * daemon offers neither). Leaving also drops the connection's live session
+   * context, so the resulting draft does not inherit Live on its first
+   * prompt.
    */
   | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
@@ -13417,13 +13419,15 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live' && intent.leaveLive) {
-          // Clearing keeps the connection's live context, so an undefined
-          // pending context would send the first prompt back to Live. Without
-          // a trusted primary, leave for a standalone draft when the daemon
-          // offers one; otherwise fall back to a plain cwd-less draft, the
-          // same as a cold draft in that setup, instead of keeping the Live
-          // path — attempting startLive('new') here throws when Live Voice is
-          // unavailable and the New task click is discarded (#12620).
+          // Without a trusted primary, leave for a standalone draft when the
+          // daemon offers one; otherwise fall back to a plain cwd-less draft,
+          // the same as a cold draft in that setup, instead of keeping the
+          // Live path — attempting startLive('new') here throws when Live
+          // Voice is unavailable and the New task click is discarded
+          // (#12620). The undefined case only means "plain draft" because the
+          // clear below is told to drop the connection's live context: an
+          // undefined pending context means "inherit from the connection", so
+          // leaving it in place would send the first prompt back to Live.
           const primaryCwd = workspacesRef.current.find(
             (entry) => entry.primary && entry.trusted !== false,
           )?.cwd;
@@ -13527,12 +13531,23 @@ export function App({
         closePanel();
       }
       if (!opts?.keepView) showChat();
+      // Leaving Live has to reach the connection: `undefined` is the
+      // downstream sentinel for "inherit from the connection", so clearing
+      // alone would hand the first prompt the live context we just left, and
+      // createSession rejects a live context (#12620). Only a context this
+      // click chose to leave is dropped — a workspace connection still
+      // inherits its cwd on the next prompt.
+      const dropSessionContextOnClear =
+        nextContext === undefined &&
+        connectionRef.current.sessionContext?.kind === 'live';
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
-        ).clearSession();
+        ).clearSession(
+          dropSessionContextOnClear ? { dropSessionContext: true } : undefined,
+        );
         focusRequest = scheduleComposerFocus();
         await clearPromise;
         if (

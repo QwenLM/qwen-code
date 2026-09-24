@@ -38181,10 +38181,18 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    mockSessionActions.clearSession.mockImplementation(async () => {
-      mockConnection.sessionId = undefined;
-      mockConnection.sessionContext = undefined;
-    });
+    // Mirrors production `clearSession`: the session id always goes, but the
+    // connection's session context only goes when the caller asks to drop it
+    // — which is exactly what the leave-Live fallback has to do, because an
+    // undefined pending context means "inherit from the connection".
+    mockSessionActions.clearSession.mockImplementation(
+      async (options?: { dropSessionContext?: boolean }) => {
+        mockConnection.sessionId = undefined;
+        if (options?.dropSessionContext) {
+          mockConnection.sessionContext = undefined;
+        }
+      },
+    );
     const { container, rerender } = renderApp();
     await flush();
 
@@ -38201,6 +38209,10 @@ describe('App session callbacks', () => {
 
     expect(mockWorkspace.client.startLive).not.toHaveBeenCalled();
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledWith({
+      dropSessionContext: true,
+    });
+    expect(mockConnection.sessionContext).toBeUndefined();
 
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('task prompt');
