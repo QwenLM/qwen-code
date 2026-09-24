@@ -36,6 +36,10 @@ import { parseReceiptCommentIds, parseReceiptIds } from './lib/receipt.js';
 import { detectPlatformKind } from './lib/platform/registry.js';
 import { a1Json, aoneWhoamiAccount } from './lib/platform/aone-client.js';
 import { git, gitProbe, releaseWorktree } from './lib/git.js';
+import {
+  baseTreeLockPath,
+  releaseBaseTreeLock,
+} from './lib/base-tree-trust.js';
 import { readBudgetStopUnfenced } from './lib/deadline.js';
 import { promptRecordDir, runEpochMs } from './lib/prompt-record.js';
 import {
@@ -954,19 +958,42 @@ export function runCleanup(target: string): void {
     for (const path of scratch.paths) {
       report('scratch worktree', path);
     }
-    // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
-    // not a git worktree, so `releaseWorktree` above does not touch it. A builder
-    // killed mid-build leaves it behind (its `finally` rmSync never runs), and every
-    // later base-tree probe for this PR then hits EEXIST and reports "another probe
-    // is building" until a manual rm. Sweep it here, at the end of the review when no
-    // builder is active. Best effort only — a lock that will not delete is an
-    // operational paper-cut, never a wrong verdict, so it does not fail the cleanup.
+    // The base-tree build lock's LEGACY location, beside the tree. The lock now
+    // lives host-side beside the base-tree trust file — here, inside the mounted
+    // directory, the reviewed code could backdate or delete it. A builder from
+    // before the move, killed mid-build, can still have left one at this path
+    // (a plain directory, which `releaseWorktree` above does not touch), so it
+    // is swept here too. Best effort only: nothing reads this path any more, so
+    // a lock that will not delete is clutter, never a wrong verdict, and it
+    // does not fail the cleanup.
     try {
       rmSync(`${baseWorktreePath(wt)}.lock`, { recursive: true, force: true });
     } catch (err) {
       writeStderrLine(
         `note: could not remove base lock ${baseWorktreePath(wt)}.lock: ${(err as Error).message}`,
       );
+    }
+    // The lock's host-side location, released here — keyed on the tree it
+    // guards being GONE, where the lease-release reclaim skips it (a
+    // finalizer removes the review worktree, not the base tree, and can run
+    // while a builder it started is still mid-install). While the tree
+    // stands, a builder killed with its client can still be writing into it
+    // from its container, and removing the lock lets the next review build
+    // over it at once — so a tree that would not delete keeps its lock. Once
+    // the tree is gone the lock guards nothing, and keeping it wedges the
+    // next review of this PR for the whole staleness window: every ask
+    // computes this same path, takes EEXIST from `mkdirSync`, and reports
+    // "another probe is building — the fast path will then reuse it" over a
+    // tree this command just removed, so the recovery the note names cannot
+    // happen. Same best-effort terms as the legacy sweep.
+    if (!existsSync(baseWorktreePath(wt))) {
+      try {
+        releaseBaseTreeLock(wt);
+      } catch (err) {
+        writeStderrLine(
+          `note: could not remove base lock ${baseTreeLockPath(wt)}: ${(err as Error).message}`,
+        );
+      }
     }
 
     const branch = reviewBranch(prNumber);

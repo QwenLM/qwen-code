@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
@@ -275,6 +276,7 @@ import {
   type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -502,6 +504,27 @@ function readDaemonAttachmentReferences(
     });
   }
   return references;
+}
+const MAX_DAEMON_INPUT_ANNOTATIONS = 256;
+function readDaemonInputAnnotations(
+  value: unknown,
+): Array<Record<string, unknown>> | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_DAEMON_INPUT_ANNOTATIONS
+  ) {
+    return undefined;
+  }
+  // Elements are persisted verbatim and replayed into every later load;
+  // drop non-object entries so one malformed element cannot poison renders.
+  // An all-invalid array must collapse to `undefined`, not `[]` — a truthy
+  // empty array would still force a `systemPayload` below.
+  const annotations = (value as unknown[]).filter(
+    (item): item is Record<string, unknown> =>
+      !!item && typeof item === 'object' && !Array.isArray(item),
+  );
+  return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
@@ -5917,6 +5940,9 @@ export class Session implements SessionContext {
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
+            const inputAnnotations = readDaemonInputAnnotations(
+              promptMetadata?.[DAEMON_INPUT_ANNOTATIONS_META_KEY],
+            );
             const declaredSubmission =
               promptMetadata?.[DAEMON_SUBMITTED_PROMPT_META_KEY];
             const submittedPrompt =
@@ -6076,11 +6102,13 @@ export class Session implements SessionContext {
                 promptText,
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
+                  inputAnnotations ||
                   attachmentReferences ||
                   resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
+                      ...(inputAnnotations ? { inputAnnotations } : {}),
                       ...(attachmentReferences ? { attachmentReferences } : {}),
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
@@ -6169,8 +6197,12 @@ export class Session implements SessionContext {
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined
-                    ? { displayText: promptDisplayText, hookContext: '' }
+                  promptDisplayText !== undefined || inputAnnotations
+                    ? {
+                        displayText: promptDisplayText ?? promptText,
+                        hookContext: '',
+                        ...(inputAnnotations ? { inputAnnotations } : {}),
+                      }
                     : undefined,
                   daemonPromptId,
                 );
@@ -13003,6 +13035,7 @@ export class Session implements SessionContext {
           function_name: toolName,
           function_args: args,
           duration_ms: durationMs,
+          started_at_ms: startTime,
           status,
           execution_status: executionStatus,
           success: false,
@@ -13067,6 +13100,8 @@ export class Session implements SessionContext {
               callId,
               toolName,
               args,
+              startedAt: startTime,
+              durationMs: Date.now() - startTime,
               message: errorParts,
               error,
               success: false,
@@ -13074,7 +13109,13 @@ export class Session implements SessionContext {
               persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
             });
           } else {
-            await this.toolCallEmitter.emitError(callId, toolName, error);
+            await this.toolCallEmitter.emitError(
+              callId,
+              toolName,
+              error,
+              undefined,
+              { startedAt: startTime, durationMs: Date.now() - startTime },
+            );
           }
         } catch (emitError) {
           debugLogger.debug(
@@ -13795,7 +13836,6 @@ export class Session implements SessionContext {
             }
           }
 
-          let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
           const cancelStaleTodoPlanApproval = async () => {
             const configRevision =
@@ -14082,7 +14122,6 @@ export class Session implements SessionContext {
                 confirmationDetails.type === 'info')
             ) {
               // Auto-approve, skip requestPermission.
-              // didRequestPermission stays false → emitStart below.
             } else if (!hookHandled) {
               if (planShellDecision.classification !== 'not-applicable') {
                 const finalPreDisplayPlanShellError =
@@ -14115,7 +14154,6 @@ export class Session implements SessionContext {
               }
 
               // Show permission dialog via ACP requestPermission
-              didRequestPermission = true;
               const content =
                 buildPermissionRequestContent(confirmationDetails);
 
@@ -14449,14 +14487,13 @@ export class Session implements SessionContext {
             }
           }
 
-          if ((!didRequestPermission || isAgentTool) && !isTodoWriteTool) {
-            // Approved agents also need the initial creating frame when the
-            // provider does not emit preparation updates.
+          if (!isTodoWriteTool) {
             const startParams: ToolCallStartParams = {
               callId,
               toolName,
               args,
               status: 'in_progress',
+              startedAt: startTime,
             };
             try {
               await this.toolCallEmitter.emitStart(startParams);
@@ -14904,11 +14941,11 @@ export class Session implements SessionContext {
               ],
               values: () => [
                 ...toolResultPartDiagnosticValues(toolResult.llmContent),
-                ...(typeof toolResult.returnDisplay === 'string'
+                ...(shellResultText(toolResult.returnDisplay) !== undefined
                   ? [
                       {
                         representation: 'display' as const,
-                        value: toolResult.returnDisplay,
+                        value: shellResultText(toolResult.returnDisplay)!,
                       },
                     ]
                   : []),
@@ -15223,6 +15260,8 @@ export class Session implements SessionContext {
                 callId,
                 toolName,
                 args,
+                startedAt: startTime,
+                durationMs: Date.now() - startTime,
                 message: responseParts,
                 resultDisplay: toolResult.returnDisplay,
                 error: responseError,
@@ -15253,6 +15292,7 @@ export class Session implements SessionContext {
               function_name: toolName,
               function_args: args,
               duration_ms: durationMs,
+              started_at_ms: startTime,
               status,
               execution_status: executionStatus,
               success: succeeded,
@@ -15607,11 +15647,9 @@ export class Session implements SessionContext {
 
       case 'unsupported': {
         if (result.originalType === 'unsupported_action') {
-          throw new RequestError(
-            -32004,
-            'This action is not supported in this standalone session.',
-            { errorKind: 'unsupported_action' },
-          );
+          throw new RequestError(-32004, result.reason, {
+            errorKind: 'unsupported_action',
+          });
         }
         // Command returned an unsupported result type
         const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;
@@ -15662,6 +15700,7 @@ export class Session implements SessionContext {
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
+    const sshWorkspace = Boolean(this.config.getExecutionEnvironment?.());
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
@@ -15682,6 +15721,7 @@ export class Session implements SessionContext {
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
+          if (sshWorkspace) return { text: part.text };
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
@@ -15732,6 +15772,9 @@ export class Session implements SessionContext {
             },
           });
         case 'resource_link': {
+          if (sshWorkspace && part.uri.startsWith(FILE_URI_SCHEME)) {
+            return { text: `@${part.uri.slice(FILE_URI_SCHEME.length)}` };
+          }
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
               fileData: {

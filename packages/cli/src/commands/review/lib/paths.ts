@@ -5,8 +5,8 @@
  */
 
 // Centralised path constants and helpers for the `qwen review` subcommands.
-// Review artifacts are relative to the project root; user-private runtime
-// preferences resolve under Storage's project directory. Use `path.join`
+// Review artifacts are relative to the project root; host-trusted state and
+// user-private runtime preferences resolve through Storage. Use `path.join`
 // rather than string concatenation so Windows backslashes are produced.
 
 import { createHash } from 'node:crypto';
@@ -19,6 +19,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sanitizeFilenameComponent, Storage } from '@qwen-code/qwen-code-core';
+import { getProjectHash } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { safeTarget } from '../../../utils/paths.js';
 import { gitRaw } from './git.js';
 import { inertText } from './inert-text.js';
@@ -60,23 +61,62 @@ export function assertWritableOutPath(out: unknown): asserts out is string {
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 
 /**
- * Where worktree leases live — a SIBLING of the review temp dir, not a child.
- *
- * The leases are host-trusted state: `cleanupReviewWorktreeLeases` matches one
- * by session ids alone and then force-removes whatever worktree and deletes
- * whatever branch it names. `REVIEW_TMP_DIR` is the directory the review
- * sandbox bind-mounts read-write, so keeping them there put that state inside
- * the container's writable surface — and inside reach of an unsandboxed run
- * too, which is how it stood before the sandbox existed. Reviewed code that
- * can edit a lease can make another session's cleanup destroy the wrong tree,
- * or plant one no session will ever sweep and wedge that PR on that machine.
- *
- * One directory over is the whole fix: nothing mounts it, and the lease
- * lifecycle is unchanged.
+ * The retired in-workspace lease directory. New code never reads authority
+ * from here, but local-diff still excludes residue left by an older build.
  */
-export const REVIEW_LEASE_DIR = join('.qwen', 'review-leases');
+export const RETIRED_REVIEW_LEASE_DIR = join('.qwen', 'review-leases');
+export const REVIEW_TRUST_STATE_DIR = 'review-state';
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
+
+function outermostReviewRepositoryRoot(repositoryRoot: string): string {
+  const resolved = resolve(repositoryRoot);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = (resolved + sep).indexOf(marker);
+  return at < 0 ? resolved : resolved.slice(0, at);
+}
+
+function canonicalReviewRepositoryRoot(repositoryRoot: string): string {
+  let canonical = outermostReviewRepositoryRoot(repositoryRoot);
+  try {
+    canonical = realpathSync.native(canonical);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Review repositories exist in production. Keeping the lexical fallback
+    // makes this path helper side-effect free and lets the eventual lease
+    // operation report the real filesystem error.
+  }
+  // A caller may have reached a nested review worktree through a symlink
+  // whose lexical spelling contains no `.qwen/tmp` segment. Re-apply the
+  // boundary rule after canonicalization so that spelling still shares the
+  // outer review's namespace.
+  canonical = outermostReviewRepositoryRoot(canonical);
+  return canonical;
+}
+
+/** Host-trusted review state, outside every repository workspace. */
+export function reviewTrustStateDir(repositoryRoot: string): string {
+  const digest = getProjectHash(canonicalReviewRepositoryRoot(repositoryRoot));
+  return join(Storage.getGlobalQwenDir(), REVIEW_TRUST_STATE_DIR, digest);
+}
+
+/**
+ * The outermost repository root encoded by a review worktree path. Derive it
+ * from path geometry, never Git metadata inside the reviewed worktree.
+ */
+export function reviewRepositoryRootForWorktree(worktree: string): string {
+  const resolved = resolve(worktree);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = resolved.indexOf(marker);
+  if (at < 0) {
+    throw new Error(
+      `cannot place the base-tree trust artifact for ${worktree}: the ` +
+        'worktree is not shaped like <root>/.qwen/tmp/<name>, so there is ' +
+        'no host-side review directory to key it under',
+    );
+  }
+  return resolved.slice(0, at);
+}
 
 /**
  * Where a generated review fan-out script has to live.
@@ -237,7 +277,8 @@ export function reviewWorkflowScriptPath(
 }
 
 /**
- * Filename prefix for review-worktree lease files under `REVIEW_LEASE_DIR`.
+ * Filename prefix for review-worktree lease files under the trusted review
+ * state directory.
  * Lives here, not in `review-worktree-lease.ts`, because the review
  * workflow's cleanup sweep deletes leases by glob — the sweep pattern and
  * the lease writer must share one definition (the cleanup spec pins both).

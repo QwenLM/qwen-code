@@ -60,6 +60,7 @@ describe('reviewCommand', () => {
       'base-tree',
       'scratch-tree',
       'test-delta',
+      'fix-delta',
       'drive',
       'ab-drive',
       'mock-provider',

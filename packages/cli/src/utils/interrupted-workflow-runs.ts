@@ -13,6 +13,7 @@ import {
   buildResumeCall,
   hasUninlinableResumeArgs,
 } from '@qwen-code/qwen-code-core/agents/workflow-resume-call.js';
+import { snapshotArgsUnavailable } from '@qwen-code/qwen-code-core/agents/workflow-snapshot.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 
 /** Runs named one by one in the notice; the rest are counted. */
@@ -55,8 +56,12 @@ export function formatInterruptedWorkflowRunsNotice(
     };
     const call = hasJournal ? buildResumeCall(target) : null;
     if (call) {
+      // The third reader of this predicate, beside the daemon's refusal and
+      // the task projection. This notice is a call to paste, and on this
+      // path nothing refuses it: a run whose history cannot name its args
+      // would resume with none, replay nothing and re-dispatch every agent.
       const argsNote =
-        snapshot.argsOmitted || hasUninlinableResumeArgs(target)
+        snapshotArgsUnavailable(snapshot) || hasUninlinableResumeArgs(target)
           ? ' (pass its original args too)'
           : '';
       lines.push(`    resume: ${call}${argsNote}`);

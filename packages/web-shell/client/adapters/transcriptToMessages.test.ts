@@ -284,6 +284,27 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps active shell input previews out of output while preserving actual content', () => {
+    const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
+      toolName: 'run_shell_command',
+      serverTimestamp: 500,
+      rawInput: { command: 'sleep 10' },
+      details: '{"command":"sleep 10"}',
+    });
+    const getTool = (value: typeof block) =>
+      transcriptBlocksToDaemonMessages([value]).find(
+        (m) => m.role === 'tool_group',
+      )?.tools[0];
+    expect(getTool(block)?.rawOutput).toBeUndefined();
+    expect(getTool(block)?.startTime).toBe(500);
+    expect(getTool({ ...block, rawOutput: 'actual output' })?.rawOutput).toBe(
+      'actual output',
+    );
+    expect(
+      getTool({ ...block, status: 'failed', details: 'Timed out' })?.rawOutput,
+    ).toBe('Timed out');
+  });
+
   it('does not treat a historical background launch as agent completion', () => {
     const block = toolBlock('agent-history', 'agent-1', 'completed', 1000, {
       toolName: 'agent',
@@ -5959,5 +5980,33 @@ describe('assistantBlockRendersAsSystemNotice', () => {
     expect(
       assistantBlockRendersAsSystemNotice(textBlock('u-1', 'user', 'hi', 1)),
     ).toBe(false);
+  });
+});
+
+it('projects generic tool wrappers into real names and arguments in chat messages', () => {
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'wrapped',
+        status: 'completed',
+        rawInput: {
+          name: 'mcp__server__lookup',
+          arguments: { query: 'value' },
+        },
+        _meta: { toolName: 'tool_call' },
+      },
+    }),
+  );
+  const message = transcriptBlocksToDaemonMessages(state.blocks).find(
+    (message) => message.role === 'tool_group',
+  );
+  expect(message?.role === 'tool_group' && message.tools[0]).toMatchObject({
+    toolName: 'mcp__server__lookup',
+    title: 'mcp__server__lookup',
+    args: { query: 'value' },
   });
 });

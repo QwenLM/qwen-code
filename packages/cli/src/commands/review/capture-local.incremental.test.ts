@@ -226,6 +226,34 @@ describe('capture-local — incremental local rounds', () => {
     ).toContain('bystander');
   });
 
+  it('records the identity of the SLICE it wrote, not of the full capture', () => {
+    // Here the command holds two diff texts at once — the full capture and
+    // the slice — and only the slice is what lands at `diffPathAbsolute`, and
+    // the coverage reader re-hashes that path and nothing else. An identity
+    // over the full capture type-checks, passes every un-sliced fixture, and
+    // reports drift on every incrementally-scoped round of a plan nothing
+    // touched.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    // Not ASCII, so the writer's decoding is pinned too: the reader decodes
+    // the file as utf8, and any other decoding here agrees only on ASCII.
+    write(CHANGED, 'export const v = "变更 é";\n');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+
+    const sha = (text: string): string =>
+      createHash('sha256').update(text, 'utf8').digest('hex');
+    const slice = readFileSync(join(repo, plan.diffPath), 'utf8');
+    const full = readFileSync(plan.incremental!.scope!.fullDiffPath!, 'utf8');
+    // The slice genuinely dropped a section, or this pins nothing.
+    expect(full).toContain('bystander');
+    expect(slice).not.toContain('bystander');
+
+    const recorded = (plan['selection'] as { sourceArtifactSha256: string })
+      .sourceArtifactSha256;
+    expect(recorded).toBe(sha(slice));
+    expect(recorded).not.toBe(sha(full));
+  });
+
   it('an attribute flip re-reviews the file — including with NO worktree change', () => {
     // What a round READS is the rendering. `binary` turns a file's section
     // into "Binary files … differ", so a round can end clean having read no
