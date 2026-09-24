@@ -2805,6 +2805,67 @@ describe('AppContainer State Management', () => {
       expect(mockSubmitQuery).not.toHaveBeenCalled();
     });
 
+    // #11626: Ctrl+Q is not shell-gated — `keyMatchers[Command.QUEUE_MESSAGE]`
+    // calls `handleSubmitAndClear(buffer.text, true)` (InputPrompt.tsx:1810)
+    // after the `if (!shellModeActive) {` block closes at :1808 — and
+    // handleFinalSubmit reaches the deferred leg with no shell-mode gate before
+    // it, so a shell-mode command can be deferred. That entry is also the one
+    // that sits in the queue longest, across exactly the flag flip the recorded
+    // intent exists to survive. The case above pins this leg's non-shell arm, so
+    // the 4th argument is asserted in both directions here: replacing
+    // `shellModeActive` with `false` at AppContainer.tsx:3253 turns this red.
+    it('records shell intent on a Ctrl+Q submission made in shell mode', () => {
+      const mockQueueMessage = vi.fn();
+      const mockSubmitQuery = vi.fn();
+
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('gh workflow list', {
+        deferUntilIdle: true,
+        submittedPrompt: 'gh workflow list',
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        'gh workflow list',
+        true,
+        'gh workflow list',
+        true,
+      );
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+    });
+
     it('submits /btw immediately instead of queueing while responding', () => {
       const mockSubmitQuery = vi.fn();
       const mockQueueMessage = vi.fn();
