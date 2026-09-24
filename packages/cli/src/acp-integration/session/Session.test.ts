@@ -2883,6 +2883,95 @@ describe('Session', () => {
     });
   });
 
+  describe('managed Runtime recovery cancellation', () => {
+    it('shares one in-flight terminal notification between concurrent cancellations', async () => {
+      mockConfig.cancelPendingManagedRuntimeWait = vi.fn().mockResolvedValue({
+        phase: 'results_ready',
+        checkpointId: 'checkpoint-after-cancel',
+        activationId: 'activation-1',
+        continuationAdmitted: false,
+        executions: [],
+      });
+      let finishNotification!: () => void;
+      vi.mocked(mockClient.extNotification).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishNotification = resolve;
+          }),
+      );
+
+      const first = session.cancelManagedRuntime(
+        'prompt-1',
+        'checkpoint-1',
+        'activation-1',
+      );
+      const second = session.cancelManagedRuntime(
+        'prompt-1',
+        'checkpoint-1',
+        'activation-1',
+      );
+
+      await vi.waitFor(() =>
+        expect(mockClient.extNotification).toHaveBeenCalledExactlyOnceWith(
+          '_qwencode/end_turn',
+          {
+            sessionId: 'test-session-id',
+            reason: 'cancelled',
+            source: 'goal',
+            promptId: 'prompt-1',
+          },
+        ),
+      );
+      finishNotification();
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        { accepted: true },
+        { accepted: true },
+      ]);
+      await session.cancelManagedRuntime(
+        'prompt-1',
+        'checkpoint-1',
+        'activation-1',
+      );
+
+      expect(mockClient.extNotification).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries the terminal notification after emission fails', async () => {
+      mockConfig.cancelPendingManagedRuntimeWait = vi.fn().mockResolvedValue({
+        phase: 'results_ready',
+        checkpointId: 'checkpoint-after-cancel',
+        activationId: 'activation-1',
+        continuationAdmitted: false,
+        executions: [],
+      });
+      vi.mocked(mockClient.extNotification)
+        .mockRejectedValueOnce(new Error('terminal notification failed'))
+        .mockResolvedValueOnce(undefined);
+
+      await expect(
+        session.cancelManagedRuntime(
+          'prompt-1',
+          'checkpoint-1',
+          'activation-1',
+        ),
+      ).rejects.toThrow('terminal notification failed');
+      await expect(
+        session.cancelManagedRuntime(
+          'prompt-1',
+          'checkpoint-1',
+          'activation-1',
+        ),
+      ).resolves.toEqual({ accepted: true });
+      await session.cancelManagedRuntime(
+        'prompt-1',
+        'checkpoint-1',
+        'activation-1',
+      );
+
+      expect(mockClient.extNotification).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('shell execution config plumbing', () => {
     it('passes the config shell execution settings to invocation.execute', async () => {
       const execute = vi.fn().mockResolvedValue({
@@ -39071,6 +39160,100 @@ describe('Session', () => {
         );
       });
 
+      it('durably admits concurrent managed executions before dispatch and preserves model order', async () => {
+        const first = managedTool();
+        const second = managedTool();
+        first.tool.name = 'remote_first';
+        second.tool.name = 'remote_second';
+        first.managed.prepareExecution.mockResolvedValue({
+          executionCallId: 'execution-first',
+          invocationBindingId: 'binding-first',
+        });
+        second.managed.prepareExecution.mockResolvedValue({
+          executionCallId: 'execution-second',
+          invocationBindingId: 'binding-second',
+        });
+        let releaseCommit!: () => void;
+        const commitPending = new Promise<void>((resolve) => {
+          releaseCommit = resolve;
+        });
+        mockConfig.commitManagedAwaitRuntimeBatch = vi.fn(async () => {
+          await commitPending;
+        });
+        let finishFirst!: () => void;
+        let finishSecond!: () => void;
+        first.invocation.execute.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              finishFirst = () =>
+                resolve({
+                  llmContent: 'first output',
+                  returnDisplay: 'first output',
+                });
+            }),
+        );
+        second.invocation.execute.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              finishSecond = () =>
+                resolve({
+                  llmContent: 'second output',
+                  returnDisplay: 'second output',
+                });
+            }),
+        );
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'remote_first' ? first.tool : second.tool,
+        );
+
+        const pending = (session as unknown as ToolCallInternals).runToolCalls(
+          new AbortController().signal,
+          'managed-prompt',
+          [
+            { id: 'call-first', name: 'remote_first', args: {} },
+            { id: 'call-second', name: 'remote_second', args: {} },
+          ],
+        );
+        await vi.waitFor(() =>
+          expect(
+            mockConfig.commitManagedAwaitRuntimeBatch,
+          ).toHaveBeenCalledWith([
+            expect.objectContaining({
+              executionCallId: 'execution-first',
+              ordinal: 0,
+            }),
+            expect.objectContaining({
+              executionCallId: 'execution-second',
+              ordinal: 1,
+            }),
+          ]),
+        );
+        expect(first.invocation.execute).not.toHaveBeenCalled();
+        expect(second.invocation.execute).not.toHaveBeenCalled();
+
+        releaseCommit();
+        await vi.waitFor(() => {
+          expect(first.invocation.execute).toHaveBeenCalledOnce();
+          expect(second.invocation.execute).toHaveBeenCalledOnce();
+        });
+        finishSecond();
+        await vi.waitFor(() =>
+          expect(mockConfig.resolveManagedAwaitRuntime).toHaveBeenCalledWith(
+            expect.objectContaining({ executionCallId: 'execution-second' }),
+          ),
+        );
+        finishFirst();
+        const result = await pending;
+
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'call-first',
+          'call-second',
+        ]);
+        expect(first.invocation.execute).toHaveBeenCalledTimes(1);
+        expect(second.invocation.execute).toHaveBeenCalledTimes(1);
+        expect(mockConfig.commitManagedAwaitRuntime).not.toHaveBeenCalled();
+      });
+
       it('keeps a handed-off Runtime invocation instead of draining it', async () => {
         mockConfig.shouldRetainManagedRuntimeInvocation = vi
           .fn()
@@ -43648,7 +43831,10 @@ describe('Session', () => {
       });
       mockToolRegistry.getTool.mockImplementation((name: string) => {
         if (name !== core.ToolNames.AGENT) {
-          return mockAllowedTool(name, shellExecute);
+          return {
+            ...mockAllowedTool(name, shellExecute),
+            kind: core.Kind.Edit,
+          };
         }
         return {
           name: core.ToolNames.AGENT,
@@ -43692,7 +43878,7 @@ describe('Session', () => {
         {
           id: 'shell_after',
           name: core.ToolNames.SHELL,
-          args: { command: 'echo should-not-run' },
+          args: { command: 'rm should-not-run' },
         },
       ]);
 
@@ -43744,7 +43930,10 @@ describe('Session', () => {
       });
       mockToolRegistry.getTool.mockImplementation((name: string) => {
         if (name !== core.ToolNames.AGENT) {
-          return mockAllowedTool(name, shellExecute);
+          return {
+            ...mockAllowedTool(name, shellExecute),
+            kind: core.Kind.Edit,
+          };
         }
         return {
           name: core.ToolNames.AGENT,

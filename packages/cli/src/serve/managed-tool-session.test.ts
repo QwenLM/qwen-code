@@ -42,10 +42,13 @@ describe('managed tool Session binding', () => {
     vi.fn<NonNullable<ManagedRuntimeProvider['getToolV2Client']>>();
   const inspectExecution =
     vi.fn<NonNullable<ManagedRuntimeProvider['inspectExecution']>>();
+  const cancelExecution =
+    vi.fn<NonNullable<ManagedRuntimeProvider['cancelExecution']>>();
   const release = vi.fn<ManagedRuntimeProvider['release']>();
   const provider = {
     getToolV2Client: getClient,
     inspectExecution,
+    cancelExecution,
     release,
   } as unknown as ManagedRuntimeProvider;
 
@@ -335,8 +338,34 @@ describe('managed tool Session binding', () => {
     });
     expect(getClient).not.toHaveBeenCalled();
 
+    cancelExecution.mockResolvedValue({
+      outcome: 'known',
+      status: {
+        state: 'settled',
+        cancelRequested: true,
+        lastSeq: 1,
+        firstAvailableSeq: 1,
+        progressGap: false,
+        progress: [],
+        result: { executionStatus: 'cancelled' },
+      },
+    });
+    await session.cancelExecution!({
+      runtimeSessionId: 'runtime-session',
+      executionCallId: 'execution-call',
+      afterSeq: 7,
+    });
+    expect(cancelExecution).toHaveBeenCalledExactlyOnceWith({
+      harnessSessionId: config.getSessionId(),
+      runtimeSessionId: 'runtime-session',
+      executionCallId: 'execution-call',
+      afterSeq: 7,
+    });
+    expect(getClient).not.toHaveBeenCalled();
+
     const child = session.createChild!(config);
     expect(child.inspectExecution).toBeUndefined();
+    expect(child.cancelExecution).toBeUndefined();
     await child.close();
     await session.close();
   });

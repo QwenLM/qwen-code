@@ -313,6 +313,79 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it('cancels and waits for the original execution without starting or acquiring', async () => {
+    const pending = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const cancelling = {
+      ...pending,
+      state: 'cancel_requested' as const,
+      cancelRequested: true,
+    };
+    const settled = {
+      ...cancelling,
+      state: 'settled' as const,
+      result: { executionStatus: 'cancelled' as const },
+    };
+    let reads = 0;
+    const calls: Array<{ method: string; url: string }> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      calls.push({ method, url });
+      if (url.includes('/executions/execution-recovery?')) {
+        reads++;
+        return json(
+          envelope({
+            executionCallId: 'execution-recovery',
+            status: reads === 1 ? pending : settled,
+          }),
+        );
+      }
+      if (url.endsWith('/executions/execution-recovery:cancel')) {
+        return json(
+          envelope({
+            executionCallId: 'execution-recovery',
+            status: cancelling,
+          }),
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${method} ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+
+    await expect(
+      provider.cancelExecution({
+        harnessSessionId,
+        runtimeSessionId,
+        executionCallId: 'execution-recovery',
+        afterSeq: 0,
+      }),
+    ).resolves.toEqual({ outcome: 'known', status: settled });
+
+    expect(calls.map(({ method, url }) => ({ method, url }))).toEqual([
+      expect.objectContaining({ method: 'GET' }),
+      expect.objectContaining({
+        method: 'POST',
+        url: expect.stringContaining('/executions/execution-recovery:cancel'),
+      }),
+      expect.objectContaining({ method: 'GET' }),
+    ]);
+    expect(calls.some((call) => call.url.includes(':start'))).toBe(false);
+    expect(
+      calls.some((call) => call.url.includes('tool-sessions:acquire')),
+    ).toBe(false);
+  });
+
   it('reconciles the original execution to settlement without acquiring a new Runtime', async () => {
     const result = {
       executionStatus: 'success' as const,

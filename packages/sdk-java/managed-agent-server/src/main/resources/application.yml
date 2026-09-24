@@ -41,6 +41,9 @@ qwen:
       scan-delay: 1s
       lease-duration: 60s
       lease-renew-interval: 20s
+      retry-initial-delay: 1s
+      retry-max-delay: 1m
+      max-pre-admission-retries: 5
     events:
       poll-interval: 5s
       heartbeat-interval: 15s

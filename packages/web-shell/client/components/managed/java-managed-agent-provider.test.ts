@@ -87,6 +87,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
       expect.objectContaining({
         idempotencyKey: 'key-1',
+        agentId: 'qwen-code',
         environmentId: 'python',
         input: [{ type: 'text', text: 'hello' }],
       }),

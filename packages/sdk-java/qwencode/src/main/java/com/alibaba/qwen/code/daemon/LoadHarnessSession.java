@@ -7,22 +7,24 @@ import java.util.Map;
 public final class LoadHarnessSession {
     private final String harnessSessionId;
     private final ManagedSessionStoreConnection managedSessionStore;
+    private final boolean passiveManagedRuntimeRecovery;
 
     public LoadHarnessSession(String harnessSessionId) {
-        this.harnessSessionId = HostedHarnessClient.requireUuid(
-                harnessSessionId, "harnessSessionId");
-        this.managedSessionStore = null;
+        this(harnessSessionId, null, false);
     }
 
     public LoadHarnessSession(String harnessSessionId,
             ManagedSessionStoreConnection managedSessionStore) {
+        this(harnessSessionId, managedSessionStore, false);
+    }
+
+    public LoadHarnessSession(String harnessSessionId,
+            ManagedSessionStoreConnection managedSessionStore,
+            boolean passiveManagedRuntimeRecovery) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
                 harnessSessionId, "harnessSessionId");
-        if (managedSessionStore == null) {
-            throw new IllegalArgumentException(
-                    "managedSessionStore must not be null");
-        }
         this.managedSessionStore = managedSessionStore;
+        this.passiveManagedRuntimeRecovery = passiveManagedRuntimeRecovery;
     }
 
     String getHarnessSessionId() {
@@ -33,6 +35,9 @@ public final class LoadHarnessSession {
         Map<String, Object> result = new LinkedHashMap<>();
         if (managedSessionStore != null) {
             result.put("managedSessionStore", managedSessionStore.toJson());
+        }
+        if (passiveManagedRuntimeRecovery) {
+            result.put("passiveManagedRuntimeRecovery", true);
         }
         return result;
     }

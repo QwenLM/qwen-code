@@ -557,17 +557,14 @@ describe('managed harness factory', () => {
 
     const same = await handle.commitAwaitRuntime(commit);
     expect(same.checkpointId).toBe(boundary.checkpointId);
-    await expect(
-      handle.commitAwaitRuntime({ ...commit, executionCallId: 'ex-2' }),
-    ).rejects.toThrow(/already waiting on a different Runtime invocation/);
 
     await handle.detach();
     expect(managedRuntimeDispatchGate(sessionKey).isHandedOff('ex-1')).toBe(
       true,
     );
-    await expect(handle.resolveAwaitRuntime(commit.routeRef)).rejects.toThrow(
-      /detached/,
-    );
+    await expect(
+      handle.resolveAwaitRuntime(commit.executionCallId, commit.routeRef),
+    ).rejects.toThrow(/detached/);
 
     const next = createManagedHarnessHandle(session);
     const again = await next.commitAwaitRuntime(commit);
@@ -580,7 +577,7 @@ describe('managed harness factory', () => {
       'managed-tool-outcome',
       Buffer.from('{"outcome":"completed"}', 'utf8'),
     );
-    const ready = await next.resolveAwaitRuntime(outcomeRef);
+    const ready = await next.resolveAwaitRuntime('ex-1', outcomeRef);
     expect(ready?.continuation.phase).toBe('results_ready');
     expect(session.authority.latestCheckpoint?.boundary).toBeNull();
     const runnable = await next.ensureRunnable();
@@ -590,6 +587,68 @@ describe('managed harness factory', () => {
     );
     await expect(next.commitAwaitRuntime(commit)).rejects.toThrow(
       /already dispatched/,
+    );
+    await session.close();
+  });
+
+  it('commits a Runtime batch before reverse-order settlement without losing an outcome', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const first = await runtimeCommit(session);
+    const second = {
+      ...first,
+      functionCallId: 'fc-2',
+      executionCallId: 'ex-2',
+      invocationBindingId: 'bind-2',
+      modelMessageId: 'msg-2',
+      ordinal: 1,
+      inputDigest: '8'.repeat(64),
+    };
+    await handle.commitAwaitRuntimeBatch([first, second]);
+    const wait = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(wait.tools?.items.map((item) => item.executionCallId)).toEqual([
+      'ex-1',
+      'ex-2',
+    ]);
+    expect(wait.runtime?.bindings.map((item) => item.executionCallId)).toEqual([
+      'ex-1',
+      'ex-2',
+    ]);
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    const firstRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"executionCallId":"ex-1"}', 'utf8'),
+    );
+    const secondRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"executionCallId":"ex-2"}', 'utf8'),
+    );
+
+    const [secondResult, firstResult] = await Promise.all([
+      handle.resolveAwaitRuntime('ex-2', secondRef),
+      handle.resolveAwaitRuntime('ex-1', firstRef),
+    ]);
+
+    expect(secondResult?.continuation.phase).toBe('await_runtime');
+    expect(firstResult?.continuation.phase).toBe('results_ready');
+    const ready = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(ready.tools?.items.map((item) => item.outcomeRef)).toEqual([
+      firstRef,
+      secondRef,
+    ]);
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    expect(managedRuntimeDispatchGate(sessionKey).state('ex-1')).toBe(
+      'settled',
+    );
+    expect(managedRuntimeDispatchGate(sessionKey).state('ex-2')).toBe(
+      'settled',
     );
     await session.close();
   });
@@ -617,7 +676,7 @@ describe('managed harness factory', () => {
         'utf8',
       ),
     );
-    const ready = await handle.resolveAwaitRuntime(outcomeRef);
+    const ready = await handle.resolveAwaitRuntime('ex-1', outcomeRef);
     expect(ready?.tools?.items[0]?.consumed).toBe(false);
     const consumed = await handle.consumeRuntimeResults();
     expect(consumed?.continuation.phase).toBe('results_ready');
@@ -659,7 +718,7 @@ describe('managed harness factory', () => {
       'managed-tool-outcome',
       Buffer.from('{"outcome":"completed"}', 'utf8'),
     );
-    await handle.resolveAwaitRuntime(firstOutcome);
+    await handle.resolveAwaitRuntime('ex-1', firstOutcome);
     await handle.consumeRuntimeResults();
 
     await handle.commitAwaitRuntime({
@@ -717,7 +776,7 @@ describe('managed harness factory', () => {
       'managed-tool-outcome',
       Buffer.from('{"outcome":"completed"}', 'utf8'),
     );
-    const ready = await next.resolveAwaitRuntime(outcomeRef);
+    const ready = await next.resolveAwaitRuntime('ex-1', outcomeRef);
     expect(ready?.continuation.phase).toBe('results_ready');
     const runnable = await next.ensureRunnable();
     expect(runnable.continuation.phase).toBe('results_ready');

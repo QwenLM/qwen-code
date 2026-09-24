@@ -20,8 +20,9 @@ public final class StoreModels {
             String status, boolean submissionAttempted,
             String harnessEventEpoch,
             Long harnessLastEventId, String dispatchOwner,
-            Long dispatchLeaseUntil, String errorCode, String errorMessage,
-            long createdAt, long updatedAt, Long completedAt, long version) {
+            Long dispatchLeaseUntil, int retryCount, Long retryAfter,
+            String errorCode, String errorMessage, long createdAt,
+            long updatedAt, Long completedAt, long version) {
     }
 
     public record EventRecord(String tenantId, String sessionId,

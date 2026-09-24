@@ -272,30 +272,49 @@ public final class HostedHarnessClient implements AutoCloseable {
                         "checkpointId", checkpoint,
                         "activationId", activation),
                 ref.getHarnessClientId(), operation);
+        return parseManagedRuntimeAdmission(response, stablePromptId,
+                operation, "continuation");
+    }
+
+    public PromptReceipt cancelManagedRuntime(CancelManagedRuntime request) {
+        if (request == null) {
+            throw new IllegalArgumentException("request must not be null");
+        }
+        HarnessSessionRef ref = requireSessionRef(request.getSession());
+        String operation = "POST /session/:id/managed-runtime/cancel";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/managed-runtime/cancel",
+                request.toJson(), ref.getHarnessClientId(), operation);
+        return parseManagedRuntimeAdmission(response, request.getPromptId(),
+                operation, "cancellation");
+    }
+
+    private PromptReceipt parseManagedRuntimeAdmission(
+            HttpSupport.Response response, String promptId, String operation,
+            String action) {
+        String context = "managed Runtime " + action;
         try {
             DaemonClient.requireStatus(response, 200, operation);
             Map<String, Object> json = JsonSupport.parseObject(
-                    response.getBody(),
-                    "managed Runtime continuation response");
-            if (!JsonSupport.requiredBoolean(json, "accepted",
-                    "managed Runtime continuation")) {
+                    response.getBody(), context + " response");
+            if (!JsonSupport.requiredBoolean(json, "accepted", context)) {
                 throw new DaemonProtocolException(
-                        "Hosted Harness did not admit the Runtime continuation");
+                        "Hosted Harness did not admit the Runtime " + action);
             }
             String responsePromptId = parseWireUuid(
-                    JsonSupport.requiredString(json, "promptId",
-                            "managed Runtime continuation"),
-                    "managed Runtime continuation.promptId");
-            if (!stablePromptId.equals(responsePromptId)) {
+                    JsonSupport.requiredString(json, "promptId", context),
+                    context + ".promptId");
+            if (!promptId.equals(responsePromptId)) {
                 throw new DaemonProtocolException(
-                        "Hosted Harness returned a different continuation promptId");
+                        "Hosted Harness returned a different " + action
+                                + " promptId");
             }
             return new PromptReceipt(responsePromptId,
                     JsonSupport.requiredNonNegativeLong(json, "lastEventId",
-                            "managed Runtime continuation"),
+                            context),
                     requireEventEpoch(JsonSupport.requiredString(json,
-                            "eventEpoch", "managed Runtime continuation"),
-                            false));
+                            "eventEpoch", context), false));
         } catch (DaemonProtocolException e) {
             throw new MutationOutcomeUnknownException(operation, e);
         }
@@ -824,7 +843,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         return result;
     }
 
-    private static String requireBoundedRecoveryText(String value,
+    static String requireBoundedRecoveryText(String value,
             String field) {
         String result = requireNonBlank(value, field);
         if (!isBoundedRecoveryText(result)) {

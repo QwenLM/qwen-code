@@ -376,11 +376,39 @@ public class ManagedAgentService {
     private WebShellSession webShellSession(SessionRecord session) {
         TurnRecord latestTurn = store.findLatestTurn(session.tenantId(),
                 session.sessionId()).orElse(null);
+        EventRecord environmentEvent = store.findLatestEnvironmentEvent(
+                session.tenantId(), session.sessionId()).orElse(null);
         return new WebShellSession(session.sessionId(), session.title(),
                 session.agentId(), session.status().toLowerCase(),
                 session.createdAt(), session.updatedAt(),
-                latestTurn == null ? null : webShellTurn(latestTurn), null,
+                latestTurn == null ? null : webShellTurn(latestTurn),
+                webShellEnvironment(environmentEvent),
                 session.lastSequence());
+    }
+
+    private static Map<String, Object> webShellEnvironment(
+            EventRecord event) {
+        if (event == null) {
+            return null;
+        }
+        String state = switch (event.type()) {
+            case "environment.provisioning" -> "starting";
+            case "environment.ready" -> "ready";
+            case "environment.failed" -> "failed";
+            default -> throw new IllegalStateException(
+                    "Unexpected environment event: " + event.type());
+        };
+        Map<String, Object> environment = new LinkedHashMap<>();
+        environment.put("state", state);
+        Object environmentId = event.data().get("environmentId");
+        if (environmentId instanceof String) {
+            environment.put("environmentId", environmentId);
+        }
+        Object errorCode = event.data().get("code");
+        if (errorCode instanceof String) {
+            environment.put("errorCode", errorCode);
+        }
+        return Map.copyOf(environment);
     }
 
     private static PublicTurn publicTurn(TurnRecord turn) {

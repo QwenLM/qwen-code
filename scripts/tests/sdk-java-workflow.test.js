@@ -61,6 +61,21 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
   });
 
+  it('keeps the managed server runner portable and latency assertions stable', () => {
+    expect(managedAgentServerE2E).toContain(
+      "process.getuid?.() === 0 ? ['--user=root'] : []",
+    );
+    expect(managedAgentServerE2E).toContain(
+      "'--no-defaults',\n      ...mysqldUserArguments,\n      '--initialize-insecure'",
+    );
+    expect(managedAgentServerE2E).toContain(
+      'runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs',
+    );
+    expect(managedAgentServerE2E).toContain(
+      'const modelBeforeRuntimeAssertionDelayMs = 20_000',
+    );
+  });
+
   it('keeps durable Session failover deterministic and isolated from real-model mode', () => {
     expect(managedAgentServerE2E).toContain(
       "} else if (argument === '--session-failover') {",

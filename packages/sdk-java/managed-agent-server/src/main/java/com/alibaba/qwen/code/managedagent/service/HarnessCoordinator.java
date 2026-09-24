@@ -53,6 +53,9 @@ public class HarnessCoordinator {
     private final Clock clock;
     private final Duration leaseDuration;
     private final Duration renewInterval;
+    private final Duration retryInitialDelay;
+    private final Duration retryMaxDelay;
+    private final int maxPreAdmissionRetries;
     private final Duration batchInterval;
     private final int batchMaxEvents;
     private final int batchMaxBytes;
@@ -79,6 +82,11 @@ public class HarnessCoordinator {
         this.leaseDuration = properties.getDispatch().getLeaseDuration();
         this.renewInterval = properties.getDispatch()
                 .getLeaseRenewInterval();
+        this.retryInitialDelay = properties.getDispatch()
+                .getRetryInitialDelay();
+        this.retryMaxDelay = properties.getDispatch().getRetryMaxDelay();
+        this.maxPreAdmissionRetries = properties.getDispatch()
+                .getMaxPreAdmissionRetries();
         this.batchInterval = properties.getEvents().getBatchInterval();
         this.batchMaxEvents = properties.getEvents().getBatchMaxEvents();
         this.batchMaxBytes = properties.getEvents().getBatchMaxBytes();
@@ -86,6 +94,12 @@ public class HarnessCoordinator {
                 || batchMaxEvents <= 0 || batchMaxBytes <= 0) {
             throw new IllegalStateException(
                     "Managed event batch limits must be positive");
+        }
+        if (retryInitialDelay.isNegative() || retryInitialDelay.isZero()
+                || retryMaxDelay.compareTo(retryInitialDelay) < 0
+                || maxPreAdmissionRetries < 0) {
+            throw new IllegalStateException(
+                    "Managed dispatch retry limits are invalid");
         }
     }
 
@@ -152,8 +166,11 @@ public class HarnessCoordinator {
                 renewInterval.toMillis(), renewInterval.toMillis(),
                 TimeUnit.MILLISECONDS);
         boolean terminal = false;
+        AtomicBoolean submissionAttempted = new AtomicBoolean(
+                claimed.submissionAttempted());
         try {
-            terminal = runClaimed(claimed, leaseLost);
+            terminal = runClaimed(claimed, leaseLost,
+                    submissionAttempted);
         } catch (HostedHarnessCapabilityMismatchException error) {
             terminal = fail(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.");
@@ -170,10 +187,12 @@ public class HarnessCoordinator {
                 terminal = fail(claimed, "hosted_harness_rejected",
                         "Hosted Harness rejected the Turn.");
             } else {
-                transientFailure(claimed, error);
+                terminal = transientFailure(claimed,
+                        submissionAttempted.get(), error);
             }
         } catch (RuntimeException error) {
-            transientFailure(claimed, error);
+            terminal = transientFailure(claimed,
+                    submissionAttempted.get(), error);
         } finally {
             renewal.cancel(false);
             if (!terminal) {
@@ -183,7 +202,7 @@ public class HarnessCoordinator {
     }
 
     private boolean runClaimed(TurnRecord claimed,
-            AtomicBoolean leaseLost) {
+            AtomicBoolean leaseLost, AtomicBoolean submissionAttempted) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
         if ("CANCELLING".equals(claimed.status())
@@ -193,11 +212,17 @@ public class HarnessCoordinator {
                     claimed.sessionId(), claimed.turnId(), owner);
             return true;
         }
-        warmRuntime(session, claimed);
+        boolean recoveringCancellation =
+                "CANCELLING".equals(claimed.status());
+        if (!recoveringCancellation) {
+            warmRuntime(session, claimed);
+        }
         requireLease(leaseLost);
-        Attachment attachment = harness.createOrLoad(
-                session.tenantId(), session.sessionId(),
-                session.harnessBootId() != null);
+        Attachment attachment = recoveringCancellation
+                ? harness.createOrLoad(session.tenantId(), session.sessionId(),
+                        session.harnessBootId() != null, true)
+                : harness.createOrLoad(session.tenantId(), session.sessionId(),
+                        session.harnessBootId() != null);
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
                 && runtimeRecovery.hasUnknownOutcome()) {
@@ -206,17 +231,16 @@ public class HarnessCoordinator {
                             + " Session was blocked without replaying it.");
         }
         TurnRecord current;
+        boolean recoveredCancellation = false;
         if (runtimeRecovery != null) {
-            if (!runtimeRecovery.isContinuationReady()) {
+            if (recoveringCancellation
+                    ? !runtimeRecovery.isCancellationReady()
+                    : !runtimeRecovery.isContinuationReady()) {
                 return fail(claimed, "managed_runtime_recovery_incomplete",
                         "A prior tool execution is not ready for safe"
-                                + " continuation.");
-            }
-            if ("CANCELLING".equals(claimed.status())) {
-                return fail(claimed,
-                        "managed_runtime_recovery_cancel_pending",
-                        "The recovered Turn was cancelled before model"
-                                + " continuation.");
+                                + (recoveringCancellation
+                                        ? " cancellation."
+                                        : " continuation."));
             }
             if (attachment.eventEpoch() == null
                     || attachment.lastEventId() == null) {
@@ -225,7 +249,8 @@ public class HarnessCoordinator {
                         "Hosted Harness recovery did not return an event"
                                 + " watermark.");
             }
-            if (session.harnessBootId() != null
+            recoveredCancellation = "CANCELLING".equals(claimed.status());
+            if (!recoveredCancellation && session.harnessBootId() != null
                     && claimed.harnessEventEpoch() != null) {
                 store.retractContinuationOutput(session.tenantId(),
                         session.sessionId(), claimed.turnId(), owner,
@@ -242,28 +267,44 @@ public class HarnessCoordinator {
             current = store.findTurn(claimed.tenantId(),
                     claimed.sessionId(), claimed.turnId()).orElseThrow();
             String previousEventEpoch = current.harnessEventEpoch();
-            store.recordRecoveryAdmission(current.tenantId(),
-                    current.sessionId(), current.turnId(), owner,
-                    previousEventEpoch, attachment.eventEpoch(),
-                    attachment.lastEventId());
-            requireLease(leaseLost);
-            Admission admission = harness.continueManagedRuntime(
-                    session.tenantId(), session.sessionId(),
-                    current.promptId(), runtimeRecovery.getCheckpointId(),
-                    runtimeRecovery.getActivationId());
-            requireLease(leaseLost);
-            if (!attachment.eventEpoch().equals(admission.eventEpoch())
-                    || admission.lastEventId()
-                            < attachment.lastEventId()) {
-                throw new IllegalStateException(
-                        "Hosted Harness recovery watermark changed");
+            if (!attachment.eventEpoch().equals(previousEventEpoch)) {
+                store.recordRecoveryAdmission(current.tenantId(),
+                        current.sessionId(), current.turnId(), owner,
+                        previousEventEpoch, attachment.eventEpoch(),
+                        attachment.lastEventId());
+                requireLease(leaseLost);
+                current = store.findTurn(current.tenantId(),
+                        current.sessionId(), current.turnId()).orElseThrow();
             }
-            store.recordRecoveryAdmission(current.tenantId(),
-                    current.sessionId(), current.turnId(), owner,
-                    attachment.eventEpoch(), admission.eventEpoch(),
-                    admission.lastEventId());
-            current = store.findTurn(current.tenantId(), current.sessionId(),
-                    current.turnId()).orElseThrow();
+            if (recoveredCancellation) {
+                Admission admission = harness.cancelManagedRuntime(
+                        session.tenantId(), session.sessionId(),
+                        current.promptId(), runtimeRecovery.getCheckpointId(),
+                        runtimeRecovery.getActivationId());
+                requireLease(leaseLost);
+                if (!attachment.eventEpoch().equals(admission.eventEpoch())) {
+                    throw new IllegalStateException(
+                            "Hosted Harness recovery epoch changed");
+                }
+            } else {
+                Admission admission = harness.continueManagedRuntime(
+                        session.tenantId(), session.sessionId(),
+                        current.promptId(), runtimeRecovery.getCheckpointId(),
+                        runtimeRecovery.getActivationId());
+                requireLease(leaseLost);
+                if (!attachment.eventEpoch().equals(admission.eventEpoch())
+                        || admission.lastEventId()
+                                < attachment.lastEventId()) {
+                    throw new IllegalStateException(
+                            "Hosted Harness recovery watermark changed");
+                }
+                store.recordRecoveryAdmission(current.tenantId(),
+                        current.sessionId(), current.turnId(), owner,
+                        attachment.eventEpoch(), admission.eventEpoch(),
+                        admission.lastEventId());
+                current = store.findTurn(current.tenantId(),
+                        current.sessionId(), current.turnId()).orElseThrow();
+            }
         } else {
             if (!store.bindHarness(session.tenantId(), session.sessionId(),
                     claimed.turnId(), owner, attachment.bootId())) {
@@ -276,6 +317,7 @@ public class HarnessCoordinator {
             if (current.harnessEventEpoch() == null) {
                 store.markSubmissionAttempted(current.tenantId(),
                         current.sessionId(), current.turnId(), owner);
+                submissionAttempted.set(true);
                 Admission admission = harness.submit(session.tenantId(),
                         session.sessionId(), current.promptId(),
                         current.input(), current.payloadDigest());
@@ -287,7 +329,8 @@ public class HarnessCoordinator {
                         current.sessionId(), current.turnId()).orElseThrow();
             }
         }
-        if ("CANCELLING".equals(current.status())) {
+        if ("CANCELLING".equals(current.status())
+                && !recoveredCancellation) {
             harness.cancel(session.tenantId(), session.sessionId());
         }
         long lastEventId = current.harnessLastEventId() == null ? 0
@@ -469,6 +512,11 @@ public class HarnessCoordinator {
         String type = "environment." + suffix;
         Map<String, Object> data = error == null ? Map.of()
                 : Map.of("code", "runtime_warm_failed");
+        if (error != null) {
+            LOG.warn("Managed Runtime warm failed tenant={} session={} turn={}",
+                    session.tenantId(), session.sessionId(), turn.turnId(),
+                    error);
+        }
         store.appendPublicEventIfAbsent(session.tenantId(),
                 session.sessionId(), turn.turnId(), type, data, false,
                 "runtime:" + suffix + ":" + turn.turnId());
@@ -512,11 +560,38 @@ public class HarnessCoordinator {
         return true;
     }
 
-    private void transientFailure(TurnRecord turn, RuntimeException error) {
+    private boolean transientFailure(TurnRecord turn,
+            boolean submissionAttempted, RuntimeException error) {
+        if (!submissionAttempted
+                && turn.retryCount() >= maxPreAdmissionRetries) {
+            LOG.error("Managed Turn coordination exhausted retries tenant={}"
+                            + " session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    error.getClass().getSimpleName(), error);
+            return fail(turn, "hosted_harness_unavailable",
+                    "Hosted Harness remained unavailable before Turn"
+                            + " admission.");
+        }
+        long delay = retryDelay(turn.retryCount());
+        long retryAfter = Math.addExact(clock.millis(), delay);
+        store.scheduleTurnRetry(turn.tenantId(), turn.sessionId(),
+                turn.turnId(), owner, retryAfter);
         LOG.warn("Managed Turn coordination will retry tenant={} session={}"
-                        + " turn={} failure={}",
+                        + " turn={} retry={} delayMs={} failure={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),
+                turn.retryCount() + 1, delay,
                 error.getClass().getSimpleName());
+        return true;
+    }
+
+    private long retryDelay(int retryCount) {
+        long initial = retryInitialDelay.toMillis();
+        long maximum = retryMaxDelay.toMillis();
+        int shift = Math.min(retryCount, 62);
+        if (initial > (Long.MAX_VALUE >> shift)) {
+            return maximum;
+        }
+        return Math.min(initial << shift, maximum);
     }
 
     private static String key(String tenantId, String sessionId,

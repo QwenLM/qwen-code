@@ -1427,14 +1427,15 @@ export function createAwaitRuntimeHarnessCheckpoint(input: {
 }
 
 /**
- * After admitted Runtime work settles, the turn may start the next model
- * request from `results_ready`. Dispatch bindings are no longer in flight.
+ * Records one admitted Runtime result. The turn stays in `await_runtime`
+ * until every execution settles, then advances to `results_ready`.
  */
 export function createResultsReadyHarnessCheckpoint(input: {
   readonly previous: HarnessCheckpointV1;
   readonly checkpointId: string;
   readonly coveredSequence: number;
   readonly previousCheckpointId: string | null;
+  readonly executionCallId: string;
   readonly outcomeRef: ManagedSessionDurableRef;
 }): HarnessCheckpointV1 {
   if (input.previous.continuation.phase !== 'await_runtime') {
@@ -1447,6 +1448,25 @@ export function createResultsReadyHarnessCheckpoint(input: {
       'results_ready requires the waited attempt and tools.',
     );
   }
+  const settledItem = input.previous.tools.items.find(
+    (item) => item.executionCallId === input.executionCallId,
+  );
+  if (settledItem?.state !== 'in_progress') {
+    throw new ManagedSessionRecordError(
+      `await_runtime has no in-progress execution ${input.executionCallId}.`,
+    );
+  }
+  const items = input.previous.tools.items.map((item) =>
+    item.executionCallId === input.executionCallId
+      ? {
+          ...item,
+          state: 'settled' as const,
+          outcomeRef: input.outcomeRef,
+          consumed: false,
+        }
+      : item,
+  );
+  const allSettled = items.every((item) => item.state === 'settled');
   return {
     identity: {
       ...input.previous.identity,
@@ -1459,25 +1479,17 @@ export function createResultsReadyHarnessCheckpoint(input: {
       throughSequence: input.coveredSequence,
     },
     continuation: {
-      phase: 'results_ready',
+      phase: allSettled ? 'results_ready' : 'await_runtime',
       pendingEventIds: [],
     },
     attempt: input.previous.attempt,
     tools: {
       batchId: input.previous.tools.batchId,
-      items: input.previous.tools.items.map((item) =>
-        item.state === 'in_progress'
-          ? {
-              ...item,
-              state: 'settled',
-              outcomeRef: input.outcomeRef,
-              consumed: false,
-            }
-          : item,
-      ),
+      items,
     },
     runtime: {
       bindings: runtimeBindings(input.previous.runtime).map((binding) =>
+        binding.executionCallId === input.executionCallId &&
         binding.state === 'dispatch'
           ? { ...binding, state: 'settled' }
           : binding,

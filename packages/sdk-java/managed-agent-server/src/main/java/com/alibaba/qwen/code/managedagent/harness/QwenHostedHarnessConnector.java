@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
+import com.alibaba.qwen.code.daemon.CancelManagedRuntime;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonApprovalMode;
 import com.alibaba.qwen.code.daemon.DaemonEvent;
@@ -68,11 +69,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting) {
+        return createOrLoad(tenantId, sessionId, loadExisting, false);
+    }
+
+    @Override
+    public Attachment createOrLoad(String tenantId, String sessionId,
+            boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
-        HarnessSessionRef attached = attachments.computeIfAbsent(
-                key, ignored -> loadExisting
-                        ? load(tenantId, sessionId)
+        HarnessSessionRef attached = passiveManagedRuntimeRecovery
+                ? load(tenantId, sessionId, true)
+                : attachments.computeIfAbsent(key, ignored -> loadExisting
+                        ? load(tenantId, sessionId, false)
                         : loadOrCreate(tenantId, sessionId));
+        attachments.put(key, attached);
         return new Attachment(attached.getHarnessBootId(),
                 attached.getRuntimeRecovery(),
                 attached.getHarnessLastEventId(),
@@ -100,6 +109,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         PromptReceipt receipt = client().continueManagedRuntime(
                 attachment(tenantId, sessionId), promptId, checkpointId,
                 activationId);
+        return new Admission(receipt.getLastEventId(),
+                receipt.getEventEpoch());
+    }
+
+    @Override
+    public Admission cancelManagedRuntime(String tenantId, String sessionId,
+            String promptId, String checkpointId, String activationId) {
+        PromptReceipt receipt = client().cancelManagedRuntime(
+                new CancelManagedRuntime(attachment(tenantId, sessionId),
+                        promptId, checkpointId, activationId));
         return new Admission(receipt.getLastEventId(),
                 receipt.getEventEpoch());
     }
@@ -186,23 +205,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (error.getStatusCode() != 409) {
                 throw error;
             }
-            return load(tenantId, sessionId);
+            return load(tenantId, sessionId, false);
         } catch (SessionCreationOutcomeUnknownException error) {
-            return load(tenantId, sessionId);
+            return load(tenantId, sessionId, false);
         }
     }
 
-    private HarnessSessionRef load(String tenantId, String sessionId) {
+    private HarnessSessionRef load(String tenantId, String sessionId,
+            boolean passiveManagedRuntimeRecovery) {
         ManagedSessionStoreConnection store = managedSessionStore(tenantId);
-        return client().loadSession(store == null
-                ? new LoadHarnessSession(sessionId)
-                : new LoadHarnessSession(sessionId, store));
+        return client().loadSession(new LoadHarnessSession(sessionId, store,
+                passiveManagedRuntimeRecovery));
     }
 
     private HarnessSessionRef loadOrCreate(String tenantId,
             String sessionId) {
         try {
-            return load(tenantId, sessionId);
+            return load(tenantId, sessionId, false);
         } catch (DaemonHttpException error) {
             if (error.getStatusCode() != 404) {
                 throw error;

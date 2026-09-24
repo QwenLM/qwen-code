@@ -327,7 +327,7 @@ class HostedHarnessClientTest {
                                     .workspaceId("workspace-a")
                                     .writerId(BOOT_ID)
                                     .leaseDuration(Duration.ofSeconds(45))
-                                            .build()));
+                                            .build(), true));
             HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
             assertNotNull(recovery);
             assertEquals("await_runtime", recovery.getPhase());
@@ -362,6 +362,8 @@ class HostedHarnessClientTest {
                 "\"baseUrl\":\"https://store.example\""));
         assertTrue(loadBody.get().contains("\"writerId\":\"" + BOOT_ID
                 + "\""));
+        assertTrue(loadBody.get().contains(
+                "\"passiveManagedRuntimeRecovery\":true"));
     }
 
     @Test
@@ -392,7 +394,14 @@ class HostedHarnessClientTest {
             assertEquals("results_ready", recovery.getPhase());
             assertFalse(recovery.hasUnknownOutcome());
             assertTrue(recovery.isContinuationReady());
+            assertEquals(2, recovery.getExecutions().size());
+            assertEquals("execution-1", recovery.getExecutions().get(0)
+                    .getExecutionCallId());
+            assertEquals("execution-2", recovery.getExecutions().get(1)
+                    .getExecutionCallId());
             assertEquals("settled", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
+            assertEquals("settled", recovery.getExecutions().get(1)
                     .getStatus().get("state"));
             assertEquals(0L, session.getHarnessLastEventId());
             assertEquals(EVENT_EPOCH, session.getHarnessEventEpoch());
@@ -403,6 +412,104 @@ class HostedHarnessClientTest {
             assertEquals(EVENT_EPOCH, receipt.getEventEpoch());
             assertTrue(continuationBody.get().contains(
                     "\"checkpointId\":\"checkpoint-2\""));
+        }
+    }
+
+    @Test
+    void cancelsRecoveredRuntimeWithExactWireRequest() {
+        AtomicReference<String> method = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID
+                        + "/managed-runtime/cancel",
+                exchange -> {
+                    method.set(exchange.getRequestMethod());
+                    body.set(readBody(exchange));
+                    sendSessionJson(exchange, 200,
+                            "{\"accepted\":true,\"promptId\":\""
+                                    + PROMPT_ID + "\",\"lastEventId\":3,"
+                                    + "\"eventEpoch\":\"" + EVENT_EPOCH
+                                    + "\"}");
+                });
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = new HarnessSessionRef(SESSION_ID,
+                    CLIENT_ID, BOOT_ID, "/workspace", null, null, null);
+            PromptReceipt receipt = client.cancelManagedRuntime(
+                    new CancelManagedRuntime(session, PROMPT_ID,
+                            "checkpoint-2", "activation-2"));
+
+            assertEquals("POST", method.get());
+            assertEquals("{\"promptId\":\"" + PROMPT_ID
+                    + "\",\"checkpointId\":\"checkpoint-2\","
+                    + "\"activationId\":\"activation-2\"}", body.get());
+            assertEquals(PROMPT_ID, receipt.getPromptId());
+            assertEquals(3L, receipt.getLastEventId());
+            assertEquals(EVENT_EPOCH, receipt.getEventEpoch());
+        }
+    }
+
+    @Test
+    void requiresEveryRuntimeExecutionToBeKnownAndSettled() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithResultsReadyRuntimeRecovery()
+                                .replace("\"outcome\":\"known\","
+                                                + "\"status\":{\"state\":"
+                                                + "\"settled\"}}]",
+                                        "\"outcome\":\"known\","
+                                                + "\"status\":{\"state\":"
+                                                + "\"executing\"}}]")));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessRuntimeRecovery recovery = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID)).getRuntimeRecovery();
+
+            assertNotNull(recovery);
+            assertFalse(recovery.hasUnknownOutcome());
+            assertFalse(recovery.isContinuationReady());
+        }
+    }
+
+    @Test
+    void requiresAtLeastOneRuntimeExecutionForContinuation() {
+        HarnessRuntimeRecovery recovery = new HarnessRuntimeRecovery(
+                "results_ready", "checkpoint-1", "activation-1", List.of());
+
+        assertFalse(recovery.isContinuationReady());
+    }
+
+    @Test
+    void aggregatesUnknownOutcomeAcrossMultipleCancellationExecutions() {
+        HarnessRuntimeRecovery recovery = new HarnessRuntimeRecovery(
+                "await_runtime", "checkpoint-1", "activation-1", List.of(
+                        new HarnessRuntimeExecutionRecovery("call-1", "tool",
+                                "execution-1", "runtime-1", null, "known",
+                                Map.of("state", "executing")),
+                        new HarnessRuntimeExecutionRecovery("call-2", "tool",
+                                "execution-2", "runtime-1", null, "unknown",
+                                null)));
+
+        assertTrue(recovery.hasUnknownOutcome());
+        assertFalse(recovery.isCancellationReady());
+    }
+
+    @Test
+    void rejectsContinuationWhenAnyRuntimeOutcomeIsUnknown() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithResultsReadyRuntimeRecovery()
+                                .replace("\"outcome\":\"known\","
+                                                + "\"status\":{\"state\":"
+                                                + "\"settled\"}}]",
+                                        "\"outcome\":\"unknown\"}]")));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessRuntimeRecovery recovery = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID)).getRuntimeRecovery();
+
+            assertNotNull(recovery);
+            assertTrue(recovery.hasUnknownOutcome());
+            assertFalse(recovery.isContinuationReady());
         }
     }
 
@@ -654,6 +761,13 @@ class HostedHarnessClientTest {
                 + "\"executionCallId\":\"execution-1\","
                 + "\"runtimeSessionId\":\"runtime-1\","
                 + "\"progressCursor\":null,\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"settled\"}},{"
+                + "\"functionCallId\":\"function-2\","
+                + "\"toolName\":\"write_file\","
+                + "\"executionCallId\":\"execution-2\","
+                + "\"runtimeSessionId\":\"runtime-2\","
+                + "\"progressCursor\":\"cursor-2\","
+                + "\"outcome\":\"known\","
                 + "\"status\":{\"state\":\"settled\"}}]}}}";
     }
 

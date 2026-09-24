@@ -62,6 +62,9 @@ public interface AgentStateStore {
     List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit);
 
+    Optional<EventRecord> findLatestEnvironmentEvent(String tenantId,
+            String sessionId);
+
     List<EventRecord> findControlEvents(String tenantId, String sessionId,
             long throughSequence);
 
@@ -86,6 +89,9 @@ public interface AgentStateStore {
 
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
+
+    void scheduleTurnRetry(String tenantId, String sessionId, String turnId,
+            String owner, long retryAfter);
 
     boolean bindHarness(String tenantId, String sessionId, String turnId,
             String owner, String harnessBootId);

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -24,7 +25,12 @@ import {
 } from '../services/session-transcript-reader.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
-import { parseHarnessCheckpointV1 } from '../managed-runtime/managed-harness-checkpoint.js';
+import {
+  createAwaitRuntimeHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+  HARNESS_DURABLE_WAIT_BOUNDARY,
+  parseHarnessCheckpointV1,
+} from '../managed-runtime/managed-harness-checkpoint.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import {
@@ -1014,6 +1020,9 @@ describe('managed session log activation', () => {
           progress: [],
         },
       });
+      const reconcileExecution = vi
+        .fn()
+        .mockRejectedValue(new Error('passive recovery must not reconcile'));
       const second = await activate({
         managedSessionLog: true,
         managedToolSessionFactory: () => ({
@@ -1028,6 +1037,7 @@ describe('managed session log activation', () => {
             throw new Error('recovery inspection must not acquire a Runtime');
           },
           inspectExecution,
+          reconcileExecution,
           close: async () => {},
         }),
       });
@@ -1049,7 +1059,7 @@ describe('managed session log activation', () => {
         ],
       });
       await expect(
-        second.config.inspectPendingManagedRuntimeWait(),
+        second.config.inspectPendingManagedRuntimeWait({ passive: true }),
       ).resolves.toMatchObject({
         phase: 'await_runtime',
         executions: [
@@ -1062,6 +1072,7 @@ describe('managed session log activation', () => {
           },
         ],
       });
+      expect(reconcileExecution).not.toHaveBeenCalled();
       expect(inspectExecution).toHaveBeenCalledExactlyOnceWith({
         runtimeSessionId: 'runtime-session-1',
         executionCallId: 'ex-recover-1',
@@ -1072,7 +1083,9 @@ describe('managed session log activation', () => {
       const blockRecovery = vi
         .spyOn(managedSession.authority, 'blockRecovery')
         .mockResolvedValue();
-      inspectExecution.mockResolvedValueOnce({ outcome: 'unknown' as const });
+      reconcileExecution.mockResolvedValueOnce({
+        outcome: 'unknown' as const,
+      });
       await expect(
         second.config.inspectPendingManagedRuntimeWait(),
       ).resolves.toMatchObject({
@@ -1083,6 +1096,264 @@ describe('managed session log activation', () => {
         status: 'BLOCKED_EXECUTION',
         detailCode: 'runtime_execution_outcome_unknown',
       });
+      await second.config.closeSessionWriter();
+    });
+  });
+
+  it('cancels and waits for the original Runtime execution after a cold reopen', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      const recorder = first.config.getChatRecordingService()!;
+      const daemonPromptId = '550e8400-e29b-41d4-a716-446655440099';
+      recorder.recordUserMessage(
+        'cancel a remote tool',
+        undefined,
+        undefined,
+        daemonPromptId,
+      );
+      await recorder.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-cancel-1',
+        toolName: 'remote_tool',
+        executionCallId: 'ex-cancel-1',
+        invocationBindingId: 'runtime-cancel-1',
+        modelMessageId: 'msg-cancel-1',
+      });
+      await first.config.closeSessionWriter();
+
+      const cancelExecution = vi.fn().mockResolvedValue({
+        outcome: 'known' as const,
+        status: {
+          state: 'settled' as const,
+          cancelRequested: true,
+          lastSeq: 1,
+          firstAvailableSeq: 1,
+          progressGap: false,
+          progress: [],
+          result: { executionStatus: 'cancelled' as const },
+        },
+      });
+      const second = await activate({
+        managedSessionLog: true,
+        managedToolSessionFactory: () => ({
+          sessionId: 'recovery-canceller',
+          shellConfiguration: {
+            shell: 'bash',
+            executable: 'bash',
+            argsPrefix: ['-c'],
+          },
+          platform: 'darwin',
+          getClient: async () => {
+            throw new Error('recovery cancellation must not acquire a Runtime');
+          },
+          cancelExecution,
+          close: async () => {},
+        }),
+      });
+      const pending = await second.config.readPendingManagedRuntimeWait();
+      if (pending === null) {
+        throw new Error('expected a pending Runtime checkpoint');
+      }
+
+      await expect(
+        second.config.cancelPendingManagedRuntimeWait(
+          '550e8400-e29b-41d4-a716-446655440098',
+          pending.checkpointId,
+          pending.activationId,
+        ),
+      ).resolves.toBeNull();
+      expect(cancelExecution).not.toHaveBeenCalled();
+      await expect(
+        second.config.cancelPendingManagedRuntimeWait(
+          daemonPromptId,
+          pending.checkpointId,
+          pending.activationId,
+        ),
+      ).resolves.toMatchObject({ phase: 'results_ready' });
+      expect(cancelExecution).toHaveBeenCalledExactlyOnceWith({
+        runtimeSessionId: 'runtime-cancel-1',
+        executionCallId: 'ex-cancel-1',
+      });
+      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
+        expect.objectContaining({
+          outcomes: [
+            expect.objectContaining({
+              functionCallId: 'fc-cancel-1',
+              executionCallId: 'ex-cancel-1',
+            }),
+          ],
+        }),
+      );
+      await second.config.closeSessionWriter();
+    });
+  });
+
+  it('blocks recovered cancellation of multiple Runtime executions when any outcome is unknown', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      const recorder = first.config.getChatRecordingService()!;
+      const daemonPromptId = '550e8400-e29b-41d4-a716-446655440099';
+      recorder.recordUserMessage(
+        'cancel two remote tools',
+        undefined,
+        undefined,
+        daemonPromptId,
+      );
+      await recorder.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-cancel-multi-1',
+        toolName: 'remote_tool',
+        executionCallId: 'ex-cancel-multi-1',
+        invocationBindingId: 'runtime-cancel-multi-1',
+        modelMessageId: 'msg-cancel-multi-1',
+      });
+      const managedSession = (
+        first.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession!;
+      const wait = parseHarnessCheckpointV1(
+        (await managedSession.authority.readCheckpointState())!,
+      );
+      const secondItem = {
+        ...wait.tools!.items[0],
+        functionCallId: 'fc-cancel-multi-2',
+        executionCallId: 'ex-cancel-multi-2',
+        modelMessageId: 'msg-cancel-multi-2',
+        ordinal: 1,
+        inputDigest: createHash('sha256')
+          .update('ex-cancel-multi-2')
+          .digest('hex'),
+      };
+      const secondBinding = {
+        ...wait.runtime!.bindings[0],
+        executionCallId: 'ex-cancel-multi-2',
+        invocationBindingId: 'runtime-cancel-multi-2',
+      };
+      const state = encodeHarnessCheckpointV1(
+        createAwaitRuntimeHarnessCheckpoint({
+          previous: wait,
+          checkpointId: `ckpt-${managedSession.authority.committedSequence + 1}`,
+          coveredSequence: managedSession.authority.committedSequence,
+          previousCheckpointId: wait.identity.checkpointId,
+          attempt: wait.attempt!,
+          tools: {
+            batchId: wait.tools!.batchId,
+            items: [...wait.tools!.items, secondItem],
+          },
+          runtime: {
+            bindings: [...wait.runtime!.bindings, secondBinding],
+          },
+        }),
+      );
+      await managedSession.authority.commitCheckpoint(
+        {
+          operation: 'commitCheckpoint',
+          commandId: 'multi-runtime-cancel-wait',
+          sessionKey: managedSession.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(state).digest('hex'),
+        },
+        { state, boundary: HARNESS_DURABLE_WAIT_BOUNDARY },
+        { class: 'harness', activation: managedSession.activation },
+      );
+      await first.config.closeSessionWriter();
+
+      const cancelExecution = vi.fn(
+        async ({ executionCallId }: { executionCallId: string }) =>
+          executionCallId === 'ex-cancel-multi-1'
+            ? {
+                outcome: 'known' as const,
+                status: {
+                  state: 'settled' as const,
+                  cancelRequested: true,
+                  lastSeq: 1,
+                  firstAvailableSeq: 1,
+                  progressGap: false,
+                  progress: [],
+                  result: { executionStatus: 'cancelled' as const },
+                },
+              }
+            : { outcome: 'unknown' as const },
+      );
+      const second = await activate({
+        managedSessionLog: true,
+        managedToolSessionFactory: () => ({
+          sessionId: 'multi-recovery-canceller',
+          shellConfiguration: {
+            shell: 'bash',
+            executable: 'bash',
+            argsPrefix: ['-c'],
+          },
+          platform: 'darwin',
+          getClient: async () => {
+            throw new Error('recovery cancellation must not acquire a Runtime');
+          },
+          cancelExecution,
+          close: async () => {},
+        }),
+      });
+      const pending = await second.config.readPendingManagedRuntimeWait();
+      if (pending === null) {
+        throw new Error('expected a pending Runtime checkpoint');
+      }
+      const recoveredSession = (
+        second.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession!;
+      const blockRecovery = vi
+        .spyOn(recoveredSession.authority, 'blockRecovery')
+        .mockResolvedValue();
+
+      await expect(
+        second.config.cancelPendingManagedRuntimeWait(
+          daemonPromptId,
+          pending.checkpointId,
+          pending.activationId,
+        ),
+      ).resolves.toMatchObject({
+        phase: 'await_runtime',
+        executions: [
+          {
+            executionCallId: 'ex-cancel-multi-1',
+            outcome: 'known',
+            status: {
+              state: 'settled',
+              result: { executionStatus: 'cancelled' },
+            },
+          },
+          { executionCallId: 'ex-cancel-multi-2', outcome: 'unknown' },
+        ],
+      });
+      expect(cancelExecution).toHaveBeenNthCalledWith(1, {
+        runtimeSessionId: 'runtime-cancel-multi-1',
+        executionCallId: 'ex-cancel-multi-1',
+      });
+      expect(cancelExecution).toHaveBeenNthCalledWith(2, {
+        runtimeSessionId: 'runtime-cancel-multi-2',
+        executionCallId: 'ex-cancel-multi-2',
+      });
+      expect(blockRecovery).toHaveBeenCalledExactlyOnceWith({
+        status: 'BLOCKED_EXECUTION',
+        detailCode: 'runtime_execution_outcome_unknown',
+      });
+      await expect(
+        recoveredSession.authority.harnessRunAuthorization(),
+      ).resolves.toMatchObject({
+        checkpoint: {
+          continuation: { phase: 'await_runtime' },
+          tools: {
+            items: [
+              { executionCallId: 'ex-cancel-multi-1', state: 'in_progress' },
+              { executionCallId: 'ex-cancel-multi-2', state: 'in_progress' },
+            ],
+          },
+        },
+      });
+      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
+        {
+          outcomes: [],
+          preserveCallIds: [],
+        },
+      );
       await second.config.closeSessionWriter();
     });
   });
@@ -1203,6 +1474,169 @@ describe('managed session log activation', () => {
       });
       expect(reconcileExecution).toHaveBeenCalledOnce();
       await third.config.closeSessionWriter();
+    });
+  });
+
+  it('recovers multiple Runtime executions in reverse settle order after a cold reopen', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      const recorder = first.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run two remote tools');
+      await recorder.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-multi-1',
+        toolName: 'remote_tool',
+        executionCallId: 'ex-multi-1',
+        invocationBindingId: 'runtime-multi-1',
+        modelMessageId: 'msg-multi-1',
+      });
+      const managedSession = (
+        first.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession!;
+      const wait = parseHarnessCheckpointV1(
+        (await managedSession.authority.readCheckpointState())!,
+      );
+      const secondItem = {
+        ...wait.tools!.items[0],
+        functionCallId: 'fc-multi-2',
+        executionCallId: 'ex-multi-2',
+        modelMessageId: 'msg-multi-2',
+        ordinal: 1,
+        inputDigest: createHash('sha256').update('ex-multi-2').digest('hex'),
+      };
+      const secondBinding = {
+        ...wait.runtime!.bindings[0],
+        executionCallId: 'ex-multi-2',
+        invocationBindingId: 'runtime-multi-2',
+      };
+      const state = encodeHarnessCheckpointV1(
+        createAwaitRuntimeHarnessCheckpoint({
+          previous: wait,
+          checkpointId: `ckpt-${managedSession.authority.committedSequence + 1}`,
+          coveredSequence: managedSession.authority.committedSequence,
+          previousCheckpointId: wait.identity.checkpointId,
+          attempt: wait.attempt!,
+          tools: {
+            batchId: wait.tools!.batchId,
+            items: [...wait.tools!.items, secondItem],
+          },
+          runtime: {
+            bindings: [...wait.runtime!.bindings, secondBinding],
+          },
+        }),
+      );
+      await managedSession.authority.commitCheckpoint(
+        {
+          operation: 'commitCheckpoint',
+          commandId: 'multi-runtime-wait',
+          sessionKey: managedSession.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(state).digest('hex'),
+        },
+        { state, boundary: HARNESS_DURABLE_WAIT_BOUNDARY },
+        { class: 'harness', activation: managedSession.activation },
+      );
+      await first.config.closeSessionWriter();
+
+      const settledResult = (output: string) => ({
+        outcome: 'known' as const,
+        status: {
+          state: 'settled' as const,
+          cancelRequested: false,
+          lastSeq: 1,
+          firstAvailableSeq: 1,
+          progressGap: false,
+          progress: [],
+          result: {
+            executionStatus: 'success' as const,
+            result: { llmContent: output, returnDisplay: output },
+          },
+        },
+      });
+      let firstSettled = false;
+      const reconcileExecution = vi.fn(
+        async ({ executionCallId }: { executionCallId: string }) =>
+          executionCallId === 'ex-multi-2' || firstSettled
+            ? settledResult(`${executionCallId} output`)
+            : {
+                outcome: 'known' as const,
+                status: {
+                  state: 'executing' as const,
+                  cancelRequested: false,
+                  lastSeq: 1,
+                  firstAvailableSeq: 1,
+                  progressGap: false,
+                  progress: [],
+                },
+              },
+      );
+      const second = await activate({
+        managedSessionLog: true,
+        managedToolSessionFactory: () => ({
+          sessionId: 'multi-recovery',
+          shellConfiguration: {
+            shell: 'bash',
+            executable: 'bash',
+            argsPrefix: ['-c'],
+          },
+          platform: 'darwin',
+          getClient: async () => {
+            throw new Error('recovery must not acquire a new Runtime');
+          },
+          reconcileExecution,
+          close: async () => {},
+        }),
+      });
+
+      await expect(
+        second.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'await_runtime',
+        executions: [{ executionCallId: 'ex-multi-1' }],
+      });
+      const partialSession = (
+        second.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession!;
+      await expect(
+        partialSession.authority.harnessRunAuthorization(),
+      ).resolves.toMatchObject({
+        checkpoint: {
+          continuation: { phase: 'await_runtime' },
+          tools: {
+            items: [
+              { executionCallId: 'ex-multi-1', state: 'in_progress' },
+              { executionCallId: 'ex-multi-2', state: 'settled' },
+            ],
+          },
+        },
+      });
+
+      firstSettled = true;
+      await expect(
+        second.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'results_ready',
+        executions: [
+          { executionCallId: 'ex-multi-1' },
+          { executionCallId: 'ex-multi-2' },
+        ],
+      });
+      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
+        {
+          outcomes: [
+            expect.objectContaining({
+              functionCallId: 'fc-multi-1',
+              executionCallId: 'ex-multi-1',
+            }),
+            expect.objectContaining({
+              functionCallId: 'fc-multi-2',
+              executionCallId: 'ex-multi-2',
+            }),
+          ],
+          preserveCallIds: ['fc-multi-1', 'fc-multi-2'],
+        },
+      );
+      await second.config.closeSessionWriter();
     });
   });
 

@@ -486,6 +486,7 @@ import {
   DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -5183,8 +5184,10 @@ class QwenAgent implements Agent {
 
   private async withManagedRuntimeRecoveryHint<
     T extends { _meta?: Record<string, unknown> | null },
-  >(session: Session | undefined, response: T): Promise<T> {
-    const recovery = await session?.readManagedRuntimeRecoveryHint?.();
+  >(session: Session | undefined, response: T, passive = false): Promise<T> {
+    const recovery = await session?.readManagedRuntimeRecoveryHint?.({
+      passive,
+    });
     if (recovery === undefined || recovery === null) return response;
     return {
       ...response,
@@ -5203,6 +5206,7 @@ class QwenAgent implements Agent {
     session: Session | undefined,
     response: T,
     suppressRestoreAskUserQuestion: boolean,
+    passiveManagedRuntimeRecovery = false,
   ): Promise<T> {
     const withSessionMeta = this.withSessionRestoreMeta(
       session,
@@ -5213,7 +5217,11 @@ class QwenAgent implements Agent {
       session,
       withSessionMeta,
     );
-    return this.withManagedRuntimeRecoveryHint(session, withApproval);
+    return this.withManagedRuntimeRecoveryHint(
+      session,
+      withApproval,
+      passiveManagedRuntimeRecovery,
+    );
   }
 
   private async retryPendingConfigCleanup(
@@ -6511,13 +6519,23 @@ class QwenAgent implements Agent {
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
       ] === true;
+    const passiveManagedRuntimeRecovery =
+      managedSessionStore !== undefined &&
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY
+      ] === true;
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
     >(
       session: Session | undefined,
       response: T,
     ): Promise<T> =>
-      this.withRestoreHints(session, response, suppressRestoreAskUserQuestion);
+      this.withRestoreHints(
+        session,
+        response,
+        suppressRestoreAskUserQuestion,
+        passiveManagedRuntimeRecovery,
+      );
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -7681,6 +7699,28 @@ class QwenAgent implements Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
     await this.runInSessionContext(session, async () => {
+      const meta = params._meta as Record<string, unknown> | null | undefined;
+      const promptId = meta?.['managedRuntimePromptId'];
+      const checkpointId = meta?.['managedRuntimeCheckpointId'];
+      const activationId = meta?.['managedRuntimeActivationId'];
+      if (
+        typeof promptId === 'string' &&
+        typeof checkpointId === 'string' &&
+        typeof activationId === 'string'
+      ) {
+        const result = await session.cancelManagedRuntime(
+          promptId,
+          checkpointId,
+          activationId,
+        );
+        if (!result.accepted) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Managed Runtime cancellation identity is not current',
+          );
+        }
+        return;
+      }
       try {
         await session.cancelPendingPrompt();
       } catch (error) {

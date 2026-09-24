@@ -87,6 +87,9 @@ export interface ManagedRuntimeProvider {
   reconcileExecution?(
     identity: ManagedRuntimeExecutionIdentity,
   ): Promise<ManagedRuntimeExecutionInspection>;
+  cancelExecution?(
+    identity: ManagedRuntimeExecutionIdentity,
+  ): Promise<ManagedRuntimeExecutionInspection>;
   prepare(request: ManagedRuntimePrepareRequest): ManagedRuntimeHandle;
   cancel(
     sessionId: string,

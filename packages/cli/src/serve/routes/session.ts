@@ -51,6 +51,7 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY,
+  DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
@@ -1104,6 +1105,11 @@ export function registerSessionRoutes(
     string,
     SessionTranscriptCursorCodec
   >();
+  const managedRuntimeCancellationReceipts = new Map<
+    string,
+    { lastEventId: number; eventEpoch: string }
+  >();
+  const maxManagedRuntimeCancellationReceipts = 1024;
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
   // Prevents concurrent branch sessions that would conflict on HEAD. The
   // POST /session branch block additionally rejects branch creation while any
@@ -4162,6 +4168,8 @@ export function registerSessionRoutes(
       }
       const body = safeBody(req);
       const route = `POST /session/:id/${action}`;
+      const passiveManagedRuntimeRecovery =
+        action === 'load' && body['passiveManagedRuntimeRecovery'] === true;
       let managedSessionStore: BridgeManagedSessionStore | undefined;
       if (body['managedSessionStore'] !== undefined) {
         if (action !== 'load') {
@@ -4590,6 +4598,13 @@ export function registerSessionRoutes(
                       ? { managedSessionStore }
                       : {}),
                     ...restoreRequestMetadata,
+                    ...(passiveManagedRuntimeRecovery
+                      ? {
+                          _meta: {
+                            [DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY]: true,
+                          },
+                        }
+                      : {}),
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
@@ -7394,6 +7409,109 @@ export function registerSessionRoutes(
           return;
         }
         res.status(200).json(result);
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
+  app.post(
+    '/session/:id/managed-runtime/cancel',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/managed-runtime/cancel',
+      async (req, res, sessionId, runtime) => {
+        if (deps.hostedHarness !== true) {
+          res.status(404).json({
+            error: 'Hosted Harness route not found',
+            code: 'hosted_harness_route_not_found',
+          });
+          return;
+        }
+        const body = safeBody(req);
+        const parsedPromptId = parseCallerSuppliedSessionId(body['promptId']);
+        const checkpointId = body['checkpointId'];
+        const activationId = body['activationId'];
+        if (
+          parsedPromptId.kind !== 'valid' ||
+          typeof checkpointId !== 'string' ||
+          checkpointId.length === 0 ||
+          Buffer.byteLength(checkpointId, 'utf8') > 512 ||
+          checkpointId.includes('\0') ||
+          typeof activationId !== 'string' ||
+          activationId.length === 0 ||
+          Buffer.byteLength(activationId, 'utf8') > 512 ||
+          activationId.includes('\0')
+        ) {
+          res.status(400).json({
+            error: 'Invalid managed Runtime cancellation identity',
+            code: 'invalid_managed_runtime_cancellation',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const receiptKey = JSON.stringify([
+          sessionId,
+          parsedPromptId.sessionId,
+          checkpointId,
+          activationId,
+        ]);
+        const previousReceipt =
+          managedRuntimeCancellationReceipts.get(receiptKey);
+        if (previousReceipt !== undefined) {
+          res.status(200).json({
+            accepted: true,
+            promptId: parsedPromptId.sessionId,
+            ...previousReceipt,
+          });
+          return;
+        }
+        const lastEventId = runtime.bridge.getSessionLastEventId(sessionId);
+        const eventEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+        try {
+          await runtime.bridge.cancelSession(
+            sessionId,
+            {
+              sessionId,
+              _meta: {
+                managedRuntimePromptId: parsedPromptId.sessionId,
+                managedRuntimeCheckpointId: checkpointId,
+                managedRuntimeActivationId: activationId,
+              },
+            },
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message.includes(
+              'Managed Runtime cancellation identity is not current',
+            )
+          ) {
+            res.status(409).json({
+              accepted: false,
+              promptId: parsedPromptId.sessionId,
+              code: 'managed_runtime_cancellation_not_ready',
+            });
+            return;
+          }
+          throw error;
+        }
+        const receipt = { lastEventId, eventEpoch };
+        managedRuntimeCancellationReceipts.set(receiptKey, receipt);
+        while (
+          managedRuntimeCancellationReceipts.size >
+          maxManagedRuntimeCancellationReceipts
+        ) {
+          const oldest = managedRuntimeCancellationReceipts.keys().next();
+          if (oldest.done) break;
+          managedRuntimeCancellationReceipts.delete(oldest.value);
+        }
+        res.status(200).json({
+          accepted: true,
+          promptId: parsedPromptId.sessionId,
+          ...receipt,
+        });
       },
       { cwdBound: 'always' },
     ),

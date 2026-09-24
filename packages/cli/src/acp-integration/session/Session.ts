@@ -5,6 +5,7 @@
  */
 
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
+import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
@@ -781,6 +782,61 @@ type QueueToolResultRecord = (
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
+
+type ManagedRuntimeAdmissionRequest = {
+  functionCallId: string;
+  toolName: string;
+  executionCallId: string;
+  invocationBindingId?: string;
+  modelMessageId?: string;
+  ordinal: number;
+};
+
+type ConcurrentExecutionAdmission = {
+  arrive: (
+    ordinal: number,
+    request?: ManagedRuntimeAdmissionRequest,
+  ) => Promise<void>;
+  complete: (ordinal: number) => void;
+};
+
+function createConcurrentExecutionAdmission(
+  size: number,
+  commit: (
+    requests: readonly ManagedRuntimeAdmissionRequest[],
+  ) => Promise<void>,
+): ConcurrentExecutionAdmission {
+  const accounted = new Set<number>();
+  const requests = new Map<number, ManagedRuntimeAdmissionRequest>();
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const admitted = new Promise<void>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  let committing = false;
+  const admitIfReady = () => {
+    if (committing || accounted.size !== size) return;
+    committing = true;
+    void commit(
+      [...requests.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, request]) => request),
+    ).then(resolve, reject);
+  };
+  return {
+    arrive: async (ordinal, request) => {
+      if (request) requests.set(ordinal, request);
+      accounted.add(ordinal);
+      admitIfReady();
+      await admitted;
+    },
+    complete: (ordinal) => {
+      accounted.add(ordinal);
+      admitIfReady();
+    },
+  };
+}
 
 export type DaemonToolLoopState = {
   totalToolCalls: number;
@@ -2162,6 +2218,12 @@ export class Session implements SessionContext {
   // background loops, so keep this with the session instead of a single
   // runToolCalls invocation.
   private readonly duplicateProviderToolCallResponseIds = new Set<string>();
+  private readonly managedRuntimeCancellationTerminalPromptIds =
+    new Set<string>();
+  private readonly managedRuntimeCancellationTerminalPromises = new Map<
+    string,
+    Promise<void>
+  >();
   // Messages from a drain that the daemon answered but we timed out waiting for
   // (the daemon already spliced + SSE-published them). Re-injected on the next
   // batch so a transient stall can't silently lose them. See
@@ -4199,8 +4261,10 @@ export class Session implements SessionContext {
     );
   }
 
-  async readManagedRuntimeRecoveryHint() {
-    return (await this.config.inspectPendingManagedRuntimeWait?.()) ?? null;
+  async readManagedRuntimeRecoveryHint(options?: { passive?: boolean }) {
+    return (
+      (await this.config.inspectPendingManagedRuntimeWait?.(options)) ?? null
+    );
   }
 
   async assertCanStartTurn(): Promise<void> {
@@ -5745,6 +5809,49 @@ export class Session implements SessionContext {
       return { accepted: false, interruption: 'none' };
     }
     return this.continueLastTurn();
+  }
+
+  async cancelManagedRuntime(
+    promptId: string,
+    checkpointId: string,
+    activationId: string,
+  ): Promise<{ accepted: boolean }> {
+    const recovery = await this.config.cancelPendingManagedRuntimeWait?.(
+      promptId,
+      checkpointId,
+      activationId,
+    );
+    const accepted =
+      recovery?.phase === 'results_ready' &&
+      recovery.activationId === activationId;
+    if (
+      accepted &&
+      !this.managedRuntimeCancellationTerminalPromptIds.has(promptId)
+    ) {
+      let terminalPromise =
+        this.managedRuntimeCancellationTerminalPromises.get(promptId);
+      if (!terminalPromise) {
+        terminalPromise = this.client
+          .extNotification('_qwencode/end_turn', {
+            sessionId: this.sessionId,
+            reason: 'cancelled',
+            source: 'goal',
+            promptId,
+          })
+          .then(() => {
+            this.managedRuntimeCancellationTerminalPromptIds.add(promptId);
+          })
+          .finally(() => {
+            this.managedRuntimeCancellationTerminalPromises.delete(promptId);
+          });
+        this.managedRuntimeCancellationTerminalPromises.set(
+          promptId,
+          terminalPromise,
+        );
+      }
+      await terminalPromise;
+    }
+    return { accepted };
   }
 
   /**
@@ -12405,14 +12512,9 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Execute a batch of model-returned tool calls, running Agent calls
-   * concurrently while keeping other tools sequential.
-   *
-   * Mirrors the partition logic in `coreToolScheduler.partitionToolCalls`:
-   * consecutive Agent calls form a parallel batch (they spawn independent
-   * sub-agents with no shared mutable state); any other tool forms its own
-   * sequential batch to preserve the implicit ordering the model may rely
-   * on. Response-part ordering matches the original `functionCalls` order.
+   * Execute model-returned tool calls using the core scheduler's concurrency
+   * policy. Consecutive safe calls form a parallel batch; unsafe calls remain
+   * sequential. Response-part ordering matches the original call order.
    */
   private async runToolCalls(
     abortSignal: AbortSignal,
@@ -12786,15 +12888,21 @@ export class Session implements SessionContext {
         );
       }
 
-      // Canonical names match core's isToolCallConcurrencySafe predicate,
-      // where `task` is a live alias of the agent tool; concurrent batches
-      // are therefore agent-only.
-      const isAgent = canonicalToolName(fc.name ?? '') === ToolNames.AGENT;
+      const tool = this.config.getToolRegistry().getTool(fc.name ?? '');
+      const concurrencySafe = isToolCallConcurrencySafe(
+        fc.name ?? '',
+        tool?.kind,
+        fc.args,
+      );
       const last = batches[batches.length - 1];
-      if (isAgent && last?.kind === 'execute' && last.concurrent) {
+      if (concurrencySafe && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
       } else {
-        batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
+        batches.push({
+          kind: 'execute',
+          concurrent: concurrencySafe,
+          calls: [fc],
+        });
       }
     }
 
@@ -12883,10 +12991,10 @@ export class Session implements SessionContext {
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
     // in input order regardless of resolution order.
     //
-    // Only agent-only batches reach here (the batcher above groups only
-    // agent calls into concurrent batches), so no invalid-params serial
-    // defence is needed: an invalid agent call fails in build() before any
-    // side effect. Batches wider than the cap run in windows; once a
+    // Only concurrency-safe calls reach here. Managed calls share an
+    // admission barrier so every execution identity is durably committed
+    // before any member starts physical execution. Batches wider than the cap
+    // run in windows; once a
     // window's race observes a loop, the unstarted tail is skipped. A loop
     // firing mid-batch never aborts in-flight calls regardless of batch
     // width — they settle and their results are kept before the turn
@@ -12921,8 +13029,21 @@ export class Session implements SessionContext {
         }
       };
       let warnedWaitingForInFlight = false;
+      const admissions = new Map<number, ConcurrentExecutionAdmission>();
       for (let i = 0; i < calls.length; i++) {
         const idx = i;
+        const windowStart = Math.floor(idx / maxConcurrency) * maxConcurrency;
+        let admission = admissions.get(windowStart);
+        if (!admission) {
+          admission = createConcurrentExecutionAdmission(
+            Math.min(maxConcurrency, calls.length - windowStart),
+            async (requests) => {
+              if (requests.length === 0) return;
+              await this.config.commitManagedAwaitRuntimeBatch?.(requests);
+            },
+          );
+          admissions.set(windowStart, admission);
+        }
         if (toolLoopState?.loopDetected) {
           await fillLoopSkippedFrom(idx);
           return results;
@@ -12946,6 +13067,7 @@ export class Session implements SessionContext {
           onFullTurnModel,
           undefined,
           finalizeNestedToolResult,
+          { admission, ordinal: idx },
         )
           .then((r) => {
             results[idx] = r;
@@ -12963,6 +13085,7 @@ export class Session implements SessionContext {
             }
           })
           .finally(() => {
+            admission.complete(idx);
             executing.delete(p);
           });
         executing.add(p);
@@ -13197,6 +13320,10 @@ export class Session implements SessionContext {
       source: 'code_mode';
     },
     finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
+    concurrentAdmission?: {
+      admission: ConcurrentExecutionAdmission;
+      ordinal: number;
+    },
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     const modelFacingToolName = fc.name ?? 'unknown_tool';
@@ -13227,6 +13354,7 @@ export class Session implements SessionContext {
       | { executionCallId: string; invocationBindingId: string }
       | undefined;
     let managedModelFunctionResponse: Part['functionResponse'];
+    let concurrentAdmissionAccounted = false;
     const drainManagedInvocation = async () => {
       if (managedInvocation) {
         if (
@@ -15014,15 +15142,29 @@ export class Session implements SessionContext {
             if (invocation.managed && this.config.commitManagedAwaitRuntime) {
               managedExecutionIdentity =
                 await invocation.managed.prepareExecution();
-              await this.config.commitManagedAwaitRuntime({
+              const admissionRequest = {
                 functionCallId: callId,
                 toolName: modelFacingToolName,
                 executionCallId: managedExecutionIdentity.executionCallId,
                 invocationBindingId:
                   managedExecutionIdentity.invocationBindingId,
                 modelMessageId: promptId,
-              });
+              };
+              if (concurrentAdmission) {
+                concurrentAdmissionAccounted = true;
+                await concurrentAdmission.admission.arrive(
+                  concurrentAdmission.ordinal,
+                  { ...admissionRequest, ordinal: concurrentAdmission.ordinal },
+                );
+              } else {
+                await this.config.commitManagedAwaitRuntime(admissionRequest);
+              }
               managedRuntimeWaitCommitted = true;
+            } else if (concurrentAdmission) {
+              concurrentAdmissionAccounted = true;
+              await concurrentAdmission.admission.arrive(
+                concurrentAdmission.ordinal,
+              );
             }
 
             const continuedAgentId =
@@ -15923,6 +16065,9 @@ export class Session implements SessionContext {
         executionStatus,
       });
     } finally {
+      if (concurrentAdmission && !concurrentAdmissionAccounted) {
+        concurrentAdmission.admission.complete(concurrentAdmission.ordinal);
+      }
       if (managedInvocation && managedRuntimeWaitCommitted) {
         if (
           abortSignal.aborted ||

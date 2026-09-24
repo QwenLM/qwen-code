@@ -26,7 +26,7 @@ export function createJavaManagedAgentProvider(
   options: JavaManagedAgentProviderOptions,
 ): ManagedAgentProvider {
   const client = new JavaManagedAgentClient(options);
-  const agentId = options.agentId ?? 'dataworks_data_agent';
+  const agentId = options.agentId ?? 'qwen-code';
   return {
     kind: 'java',
     storageKey: storageKey(options),

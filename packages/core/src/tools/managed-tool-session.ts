@@ -54,6 +54,9 @@ export interface ManagedToolSession {
   reconcileExecution?(
     identity: ManagedToolExecutionIdentity,
   ): Promise<ManagedToolExecutionInspection>;
+  cancelExecution?(
+    identity: ManagedToolExecutionIdentity,
+  ): Promise<ManagedToolExecutionInspection>;
   createChild?(config: Config): ManagedToolSession;
   beginFileHistoryTurn?(promptId: string): Promise<void>;
   flushFileHistory?(): Promise<void>;

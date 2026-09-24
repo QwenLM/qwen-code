@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -503,7 +504,8 @@ class ManagedAgentServerIntegrationTest {
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
 
-        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+        MvcResult submitted = mvc.perform(post(
+                                "/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -514,7 +516,11 @@ class ManagedAgentServerIntegrationTest {
                                 """.formatted(sessionId)))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.sessionId").value(sessionId))
-                .andExpect(jsonPath("$.turnId").isNotEmpty());
+                .andExpect(jsonPath("$.turnId").isNotEmpty())
+                .andReturn();
+        String turnId = objectMapper.readTree(
+                submitted.getResponse().getContentAsString())
+                .get("turnId").asText();
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 mvc.perform(post(
@@ -527,13 +533,23 @@ class ManagedAgentServerIntegrationTest {
                         .andExpect(jsonPath("$.events[?(@.type =="
                                 + " 'turn.completed')]").isNotEmpty()));
 
+        store.appendPublicEventIfAbsent(tenant, sessionId, turnId,
+                "environment.failed", Map.of(
+                        "code", "runtime_warm_failed",
+                        "environmentId", "local-runtime"), false,
+                "test:environment:failed");
         mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"" + sessionId + "\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.activeTurn.status")
-                        .value("completed"));
+                        .value("completed"))
+                .andExpect(jsonPath("$.environment.state").value("failed"))
+                .andExpect(jsonPath("$.environment.environmentId")
+                        .value("local-runtime"))
+                .andExpect(jsonPath("$.environment.errorCode")
+                        .value("runtime_warm_failed"));
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
             MvcResult transcript = mvc.perform(post(
@@ -773,6 +789,76 @@ class ManagedAgentServerIntegrationTest {
                 });
         assertThat(store.materializeNextBatch(tenant, session.sessionId(),
                 200).advanced()).isFalse();
+    }
+
+    @Test
+    void ignoresLateEnvironmentResultFromAnOlderTurn() {
+        String tenant = "tenant-environment-order-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "environment-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null,
+                List.of(), null);
+        Admission first = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "environment-turn-1", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "3".repeat(64));
+        String owner = "environment-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(), first.turnId(),
+                owner, Duration.ofMinutes(1))).isPresent();
+        store.cancelBeforeAdmission(tenant, session.sessionId(),
+                first.turnId(), owner);
+        Admission second = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "environment-turn-2", "sha256:" + "4".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "5".repeat(64));
+
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(),
+                second.turnId(), "environment.ready", Map.of(), false,
+                "environment:second:ready");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(),
+                first.turnId(), "environment.failed",
+                Map.of("code", "runtime_warm_failed"), false,
+                "environment:first:failed");
+
+        assertThat(store.findLatestEnvironmentEvent(tenant,
+                session.sessionId())).get().satisfies(event -> {
+                    assertThat(event.turnId()).isEqualTo(second.turnId());
+                    assertThat(event.type()).isEqualTo("environment.ready");
+                });
+    }
+
+    @Test
+    void persistsRetryBackoffAcrossClaims() {
+        String tenant = "tenant-retry-backoff-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "retry-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "retry-turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "3".repeat(64));
+        String firstOwner = "retry-owner-1";
+        assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                firstOwner, Duration.ofMinutes(1))).isPresent();
+        long retryAfter = System.currentTimeMillis() + 60_000;
+
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                firstOwner, retryAfter);
+
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    assertThat(record.retryCount()).isEqualTo(1);
+                    assertThat(record.retryAfter()).isEqualTo(retryAfter);
+                    assertThat(record.dispatchOwner()).isNull();
+                });
+        DispatchTarget target = new DispatchTarget(tenant,
+                session.sessionId(), turn.turnId());
+        assertThat(store.findDispatchable(retryAfter - 1, 100))
+                .doesNotContain(target);
+        assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                "retry-owner-2", Duration.ofMinutes(1))).isEmpty();
+        assertThat(store.findDispatchable(retryAfter, 100)).contains(target);
     }
 
     @Test

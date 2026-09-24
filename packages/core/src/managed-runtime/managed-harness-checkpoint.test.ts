@@ -446,6 +446,7 @@ describe('harness checkpoint v1', () => {
       checkpointId: 'ckpt-6',
       coveredSequence: 5,
       previousCheckpointId: 'ckpt-5',
+      executionCallId: 'ex-1',
       outcomeRef,
     });
     expect(ready.continuation.phase).toBe('results_ready');
@@ -470,6 +471,78 @@ describe('harness checkpoint v1', () => {
       consumed: true,
     });
     expect(parseHarnessCheckpointV1(bytesOf(consumed))).toEqual(consumed);
+  });
+
+  it('settles multiple Runtime executions independently in reverse order', () => {
+    const runtime = inProgressRuntime();
+    const wait = createAwaitRuntimeHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      tools: {
+        ...runtime.tools,
+        items: [
+          ...runtime.tools.items,
+          {
+            ...runtime.tools.items[0],
+            functionCallId: 'fc-2',
+            executionCallId: 'ex-2',
+            ordinal: 1,
+          },
+        ],
+      },
+      runtime: {
+        bindings: [
+          ...runtime.runtime.bindings,
+          {
+            ...runtime.runtime.bindings[0],
+            executionCallId: 'ex-2',
+            invocationBindingId: 'bind-2',
+          },
+        ],
+      },
+    });
+    const secondRef = ref('managed-tool-outcome-2');
+    const partial = createResultsReadyHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      executionCallId: 'ex-2',
+      outcomeRef: secondRef,
+    });
+    expect(partial.continuation.phase).toBe('await_runtime');
+    expect(partial.tools?.items).toMatchObject([
+      { executionCallId: 'ex-1', state: 'in_progress', outcomeRef: null },
+      { executionCallId: 'ex-2', state: 'settled', outcomeRef: secondRef },
+    ]);
+    expect(partial.runtime?.bindings.map((binding) => binding.state)).toEqual([
+      'dispatch',
+      'settled',
+    ]);
+    expect(parseHarnessCheckpointV1(bytesOf(partial))).toEqual(partial);
+
+    const firstRef = ref('managed-tool-outcome-1');
+    const ready = createResultsReadyHarnessCheckpoint({
+      previous: partial,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      executionCallId: 'ex-1',
+      outcomeRef: firstRef,
+    });
+    expect(ready.continuation.phase).toBe('results_ready');
+    expect(ready.tools?.items.map((item) => item.outcomeRef)).toEqual([
+      firstRef,
+      secondRef,
+    ]);
+    expect(ready.runtime?.bindings.map((binding) => binding.state)).toEqual([
+      'settled',
+      'settled',
+    ]);
+    expect(parseHarnessCheckpointV1(bytesOf(ready))).toEqual(ready);
   });
 
   it('rejects await_runtime that still has a requested approval', () => {
@@ -511,6 +584,7 @@ describe('harness checkpoint v1', () => {
         checkpointId: 'ckpt-5',
         coveredSequence: 4,
         previousCheckpointId: 'ckpt-4',
+        executionCallId: 'ex-1',
         outcomeRef: ref('managed-tool-outcome'),
       }),
     ).toThrow(/requires an await_runtime checkpoint/);

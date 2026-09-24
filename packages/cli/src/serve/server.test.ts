@@ -125,7 +125,10 @@ import {
   BridgeTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
-import { DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY,
+  DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   appendPromptLedgerRecord,
   readPromptLedgerRecords,
@@ -13665,6 +13668,7 @@ describe('createServeApp', () => {
         .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
         .send({
           cwd: WS_BOUND,
+          passiveManagedRuntimeRecovery: true,
           managedSessionStore: {
             baseUrl: 'https://store.example/',
             tenantId: 'tenant-a',
@@ -13688,7 +13692,13 @@ describe('createServeApp', () => {
           writerId: bootId,
           leaseDurationMs: 60_000,
         },
+        _meta: {
+          [DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY]: true,
+        },
       });
+      expect(bridge.loadCalls[0]).not.toHaveProperty(
+        'suppressWorktreeContextRestore',
+      );
     });
 
     it('admits a checkpoint-bound Managed Runtime continuation only through Hosted Harness', async () => {
@@ -13752,6 +13762,126 @@ describe('createServeApp', () => {
           },
         },
       ]);
+    });
+
+    it('authenticates and forwards checkpoint-bound recovered cancellation with the pre-cancel watermark', async () => {
+      const digest = `sha256:${'e'.repeat(64)}`;
+      const bootId = '55555555-5555-4555-8555-555555555555';
+      const sessionId = '550e8400-e29b-41d4-a716-446655440015';
+      const promptId = '550e8400-e29b-41d4-a716-446655440016';
+      const bridge = fakeBridge({
+        getSessionLastEventIdImpl: () => 9,
+        getSessionEventEpochImpl: () => 'cancel-epoch',
+      });
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          profile: 'hosted-harness',
+          workspace: WS_BOUND,
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: digest,
+        },
+        undefined,
+        {
+          bridge,
+          hostedHarnessContract: createHostedHarnessContract(digest, bootId),
+        },
+      );
+      const body = {
+        promptId,
+        checkpointId: 'checkpoint-3',
+        activationId: 'activation-3',
+      };
+
+      const unauthorized = await request(app)
+        .post(`/session/${sessionId}/managed-runtime/cancel`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+      expect(unauthorized.status).toBe(401);
+      expect(bridge.cancelCalls).toEqual([]);
+
+      const res = await request(app)
+        .post(`/session/${sessionId}/managed-runtime/cancel`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send(body);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        accepted: true,
+        promptId,
+        lastEventId: 9,
+        eventEpoch: 'cancel-epoch',
+      });
+      expect(bridge.cancelCalls).toEqual([
+        {
+          sessionId,
+          req: {
+            sessionId,
+            _meta: {
+              managedRuntimePromptId: promptId,
+              managedRuntimeCheckpointId: 'checkpoint-3',
+              managedRuntimeActivationId: 'activation-3',
+            },
+          },
+        },
+      ]);
+
+      bridge.getSessionLastEventId = () => 10;
+      const retry = await request(app)
+        .post(`/session/${sessionId}/managed-runtime/cancel`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send(body);
+
+      expect(retry.status).toBe(200);
+      expect(retry.body).toEqual(res.body);
+      expect(bridge.cancelCalls).toHaveLength(1);
+
+      const staleBridge = fakeBridge({
+        cancelImpl: async () => {
+          throw new Error(
+            'Managed Runtime cancellation identity is not current',
+          );
+        },
+      });
+      const staleApp = createServeApp(
+        {
+          ...baseOpts,
+          profile: 'hosted-harness',
+          workspace: WS_BOUND,
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: digest,
+        },
+        undefined,
+        {
+          bridge: staleBridge,
+          hostedHarnessContract: createHostedHarnessContract(digest, bootId),
+        },
+      );
+      const stale = await request(staleApp)
+        .post(`/session/${sessionId}/managed-runtime/cancel`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send({ ...body, activationId: 'stale-activation' });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({
+        accepted: false,
+        promptId,
+        code: 'managed_runtime_cancellation_not_ready',
+      });
     });
 
     it('returns a typed safe-retry error when channel initialization times out', async () => {

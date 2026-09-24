@@ -223,6 +223,15 @@ export function createManagedToolSessionFactory(options: {
                 }),
             }
           : {}),
+        ...(isRoot && provider.cancelExecution
+          ? {
+              cancelExecution: (identity: ManagedToolExecutionIdentity) =>
+                provider.cancelExecution!({
+                  harnessSessionId: rootConfig.getSessionId(),
+                  ...identity,
+                }),
+            }
+          : {}),
         createChild: (childConfig) => {
           assertOpen();
           return create(childConfig, false).session;

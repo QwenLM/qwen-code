@@ -299,6 +299,7 @@ import {
 import { Storage } from './storage.js';
 import {
   ChatRecordingService,
+  type ChatRecord,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
 } from '../services/chatRecordingService.js';
@@ -356,7 +357,10 @@ import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
 } from '../managed-runtime/managed-session-records.js';
-import { ManagedSessionRecordError } from '../managed-runtime/managed-session-records.js';
+import {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../managed-runtime/managed-session-records.js';
 import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
@@ -6132,35 +6136,43 @@ export class Config {
   async commitManagedAwaitRuntime(
     request: ManagedAwaitRuntimeRequest,
   ): Promise<void> {
+    await this.commitManagedAwaitRuntimeBatch([request]);
+  }
+
+  async commitManagedAwaitRuntimeBatch(
+    requests: readonly ManagedAwaitRuntimeRequest[],
+  ): Promise<void> {
     const session = this.managedSession;
-    if (session === undefined) return;
+    if (session === undefined || requests.length === 0) return;
     const handle = this.liveManagedHarness();
     if (handle === undefined) return;
     const routeRef = await session.resources.publish(
       'managed-route',
       Buffer.from(JSON.stringify({ model: this.getModel() }), 'utf8'),
     );
-    await handle.commitAwaitRuntime({
-      functionCallId: request.functionCallId,
-      toolName: request.toolName,
-      executionCallId: request.executionCallId,
-      invocationBindingId:
-        request.invocationBindingId ?? request.executionCallId,
-      capabilityVersion: 'runtime-v1',
-      policyVersion: 'policy-v1',
-      mediaVersion: null,
-      modelMessageId: request.modelMessageId ?? request.functionCallId,
-      partIndex: 0,
-      ordinal: 0,
-      inputDigest: createHash('sha256')
-        .update(request.functionCallId)
-        .update('\0')
-        .update(request.executionCallId)
-        .digest('hex'),
-      progressCursor: null,
-      attemptId: `att-${request.functionCallId}`,
-      routeRef,
-    });
+    await handle.commitAwaitRuntimeBatch(
+      requests.map((request, index) => ({
+        functionCallId: request.functionCallId,
+        toolName: request.toolName,
+        executionCallId: request.executionCallId,
+        invocationBindingId:
+          request.invocationBindingId ?? request.executionCallId,
+        capabilityVersion: 'runtime-v1',
+        policyVersion: 'policy-v1',
+        mediaVersion: null,
+        modelMessageId: request.modelMessageId ?? request.functionCallId,
+        partIndex: 0,
+        ordinal: request.ordinal ?? index,
+        inputDigest: createHash('sha256')
+          .update(request.functionCallId)
+          .update('\0')
+          .update(request.executionCallId)
+          .digest('hex'),
+        progressCursor: null,
+        attemptId: `att-${request.functionCallId}`,
+        routeRef,
+      })),
+    );
   }
 
   async resolveManagedAwaitRuntime(request: {
@@ -6189,7 +6201,7 @@ export class Config {
         'utf8',
       ),
     );
-    await handle.resolveAwaitRuntime(resultRef);
+    await handle.resolveAwaitRuntime(request.executionCallId, resultRef);
   }
 
   /**
@@ -6313,13 +6325,16 @@ export class Config {
    * provider supports it, otherwise inspects without dispatch. An unknown
    * result is returned to the coordinator and must never trigger tool replay.
    */
-  async inspectPendingManagedRuntimeWait(): Promise<ManagedRuntimeWaitInspection | null> {
+  async inspectPendingManagedRuntimeWait(options?: {
+    passive?: boolean;
+  }): Promise<ManagedRuntimeWaitInspection | null> {
     const pending = await this.readPendingManagedRuntimeWait();
     if (pending === null) return this.readResultsReadyManagedRuntimeWait();
     const managedToolSession = this.getManagedToolSession();
-    const inspectExecution =
-      managedToolSession?.reconcileExecution ??
-      managedToolSession?.inspectExecution;
+    const inspectExecution = options?.passive
+      ? managedToolSession?.inspectExecution
+      : (managedToolSession?.reconcileExecution ??
+        managedToolSession?.inspectExecution);
     if (inspectExecution === undefined) {
       throw new Error(
         'Managed tool Runtime recovery inspection is unavailable.',
@@ -6334,6 +6349,7 @@ export class Config {
         })),
       })),
     );
+    if (options?.passive) return { ...pending, executions };
     if (executions.some((execution) => execution.outcome === 'unknown')) {
       await this.managedSession!.authority.blockRecovery({
         status: 'BLOCKED_EXECUTION',
@@ -6341,24 +6357,132 @@ export class Config {
       });
       return { ...pending, executions };
     }
-    if (
-      executions.every(
-        (execution) =>
-          execution.outcome === 'known' && execution.status.state === 'settled',
-      )
-    ) {
-      if (executions.length !== 1) {
+    const knownExecutions = executions.filter(
+      (
+        execution,
+      ): execution is ManagedPendingRuntimeExecution &
+        Extract<ManagedToolExecutionInspection, { outcome: 'known' }> =>
+        execution.outcome === 'known',
+    );
+    const settled = knownExecutions.filter(
+      (execution) => execution.status.state === 'settled',
+    );
+    for (const execution of settled) {
+      if (execution.status.result === undefined) {
         throw new ManagedSessionRecordError(
-          'Runtime recovery currently requires exactly one pending execution.',
+          `settled Runtime execution ${execution.executionCallId} has no receipt.`,
         );
       }
-      const execution = executions[0];
+    }
+    for (const execution of settled) {
+      const result = execution.status.result!;
+      const recovered = recoveredRuntimeOutcome(execution, result);
+      await this.resolveManagedAwaitRuntime({
+        functionCallId: execution.functionCallId,
+        executionCallId: execution.executionCallId,
+        outcome: recovered.outcome,
+        body: result,
+        functionResponse: recovered.functionResponse,
+      });
+    }
+    if (settled.length === executions.length) {
+      const ready = await this.readResultsReadyManagedRuntimeWait();
+      if (ready === null) {
+        throw new ManagedSessionRecordError(
+          'settled Runtime executions did not produce a results_ready checkpoint.',
+        );
+      }
+      return ready;
+    }
+    const remaining = await this.readPendingManagedRuntimeWait();
+    if (remaining === null) {
+      throw new ManagedSessionRecordError(
+        'unsettled Runtime executions lost their await_runtime checkpoint.',
+      );
+    }
+    return {
+      ...remaining,
+      executions: knownExecutions.filter(
+        (execution) => execution.status.state !== 'settled',
+      ),
+    };
+  }
+
+  async cancelPendingManagedRuntimeWait(
+    promptId: string,
+    checkpointId: string,
+    activationId: string,
+  ): Promise<ManagedRuntimeWaitInspection | null> {
+    const session = this.managedSession;
+    if (session === undefined) return null;
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (authorization.status !== 'runnable') return null;
+    const checkpoint = authorization.checkpoint;
+    if (
+      checkpoint.identity.checkpointId !== checkpointId ||
+      checkpoint.identity.activationId !== activationId
+    ) {
+      return null;
+    }
+    let durablePromptId: string | undefined;
+    let afterSequence = 0;
+    for (;;) {
+      const events = session.authority.readEvents({
+        afterSequence,
+        limit: MANAGED_SESSION_LIMITS.maxReadEvents,
+      });
+      if (events.length === 0) break;
+      for (const event of events) {
+        afterSequence = event.sequence;
+        if (
+          event.kind !== 'message.committed' ||
+          event.subject?.type !== 'activation' ||
+          event.subject.activationId !== activationId
+        ) {
+          continue;
+        }
+        const body = await session.resources.read(
+          event.payload['contentRef'] as unknown as ManagedSessionDurableRef,
+        );
+        const record = JSON.parse(body.toString('utf8')) as ChatRecord;
+        if (typeof record.daemonPromptId === 'string') {
+          durablePromptId = record.daemonPromptId;
+        }
+      }
+    }
+    if (durablePromptId !== promptId) return null;
+    const pending = await this.readPendingManagedRuntimeWait();
+    if (pending === null) return this.readResultsReadyManagedRuntimeWait();
+    const cancelExecution = this.getManagedToolSession()?.cancelExecution;
+    if (cancelExecution === undefined) {
+      throw new Error(
+        'Managed tool Runtime recovery cancellation is unavailable.',
+      );
+    }
+    const executions = await Promise.all(
+      pending.executions.map(async (execution) => ({
+        ...execution,
+        ...(await cancelExecution({
+          runtimeSessionId: execution.runtimeSessionId,
+          executionCallId: execution.executionCallId,
+        })),
+      })),
+    );
+    if (executions.some((execution) => execution.outcome === 'unknown')) {
+      await this.managedSession!.authority.blockRecovery({
+        status: 'BLOCKED_EXECUTION',
+        detailCode: 'runtime_execution_outcome_unknown',
+      });
+      return { ...pending, executions };
+    }
+    for (const execution of executions) {
       if (
         execution.outcome !== 'known' ||
+        execution.status.state !== 'settled' ||
         execution.status.result === undefined
       ) {
         throw new ManagedSessionRecordError(
-          `settled Runtime execution ${execution.executionCallId} has no receipt.`,
+          `cancelled Runtime execution ${execution.executionCallId} did not settle with a receipt.`,
         );
       }
       const recovered = recoveredRuntimeOutcome(
@@ -6372,15 +6496,14 @@ export class Config {
         body: execution.status.result,
         functionResponse: recovered.functionResponse,
       });
-      const ready = await this.readResultsReadyManagedRuntimeWait();
-      if (ready === null) {
-        throw new ManagedSessionRecordError(
-          'settled Runtime execution did not produce a results_ready checkpoint.',
-        );
-      }
-      return ready;
     }
-    return { ...pending, executions };
+    const ready = await this.readResultsReadyManagedRuntimeWait();
+    if (ready === null) {
+      throw new ManagedSessionRecordError(
+        'cancelled Runtime executions did not produce a results_ready checkpoint.',
+      );
+    }
+    return ready;
   }
 
   shouldRetainManagedRuntimeInvocation(executionCallId: string): boolean {

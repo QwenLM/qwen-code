@@ -149,7 +149,8 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       .toBe(true);
   }
 
-  await page.goto(`/?managed=1&managedSession=${SESSION_ID}`);
+  await page.goto(`/?managedSession=${SESSION_ID}`);
+  await page.getByRole('button', { name: 'Managed Agents' }).click();
   await expect(
     page.getByRole('textbox', { name: 'Message the managed agent' }),
   ).toBeEnabled();

@@ -10,6 +10,11 @@ public interface HarnessConnector extends AutoCloseable {
     Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting);
 
+    default Attachment createOrLoad(String tenantId, String sessionId,
+            boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
+        return createOrLoad(tenantId, sessionId, loadExisting);
+    }
+
     Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
 
@@ -18,6 +23,12 @@ public interface HarnessConnector extends AutoCloseable {
             String activationId) {
         throw new UnsupportedOperationException(
                 "Managed Runtime continuation is unavailable");
+    }
+
+    default Admission cancelManagedRuntime(String tenantId, String sessionId,
+            String promptId, String checkpointId, String activationId) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime cancellation is unavailable");
     }
 
     SourceStream stream(String tenantId, String sessionId, long lastEventId,

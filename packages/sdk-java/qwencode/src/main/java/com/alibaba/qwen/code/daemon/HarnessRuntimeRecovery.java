@@ -48,7 +48,18 @@ public final class HarnessRuntimeRecovery {
     }
 
     public boolean isContinuationReady() {
-        return "results_ready".equals(phase) && !hasUnknownOutcome();
+        return "results_ready".equals(phase) && !executions.isEmpty()
+                && executions.stream().allMatch(execution ->
+                        "known".equals(execution.getOutcome())
+                                && "settled".equals(
+                                        execution.getStatus().get("state")));
+    }
+
+    public boolean isCancellationReady() {
+        return ("await_runtime".equals(phase)
+                || "results_ready".equals(phase)) && !executions.isEmpty()
+                && executions.stream().allMatch(execution ->
+                        "known".equals(execution.getOutcome()));
     }
 
     public boolean isContinuationAdmitted() {

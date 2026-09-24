@@ -727,6 +727,52 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
     }
   }
 
+  async cancelExecution(
+    identity: ManagedRuntimeExecutionIdentity,
+  ): Promise<ManagedRuntimeExecutionInspection> {
+    this.lifetime.signal.throwIfAborted();
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+    ]);
+    try {
+      let status = await this.client.getExecution(
+        identity.runtimeSessionId,
+        identity.harnessSessionId,
+        identity.executionCallId,
+        identity.afterSeq,
+        signal,
+      );
+      if (status.state !== 'settled') {
+        status = await this.client.cancelExecution(
+          identity.runtimeSessionId,
+          identity.harnessSessionId,
+          identity.executionCallId,
+          signal,
+        );
+      }
+      while (status.state !== 'settled') {
+        await delay(EXECUTION_POLL_DELAY_MS, undefined, { signal });
+        status = await this.client.getExecution(
+          identity.runtimeSessionId,
+          identity.harnessSessionId,
+          identity.executionCallId,
+          undefined,
+          signal,
+        );
+      }
+      return { outcome: 'known', status };
+    } catch (error) {
+      if (
+        error instanceof BrokerResponseError &&
+        error.code === 'runtime_broker_execution_unknown'
+      ) {
+        return { outcome: 'unknown' };
+      }
+      throw error;
+    }
+  }
+
   async cancel(
     _sessionId: string,
     _executionId: string,

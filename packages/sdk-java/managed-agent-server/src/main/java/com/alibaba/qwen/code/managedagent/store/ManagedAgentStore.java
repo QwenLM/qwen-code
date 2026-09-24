@@ -86,6 +86,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     nullableLong(result, "harness_last_event_id"),
                     result.getString("dispatch_owner"),
                     nullableLong(result, "dispatch_lease_until"),
+                    result.getInt("retry_count"),
+                    nullableLong(result, "retry_after"),
                     result.getString("error_code"),
                     result.getString("error_message"),
                     result.getLong("created_at"),
@@ -468,6 +470,26 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, afterSequence, limit);
     }
 
+    public Optional<EventRecord> findLatestEnvironmentEvent(String tenantId,
+            String sessionId) {
+        requireSession(tenantId, sessionId);
+        return jdbc.query("SELECT event.* FROM managed_agent_event event"
+                        + " JOIN managed_agent_turn turn_record ON"
+                        + " turn_record.tenant_id = event.tenant_id AND"
+                        + " turn_record.session_id = event.session_id AND"
+                        + " turn_record.turn_id = event.turn_id WHERE"
+                        + " event.tenant_id = ? AND event.session_id = ? AND"
+                        + " event.event_type IN ('environment.provisioning',"
+                        + " 'environment.ready', 'environment.failed') AND"
+                        + " turn_record.turn_id = (SELECT turn_id FROM"
+                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? ORDER BY created_at DESC, turn_id"
+                        + " DESC LIMIT 1) ORDER BY event.sequence_id DESC"
+                        + " LIMIT 1",
+                eventMapper, tenantId, sessionId, tenantId, sessionId)
+                .stream().findFirst();
+    }
+
     public List<EventRecord> findControlEvents(String tenantId,
             String sessionId, long throughSequence) {
         requireSession(tenantId, sessionId);
@@ -603,12 +625,13 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " managed_agent_turn WHERE status IN"
                         + " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
                         + " (dispatch_lease_until IS NULL OR"
-                        + " dispatch_lease_until < ?)"
+                        + " dispatch_lease_until < ?) AND (retry_after IS"
+                        + " NULL OR retry_after <= ?)"
                         + " ORDER BY updated_at ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
-                        result.getString("turn_id")), now, limit);
+                        result.getString("turn_id")), now, now, limit);
     }
 
     @Transactional
@@ -621,9 +644,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " tenant_id = ? AND session_id = ? AND turn_id = ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
                         + " 'CANCELLING') AND (dispatch_lease_until IS NULL"
-                        + " OR dispatch_lease_until < ?)",
+                        + " OR dispatch_lease_until < ?) AND (retry_after IS"
+                        + " NULL OR retry_after <= ?)",
                 owner, now + leaseDuration.toMillis(), now, tenantId,
-                sessionId, turnId, now);
+                sessionId, turnId, now, now);
         return updated == 0 ? Optional.empty()
                 : findTurn(tenantId, sessionId, turnId);
     }
@@ -649,6 +673,19 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
                         + " ('ACCEPTED', 'RUNNING', 'CANCELLING')",
                 tenantId, sessionId, turnId, owner);
+    }
+
+    public void scheduleTurnRetry(String tenantId, String sessionId,
+            String turnId, String owner, long retryAfter) {
+        jdbc.update("UPDATE managed_agent_turn SET retry_count = retry_count"
+                        + " + 1, retry_after = ?, dispatch_owner = NULL,"
+                        + " dispatch_lease_until = NULL, updated_at = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND dispatch_owner"
+                        + " = ? AND status IN ('ACCEPTED', 'RUNNING',"
+                        + " 'CANCELLING')",
+                retryAfter, clock.millis(), tenantId, sessionId, turnId,
+                owner);
     }
 
     @Transactional

@@ -151,6 +151,9 @@ public class ManagedAgentProperties {
         private Duration scanDelay = Duration.ofSeconds(1);
         private Duration leaseDuration = Duration.ofSeconds(60);
         private Duration leaseRenewInterval = Duration.ofSeconds(20);
+        private Duration retryInitialDelay = Duration.ofSeconds(1);
+        private Duration retryMaxDelay = Duration.ofMinutes(1);
+        private int maxPreAdmissionRetries = 5;
 
         public Duration getScanDelay() {
             return scanDelay;
@@ -174,6 +177,30 @@ public class ManagedAgentProperties {
 
         public void setLeaseRenewInterval(Duration leaseRenewInterval) {
             this.leaseRenewInterval = leaseRenewInterval;
+        }
+
+        public Duration getRetryInitialDelay() {
+            return retryInitialDelay;
+        }
+
+        public void setRetryInitialDelay(Duration retryInitialDelay) {
+            this.retryInitialDelay = retryInitialDelay;
+        }
+
+        public Duration getRetryMaxDelay() {
+            return retryMaxDelay;
+        }
+
+        public void setRetryMaxDelay(Duration retryMaxDelay) {
+            this.retryMaxDelay = retryMaxDelay;
+        }
+
+        public int getMaxPreAdmissionRetries() {
+            return maxPreAdmissionRetries;
+        }
+
+        public void setMaxPreAdmissionRetries(int maxPreAdmissionRetries) {
+            this.maxPreAdmissionRetries = maxPreAdmissionRetries;
         }
     }
 

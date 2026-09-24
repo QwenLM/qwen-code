@@ -62,6 +62,7 @@ if (
 
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover;
+const modelBeforeRuntimeAssertionDelayMs = 20_000;
 
 if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
   throw new Error('--runtime-delay-ms must be a non-negative integer');
@@ -100,6 +101,7 @@ const java = command('java');
 const mysqld = command('mysqld');
 const mysql = command('mysql');
 const mysqladmin = command('mysqladmin');
+const mysqldUserArguments = process.getuid?.() === 0 ? ['--user=root'] : [];
 let receivedSignal: NodeJS.Signals | undefined;
 const handleSignal = (signal: NodeJS.Signals) => {
   receivedSignal = signal;
@@ -628,7 +630,6 @@ const inflightResponse = 'INFLIGHT_TURN_RECOVERED';
 const continuationMarker = 'MANAGED_SESSION_CONTINUATION_FAILOVER';
 const continuationPartial = 'CONTINUATION_PARTIAL';
 const continuationResponse = 'CONTINUATION_TURN_RECOVERED';
-let continuationModelRequests = 0;
 let acceptReplacementContinuation = false;
 let releaseContinuationHold = () => {};
 const continuationHold = new Promise<void>((resolve) => {
@@ -668,7 +669,6 @@ try {
             ],
           };
         }
-        continuationModelRequests += 1;
         if (!acceptReplacementContinuation) {
           return {
             contentChunks: [continuationPartial],
@@ -716,7 +716,12 @@ try {
 
   const initialized = spawnSync(
     mysqld,
-    ['--no-defaults', '--initialize-insecure', `--datadir=${mysqlData}`],
+    [
+      '--no-defaults',
+      ...mysqldUserArguments,
+      '--initialize-insecure',
+      `--datadir=${mysqlData}`,
+    ],
     { encoding: 'utf8' },
   );
   if (initialized.status !== 0) {
@@ -726,6 +731,7 @@ try {
     mysqld,
     [
       '--no-defaults',
+      ...mysqldUserArguments,
       `--datadir=${mysqlData}`,
       `--socket=${mysqlSocket}`,
       `--port=${mysqlPort}`,
@@ -1588,7 +1594,7 @@ try {
       throw new Error(`Managed Turn ended with ${terminal.event.type}`);
     }
     if (
-      runtimeDelayMs > 0 &&
+      runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs &&
       firstModel.event.sequence >= runtimeReady.event.sequence
     ) {
       throw new Error('First model event did not precede Runtime readiness');
