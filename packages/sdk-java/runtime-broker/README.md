@@ -9,10 +9,12 @@ adapters.
 
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
-intent, and fails ambiguous dispatch outcomes as `UNKNOWN`. A persisted
-`READY` binding is never reused by a new process without explicit adoption or
-reconciliation; this core currently fails closed when it has no process-local
-attestation for that binding.
+intent, and fails ambiguous dispatch outcomes as `UNKNOWN`.
+`reconcileExecution` asks the original Runtime about an `UNKNOWN` execution
+and settles it only on that Runtime's terminal answer; it never replays the
+call. A persisted `READY` binding is never reused by a new process without
+explicit adoption or reconciliation; this core currently fails closed when it
+has no process-local attestation for that binding.
 
 The module ships one local process provider, `LocalProcessRuntimeProvisioner`,
 which starts the merged Managed Runtime worker and adopts it only after
