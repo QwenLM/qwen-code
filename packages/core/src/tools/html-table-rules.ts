@@ -4,8 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * The rule shape these tables need. A structural stand-in for turndown's own
+ * types, the way web-fetch.ts describes its converter, so this module imports
+ * nothing from turndown while the five rules are still checked, tag names
+ * included.
+ */
+interface TableRule {
+  filter: keyof HTMLElementTagNameMap | Array<keyof HTMLElementTagNameMap>;
+  replacement(content: string, node: HTMLElement): string;
+}
+
 interface TurndownLike {
-  addRule(key: string, rule: unknown): unknown;
+  addRule(key: string, rule: TableRule): unknown;
 }
 
 // HTML clamps colspan to 1..1000, and a rowspan never reaches past its table.
@@ -139,12 +150,9 @@ function escapePipes(text: string): string {
   return parts.join('|');
 }
 
-function tableOf(node: Node): HTMLElement | null {
-  let parent: Node | null = node.parentNode;
-  while (parent && parent.nodeName !== 'TABLE') {
-    parent = parent.parentNode;
-  }
-  return (parent as HTMLElement) ?? null;
+/** The nearest table around a row, cell or caption; never the node itself. */
+function tableOf(node: Element): Element | null {
+  return node.parentElement?.closest('table') ?? null;
 }
 
 interface TableGrid {
@@ -270,10 +278,8 @@ function layOut(
       }
       column += across;
     }
-    // `column` is the width the row emits cells for. Trailing slots a rowspan
-    // from above still claims widen the table, and become right-side padding.
+    // `column` is the width the row emits cells for.
     widths.push(column);
-    free();
     width = Math.max(width, column);
   }
 

@@ -225,6 +225,37 @@ describe('addTableRules', () => {
     ]);
   });
 
+  it('holds every column of a cell that spans both ways', () => {
+    const html =
+      '<table><tr><th>A</th><th>B</th><th>C</th></tr>' +
+      '<tr><td colspan="2" rowspan="2">x</td><td>1</td></tr>' +
+      '<tr><td>2</td></tr></table>';
+
+    expect(tableRows(service(true).turndown(html))).toEqual([
+      ['A', 'B', 'C'],
+      ['---', '---', '---'],
+      ['x', '', '1'],
+      ['', '', '2'],
+    ]);
+  });
+
+  it('keeps a nested table out of the grid of the table around it', () => {
+    // Counted in the outer grid, the four inner cells made the outer table
+    // four columns wide.
+    const inner =
+      '<table><tr><td>i</td><td>j</td><td>k</td><td>l</td></tr></table>';
+    const html =
+      '<table><tr><th>A</th><th>B</th></tr>' +
+      `<tr><td>1</td><td>${inner}</td></tr>` +
+      '<tr><td>2</td><td>3</td></tr></table>';
+
+    const rows = tableRows(service(true).turndown(html));
+
+    expect(rows[0]).toEqual(['A', 'B']);
+    expect(rows[1]).toEqual(['---', '---']);
+    expect(rows[rows.length - 1]).toEqual(['2', '3']);
+  });
+
   it('reads colspan="0" as one column', () => {
     // HTML5 dropped colspan="0"; a browser reports colSpan === 1 for it.
     const html =
