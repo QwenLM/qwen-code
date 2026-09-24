@@ -20,8 +20,12 @@ const foreignUrl = args.includes('--foreign-url');
 const probeArg = args.find((arg) => arg.startsWith('--probe='));
 const probePath = probeArg ? probeArg.slice('--probe='.length) : '';
 if (args.includes('--big-ready')) {
-  process.stdout.write(`${'a'.repeat(40 * 1024)}\n`);
-  process.exit(1);
+  // Never finish the line: only the broker's 32 KiB bound can end the read
+  // before its 30 s ready timeout. The broker kills this process on
+  // rejection; the exit below only bounds an orphan.
+  process.stdout.write('a'.repeat(40 * 1024));
+  setTimeout(() => process.exit(1), 60_000);
+  await new Promise(() => {});
 }
 if (chatty) {
   // Mirror the real worker: a stdout write failure is fatal.
