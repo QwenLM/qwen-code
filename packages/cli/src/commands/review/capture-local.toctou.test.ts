@@ -17,20 +17,52 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
+  mkdirSync,
   realpathSync,
+  symlinkSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const stderrLines: string[] = [];
+/** What the handler's `catch` printed — the refusal line of a failed round. */
+const handlerErrors: string[] = [];
+/** Runs on every stderr line — a seam to act mid-run, after a given line. */
+let onStderr: ((line: string) => void) | undefined;
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn((line: string) => {
     stderrLines.push(line);
+    onStderr?.(line);
   }),
-  writeStderrLineSafe: vi.fn(),
+  writeStderrLineSafe: vi.fn((line: string) => {
+    handlerErrors.push(line);
+  }),
 }));
+
+/** When set, the candidate's atomic write fails — a full disk, a refusal. */
+let failCandidateWrite = false;
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/atomicFileWrite.js',
+  async (importOriginal) => {
+    const real =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/atomicFileWrite.js')
+      >();
+    return {
+      ...real,
+      atomicWriteFileSync: vi.fn(
+        (...args: Parameters<typeof real.atomicWriteFileSync>) => {
+          if (failCandidateWrite && String(args[0]).includes('candidate')) {
+            throw new Error('ENOSPC: no space left on device');
+          }
+          return real.atomicWriteFileSync(...args);
+        },
+      ),
+    };
+  },
+);
 
 const captures: Array<{ diff: Buffer }> = [];
 /**
@@ -71,15 +103,28 @@ vi.mock('./lib/local-diff.js', async (importOriginal) => {
   };
 });
 
+import { cacheCommitCommand } from './cache-commit.js';
 import { captureLocalCommand } from './capture-local.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  isLedgerOnlyCandidate,
+  isolateHostGitConfig,
+} from './lib/test-utils.js';
 
 let repo: string;
 let cwd: string;
 let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
+  // A candidate anchors only under a published identity, so the fixtures
+  // publish one.
+  failCandidateWrite = false;
+  onStderr = undefined;
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
+  handlerErrors.length = 0;
   captures.length = 0;
   hashPasses.length = 0;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-toctou-')));
@@ -98,9 +143,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();
+  process.exitCode = undefined;
 });
 
 const DIFF_A = Buffer.from(
@@ -125,29 +174,28 @@ function report(): { incremental?: unknown; diffPath: string } {
   };
 }
 
-describe('capture-local — TOCTOU candidate withholding', () => {
-  it('a tree that moved between capture and hash withholds the candidate, out loud', () => {
+describe('capture-local — TOCTOU anchor withholding', () => {
+  it('a tree that moved between capture and hash writes no anchor, out loud', () => {
     captures.push(
       { diff: DIFF_A },
       { diff: Buffer.from('changed mid-hash\n') },
     );
     run();
     expect(
-      existsSync(
+      isLedgerOnlyCandidate(
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(stderrLines.join('\n')).toContain(
       'working tree changed while the capture was being hashed',
     );
   });
 
-  it('a withhold REMOVES an earlier candidate left at the stable path', () => {
+  it('a withhold REPLACES an earlier anchored candidate left at the stable path', () => {
     // The candidate path is stable per target: round A's candidate still
-    // sits there when round B withholds, and round B's plan still publishes
-    // `cacheCandidatePath` — so Step 8 read the stale file and promoted
-    // round A's anchor merged with round B's ledger. The withhold must
-    // leave the published path actually ABSENT.
+    // sits there when round B withholds, and round B's plan publishes
+    // `cacheCandidatePath` — so Step 8 would promote round A's anchor merged
+    // with round B's ledger. The ledger-only candidate must REPLACE it.
     captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
     run();
     expect(
@@ -155,6 +203,11 @@ describe('capture-local — TOCTOU candidate withholding', () => {
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
       ),
     ).toBe(true);
+    expect(
+      isLedgerOnlyCandidate(
+        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(false);
 
     // Round B: the tree moves under the hash pass — the withhold path.
     captures.push(
@@ -163,10 +216,10 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     );
     run();
     expect(
-      existsSync(
+      isLedgerOnlyCandidate(
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('a moved tree refuses THIS round\u2019s scoping too, not just the candidate', () => {
@@ -262,10 +315,10 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     );
     run();
     expect(
-      existsSync(
+      isLedgerOnlyCandidate(
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(stderrLines.join('\n')).toContain(
       'working tree changed while the capture was being hashed',
     );
@@ -289,10 +342,10 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     hashPasses.push({ 'a.ts': '100644:oid-B1' }, { 'a.ts': '100644:oid-B0' });
     run();
     expect(
-      existsSync(
+      isLedgerOnlyCandidate(
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(stderrLines.join('\n')).toContain(
       'working tree changed while the capture was being hashed',
     );
@@ -306,6 +359,183 @@ describe('capture-local — TOCTOU candidate withholding', () => {
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
       ),
     ).toBe(true);
-    expect(stderrLines.join('\n')).not.toContain('candidate is withheld');
+    expect(
+      isLedgerOnlyCandidate(
+        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(false);
+    expect(stderrLines.join('\n')).not.toContain('findings ledger only');
+  });
+});
+
+describe('capture-local — the unanchored candidate is announced with its own state id', () => {
+  it('publishes the ledger-only candidate and replaces a stale file (#12657)', () => {
+    // A local round's ledger has no other home, so the plan announces the
+    // candidate — but it must be THIS round's ledger-only one, never an
+    // earlier round's anchor left at the stable path, and its state id must
+    // sit outside the anchored namespace so a concurrent anchored round's
+    // file can never pass `--state-id` for it.
+    const stale = join(
+      repo,
+      '.qwen/tmp/qwen-review-local-cache-candidate.json',
+    );
+    // PLANT an earlier round's candidate: without it the removal assertion
+    // passes even when the removal itself is deleted.
+    mkdirSync(join(repo, '.qwen/tmp'), { recursive: true });
+    writeFileSync(
+      stale,
+      JSON.stringify({ v: 1, target: 'local', stale: true }),
+    );
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from('moved mid-hash\n') });
+    run();
+    const plan = JSON.parse(
+      readFileSync(join(repo, 'plan.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(plan['cacheCandidatePath']).toBeTruthy();
+    expect(isLedgerOnlyCandidate(stale)).toBe(true);
+    expect(String(plan['cacheCandidateStateId'])).toMatch(/^ledger-/);
+    expect(
+      (JSON.parse(readFileSync(stale, 'utf8')) as Record<string, unknown>)[
+        'ledgerOnly'
+      ],
+    ).toBe('the working tree changed while the capture was being hashed');
+    expect(
+      (JSON.parse(readFileSync(stale, 'utf8')) as Record<string, unknown>)[
+        'stateId'
+      ],
+    ).toBe(plan['cacheCandidateStateId']);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a symlinked `.qwen/tmp` is refused before the withhold branch can remove through it',
+    () => {
+      // The removal side of the redirected-scratch-directory threat: a link
+      // to a directory holding the deterministic candidate name, and a
+      // withhold that would have deleted the VICTIM file. The round is
+      // refused at the directory, before the capture — so the victim is
+      // intact, no plan is written, and the removal guard below the write
+      // is the second line, not the first.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      const planted = join(victim, 'qwen-review-local-cache-candidate.json');
+      writeFileSync(planted, 'ORIGINAL');
+      mkdirSync(join(repo, '.qwen'), { recursive: true });
+      symlinkSync(victim, join(repo, '.qwen/tmp'));
+      try {
+        captures.push(
+          { diff: DIFF_A },
+          { diff: Buffer.from('moved mid-hash\n') },
+        );
+        // The handler reports a refusal rather than throwing it: one line,
+        // exit 1 — a runtime refusal, not the usage class.
+        expect(() => run()).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(handlerErrors.join('\n')).toMatch(
+          /^capture-local: .*tmp is a symbolic link/s,
+        );
+        expect(readFileSync(planted, 'utf8')).toBe('ORIGINAL');
+        expect(existsSync(join(repo, 'plan.json'))).toBe(false);
+      } finally {
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('announces the path when the candidate IS written', () => {
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
+    run();
+    const plan = JSON.parse(
+      readFileSync(join(repo, 'plan.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(plan['cacheCandidatePath']).toContain('cache-candidate.json');
+  });
+});
+
+describe('capture-local — the ledger-only candidate at its edges (#12657)', () => {
+  const CANDIDATE = () =>
+    join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json');
+  const plan = () =>
+    JSON.parse(readFileSync(join(repo, 'plan.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+
+  it('binds anchored and ledger-only rounds apart, in both directions', () => {
+    // Same content, two rounds racing on the stable path: neither's plan may
+    // promote the other's file, or an anchor rides a ledger nobody paired it
+    // with (or a ledger-only round's verdict rides a foreign anchor).
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
+    run();
+    const anchoredId = String(plan()['cacheCandidateStateId']);
+    const anchoredFile = readFileSync(CANDIDATE(), 'utf8');
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from('moved mid-hash\n') });
+    run();
+    const ledgerId = String(plan()['cacheCandidateStateId']);
+    expect(ledgerId).toBe(`ledger-${anchoredId}`);
+
+    const ledger = join(repo, '.qwen/tmp/ledger.json');
+    writeFileSync(ledger, JSON.stringify({ round: 1, findings: [] }));
+    const promote = (stateId: string) =>
+      (cacheCommitCommand.handler as (argv: unknown) => void)({
+        candidate: CANDIDATE(),
+        ledger,
+        out: join(repo, '.qwen/review-cache/local.json'),
+        stateId,
+      });
+    // The ledger-only file is on disk: the anchored round's id is refused.
+    expect(() => promote(anchoredId)).toThrow(/stateId/);
+    // The anchored file is back: the ledger-only round's id is refused.
+    writeFileSync(CANDIDATE(), anchoredFile);
+    expect(() => promote(ledgerId)).toThrow(/stateId/);
+  });
+
+  it('publishes no path for a ledger-only round with no chunks', () => {
+    // SKILL.md's 0-chunk WARNING shapes end without a verdict. Published,
+    // the path would let a Step 8 that ran anyway overwrite the previous
+    // round's open Criticals with an empty ledger.
+    captures.push({ diff: Buffer.alloc(0) }, { diff: Buffer.from(DIFF_A) });
+    run();
+    const p = plan();
+    expect(p['chunks']).toEqual([]);
+    expect('cacheCandidatePath' in p).toBe(false);
+    expect('cacheCandidateStateId' in p).toBe(false);
+    // …and the stable path holds nothing, said out loud.
+    expect(existsSync(CANDIDATE())).toBe(false);
+    expect(stderrLines.join('\n')).toContain(
+      'the ledger-only cache candidate is not published',
+    );
+  });
+
+  it('leaves a concurrent round\u2019s candidate alone when withdrawing its own', () => {
+    // The withdrawal runs after the scoping work, so a same-target round can
+    // write its own candidate at the stable path in between. Written right
+    // after this round's reason line — between our write and our removal.
+    const foreign = JSON.stringify({ v: 1, stateId: 'someone-else' });
+    // Once: the 0-chunk WARNING later repeats the phrase, AFTER the
+    // withdrawal, and a second write there would restore what a wrong
+    // removal deleted.
+    let planted = false;
+    onStderr = (line) => {
+      if (!planted && line.includes('working tree changed')) {
+        planted = true;
+        writeFileSync(CANDIDATE(), foreign);
+      }
+    };
+    captures.push({ diff: Buffer.alloc(0) }, { diff: Buffer.from(DIFF_A) });
+    run();
+    expect('cacheCandidatePath' in plan()).toBe(false);
+    expect(readFileSync(CANDIDATE(), 'utf8')).toBe(foreign);
+  });
+
+  it('a failed write publishes nothing, removes the stale file, and says the ledger is lost', () => {
+    mkdirSync(join(repo, '.qwen/tmp'), { recursive: true });
+    writeFileSync(CANDIDATE(), JSON.stringify({ v: 1, stale: true }));
+    failCandidateWrite = true;
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from('moved mid-hash\n') });
+    run();
+    expect('cacheCandidatePath' in plan()).toBe(false);
+    expect(existsSync(CANDIDATE())).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).toContain('findings ledger will not persist');
+    expect(err).not.toContain('findings ledger only, no anchor');
   });
 });

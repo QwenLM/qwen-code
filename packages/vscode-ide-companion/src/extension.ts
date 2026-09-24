@@ -244,46 +244,95 @@ export async function activate(context: vscode.ExtensionContext) {
         diffManager.cancelDiff(doc.uri);
       }
     }),
+    // Closing a permission diff by hand is not a vote. Tell every chat surface
+    // so the one holding that request can show the edit again instead of
+    // leaving the user to approve or reject something they can no longer look
+    // at (#10557).
+    diffManager.onDidClosePermissionDiff(({ permissionRequestId }) => {
+      try {
+        const providers =
+          chatProviderRegistry?.getPermissionAwareProviders() ?? [];
+        if (providers.length === 0) {
+          // The only silent drop on the dismissal chain with nothing below it:
+          // no chat surface is listening, so the request's owner never learns
+          // the diff is gone. Log it the way the open direction does (#10557).
+          logger.log(
+            '[Extension] Permission diff closed, no permission-aware provider to notify',
+          );
+          return;
+        }
+        for (const provider of providers) {
+          provider.notifyPermissionDiffClosed(permissionRequestId);
+        }
+      } catch (err) {
+        // A disposed or half-torn-down surface must not take down the emitter
+        // and with it every other surface's notification, the same way the
+        // vote commands above guard their fan-out.
+        logger.warn('[Extension] Permission diff close fan-out failed:', err);
+      }
+    }),
     vscode.workspace.registerTextDocumentContentProvider(
       DIFF_SCHEME,
       diffContentProvider,
     ),
-    (vscode.commands.registerCommand('qwen.diff.accept', (uri?: vscode.Uri) => {
-      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-      if (docUri && docUri.scheme === DIFF_SCHEME) {
-        diffManager.acceptDiff(docUri);
-      }
-      // If any chat surface is requesting permission, actively select allow (prefer once)
-      try {
-        for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-          []) {
-          if (provider?.hasPendingPermission()) {
-            provider.respondToPendingPermission('allow');
-          }
+    vscode.commands.registerCommand(
+      'qwen.diff.accept',
+      async (uri?: vscode.Uri) => {
+        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        const isManagedDiff =
+          docUri?.scheme === DIFF_SCHEME && diffManager.hasDiff(docUri);
+        const permissionRequestId = isManagedDiff
+          ? diffManager.getPermissionRequestId(docUri)
+          : undefined;
+        if (docUri && isManagedDiff && !permissionRequestId) {
+          await diffManager.acceptDiff(docUri);
         }
-      } catch (err) {
-        logger.warn('[Extension] Auto-allow on diff.accept failed:', err);
-      }
-      logger.log('[Extension] Diff accepted');
-    }),
-    vscode.commands.registerCommand('qwen.diff.cancel', (uri?: vscode.Uri) => {
-      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-      if (docUri && docUri.scheme === DIFF_SCHEME) {
-        diffManager.cancelDiff(docUri);
-      }
-      // If any chat surface is requesting permission, actively select reject/cancel
-      try {
-        for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-          []) {
-          if (provider?.hasPendingPermission()) {
-            provider.respondToPendingPermission('cancel');
+        // If any chat surface is requesting permission, actively select allow (prefer once)
+        try {
+          if (permissionRequestId) {
+            for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+              []) {
+              provider.respondToPendingPermission('allow', {
+                fromDiffEditor: true,
+                permissionRequestId,
+              });
+            }
           }
+        } catch (err) {
+          logger.warn('[Extension] Auto-allow on diff.accept failed:', err);
         }
-      } catch (err) {
-        logger.warn('[Extension] Auto-reject on diff.cancel failed:', err);
-      }
-      logger.log('[Extension] Diff cancelled');
-    })),
+        logger.log('[Extension] Diff accepted');
+      },
+    ),
+    vscode.commands.registerCommand(
+      'qwen.diff.cancel',
+      async (uri?: vscode.Uri) => {
+        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        const isManagedDiff =
+          docUri?.scheme === DIFF_SCHEME && diffManager.hasDiff(docUri);
+        const permissionRequestId = isManagedDiff
+          ? diffManager.getPermissionRequestId(docUri)
+          : undefined;
+        if (docUri && isManagedDiff && !permissionRequestId) {
+          await diffManager.cancelDiff(docUri);
+        }
+        // If any chat surface is requesting permission, actively select reject/cancel
+        try {
+          if (permissionRequestId) {
+            for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+              []) {
+              provider.respondToPendingPermission('cancel', {
+                fromDiffEditor: true,
+                permissionRequestId,
+              });
+            }
+          }
+        } catch (err) {
+          logger.warn('[Extension] Auto-reject on diff.cancel failed:', err);
+        }
+        logger.log('[Extension] Diff cancelled');
+      },
+    ),
     vscode.commands.registerCommand('qwen.diff.closeAll', async () => {
       try {
         await diffManager.closeAll();

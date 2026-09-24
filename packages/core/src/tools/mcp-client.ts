@@ -1530,15 +1530,10 @@ export async function connectAndDiscover(
 }
 
 /**
- * Discovers and sanitizes tools from a connected MCP client.
- * It retrieves function declarations from the client, filters out disabled tools,
- * generates valid names for them, and wraps them in `DiscoveredMCPTool` instances.
- *
- * @param mcpServerName The name of the MCP server.
- * @param mcpServerConfig The configuration for the MCP server.
- * @param mcpClient The active MCP client instance.
- * @returns A promise that resolves to an array of discovered and enabled tools.
- * @throws An error if no enabled tools are found or if the server provides invalid function declarations.
+ * Applies resource listing UI metadata (`_meta.ui`) to matching discovered tools.
+ * @param tools Discovered tools.
+ * @param resources Resources whose `_meta.ui` decorates matching tools.
+ * @returns The updated tool list.
  */
 function applyListingAppResourceUi(
   tools: DiscoveredMCPTool[],
@@ -2560,8 +2555,19 @@ export async function createTransport(
     // Windows), then apply server-specific overrides on top so that a server
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
+    const inherited = normalizePathEnvForWindows(sanitizeChildEnv(process.env));
+    // The Desktop AppImage exports its bundled Python's PYTHONHOME/PYTHONPATH
+    // globally, and a stdio MCP server's own interpreter then looks for its
+    // standard library under the AppImage mount and crashes at startup
+    // (#11718). Strip both from the inherited environment under the desktop
+    // shell only — the CLI leaves a user's own Python setup untouched, and an
+    // explicit `env` entry in the server config below still wins.
+    if (process.env['QWEN_CODE_DESKTOP'] === '1') {
+      delete inherited['PYTHONHOME'];
+      delete inherited['PYTHONPATH'];
+    }
     const env = {
-      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+      ...inherited,
       ...(mcpServerConfig.env || {}),
     };
 

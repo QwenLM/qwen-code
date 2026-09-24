@@ -574,6 +574,53 @@ describe('debugLogger', () => {
       vi.mocked(fs.readlink).mockResolvedValue('');
     });
 
+    it('recovers from the streak cap when a later alias update succeeds', async () => {
+      // The cap must behave like a circuit breaker, not a latch: a capped
+      // streak still attempts on a session CHANGE (different dedup key), and
+      // one success re-opens retries for subsequent transient failures.
+      resetDebugLoggingState();
+      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink)
+        // A's three failures reach the cap.
+        .mockRejectedValueOnce(new Error('ENOENT'))
+        .mockRejectedValueOnce(new Error('ENOENT'))
+        .mockRejectedValueOnce(new Error('ENOENT'))
+        // B's attempt succeeds and resets the streak.
+        .mockResolvedValueOnce('6ba7b810-9dad-11d1-80b4-00c04fd430c8.txt')
+        // A's post-recovery failure must retry again.
+        .mockRejectedValue(new Error('ENOENT'));
+
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+      const logger = createDebugLogger();
+      logger.info('A failure 2');
+      await vi.runAllTimersAsync();
+      logger.info('A failure 3');
+      await vi.runAllTimersAsync();
+      logger.info('A at cap — sticky');
+      await vi.runAllTimersAsync();
+      expect(fs.symlink).toHaveBeenCalledTimes(3);
+
+      // Session change: the capped streak must not block B's attempt.
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B succeeds');
+      });
+      await vi.runAllTimersAsync();
+      expect(fs.symlink).toHaveBeenCalledTimes(4);
+
+      // B's success re-opened the breaker: A's next failure retries again.
+      logger.info('A fails after recovery');
+      await vi.runAllTimersAsync();
+      logger.info('A retries');
+      await vi.runAllTimersAsync();
+      expect(fs.symlink).toHaveBeenCalledTimes(6);
+
+      // Restore the factory defaults for later tests.
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue('');
+    });
+
     it('does not let a stale failed update clear a newer session marker', async () => {
       resetDebugLoggingState();
       vi.clearAllMocks();

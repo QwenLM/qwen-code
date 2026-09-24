@@ -221,6 +221,21 @@ describe('systemInfo', () => {
   });
 
   describe('getSystemInfo', () => {
+    it('reports the Config policy and skips host binary probes', async () => {
+      mockContext.services.config!.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({
+          requestedBackend: 'bwrap',
+          filesystem: 'read-only',
+          network: 'closed',
+        });
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.sandboxEnv).toBe(
+        'tools / bwrap → bwrap / read-only / command network: closed',
+      );
+      expect(mockedExecFile).not.toHaveBeenCalled();
+    });
+
     it('should collect all system information', async () => {
       // Ensure SANDBOX is not set for this test
       delete process.env['SANDBOX'];
@@ -280,6 +295,30 @@ describe('systemInfo', () => {
       expect(extendedInfo.memoryUsage).toBeDefined();
       expect(extendedInfo.memoryUsage).toMatch(/\d+\.\d+ (KB|MB|GB)/);
       expect(extendedInfo.baseUrl).toBe('https://api.openai.com');
+    });
+
+    it('should include provider diagnostics for OpenAI Responses auth', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      const { AuthType } = await import('@qwen-code/qwen-code-core');
+      vi.mocked(mockContext.services.config!.getAuthType).mockReturnValue(
+        AuthType.USE_OPENAI_RESPONSES,
+      );
+      vi.mocked(
+        mockContext.services.config!.getContentGeneratorConfig,
+      ).mockReturnValue({
+        model: 'gpt-5',
+        baseUrl: 'https://api.example.com',
+        apiKeyEnvKey: 'OPENAI_API_KEY',
+      });
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.baseUrl).toBe('https://api.example.com');
+      expect(extendedInfo.apiKeyEnvKey).toBe('OPENAI_API_KEY');
     });
 
     it('should use sandbox env without prefix for bug reports', async () => {

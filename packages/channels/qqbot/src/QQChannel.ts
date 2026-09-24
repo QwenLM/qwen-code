@@ -224,7 +224,6 @@ export class QQChannel extends ChannelBase {
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
-  private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
   /**
    * Sessions with a prompt turn currently in flight, tracked via
@@ -232,9 +231,7 @@ export class QQChannel extends ChannelBase {
    *
    * This is the discriminator the cron textChunk handler uses to tell
    * "prompt-response chunk" from "cron/non-prompt chunk". streamState
-   * cannot serve that role (#6094): it is never populated when
-   * blockStreaming is 'on' (onResponseChunk early-returns), so prompt
-   * chunks leak into cronBuffer; and a residual entry from a finished
+   * cannot serve that role (#6094): a residual entry from a finished
    * turn's unsettled flush silently blocks cron delivery. This set is
    * reliable because ChannelBase always brackets a prompt turn with
    * onPromptStart and onPromptEnd (onPromptEnd runs in the prompt path's
@@ -297,7 +294,6 @@ export class QQChannel extends ChannelBase {
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
-    this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -332,9 +328,8 @@ export class QQChannel extends ChannelBase {
       // Sessions with an active prompt turn belong to the prompt path
       // (which delivers the response itself) — never capture their chunks
       // into the cron buffer. Keyed on activePromptSessions rather than
-      // streamState (#6094): streamState is empty under blockStreaming:'on'
-      // (prompt chunks would be duplicated) and can linger after a turn
-      // ends (cron chunks would be silently dropped).
+      // streamState (#6094): streamState can linger after a turn ends,
+      // which would silently drop cron chunks.
       if (this.activePromptSessions.has(sessionId)) return;
       let entry = this.cronBuffer.get(sessionId);
       if (!entry) {
@@ -1109,7 +1104,6 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    if (this.blockStreaming) return;
     let state = this.streamState.get(sessionId);
     if (!state) {
       const messageId =
@@ -2447,8 +2441,9 @@ export class QQChannel extends ChannelBase {
     isSlash: boolean;
     safeName: string;
     cleanText: string;
+    commandText: string;
+    routeText: string;
     text: string;
-    displayText: string;
     senderName: string;
   } | null {
     // Keep identity values out of the display-name position. In particular,
@@ -2469,10 +2464,6 @@ export class QQChannel extends ChannelBase {
       )
       .trim();
     // Strip trusted tags that could be forged by users
-    const safeContent = content
-      .replace(/\[atMention=[^\]]*]/g, '')
-      .replace(/\[botOpenId:[^\]]*]/g, '')
-      .replace(/\[bot]/g, '');
     const safeCleanText = cleanText
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
@@ -2496,7 +2487,9 @@ export class QQChannel extends ChannelBase {
 
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
-    const isSlash = effectiveIsAtBot && safeCleanText.startsWith('/');
+    const rawCommandText = safeCleanText.replace(/<@[^>]{1,64}>/g, '').trim();
+    const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
+    const commandText = sanitizePromptText(rawCommandText);
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
     // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
@@ -2562,18 +2555,22 @@ export class QQChannel extends ChannelBase {
       : senderIdentity
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
+    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
+    const body = sanitizePromptText(
+      this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
+    );
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
-    const displayText = sanitizePromptText(safeDisplayText);
+      : `${head}${body}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
       isSlash,
       safeName,
       cleanText,
+      commandText,
+      routeText: sanitizePromptText(safeDisplayText),
       text,
-      displayText,
       senderName,
     };
   }
@@ -2615,21 +2612,24 @@ export class QQChannel extends ChannelBase {
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
     const isSlash = safeContent.startsWith('/');
-    const text = isSlash
-      ? sanitizePromptText(safeContent)
-      : `[atMention=true] [${safeName}]: ${sanitizePromptText(safeContent)}`;
+    const body = sanitizePromptText(safeContent);
+    const text =
+      isSlash || this.config.messageRoutes
+        ? body
+        : `[atMention=true] [${safeName}]: ${body}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
       senderName,
       chatId,
       text,
-      displayText: sanitizePromptText(safeContent),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -2677,7 +2677,7 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, displayText, senderName, safeName, cleanText } =
+    const { isSlash, text, commandText, routeText, senderName, safeName } =
       result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
@@ -2686,7 +2686,7 @@ export class QQChannel extends ChannelBase {
 
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(commandText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -2711,13 +2711,14 @@ export class QQChannel extends ChannelBase {
       senderId,
       senderName,
       chatId,
-      text,
-      displayText,
+      text: this.config.messageRoutes ? routeText : text,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: true,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -2761,11 +2762,11 @@ export class QQChannel extends ChannelBase {
     const {
       isSlash,
       text,
-      displayText,
+      commandText,
+      routeText,
       senderName,
       isAtBot,
       safeName,
-      cleanText,
     } = result;
 
     // @-bot messages always pass through (passive reply).
@@ -2836,7 +2837,7 @@ export class QQChannel extends ChannelBase {
 
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(commandText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -2863,15 +2864,16 @@ export class QQChannel extends ChannelBase {
     this.handleInbound({
       channelName: this.name,
       chatId,
-      text,
-      displayText,
+      text: this.config.messageRoutes ? routeText : text,
       senderId,
       senderName,
       messageId: event.id,
       isGroup: true,
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
     }).catch((e) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,

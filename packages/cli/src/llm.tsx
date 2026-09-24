@@ -5,7 +5,15 @@
  */
 
 import {
+  getRelaunchEnvProvenance,
+  hasLoadedEnvironmentValues,
+} from './config/environment.js';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
+import {
   AuthType,
+  type ChatRecord,
+  computeInitialTurnFromHistory,
   type Config,
   InputFormat,
   isDebugLogFileEnabled,
@@ -19,6 +27,8 @@ import {
   createDebugLogger,
   persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -39,6 +49,7 @@ import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildEnabledSkillNamesProvider,
   loadCliConfig,
   parseArguments,
 } from './config/config.js';
@@ -52,7 +63,10 @@ import {
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import { SettingsWatcher } from './config/settingsWatcher.js';
-import { registerMcpHotReload } from './config/hot-reload.js';
+import {
+  registerMcpHotReload,
+  registerModelProvidersHotReload,
+} from './config/hot-reload.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
 import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
 import { ExtensionRefreshState } from './config/extension-refresh-state.js';
@@ -90,10 +104,12 @@ import {
 import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
+import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { initializeLlmOutputLanguage } from './i18n/languageUtils.js';
 import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
@@ -214,8 +230,9 @@ export function setupUncaughtExceptionHandler(config: Config) {
     // debugLogger.error() uses async fs.appendFile — the write would be
     // abandoned by the process.exit() below. Write synchronously instead.
     let logged = false;
+    let logPath: string | undefined;
     try {
-      const logPath = Storage.getDebugLogPath(config.getSessionId());
+      logPath = Storage.getDebugLogPath(config.getSessionId());
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.appendFileSync(logPath, line, 'utf8');
       logged = true;
@@ -238,6 +255,57 @@ export function setupUncaughtExceptionHandler(config: Config) {
     writeStderrLineSafe(
       `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${sanitizeTerminalText(error.stack ?? error.message)}`,
     );
+    // Monitors are spawned `detached` (their own process group) so the tool
+    // can group-kill them; a side effect is that they outlive this process
+    // unless something kills them first. Reap whatever is still running on
+    // the registry of the Config this handler was installed with — each ACP
+    // session builds its own Config with its own MonitorRegistry, and those
+    // per-session registries are not covered here (a daemon-wide reap needs
+    // process-wide registry tracking; deliberately follow-up work). The
+    // crashed session can never consume their terminal events, and the
+    // in-memory registry gives a resumed session no way to reattach. The
+    // SIGKILL escalation timer in the abort path cannot survive the exit
+    // below, so children ignoring SIGTERM may still leak — best-effort, and
+    // a crash handler must never throw. (On Windows the taskkill spawn is
+    // fire-and-forget for the same reason.)
+    // Snapshot the running count before abortAll: the abort path settles and
+    // prunes entries, and this summary — written synchronously, since
+    // debugLogger is async and abandoned by the exit below — is the only
+    // record distinguishing "the reap skipped it" from "signalled but the
+    // child ignored SIGTERM".
+    const monitorRegistry = config.getMonitorRegistry();
+    const reapCount = monitorRegistry.getRunning().length;
+    try {
+      monitorRegistry.abortAll({ notify: false });
+      try {
+        if (logPath) {
+          fs.appendFileSync(
+            logPath,
+            `${new Date().toISOString()} [ERROR] [STARTUP] [MONITOR_REAP] reaped=${reapCount}\n`,
+            'utf8',
+          );
+        }
+      } catch {
+        // Nothing safe left to do.
+      }
+    } catch (reapError) {
+      // A failed reap means monitors still leak — the one distinguishing
+      // fact this path can produce. The crash lines above were written
+      // before the reap ran, so record the failure separately.
+      try {
+        if (logPath) {
+          const detail =
+            reapError instanceof Error ? reapError.stack : String(reapError);
+          fs.appendFileSync(
+            logPath,
+            `${new Date().toISOString()} [ERROR] [STARTUP] [MONITOR_REAP_FAILED] ${detail ?? ''}\n`,
+            'utf8',
+          );
+        }
+      } catch {
+        // Nothing safe left to do.
+      }
+    }
     process.exit(1);
   };
   process.on('uncaughtException', uncaughtExceptionHandler);
@@ -352,6 +420,13 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
 export async function main() {
   profileCheckpoint('main_entry');
+  // First thing, before any child can be spawned: an inherited messaging
+  // address/token names the ANCESTOR's inbox, and handing that pair on
+  // would let this session's hooks inject into the wrong session. Modes
+  // that never bind an inbox — feature off, headless `-p`, a registration
+  // that never completes — reach no other scrub, so it happens here for
+  // all of them. A session that does bind one re-exports its own pair.
+  clearInheritedPeerMessagingEnv();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -372,6 +447,14 @@ export async function main() {
 
   const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  // Captured beside the private parent capability so a Conversations
+  // provenance marker can never be introduced or withdrawn later by settings
+  // or environment files; acceptance below additionally requires ACP mode and
+  // the capability.
+  const conversationsRuntimeMarkerSeen =
+    process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+    PRIVATE_CONVERSATIONS_RUNTIME_ENABLE;
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
   const privateExternalToolGuard =
     process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
     EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
@@ -403,10 +486,20 @@ export async function main() {
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
+  const conversationsRuntimeProvenance =
+    isAcpMode &&
+    privateAcpParentCapability !== undefined &&
+    conversationsRuntimeMarkerSeen;
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
           [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability,
+          ...(conversationsRuntimeProvenance
+            ? {
+                [PRIVATE_CONVERSATIONS_RUNTIME_ENV]:
+                  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+              }
+            : {}),
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
@@ -441,6 +534,26 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings.merged,
+    argv,
+  );
+  if (
+    executionSandboxSettings &&
+    (argv.acp ||
+      argv.experimentalAcp ||
+      argv.worktree !== undefined ||
+      argv.experimentalLsp ||
+      argv.mcpConfig ||
+      argv.extensions?.length)
+  ) {
+    throw new Error(
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP or extensions.',
+    );
+  }
+  // A user-level .env or settings reload may have reintroduced the marker;
+  // the accepted value already lives in immutable local state.
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -448,7 +561,7 @@ export async function main() {
     process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
     process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
   }
-  await cleanupCheckpoints();
+  if (!executionSandboxSettings) await cleanupCheckpoints();
   // Performance checkpoint
   profileCheckpoint('after_load_settings');
 
@@ -507,13 +620,27 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
-  } else {
+  } else if (
+    process.stdout.isTTY &&
+    // A TTY-attached run can still be non-interactive by output format
+    // (config.ts Priority 2: json/stream-json together with a query or
+    // prompt, unless `-i` forces interactive per Priority 1). Such a run
+    // renders no theme colors either, so it must not pay for the probe.
+    !(
+      !argv.promptInteractive &&
+      (argv.outputFormat === 'json' || argv.outputFormat === 'stream-json') &&
+      !!(argv.query || argv.prompt)
+    )
+  ) {
     // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
     // so non-interactive runs and any pre-render UI (e.g. the --resume
     // session picker) already have a sensible theme. The interactive
     // startup block refines this with an OSC 11 probe later on, which is
     // intentionally deferred to run inside the early-capture window so
     // terminal response bytes cannot leak into the TUI input.
+    // Piped output (headless automation, `--output-format json`) renders no
+    // theme colors, so it keeps the default theme instead of blocking the
+    // event loop on the macOS `defaults read` probe.
     themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 
@@ -540,15 +667,19 @@ export async function main() {
       argv.sandboxImage ??
       process.env['QWEN_SANDBOX_IMAGE'] ??
       settings.merged.tools?.sandboxImage;
-    if (
-      sandboxConfig &&
-      sandboxConfig.command !== 'sandbox-exec' &&
-      customSandboxImage
-    ) {
+    // Only the container backends run an image with its own in-process updater;
+    // `sandbox-exec` confines this process in place, so neither the
+    // image handoff nor the host-update relaunch marker applies to them.
+    // Narrowed to the config (not a boolean) so `.image` stays type-safe below.
+    const containerSandbox =
+      sandboxConfig?.command === 'docker' || sandboxConfig?.command === 'podman'
+        ? sandboxConfig
+        : undefined;
+    if (containerSandbox?.image && customSandboxImage) {
       // Images built before this handoff protocol must be rebuilt; they cannot
       // be made to skip their in-process updater from the host.
-      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = sandboxConfig.image;
-    } else if (sandboxConfig && sandboxConfig.command !== 'sandbox-exec') {
+      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = containerSandbox.image;
+    } else if (containerSandbox) {
       const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
       process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
         Boolean(
@@ -572,10 +703,16 @@ export async function main() {
         [],
         // Pass separated hooks for proper source attribution
         {
+          systemHooks: settings.getSystemHooks(),
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
         buildDisabledSkillNamesProvider(settings),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildEnabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -665,6 +802,12 @@ export async function main() {
           )
         : injectStdinIntoArgs(process.argv, stdinData);
 
+      // The seatbelt spawn merges `{ ...process.env, ...childEnv }`, so the
+      // marker must not be sitting in process.env at the handoff: auth
+      // validation above re-runs the environment load, and the accepted
+      // provenance travels in `privateAcpChildEnv`, which is spread last.
+      delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
+
       await relaunchOnExitCode(
         () =>
           start_sandbox(
@@ -680,12 +823,20 @@ export async function main() {
       );
       process.exit(0);
     } else {
-      // Relaunch app so we always have a child process that can be internally
-      // restarted if needed.
+      // Interactive and streaming modes keep a supervisor for in-session
+      // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: privateAcpChildEnv,
+        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
+        environmentChangedSinceBoot: hasLoadedEnvironmentValues(),
         onUpdateRelaunch,
+        replaceProcess:
+          !isAcpMode &&
+          argv.inputFormat !== InputFormat.STREAM_JSON &&
+          !argv.promptInteractive &&
+          !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+          argv.jsonFd === undefined &&
+          Boolean(argv.prompt),
       });
     }
   }
@@ -868,12 +1019,16 @@ export async function main() {
       argv.extensions,
       // Pass separated hooks for proper source attribution
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
+      undefined,
+      undefined,
+      buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
@@ -891,7 +1046,7 @@ export async function main() {
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
-    if (settingsWatcher) {
+    if (settingsWatcher && !config.getShellExecutionSandbox?.()) {
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,
@@ -899,13 +1054,25 @@ export async function main() {
         config.getTopTierMcpServers(),
       );
       registerCleanup(disposeMcpHotReload);
+
+      // Same plumbing for modelProviders edits (#10568): reload the model
+      // registry in place so `/model` picks up new providers without a
+      // session restart.
+      const disposeModelProvidersHotReload = registerModelProvidersHotReload(
+        settingsWatcher,
+        settings,
+        config,
+      );
+      registerCleanup(disposeModelProvidersHotReload);
     }
 
     registerLspHotReload(config, registerCleanup);
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
-      isBareMode(argv.bare) || config.isSafeMode()
+      isBareMode(argv.bare) ||
+      config.isSafeMode() ||
+      config.getShellExecutionSandbox?.()
         ? undefined
         : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
     extensionFileWatcher?.startWatching();
@@ -991,6 +1158,10 @@ export async function main() {
       } catch {
         // Best-effort — don't block shutdown
       }
+    });
+
+    registerCleanup(() => config.shutdownExecutionEnvironments(), {
+      first: true,
     });
 
     // Register cleanup for MCP clients as early as possible
@@ -1089,6 +1260,7 @@ export async function main() {
           privateParentCapability: isAcpMode
             ? privateAcpParentCapability
             : undefined,
+          conversationsRuntimeProvenance,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
@@ -1101,6 +1273,7 @@ export async function main() {
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.
+        prepareFileWatchersForProcessExit();
         await runExitCleanup();
       }
       process.exit(0);
@@ -1146,6 +1319,12 @@ export async function main() {
     profileCheckpoint('before_render');
 
     if (config.isInteractive()) {
+      // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      const interruptedWorkflowsNotice =
+        await getInterruptedWorkflowRunsNotice(config);
+      if (interruptedWorkflowsNotice) {
+        startupWarnings.push(interruptedWorkflowsNotice);
+      }
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
       // runNonInteractive's main/drain loops. In TUI mode the same call
@@ -1176,6 +1355,62 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
+      // selects the experimental backend only on a runtime that can drive it;
+      // every other case — including a failed load or boot of the entry —
+      // falls through to ink, which stays the default renderer. The try/catch
+      // is load-bearing: importing the entry evaluates opentui modules whose
+      // module scope touches the native FFI, which can still throw on a
+      // runtime that passed the version gate.
+      const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
+        './ui/opentui/renderer-selection.js'
+      );
+      const selection = selectTuiRenderer(
+        undefined,
+        undefined,
+        process.env,
+        config.getScreenReader(),
+      );
+      if (selection.renderer === 'opentui') {
+        try {
+          const { startOpenTuiUI } = await import(
+            './ui/opentui/start-opentui-ui.js'
+          );
+          const started = await startOpenTuiUI(
+            config,
+            settings,
+            startupWarnings,
+            process.cwd(),
+            initializationResult!,
+            {
+              postRenderConnectIde: deferIdeConnection,
+              extensionRefreshState,
+            },
+          );
+          if (started) {
+            clearCorruptionEnvVars();
+            return;
+          }
+          // The entry returned false: it already warned on stderr. Strict
+          // mode turns that fallback into a loud failure too, so an E2E
+          // renderer-matrix leg cannot pass green on ink.
+          if (selection.strict) {
+            throw new Error(
+              `OpenTUI failed to start and ${TUI_RENDERER_STRICT_ENV_VAR} forbids the ink fallback`,
+            );
+          }
+        } catch (err) {
+          if (selection.strict) {
+            throw err;
+          }
+          debugLogger.error('OpenTUI boot failed; falling back to ink:', err);
+          writeStderrLine(
+            `Warning: OpenTUI failed to start — ${err instanceof Error ? err.message : String(err)} (falling back to ink)`,
+          );
+        }
+      } else {
+        debugLogger.debug(`TUI renderer: ${selection.reason}`);
+      }
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,
@@ -1308,7 +1543,10 @@ export async function main() {
       settings,
     );
 
-    const prompt_id = createNonInteractivePromptId(config.getSessionId());
+    const prompt_id = createNonInteractivePromptId(
+      config.getSessionId(),
+      config.getResumedSessionData?.()?.conversation.messages,
+    );
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
@@ -1382,8 +1620,33 @@ export async function main() {
   }
 }
 
-export function createNonInteractivePromptId(sessionId: string): string {
-  return `${sessionId}########0`;
+/**
+ * Mints the single promptId a headless `-p` run uses for its one turn.
+ *
+ * A run that resumes nothing keeps the historical `########0`. A resumed one
+ * (`--resume` / `--continue`) reuses the previous session's id, so without a
+ * seed every process mints `########0` again and one transcript ends up with
+ * several turns under a single promptId — the key #9466's rewind mapping
+ * anchors on, and the `prompt_id` persisted on `ui_telemetry` records, which
+ * is itself what the next resume reads back to seed from.
+ *
+ * Seed from the highest turn the transcript claims and continue past it, the
+ * same rule `Session.getNextPromptId` applies, so the two headless paths
+ * cannot drift.
+ */
+export function createNonInteractivePromptId(
+  sessionId: string,
+  resumedRecords?: readonly ChatRecord[],
+): string {
+  // -1 for a run that resumes nothing, so the shared `+ 1` still yields the
+  // historical `########0`. Seeding from the helper's own 0 instead would
+  // re-mint a turn the transcript already claims in the case where it returns
+  // 0 for a non-empty transcript: highest claimed turn 0, and no record with
+  // non-blank user text for its fallback to count.
+  const lastTurn = resumedRecords?.length
+    ? computeInitialTurnFromHistory(resumedRecords, sessionId)
+    : -1;
+  return `${sessionId}########${lastTurn + 1}`;
 }
 
 /**

@@ -51,6 +51,7 @@ import { dreamCommand } from '../ui/commands/dreamCommand.js';
 import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
+import { outputStyleCommand } from '../ui/commands/output-style-command.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
@@ -100,7 +101,18 @@ export class BuiltinCommandLoader implements ICommandLoader {
     // prevent ALL built-in commands from loading.
     let resolvedIdeCommand: SlashCommand | null = null;
     try {
-      resolvedIdeCommand = await ideCommand();
+      // `/ide` is interactive-only, and building it walks the process tree
+      // with one `ps` per ancestor; headless and ACP runs would filter it out
+      // after paying for that on the way to their first request. This saves
+      // nothing when `ideMode` is on — `connectIdeForStartup` performs the
+      // same walk earlier, on the awaited startup path.
+      if (
+        !this.config?.getExecutionEnvironment?.() &&
+        !this.config?.getShellExecutionSandbox?.() &&
+        this.config?.isInteractive?.() !== false
+      ) {
+        resolvedIdeCommand = await ideCommand();
+      }
     } catch (error) {
       builtinDebugLogger.warn(
         'Failed to load IDE command:',
@@ -159,6 +171,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       goalCommand,
       memoryCommand,
       modelCommand,
+      outputStyleCommand,
       rememberCommand,
       planCommand,
       permissionsCommand,

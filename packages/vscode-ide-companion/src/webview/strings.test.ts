@@ -23,7 +23,6 @@ describe('readLanguage', () => {
     document.documentElement.lang = '';
     expect(readLanguage()).toBe('en');
   });
-
 });
 
 describe('createChromeStrings', () => {

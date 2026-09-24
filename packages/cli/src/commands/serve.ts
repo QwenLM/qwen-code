@@ -213,6 +213,7 @@ interface ServeArgs {
   web: boolean;
   open: boolean;
   'open-with-auth': boolean;
+  'token-qr'?: boolean;
   'local-control': boolean;
   'local-control-address'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -233,6 +234,7 @@ interface ServeArgs {
   'session-restore-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
+  'session-prompt-settled-close-grace-ms'?: number;
   'permission-response-timeout-ms'?: number;
   'external-tool-guard-mode': 'off' | 'required';
   'external-tool-guard-endpoint'?: string;
@@ -269,12 +271,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates, and still refuses when no token source resolved; an empty value is rejected as operator error.',
       })
       .option('token', {
         type: 'string',
         description:
-          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var.',
+          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var; a non-loopback bind with neither generates an ephemeral token at startup, while loopback keeps the trusted tokenless mode unless --require-auth is set.',
       })
       .option('max-sessions', {
         type: 'number',
@@ -329,7 +331,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Refuse to start without a bearer token, even on loopback. ' +
           'Hardens the loopback developer default for shared dev hosts / CI ' +
           'runners / multi-tenant workstations where any local user can hit ' +
-          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          '127.0.0.1. Requires --token, QWEN_SERVER_TOKEN, or --open-with-auth ' +
+          '(which installs its own generated loopback token); on non-loopback ' +
+          'binds the generated ephemeral token also satisfies it, so the ' +
+          'no-configured-secret fail-fast is loopback-only. /health also ' +
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
       })
@@ -387,6 +392,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Open the Web Shell with bearer authentication on loopback. Reuse --token or QWEN_SERVER_TOKEN, or generate a temporary 256-bit token and deliver it in the URL fragment. In headless environments, print the fragment URL for manual opening.',
+      })
+      .option('token-qr', {
+        type: 'boolean',
+        description:
+          'Print the token-bearing QR even when stdout is captured (not an interactive terminal) and the bearer is an operator-supplied (stable) token, which is withheld by default to keep stable credentials out of collected logs. Enable only when the log pipeline is as trusted as the daemon host. Can also be set via the serve.tokenQr setting (user, system, and system-defaults scopes only); the flag wins when passed. --no-token-qr suppresses the startup quickstart token QR for that run on every quickstart path — interactive terminal and generated token included. It does not govern the Local Control pairing QR, which --local-control prints by design.',
       })
       .option('local-control', {
         type: 'boolean',
@@ -483,8 +493,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
-          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'HTTP bridge mode: attempt to preheat the primary `qwen --acp` child; ' +
+          'trusted secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
       .option('memory-budget-mb', {
@@ -493,8 +503,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Total memory budget in MB for the daemon process tree. When unset, ' +
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
-          'way. It does not change how any `qwen --acp` child is sized; the ' +
-          'one consumer today is adaptive live-journal growth: one ' +
+          'way. In `admit` and `enforce` modes it determines managed ACP ' +
+          'child capacity; `enforce` also applies the modeled per-child ' +
+          'old-space ceiling. It also sizes one ' +
           'daemon-wide pool of ' +
           JOURNAL_GROWTH_POOL_FRACTION * 100 +
           '% of the effective budget (capped at ' +
@@ -520,7 +531,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'either mode.',
       })
       .option('child-heap-mode', {
-        choices: ['off', 'observe'] as const,
+        choices: ['off', 'observe', 'admit', 'enforce'] as const,
         default: 'observe' as const,
         description:
           'Whether the daemon models a per-child heap partition of the ' +
@@ -532,7 +543,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'refusal count of 0 does NOT mean the partition would be safe to ' +
           'apply; children still run on the much larger host-derived ' +
           'ceiling, so a workload needing more old space than the modeled ' +
-          'ceiling looks healthy here.',
+          'ceiling looks healthy here. `admit` rejects starts past the modeled ' +
+          'process limit but keeps the existing child heap arguments. ' +
+          'Experimental `enforce` also applies the fixed modeled old-space ' +
+          'ceiling to each managed child; it does not cap total process RSS.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -558,7 +572,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('allow-origin', {
         type: 'string',
         array: true,
-        description: 'Cross-origin allowlist for browser webui clients.',
+        description: 'Cross-origin allowlist for browser clients.',
       })
       .option('allow-private-auth-base-url', {
         type: 'boolean',
@@ -582,8 +596,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('channel-idle-timeout-ms', {
         type: 'number',
         description:
-          'Milliseconds to keep ACP child alive after last session closes. ' +
-          '0 or unset = immediate kill (default).',
+          'Compatibility auto-reap delay for an idle workspace ACP child. ' +
+          '0 or unset = reap after work drains; keepalive windows may extend it (default).',
       })
       .option('initialize-timeout-ms', {
         type: 'number',
@@ -607,6 +621,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Idle timeout before a disconnected session is reaped (ms). ' +
           '0 = disabled. Default: 1800000 (30 min).',
+      })
+      .option('session-prompt-settled-close-grace-ms', {
+        type: 'number',
+        description:
+          'Grace period after a prompt settles before an otherwise-idle ' +
+          'session may be auto-closed (ms). Poll-based SSE clients use this ' +
+          'window to reconnect without triggering a session rebuild. ' +
+          '0 = disabled (immediate close). Default: 0.',
       })
       .option('permission-response-timeout-ms', {
         type: 'number',
@@ -870,6 +892,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        ...(argv['token-qr'] !== undefined
+          ? { tokenQr: argv['token-qr'] }
+          : {}),
         ...(argv['tls-cert'] !== undefined
           ? { tlsCert: argv['tls-cert'] }
           : {}),
@@ -907,6 +932,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['session-idle-timeout-ms'] !== undefined
           ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
+          : {}),
+        ...(argv['session-prompt-settled-close-grace-ms'] !== undefined
+          ? {
+              sessionPromptSettledCloseGraceMs:
+                argv['session-prompt-settled-close-grace-ms'],
+            }
           : {}),
         ...(argv['permission-response-timeout-ms'] !== undefined
           ? {

@@ -56,10 +56,15 @@ interface CreateServeFeaturesDeps {
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
   realtimeVoiceEnabled: () => boolean;
+  realtimeVoiceWebEnabled?: () => boolean;
   standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable: () => boolean;
+  workspaceRuntimeStopAvailable?: () => boolean;
+  localPathOpenAvailable?: boolean;
+  localTerminalOpenAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
@@ -93,10 +98,15 @@ export function createServeFeatures(
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
     realtimeVoiceEnabled,
+    realtimeVoiceWebEnabled,
     standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
     nativeDirectoryPickerAvailable,
+    workspaceRuntimeAvailable,
+    workspaceRuntimeStopAvailable,
+    localPathOpenAvailable,
+    localTerminalOpenAvailable,
     workspaceTrustHotReloadAvailable,
   } = deps;
   const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
@@ -151,9 +161,15 @@ export function createServeFeatures(
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
         nativeDirectoryPickerAvailable,
+        workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
+        workspaceRuntimeStopAvailable:
+          workspaceRuntimeStopAvailable?.() === true,
+        localPathOpenAvailable,
+        localTerminalOpenAvailable,
         workspaceTrustHotReloadAvailable,
         acpHttpEnabled: currentAcpHttpEnabled,
         realtimeVoiceEnabled: realtimeVoiceEnabled(),
+        realtimeVoiceWebEnabled: realtimeVoiceWebEnabled?.() === true,
         standaloneSessionsAvailable: standaloneSessionsAvailable?.() === true,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,

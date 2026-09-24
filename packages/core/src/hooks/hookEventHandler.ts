@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay } from '../utils/shell-result.js';
 import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
 import { getHookMatcherTarget } from './hookPlanner.js';
@@ -57,13 +58,139 @@ import type {
   BackgroundTaskInfo,
   CronJobInfo,
 } from './types.js';
-import { HookPhase, PermissionMode } from './types.js';
+import {
+  createHookOutput,
+  HookPhase,
+  isBlockingHookOutput,
+  PermissionMode,
+  PreToolUseHookOutput,
+} from './types.js';
+import {
+  MessageBusType,
+  type HookProgress,
+  type HookProgressOutcome,
+} from '../confirmation-bus/types.js';
+import { approvalModeToPermissionMode } from './permission-mode.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
 import type { CronJob } from '../services/cronScheduler.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+/**
+ * Serial for {@link HookProgress.invocationId}. Module level, so ids are unique
+ * across every HookEventHandler and every MessageBus in this process.
+ */
+let hookInvocationSerial = 0;
+
+/** Longest prompt text used as a hook's display name. */
+const HOOK_DISPLAY_NAME_MAX_LENGTH = 80;
+
+/**
+ * Maps one hook's execution result to the outcome reported on the bus. A hook
+ * that exits cleanly but decides to block or deny is reported as blocked, so a
+ * consumer does not have to re-parse the output.
+ */
+function toProgressOutcome(
+  eventName: HookEventName,
+  result: HookExecutionResult,
+): { outcome: HookProgressOutcome; blockedReason?: string } {
+  switch (result.outcome) {
+    case 'timeout':
+      return { outcome: 'timeout' };
+    case 'cancelled':
+      return { outcome: 'cancelled' };
+    case 'blocking':
+      return {
+        outcome: 'blocked',
+        blockedReason: blockedReasonOf(eventName, result),
+      };
+    case 'non_blocking_error':
+      return { outcome: 'error' };
+    case 'success':
+    case undefined:
+      break;
+    default: {
+      const exhaustive: never = result.outcome;
+      return exhaustive;
+    }
+  }
+  if (!result.success) {
+    return { outcome: 'error' };
+  }
+  if (result.output && isBlockingHookOutput(eventName, result.output)) {
+    return {
+      outcome: 'blocked',
+      blockedReason: blockedReasonOf(eventName, result),
+    };
+  }
+  return { outcome: 'success' };
+}
+
+function blockedReasonOf(
+  eventName: HookEventName,
+  result: HookExecutionResult,
+): string | undefined {
+  if (!result.output) {
+    return undefined;
+  }
+  const output = createHookOutput(eventName, result.output);
+  const reason =
+    output instanceof PreToolUseHookOutput
+      ? output.getPermissionDecisionReason()
+      : output.stopReason || output.reason;
+  return reason || undefined;
+}
+
+function getHookDisplayName(config: HookConfig): string {
+  if (config.name) {
+    return config.name;
+  }
+  switch (config.type) {
+    case 'command':
+      return config.command || 'command hook';
+    case 'http':
+      return config.url || 'http hook';
+    case 'function':
+      return config.id || 'function hook';
+    case 'prompt': {
+      const prompt = config.prompt.replace(/\s+/g, ' ').trim();
+      return prompt.length > HOOK_DISPLAY_NAME_MAX_LENGTH
+        ? `${prompt.slice(0, HOOK_DISPLAY_NAME_MAX_LENGTH - 1)}…`
+        : prompt || 'prompt hook';
+    }
+    default:
+      return 'hook';
+  }
+}
+
+function normalizeHookDisplayResponse(
+  toolName: string,
+  response: Record<string, unknown>,
+  displayKey: 'returnDisplay' | 'result_display',
+): Record<string, unknown> {
+  const display = response[displayKey];
+  if (toolName === ToolNames.SHELL && isShellResultDisplay(display)) {
+    return { ...response, [displayKey]: display.text };
+  }
+  if (
+    toolName === ToolNames.ASK_USER_QUESTION &&
+    display !== null &&
+    typeof display === 'object' &&
+    'type' in display &&
+    display.type === 'ask_user_question_answers' &&
+    'text' in display &&
+    typeof display.text === 'string'
+  ) {
+    // Preserve the existing hook contract without changing the stored UI result.
+    return { ...response, [displayKey]: display.text };
+  }
+  return response;
+}
 
 /**
  * Hook event bus that coordinates hook execution across the system
@@ -403,15 +530,21 @@ export class HookEventHandler {
     permissionMode: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseInput = {
       ...this.createBaseInput(HookEventName.PostToolUse),
       permission_mode: permissionMode,
       tool_name: toolName,
       tool_input: toolInput,
-      tool_response: toolResponse,
+      tool_response: normalizeHookDisplayResponse(
+        toolName,
+        toolResponse,
+        'returnDisplay',
+      ),
       tool_use_id: toolUseId,
       ...(tool_call_id && { tool_call_id }),
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -438,6 +571,7 @@ export class HookEventHandler {
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseFailureInput = {
       ...this.createBaseInput(HookEventName.PostToolUseFailure),
@@ -448,6 +582,7 @@ export class HookEventHandler {
       tool_input: toolInput,
       error: errorMessage,
       is_interrupt: isInterrupt,
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -499,7 +634,18 @@ export class HookEventHandler {
     const input: PostToolBatchInput = {
       ...this.createBaseInput(HookEventName.PostToolBatch),
       permission_mode: permissionMode,
-      tool_calls: toolCalls,
+      tool_calls: toolCalls.map((call) =>
+        call.tool_response
+          ? {
+              ...call,
+              tool_response: normalizeHookDisplayResponse(
+                call.tool_name,
+                call.tool_response,
+                'result_display',
+              ),
+            }
+          : call,
+      ),
     };
 
     return this.executeHooks(
@@ -568,10 +714,9 @@ export class HookEventHandler {
   }
 
   /**
-   * Fire a PermissionDenied event for tool calls rejected before manual
-   * permission handling starts. Unlike PermissionRequest, this event does not
-   * ask hooks to approve or modify the call; it reports AUTO-mode denials that
-   * happen before any permission dialog would be shown.
+   * Fire a PermissionDenied event for AUTO-mode classifier denials. Unlike
+   * PermissionRequest, this event does not ask hooks to approve or modify the
+   * call. A threshold fallback may still show a manual dialog afterward.
    */
   async firePermissionDeniedEvent(
     toolName: string,
@@ -807,7 +952,7 @@ export class HookEventHandler {
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
       const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
-      const sessionHooks =
+      const registeredSessionHooks =
         sessionId !== undefined
           ? matcherTarget === undefined
             ? this.sessionHooksManager.getHooksForEvent(sessionId, eventName)
@@ -817,6 +962,25 @@ export class HookEventHandler {
                 matcherTarget,
               )
           : [];
+      // The second side of the project-skill trust gate: a hook registered
+      // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
+      // only while the folder is STILL trusted. `Config.isTrustedFolder()`
+      // is live under an IDE connection, so a revocation mid-session
+      // silences the hook at its next event without a restart or any
+      // per-skill unregistration; trust granted again lets it fire. Only
+      // consulted when a gated entry is present — nothing else changes.
+      const sessionHooks = registeredSessionHooks.some(
+        (entry) => entry.trustGated === true,
+      )
+        ? registeredSessionHooks.filter(
+            (entry) => !entry.trustGated || this.config.isTrustedFolder(),
+          )
+        : registeredSessionHooks;
+      if (sessionHooks.length !== registeredSessionHooks.length) {
+        debugLogger.debug(
+          `Skipping ${registeredSessionHooks.length - sessionHooks.length} project-skill hook(s) for ${eventName}: the folder is no longer trusted`,
+        );
+      }
 
       // Merge hook configs from registry plan and session hooks
       const registryHookConfigs = plan?.hookConfigs || [];
@@ -847,18 +1011,71 @@ export class HookEventHandler {
       };
 
       const totalHooks = allHookConfigs.length;
+      // One id per hook in this batch, allocated at start and reused at end, so
+      // a consumer pairs the two even when several batches of the same event
+      // overlap (tool calls run up to QWEN_CODE_MAX_TOOL_CONCURRENCY at a time).
+      const invocationIds = allHookConfigs.map(
+        () => `hook-${++hookInvocationSerial}`,
+      );
+      // Read once per batch so a hook's start and end carry the same value by
+      // construction rather than by relying on async context propagation.
+      // Same source as the hook input's `agent_id`.
+      const agentId = getCurrentAgentId() ?? undefined;
       const onHookStart = (config: HookConfig, index: number) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
           `Hook ${hookName} started for event ${eventName} (${index + 1}/${totalHooks})`,
         );
+        this.publishHookProgress({
+          phase: 'start',
+          eventName,
+          hookName: getHookDisplayName(config),
+          hookType: config.type,
+          invocationId: invocationIds[index],
+          ...(agentId ? { agentId } : {}),
+          index,
+          total: totalHooks,
+          ...(config.statusMessage
+            ? { statusMessage: config.statusMessage }
+            : {}),
+        });
       };
 
-      const onHookEnd = (config: HookConfig, result: HookExecutionResult) => {
+      const onHookEnd = (
+        config: HookConfig,
+        result: HookExecutionResult,
+        index: number,
+      ) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
           `Hook ${hookName} ended for event ${eventName}: ${result.success ? 'success' : 'failed'}`,
         );
+        const { outcome, blockedReason } = toProgressOutcome(eventName, result);
+        const systemMessage = result.output?.systemMessage;
+        this.publishHookProgress({
+          phase: 'end',
+          eventName,
+          hookName: getHookDisplayName(config),
+          hookType: config.type,
+          invocationId: invocationIds[index],
+          ...(agentId ? { agentId } : {}),
+          index,
+          total: totalHooks,
+          ...(config.statusMessage
+            ? { statusMessage: config.statusMessage }
+            : {}),
+          durationMs: result.duration,
+          outcome,
+          ...(result.error ? { error: result.error.message } : {}),
+          ...(result.exitCode !== undefined
+            ? { exitCode: result.exitCode }
+            : {}),
+          ...(typeof systemMessage === 'string' && systemMessage
+            ? { systemMessage }
+            : {}),
+          ...(blockedReason ? { blockedReason } : {}),
+          ...(result.isAsync === true ? { async: true } : {}),
+        });
       };
 
       // Execute hooks according to the merged strategy
@@ -909,6 +1126,38 @@ export class HookEventHandler {
   }
 
   /**
+   * Publishes a hook's start or end on the MessageBus. Progress is only
+   * observed, so a missing bus or a failing subscriber never affects the hook
+   * or its result.
+   *
+   * Every execution publishes exactly one start and one end; nothing here
+   * throttles or drops events, even for a high-frequency event such as
+   * MessageDisplay:
+   * - dropping any end would break the start/end pairing by `invocationId`
+   *   and leave a consumer's status line hanging forever;
+   * - how to present a frequent event differs per surface (fold it in the
+   *   terminal UI, dedupe it in headless output, keep all of it for
+   *   telemetry), so that choice belongs to the consumer;
+   * - Claude Code likewise dedupes hook progress in its display layer, not
+   *   at the publisher.
+   */
+  private publishHookProgress(message: Omit<HookProgress, 'type'>): void {
+    const bus = this.config.getMessageBus?.();
+    if (!bus) {
+      return;
+    }
+    try {
+      void Promise.resolve(
+        bus.publish({ type: MessageBusType.HOOK_PROGRESS, ...message }),
+      ).catch((error: unknown) => {
+        debugLogger.debug(`Failed to publish hook progress: ${error}`);
+      });
+    } catch (error) {
+      debugLogger.debug(`Failed to publish hook progress: ${error}`);
+    }
+  }
+
+  /**
    * Create base hook input with common fields
    */
   private createBaseInput(eventName: HookEventName): HookInput {
@@ -916,6 +1165,9 @@ export class HookEventHandler {
     const transcriptPath = this.config.getTranscriptPath();
     const sourceType = this.config.getSessionSourceType();
     const sourceId = this.config.getSessionSourceId();
+
+    const agentId = getCurrentAgentId();
+    const promptId = promptIdContext.getStore();
 
     return {
       session_id: this.config.getSessionId(),
@@ -925,6 +1177,12 @@ export class HookEventHandler {
       cwd: this.config.getWorkingDir(),
       hook_event_name: eventName,
       timestamp: new Date().toISOString(),
+      // Tool and subagent events spread this first and set their own mode.
+      permission_mode: approvalModeToPermissionMode(
+        this.config.getApprovalMode(),
+      ),
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(promptId ? { prompt_id: promptId } : {}),
     };
   }
 

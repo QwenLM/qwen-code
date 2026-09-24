@@ -7,8 +7,12 @@
 import { describe, expect, it } from 'vitest';
 import { SettingScope } from './settings.js';
 import {
+  buildHigherDisabled,
   computeWorkspaceSkillListUpdates,
+  lookupSkillDisablement,
   resolveSkillSettings,
+  type SkillDisablement,
+  skillToggleBlockForName,
   updateWorkspaceSkillSettingLists,
 } from './skill-settings.js';
 
@@ -18,12 +22,14 @@ function fakeSettings({
   systemDefaults = {},
   user = {},
   workspace = {},
+  trusted = true,
 }: {
   merged: Record<string, unknown>;
   system?: Record<string, unknown>;
   systemDefaults?: Record<string, unknown>;
   user?: Record<string, unknown>;
   workspace?: Record<string, unknown>;
+  trusted?: boolean;
 }) {
   const byScope = {
     [SettingScope.System]: system,
@@ -33,6 +39,7 @@ function fakeSettings({
   };
   return {
     merged: { skills: merged },
+    isTrusted: trusted,
     forScope: (scope: SettingScope) => ({
       settings: { skills: byScope[scope] },
     }),
@@ -40,6 +47,36 @@ function fakeSettings({
 }
 
 describe('resolveSkillSettings', () => {
+  it('makes Browser Use and Computer Use available by default', () => {
+    const result = resolveSkillSettings(fakeSettings({ merged: {} }));
+
+    expect(result.disabledNames).toEqual(new Set());
+    expect(result.disablements.has('browser-use')).toBe(false);
+    expect(result.disabledNames.has('computer-use')).toBe(false);
+  });
+
+  it('lets the skills picker enable, disable, and re-enable Browser Use', () => {
+    let lists = { disabled: [] as string[], enabled: [] as string[] };
+    for (const enabled of [true, false, true]) {
+      lists = updateWorkspaceSkillSettingLists(lists, 'browser-use', enabled);
+      const result = resolveSkillSettings(fakeSettings({ merged: lists }));
+      expect(result.disabledNames.has('browser-use')).toBe(!enabled);
+    }
+  });
+
+  it('keeps a hard Browser Use disable authoritative over an explicit opt-in', () => {
+    const result = resolveSkillSettings(
+      fakeSettings({
+        merged: { disabled: ['browser-use'], enabled: [' BROWSER-USE '] },
+        user: { disabled: ['browser-use'] },
+      }),
+    );
+    expect(result.disablements.get('browser-use')).toEqual({
+      reason: 'hard',
+      lockedScope: 'user',
+    });
+  });
+
   it('lets a workspace opt-in override a user default case-insensitively', () => {
     const result = resolveSkillSettings(
       fakeSettings({
@@ -99,7 +136,6 @@ describe('updateWorkspaceSkillSettingLists', () => {
         { disabled: ['orphan'], enabled: [] },
         'Review',
         true,
-        true,
       ),
     ).toEqual({ disabled: ['orphan'], enabled: ['Review'] });
   });
@@ -113,20 +149,18 @@ describe('updateWorkspaceSkillSettingLists', () => {
         },
         'review',
         false,
-        true,
       ),
     ).toEqual({ disabled: ['orphan', 'review'], enabled: ['other'] });
   });
 
-  it('does not add a redundant opt-in for an ordinary skill', () => {
+  it('records an explicit opt-in even without a default disable', () => {
     expect(
       updateWorkspaceSkillSettingLists(
         { disabled: ['review'], enabled: [] },
         'review',
         true,
-        false,
       ),
-    ).toEqual({ disabled: [], enabled: [] });
+    ).toEqual({ disabled: [], enabled: ['review'] });
   });
 
   it('does not reorder an already canonical hard disable', () => {
@@ -134,7 +168,6 @@ describe('updateWorkspaceSkillSettingLists', () => {
       updateWorkspaceSkillSettingLists(
         { disabled: ['review', 'orphan'], enabled: [] },
         'review',
-        false,
         false,
       ),
     ).toEqual({ disabled: ['review', 'orphan'], enabled: [] });
@@ -154,14 +187,14 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'review',
           wasEnabled: false,
           isEnabled: true,
-          defaultDisabled: false,
         },
       ],
     );
 
     expect(result.disabled).toEqual(['orphan']);
     expect(result.disabledChanged).toBe(true);
-    expect(result.enabledChanged).toBe(false);
+    expect(result.enabled).toEqual(['review']);
+    expect(result.enabledChanged).toBe(true);
   });
 
   it('preserves workspace declarations that duplicate higher-scope entries', () => {
@@ -173,7 +206,6 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'review',
           wasEnabled: false,
           isEnabled: true,
-          defaultDisabled: false,
         },
       ],
     );
@@ -191,7 +223,6 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'review',
           wasEnabled: true,
           isEnabled: true,
-          defaultDisabled: false,
         },
       ],
     );
@@ -210,12 +241,240 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'Review',
           wasEnabled: false,
           isEnabled: true,
-          defaultDisabled: true,
         },
       ],
     );
 
     expect(result.enabled).toEqual(['Review']);
     expect(result.enabledChanged).toBe(true);
+  });
+
+  it('writes the registry name and clears only that entry', () => {
+    const updates = computeWorkspaceSkillListUpdates(
+      ['pdf', 'other'],
+      [],
+      [{ name: 'rust:pdf', wasEnabled: false, isEnabled: true }],
+    );
+    // `pdf` is a different skill's legacy entry and must survive untouched:
+    // enabling one skill can never clear a broader disablement.
+    expect(updates.disabled).toEqual(['pdf', 'other']);
+    expect(updates.enabled).toEqual(['rust:pdf']);
+  });
+
+  it('disabling writes the registry name, not the authored one', () => {
+    const updates = computeWorkspaceSkillListUpdates(
+      [],
+      ['rust:pdf'],
+      [{ name: 'rust:pdf', wasEnabled: true, isEnabled: false }],
+    );
+
+    expect(updates.disabled).toEqual(['rust:pdf']);
+    expect(updates.enabled).toEqual([]);
+  });
+});
+
+describe('lookupSkillDisablement', () => {
+  const hard: SkillDisablement = { reason: 'hard', lockedScope: 'user' };
+  const byAuthored = new Map<string, SkillDisablement>([['pdf', hard]]);
+  const byRegistry = new Map<string, SkillDisablement>([['rust:pdf', hard]]);
+  const prefixed = { name: 'rust:pdf', authoredName: 'pdf' };
+
+  it('finds the entry written under the registry name', () => {
+    expect(lookupSkillDisablement(byRegistry, prefixed)).toBe(hard);
+  });
+
+  it('finds the legacy entry written under the authored name', () => {
+    expect(lookupSkillDisablement(byAuthored, prefixed)).toBe(hard);
+  });
+
+  it('prefers the registry-name entry when both spellings are present', () => {
+    const entries = new Map<string, SkillDisablement>([
+      ['pdf', { reason: 'default' }],
+      ['rust:pdf', hard],
+    ]);
+
+    expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
+  });
+
+  it('prefers the hard entry even when the registry spelling carries the weaker one', () => {
+    const entries = new Map<string, SkillDisablement>([
+      ['rust:pdf', { reason: 'default' }],
+      ['pdf', hard],
+    ]);
+
+    expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
+  });
+
+  it('prefers the hard entry carrying lockedScope over an unlocked one', () => {
+    // The registry-spelling hard block carries no attribution; the authored
+    // one names the scope the user has to edit, so wire surfaces must surface
+    // it even though the registry spelling is walked first.
+    const entries = new Map<string, SkillDisablement>([
+      ['rust:pdf', { reason: 'hard' }],
+      ['pdf', hard],
+    ]);
+
+    expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
+  });
+
+  it('normalizes the skill name it is given', () => {
+    expect(
+      lookupSkillDisablement(byRegistry, {
+        name: ' RUST:Pdf ',
+        authoredName: ' PDF ',
+      }),
+    ).toBe(hard);
+  });
+
+  it('finds the registry-name entry for a skill with no authored spelling', () => {
+    // Registration omits `authoredName` whenever the two spellings coincide, so
+    // the registry name is the only key this lookup can be handed.
+    expect(lookupSkillDisablement(byRegistry, { name: 'rust:pdf' })).toBe(hard);
+  });
+
+  it('does not match another extension skill that shares the authored name', () => {
+    // A restriction on `other:pdf` says nothing about `rust:pdf`: the authored
+    // spelling is shared across extensions, the registry identity is not.
+    expect(
+      lookupSkillDisablement(
+        new Map<string, SkillDisablement>([['other:pdf', hard]]),
+        { name: 'rust:pdf', authoredName: 'pdf' },
+      ),
+    ).toBeUndefined();
+  });
+
+  it('still matches a skill that has one spelling', () => {
+    expect(
+      lookupSkillDisablement(
+        new Map<string, SkillDisablement>([['review', hard]]),
+        { name: 'review' },
+      ),
+    ).toBe(hard);
+    expect(
+      lookupSkillDisablement(byAuthored, { name: 'review', authoredName: '' }),
+    ).toBeUndefined();
+  });
+});
+
+describe('buildHigherDisabled', () => {
+  const prefixed = { name: 'demo:pdf', authoredName: 'pdf' };
+
+  it('blocks a qualified grant on the legacy bare workspace entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { disabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'pdf',
+      scope: 'Workspace',
+    });
+    expect(higher.lockedIn(prefixed)).toBe("skills.disabled 'pdf' (Workspace)");
+  });
+
+  it('lets the toggle remove an exact-spelling workspace entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { disabled: ['demo:pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+    expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('blames the higher scope holding the entry over the workspace one', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        user: { disabled: ['pdf'] },
+        workspace: { disabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'pdf',
+      scope: 'User',
+    });
+    expect(higher.lockedIn(prefixed)).toBe('User');
+  });
+
+  it('blocks a grant a bare defaultDisabled entry keeps gating', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { defaultDisabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'default',
+      list: 'defaultDisabled',
+      entry: 'pdf',
+      scope: 'Workspace',
+    });
+  });
+
+  it('lets an identical-spelling grant cancel the defaultDisabled entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { defaultDisabled: ['pdf'], enabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+  });
+
+  it('ignores workspace entries while the workspace is untrusted', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { disabled: ['pdf'] },
+        trusted: false,
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+  });
+});
+
+describe('skillToggleBlockForName', () => {
+  it('uses the resolved authored spelling for a qualified request name', () => {
+    expect(
+      skillToggleBlockForName(
+        fakeSettings({
+          merged: {},
+          workspace: { disabled: ['pdf'] },
+        }),
+        { name: 'demo:pdf', authoredName: 'pdf' },
+      ),
+    ).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'pdf',
+      scope: 'Workspace',
+    });
+  });
+
+  it('reads a bare request name as its single spelling', () => {
+    // A qualified entry blocks only its own registry identity; a bare
+    // request must not inherit aliases it cannot name.
+    expect(
+      skillToggleBlockForName(
+        fakeSettings({
+          merged: {},
+          workspace: { disabled: ['demo:pdf'] },
+        }),
+        { name: 'pdf' },
+      ),
+    ).toBeNull();
   });
 });

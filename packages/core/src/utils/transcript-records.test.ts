@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  isTranscriptConversationRecord,
   prepareTranscriptRecords,
   projectUserTranscriptForDisplay,
   wrapUserPromptSubmitContext,
@@ -29,6 +30,44 @@ function record(
 }
 
 describe('prepareTranscriptRecords', () => {
+  it.each([undefined, '', '   ', 42, { id: 'untrusted' }])(
+    'keeps user content readable without a valid daemonPromptId (%j)',
+    (daemonPromptId) => {
+      const prepared = prepareTranscriptRecords([
+        record('user', null, { daemonPromptId }),
+      ]);
+      expect(prepared.records).toHaveLength(1);
+      expect(prepared.records[0]?.daemonPromptId).toBeUndefined();
+      expect(prepared.records[0]?.message?.parts).toEqual([{ text: 'user' }]);
+    },
+  );
+
+  it('preserves distinct daemon identities for identical user prompts', () => {
+    const message = { role: 'user', parts: [{ text: 'same prompt' }] };
+    const prepared = prepareTranscriptRecords([
+      record('first', null, { message, daemonPromptId: 'daemon-first' }),
+      record('second', 'first', { message, daemonPromptId: 'daemon-second' }),
+    ]);
+    expect(prepared.records.map((item) => item.daemonPromptId)).toEqual([
+      'daemon-first',
+      'daemon-second',
+    ]);
+  });
+
+  it('does not use CLI history prompt IDs as daemon identities', () => {
+    const prepared = prepareTranscriptRecords([
+      record('legacy', null, { promptId: 'session-1########42' }),
+      record('current', 'legacy', {
+        promptId: 'session-1########43',
+        daemonPromptId: 'daemon-current',
+      }),
+    ]);
+    expect(prepared.records.map((item) => item.daemonPromptId)).toEqual([
+      undefined,
+      'daemon-current',
+    ]);
+  });
+
   it('selects the active branch and aggregates same-uuid fragments', () => {
     const prepared = prepareTranscriptRecords([
       record('root', null),
@@ -135,6 +174,42 @@ describe('prepareTranscriptRecords', () => {
         path: 'subtype',
       }),
     );
+  });
+
+  it('accepts background completion metadata without degrading restored history', () => {
+    const prepared = prepareTranscriptRecords([
+      record('completion', null, {
+        type: 'system',
+        subtype: 'background_task_completed',
+        message: undefined,
+        systemPayload: {
+          displayText: 'Task finished',
+          backgroundTask: {
+            taskId: 'agent-1',
+            kind: 'agent',
+            status: 'completed',
+          },
+        },
+      }),
+      record('root', 'completion'),
+    ]);
+    expect(prepared.diagnostics).toEqual([]);
+  });
+
+  it('accepts Omni recall metadata without marking history incomplete', () => {
+    const prepared = prepareTranscriptRecords([
+      record('recall', null, {
+        type: 'system',
+        subtype: 'omni_recall',
+        message: undefined,
+        systemPayload: {
+          resourceIds: ['media-1'],
+          selectedEntryIds: ['entry-1'],
+        },
+      }),
+      record('root', 'recall'),
+    ]);
+    expect(prepared.diagnostics).toEqual([]);
   });
 
   it('accepts session source metadata as a known record subtype', () => {
@@ -248,6 +323,35 @@ describe('prepareTranscriptRecords', () => {
         code: 'unknown_record_or_part',
         path: 'subtype',
       }),
+    );
+  });
+
+  it.each([
+    'managed_session_header_v1',
+    'managed_session_event_v1',
+    'managed_session_commit_v1',
+  ])('keeps %s out of ordinary conversation projection', (subtype) => {
+    const managedRecord = record('managed', 'root', {
+      type: 'system',
+      subtype,
+      message: undefined,
+      systemPayload: { managedSession: {} },
+    });
+    const prepared = prepareTranscriptRecords([
+      record('root', null),
+      managedRecord,
+    ]);
+
+    expect(prepared.records.map((item) => item.uuid)).toEqual(['root']);
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'managed',
+        path: 'subtype',
+      }),
+    );
+    expect(isTranscriptConversationRecord({ type: 'system', subtype })).toBe(
+      false,
     );
   });
 

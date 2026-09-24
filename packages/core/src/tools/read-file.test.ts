@@ -17,8 +17,10 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 
@@ -103,6 +105,7 @@ describe('ReadFileTool', () => {
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
         getProjectDir: () => path.join(tempRootDir, '.project'),
+        getWorkflowRunsDir: () => path.join(tempRootDir, '.workflow-runs'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),
@@ -110,6 +113,12 @@ describe('ReadFileTool', () => {
       getTruncateToolOutputLines: () => 500,
       getContentGeneratorConfig: () => ({
         modalities: { image: true, pdf: true, audio: true, video: true },
+      }),
+      getEffectiveInputModalities: () => ({
+        image: true,
+        pdf: true,
+        audio: true,
+        video: true,
       }),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: () => false,
@@ -125,6 +134,35 @@ describe('ReadFileTool', () => {
   });
 
   describe('build', () => {
+    it('advertises audio and video support to the model', () => {
+      expect(tool.description).toContain('audio, video');
+      expect(tool.description).toContain(
+        'selected model to support the corresponding modality',
+      );
+    });
+
+    it('recomputes the schema description from live modalities', () => {
+      // The declaration the model actually receives comes from `schema`, which
+      // is recomputed on read — so it reflects the current model's modalities.
+      expect(tool.schema.description).toContain('audio, video');
+      expect(tool.schema.description).toContain('watch a video');
+    });
+
+    it('omits audio/video for a text-only model (no false clip-read promise)', () => {
+      const textOnlyConfig = {
+        getEffectiveInputModalities: () => ({ image: true, pdf: true }),
+      } as unknown as Config;
+      const textTool = new ReadFileTool(textOnlyConfig);
+      for (const desc of [textTool.description, textTool.schema.description]) {
+        expect(desc).toContain(
+          'text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files',
+        );
+        expect(desc).not.toContain('audio, video');
+        expect(desc).not.toContain('watch a video');
+        expect(desc).not.toContain('read_file on the resulting clip');
+      }
+    });
+
     it('should return an invocation for valid params (absolute path within root)', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),
@@ -251,27 +289,85 @@ describe('ReadFileTool', () => {
       },
     );
 
-    it('should reject offset or limit for notebook files', () => {
-      const params: ReadFileToolParams = {
-        file_path: path.join(tempRootDir, 'test.ipynb'),
-        offset: 0,
-        limit: 10,
-      };
+    it.each([
+      { offset: 0 },
+      { offset: -1 },
+      { limit: 10 },
+      { limit: 0 },
+      { limit: -1 },
+      { offset: 0, limit: 2000, pages: '' },
+      { pages: '1' },
+      { pages: 'invalid' },
+    ])('gives a nullable notebook retry for %j', (pagination) => {
+      const filePath = path.join(tempRootDir, 'test "quoted".IPYNB');
+      const error = tool.validateToolParams({
+        file_path: filePath,
+        ...pagination,
+      });
 
-      expect(() => tool.build(params)).toThrow(
-        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      expect(error).toContain(
+        "For Jupyter notebooks (.ipynb), omit 'offset', 'limit', and 'pages' or set them to null.",
       );
+      const retry = JSON.parse(error!.split('Retry with: ')[1]);
+      expect(retry).toEqual({
+        file_path: filePath,
+        offset: null,
+        limit: null,
+        pages: null,
+      });
+      expect(() => tool.build(retry)).not.toThrow();
     });
 
-    it('should reject pages for notebook files', () => {
-      const params: ReadFileToolParams = {
+    it.each([
+      { offset: null },
+      { limit: null },
+      { pages: null },
+      { offset: null, limit: null, pages: null },
+    ])('normalizes nullable notebook pagination %j', (pagination) => {
+      const invocation = tool.build({
         file_path: path.join(tempRootDir, 'test.ipynb'),
-        pages: '1',
-      };
+        ...pagination,
+      });
+      expect(invocation.params.offset).toBeUndefined();
+      expect(invocation.params.limit).toBeUndefined();
+      expect(invocation.params.pages).toBeUndefined();
+      expect(invocation.getDescription()).toBe('test.ipynb');
+      expect(invocation.toolLocations()).toEqual([
+        { path: invocation.params.file_path, line: undefined },
+      ]);
+    });
 
-      expect(() => tool.build(params)).toThrow(
-        'pages is not supported for Jupyter notebook (.ipynb) files',
-      );
+    it('accepts null pagination when strict mode requires every property', () => {
+      const schema = {
+        ...(tool.schema.parametersJsonSchema as Record<string, unknown>),
+        required: ['file_path', 'offset', 'limit', 'pages'],
+        additionalProperties: false,
+      };
+      expect(
+        SchemaValidator.validate(schema, {
+          file_path: path.join(tempRootDir, 'test.ipynb'),
+          offset: null,
+          limit: null,
+          pages: null,
+        }),
+      ).toBeNull();
+      expect(
+        SchemaValidator.validate(schema, {
+          file_path: null,
+          offset: null,
+          limit: null,
+          pages: null,
+        }),
+      ).not.toBeNull();
+    });
+
+    it.each(['', '   '])('allows empty notebook pages (%j)', (pages) => {
+      expect(() =>
+        tool.build({
+          file_path: path.join(tempRootDir, 'test.ipynb'),
+          pages,
+        }),
+      ).not.toThrow();
     });
   });
 
@@ -544,7 +640,7 @@ describe('ReadFileTool', () => {
       );
     });
 
-    it('should handle image file and return appropriate content', async () => {
+    it('returns image content without tool guidance before the registry is available', async () => {
       const imagePath = path.join(tempRootDir, 'image.png');
       await sharp({
         create: {
@@ -565,9 +661,9 @@ describe('ReadFileTool', () => {
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toEqual([
         {
-          text: expect.stringMatching(
-            /Image overview: 20x10; oriented source: 20x10.*tool_search.*zoom_image.*0 to 1000/,
-          ),
+          // This suite's Config stub exposes no tool registry, so zoom_image is
+          // not reachable and the hint is withheld (#12271).
+          text: 'Image overview: 20x10; oriented source: 20x10.',
         },
         {
           inlineData: {
@@ -580,27 +676,33 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('Read image file: image.png');
     });
 
-    it('should handle PDF file and return appropriate content', async () => {
-      const pdfPath = path.join(tempRootDir, 'document.pdf');
-      // Minimal PDF header
-      const pdfHeader = Buffer.from('%PDF-1.4');
-      await fsp.writeFile(pdfPath, pdfHeader);
-      const params: ReadFileToolParams = { file_path: pdfPath };
-      const invocation = tool.build(params) as ToolInvocation<
-        ReadFileToolParams,
-        ToolResult
-      >;
+    it.each([{}, { offset: null, limit: null, pages: null }])(
+      'reads native PDF content with omitted or null pagination (%j)',
+      async (pagination) => {
+        const pdfPath = path.join(tempRootDir, 'document.pdf');
+        // Minimal PDF header
+        const pdfHeader = Buffer.from('%PDF-1.4');
+        await fsp.writeFile(pdfPath, pdfHeader);
+        const params: ReadFileToolParams = {
+          file_path: pdfPath,
+          ...pagination,
+        };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
 
-      const result = await invocation.execute(abortSignal);
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: pdfHeader.toString('base64'),
-          mimeType: 'application/pdf',
-          displayName: 'document.pdf',
-        },
-      });
-      expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
-    });
+        const result = await invocation.execute(abortSignal);
+        expect(result.llmContent).toEqual({
+          inlineData: {
+            data: pdfHeader.toString('base64'),
+            mimeType: 'application/pdf',
+            displayName: 'document.pdf',
+          },
+        });
+        expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
+      },
+    );
 
     describe('PDF vision bridge fallback', () => {
       function createTextOnlyTool(): ReadFileTool {
@@ -1014,7 +1116,15 @@ describe('ReadFileTool', () => {
         metadata: { language_info: { name: 'python' } },
       };
       await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
-      const params: ReadFileToolParams = { file_path: nbPath };
+      const error = tool.validateToolParams({
+        file_path: nbPath,
+        offset: 0,
+        limit: 0,
+      });
+      expect(error).toContain('Retry with: ');
+      const params: ReadFileToolParams = JSON.parse(
+        error!.split('Retry with: ')[1],
+      );
       const invocation = tool.build(params) as ToolInvocation<
         ReadFileToolParams,
         ToolResult
@@ -1026,6 +1136,11 @@ describe('ReadFileTool', () => {
       expect(result.llmContent).toContain('print("hello")');
       expect(result.llmContent).toContain('hello');
       expect(result.returnDisplay).toBe('Read notebook: test.ipynb');
+      const status = fileReadCache.check(fs.statSync(nbPath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(true);
+      }
     });
 
     it('records truncated notebook reads as not full', async () => {
@@ -1112,6 +1227,7 @@ describe('ReadFileTool', () => {
         file_path: filePath,
         offset: 5, // Start from line 6
         limit: 3,
+        pages: null,
       };
       const invocation = tool.build(params) as ToolInvocation<
         ReadFileToolParams,
@@ -1183,6 +1299,21 @@ describe('ReadFileTool', () => {
         return invocation.execute(abortSignal);
       }
 
+      it('treats null pagination as a full text read for caching', async () => {
+        const filePath = path.join(tempRootDir, 'nullable.txt');
+        await fsp.writeFile(filePath, 'first\nsecond\nthird');
+        const result = await read({
+          file_path: filePath,
+          offset: null,
+          limit: null,
+          pages: null,
+        });
+        expect(result.llmContent).toBe('first\nsecond\nthird');
+        expect((await read({ file_path: filePath })).llmContent).toContain(
+          'unchanged since last read',
+        );
+      });
+
       it('returns a short error when a text-only model reads a large PDF without pages', async () => {
         const pdfPath = path.join(tempRootDir, 'large.pdf');
         await fsp.writeFile(pdfPath, Buffer.alloc(2 * 1024 * 1024));
@@ -1212,6 +1343,34 @@ describe('ReadFileTool', () => {
         expect(String(result.llmContent).length).toBeLessThan(1000);
         expect(result.llmContent).toContain('has 31 pages');
         expect(result.llmContent).toContain("Use the 'pages' parameter");
+      });
+
+      it('keeps nested reads usable without claiming their bytes reached history', async () => {
+        const filePath = path.join(tempRootDir, 'program-input.txt');
+        await fsp.writeFile(filePath, 'program input', 'utf-8');
+        const source = {
+          kind: 'code_mode' as const,
+        };
+        await read({ file_path: filePath });
+        for (let i = 0; i < 2; i++) {
+          const result = await runWithToolCallSource(source, () =>
+            read({ file_path: filePath }),
+          );
+          expect(result.llmContent).toBe('program input');
+        }
+        const stats = await fsp.stat(filePath);
+        const cached = fileReadCache.check(stats);
+        expect(cached.state).toBe('fresh');
+        if (cached.state !== 'fresh') throw new Error('missing read record');
+        expect(cached.entry.lastReadWasFull).toBe(true);
+        expect(cached.entry.lastReadCacheable).toBe(true);
+        expect(cached.entry.readResidentInHistory).toBe(false);
+        expect((await read({ file_path: filePath })).llmContent).toBe(
+          'program input',
+        );
+        expect((await read({ file_path: filePath })).llmContent).toMatch(
+          /unchanged since/,
+        );
       });
 
       it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {
