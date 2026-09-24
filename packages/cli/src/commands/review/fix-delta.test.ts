@@ -443,7 +443,67 @@ describe('fix-delta', () => {
     const lines = stderr();
     expect(lines[lines.length - 1]).toBe(FIX_DELTA_SCOPE);
     expect(FIX_DELTA_SCOPE).toMatch(/submodule or a nested repository/);
-    expect(FIX_DELTA_SCOPE).toMatch(/gitignored file/);
+    // Qualified the way the capture behaves: a TRACKED ignored file is
+    // re-hashed (see the force-added test below), a tracked family path is
+    // not captured, and a binary hunk carries no content.
+    expect(FIX_DELTA_SCOPE).toMatch(/to a gitignored file HEAD does not track/);
+    expect(FIX_DELTA_SCOPE).toMatch(/name families .* tracked or not/);
+    expect(FIX_DELTA_SCOPE).toMatch(
+      /`Binary files … differ`, without its content/,
+    );
+    expect(FIX_DELTA_SCOPE).toMatch(/Git LFS\) as its filtered form/);
+  });
+
+  it('holds to the scope line: a tracked family path is not captured, and a binary-attributed file has no content hunk', () => {
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(join(repo, '.qwen', 'tmp', 'qwen-review-notes.md'), 'v1\n');
+    writeFileSync(join(repo, '.gitattributes'), 'gen.txt -diff\n');
+    writeFileSync(join(repo, 'gen.txt'), 'g1\n');
+    git('add', '-f', '-A');
+    git('commit', '-qm', 'tracked family path and a -diff file');
+    runSnapshot();
+    writeFileSync(join(repo, '.qwen', 'tmp', 'qwen-review-notes.md'), 'v2\n');
+    writeFileSync(join(repo, 'gen.txt'), 'g2\n');
+    runSince();
+    expect(hunks()).not.toContain('qwen-review-notes.md');
+    expect(hunks()).toContain('Binary files a/gen.txt and b/gen.txt differ');
+    expect(hunks()).not.toContain('+g2');
+  });
+
+  it('captures when its --out is an ignored path the user staged but HEAD does not track', () => {
+    // The mirror: tracked in the user's index, absent from the seed. The
+    // pattern alone decides (`--no-index`), or the literal exclude names a
+    // path the throwaway index sees as ignored and `add` refuses.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n*.diff\n');
+    git('commit', '-qam', 'ignore diffs');
+    const own = join(repo, 'staged.diff');
+    writeFileSync(own, 'staged\n');
+    git('add', '-f', 'staged.diff');
+    runSnapshot(own);
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
+    runFixDelta({ snapshot: false, since: own, out: hunksFile() });
+    expect(hunks()).toContain('+export const x = 3;');
+    expect(hunks()).not.toContain('staged.diff');
+  });
+
+  it("keeps its own --out out of the hunks when HEAD tracks it but the user's index dropped it", () => {
+    // The ignore question is asked of the capture's world: the throwaway
+    // index is seeded from a tree that still tracks the file, so `add -A`
+    // re-hashes it unless it is excluded — whatever the user's index says.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n*.diff\n');
+    writeFileSync(join(repo, 'notes.diff'), 'old\n');
+    git('add', '-f', '-A');
+    git('commit', '-qm', 'track an ignored notes.diff');
+    git('rm', '-q', '--cached', 'notes.diff');
+    runSnapshot();
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
+    const own = join(repo, 'notes.diff');
+    // An earlier --since run's output, rewritten between the moments.
+    writeFileSync(own, 'an earlier run\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: own });
+    const diff = readFileSync(own, 'utf8');
+    expect(diff).toContain('+export const x = 3;');
+    expect(diff).not.toContain('notes.diff');
   });
 
   it('an edit inside a nested repository is outside the scope: no hunk, and the scope line says why', () => {

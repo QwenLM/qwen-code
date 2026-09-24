@@ -24,11 +24,12 @@
 // leaves behind.
 //
 // What the hunks cover is a fixed scope, stated on every `--since` run
-// (`FIX_DELTA_SCOPE`), not certified per run: `add -A` records tracked files
-// and untracked files no ignore rule hides, in this repository. An edit inside
-// a submodule or a nested repository, or to a gitignored file, is outside that
-// scope and is named as such; a commit between the moments is detected and
-// disclosed. The audit these hunks feed is a disclosure that changes no
+// (`FIX_DELTA_SCOPE`), not certified per run: the capture records the files
+// HEAD tracks and every other file no ignore rule hides, in this repository.
+// An edit inside a submodule or a nested repository, to a gitignored file HEAD
+// does not track, or to a path in the review's name families is outside that
+// scope, and a hunk shows a file as git stores it; the scope line names each.
+// A commit between the moments is detected and disclosed. The audit these hunks feed is a disclosure that changes no
 // verdict, so a stated scope is the proportionate answer — a per-run probe of
 // every way git can hide an edit is an enumeration with no last entry.
 
@@ -42,7 +43,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { git, gitOpt, gitProbe, gitRaw, gitWithEnv } from './lib/git.js';
+import { git, gitOpt, gitRaw, gitWithEnv } from './lib/git.js';
 import { inertPath, repoRelativeOf } from './lib/paths.js';
 
 /** What `--snapshot` writes and `--since` reads back. */
@@ -85,44 +86,45 @@ export const FIX_DELTA_EXCLUDES = [
  */
 export const FIX_DELTA_SCOPE =
   'fix-delta: scope — the hunks hold what `git add -A` records in this ' +
-  'repository: tracked files, and untracked files no ignore rule hides. An ' +
-  'edit inside a submodule or a nested repository, to a gitignored file, or ' +
-  "to the review's own files under .qwen/tmp is not in them.";
+  'repository: the files HEAD tracks, and every other file no ignore rule ' +
+  'hides. Not in them: an edit inside a submodule or a nested repository, to ' +
+  "a gitignored file HEAD does not track, or to any path in the review's " +
+  '.qwen/tmp name families (qwen-review-*, review-pr-*, file-review-*), ' +
+  'tracked or not. A hunk shows a file as git stores it: a binary file (a ' +
+  '`binary` or `-diff` attribute included) as `Binary files … differ`, ' +
+  'without its content, and a clean-filtered file (Git LFS) as its filtered ' +
+  'form.';
 
 /**
- * The exclusion pathspecs both captures and the diff share. A name family
- * needs both forms: `X` alone leaves the contents of a directory matching
- * `X` captured (measured: `qwen-review-x-prompts/c.md` survived it). The
- * command's own side files — `--out`, and the `--since` record — are
- * excluded literally when they fall inside the repository, so a caller that
- * points them outside the families still gets hunks free of them.
- *
- * Except when an ignore rule already hides one. `add` refuses outright
- * (exit 1, "The following paths are ignored") when a pathspec item's literal
- * prefix names an ignored path, and a negative item counts too: wherever
- * `.qwen/tmp` is ignored — qwen-code's own `.qwen/*`, the `.qwen/` rule
- * `/setup-github` writes, a bare `tmp/` — the flow's own `--out` under it
- * made every capture fail. An
- * ignored untracked path cannot enter `add -A` in the first place, so that
- * exclusion has nothing to do. The family globs are immune: their `**`
- * prefix leaves no literal part for the check to match.
+ * The name-family exclusions both captures share. A family needs both forms:
+ * `X` alone leaves the contents of a directory matching `X` captured
+ * (measured: `qwen-review-x-prompts/c.md` survived it). The `**` prefix
+ * leaves no literal part, so an ignore rule over `.qwen/` or `tmp/` never
+ * makes `add` refuse them.
  */
-function excludePathspecs(
+const FAMILY_EXCLUDES = FIX_DELTA_EXCLUDES.flatMap((p) => [
+  `:(glob,exclude)**/${p}`,
+  `:(glob,exclude)**/${p}/**`,
+]);
+
+/**
+ * The command's own side files — `--out`, and the `--since` record — as
+ * literal exclusions for the DIFF, when they fall inside the repository, so a
+ * caller that points them outside the families still gets hunks free of them.
+ * Only the diff takes them, never a capture: `add` refuses outright ("The
+ * following paths are ignored") when a pathspec item's literal prefix names an
+ * ignored path, a negative item included, and `diff-tree` has no such rule.
+ * A side file both trees happen to record is simply not compared.
+ */
+function sideFileExcludes(
   root: string,
   sideFiles: Array<string | undefined>,
 ): string[] {
-  const specs = FIX_DELTA_EXCLUDES.flatMap((p) => [
-    `:(glob,exclude)**/${p}`,
-    `:(glob,exclude)**/${p}/**`,
-  ]);
+  const specs: string[] = [];
   for (const file of sideFiles) {
     if (file === undefined) continue;
     const { rel, escapes } = repoRelativeOf(root, file);
-    if (rel === '' || escapes) continue;
-    if (gitProbe('-C', root, 'check-ignore', '-q', '--', rel).status === 0) {
-      continue;
-    }
-    specs.push(`:(exclude,literal)${rel}`);
+    if (rel !== '' && !escapes) specs.push(`:(exclude,literal)${rel}`);
   }
   return specs;
 }
@@ -216,12 +218,11 @@ export function runFixDelta(args: FixDeltaArgs): void {
     );
   }
   const root = git('rev-parse', '--show-toplevel');
-  const excludes = excludePathspecs(root, [args.out, args.since]);
   mkdirSync(dirname(resolve(args.out)), { recursive: true });
 
   if (args.snapshot) {
     const head = headCommit(root);
-    const tree = snapshotWorkingTree(root, head, excludes);
+    const tree = snapshotWorkingTree(root, head, FAMILY_EXCLUDES);
     const snapshot: FixSnapshot = { root, tree, head };
     writeFileSync(resolve(args.out), `${JSON.stringify(snapshot, null, 2)}\n`);
     writeStderrLine(`fix-delta: snapshot ${tree} of ${inertPath(root)}`);
@@ -271,9 +272,16 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // Seeded from the snapshot's own tree, never from HEAD now: the two
   // captures then differ only by what is on disk, and whatever the first
   // one tracked (an ignored path HEAD held included) the second re-hashes.
-  const now = snapshotWorkingTree(root, snapshot.tree, excludes);
+  const now = snapshotWorkingTree(root, snapshot.tree, FAMILY_EXCLUDES);
   const headNow = headCommit(root);
-  const range = [snapshot.tree, now, '--', '.', ...excludes];
+  const range = [
+    snapshot.tree,
+    now,
+    '--',
+    '.',
+    ...FAMILY_EXCLUDES,
+    ...sideFileExcludes(root, [args.out, args.since]),
+  ];
   const diff =
     now === snapshot.tree
       ? Buffer.alloc(0)

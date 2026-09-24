@@ -2719,15 +2719,14 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   // this file: git permits a newline in a name, and a raw render let a path
   // end the heading early and forge a section — the `applied hunks end`
   // fence included — in the auditor's one input file.
+  // `validateFindings` guarantees at least one location per finding.
   const where = (f: Finding): string =>
-    f.locations.length === 0
-      ? '(no location)'
-      : f.locations
-          .map(
-            (loc) =>
-              `${inertPath(loc.file)}${loc.line !== undefined ? `:${loc.line}` : ''}`,
-          )
-          .join(', ');
+    f.locations
+      .map(
+        (loc) =>
+          `${inertPath(loc.file)}${loc.line !== undefined ? `:${loc.line}` : ''}`,
+      )
+      .join(', ');
   const entries = fixed.map((f) =>
     [
       `### ${f.id} — [${f.severity}] ${where(f)}`,
