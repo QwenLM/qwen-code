@@ -35,7 +35,6 @@ import type {
 import {
   buildTimeline,
   type TimelineMode,
-  type TimelineModel,
   type TimelineSpan,
 } from '../../trajectory/buildTimeline';
 import {
@@ -313,25 +312,29 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   // The selection belongs to the axis it was drawn on. A refresh, another
   // session, or a switch between active and real time lays the axis out
   // afresh, so the same numbers would name a different stretch of the run;
-  // holding the timeline alongside the range lets the range lapse in the same
-  // render the axis changes, with no frame in which the new table is filtered
-  // by the old one.
+  // holding what the axis was built from alongside the range lets the range
+  // lapse in the same render the axis changes, with no frame in which the new
+  // table is filtered by the old one. Keyed on the window and the mode — the
+  // axis's inputs — rather than on the memoized axis itself, whose identity
+  // React keeps as an optimisation, not a promise.
   const [rangeState, setRangeState] = useState<
-    { range: TimelineRange; of: TimelineModel } | undefined
+    { range: TimelineRange; of: Trajectory; mode: TimelineMode } | undefined
   >(undefined);
   const range =
-    rangeState !== undefined && rangeState.of === timeline
+    rangeState !== undefined &&
+    rangeState.of === trajectory &&
+    rangeState.mode === mode
       ? rangeState.range
       : undefined;
   const setRange = useCallback(
     (next: TimelineRange | undefined) => {
       setRangeState(
-        next !== undefined && timeline !== undefined
-          ? { range: next, of: timeline }
+        next !== undefined && trajectory !== undefined
+          ? { range: next, of: trajectory, mode }
           : undefined,
       );
     },
-    [timeline],
+    [trajectory, mode],
   );
 
   /** Rows running in the selected time, or undefined when nothing is selected. */
@@ -648,10 +651,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           status === 'error' ? null : range !== undefined ? (
             // Real time keeps the gaps between turns on the axis, and a
             // stretch dragged inside one has nothing in it. Said here, with
-            // the way back beside it, rather than left as a blank table.
+            // the way back beside it, rather than left as a blank table. Not
+            // a live region: the header's row count, which changes in the
+            // same render, already says it, and two would say it twice.
             <div
               className={styles.placeholder}
-              role="status"
               data-testid="trajectory-range-empty"
             >
               <span>{t('trajectory.range.empty')}</span>{' '}

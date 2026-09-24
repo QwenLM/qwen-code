@@ -720,6 +720,9 @@ describe('TrajectoryPanel', () => {
             container.querySelector('[data-testid="trajectory-range-status"]'),
           ),
         ).toBe('Showing 0 of 5 rows in the selected time');
+        // Said once: the header's count is the live region, the message is not.
+        expect(empty.getAttribute('role')).toBeNull();
+        expect(empty.closest('[role="status"]')).toBeNull();
 
         await act(async () =>
           empty.querySelector<HTMLButtonElement>('button')!.click(),
