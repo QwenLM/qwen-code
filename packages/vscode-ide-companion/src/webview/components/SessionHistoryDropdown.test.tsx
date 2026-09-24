@@ -110,10 +110,10 @@ describe('SessionHistoryDropdown search', () => {
   it('matches a session by its own display name', async () => {
     const { container } = await renderDropdown({
       sessions: [
-        makeSession('report', 'Quarterly report'),
+        makeSession('report', 'Quarterly Report'),
         makeSession('missing-title'),
       ],
-      searchQuery: 'quarterly',
+      searchQuery: ' REPORT ',
     });
 
     const rows = Array.from(
