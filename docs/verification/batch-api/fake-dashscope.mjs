@@ -1,15 +1,12 @@
 /**
  * Fake DashScope/OpenAI-compatible server for L1 verification of the
- * `qwen batch` command and `--batch` mode. Records every request so a run can
- * be asserted on the call sequence (e.g. how many batches were created).
+ * `qwen batch` command. Records every request so a run can be asserted on
+ * the call sequence (e.g. how many batches were created).
  *
  * Scenarios (env SCENARIO):
  *   happy  - one batch, completes on first poll, plain text output
- *   tools  - first batch returns tool_calls, second returns text
- *   failed - every batch settles as `failed`
  *   slow   - batch stays in_progress for SLOW_SECONDS, then completes
  *   stuck  - batch never completes (for abort/cancel tests)
- *   unpollable - batch is created, then every status poll fails with 500
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -39,8 +36,8 @@ function extractJsonl(raw) {
     .filter((l) => l.startsWith('{') && l.includes('"custom_id"'));
 }
 
-function completionBody(kind, id) {
-  const base = {
+function completionBody(id) {
+  return {
     id: `chatcmpl-${id}`,
     object: 'chat.completion',
     created: now(),
@@ -51,34 +48,6 @@ function completionBody(kind, id) {
       total_tokens: 128,
       prompt_tokens_details: { cached_tokens: 64 },
     },
-  };
-  if (kind === 'tool_call') {
-    return {
-      ...base,
-      choices: [
-        {
-          index: 0,
-          finish_reason: 'tool_calls',
-          message: {
-            role: 'assistant',
-            content: '',
-            tool_calls: [
-              {
-                id: 'call_batch_1',
-                type: 'function',
-                function: {
-                  name: 'list_directory',
-                  arguments: JSON.stringify({ path: '.' }),
-                },
-              },
-            ],
-          },
-        },
-      ],
-    };
-  }
-  return {
-    ...base,
     choices: [
       {
         index: 0,
@@ -105,66 +74,17 @@ function pollJob(job) {
     job.in_progress_at ??= now();
     return job;
   }
-  if (SCENARIO === 'failed') {
-    job.status = 'failed';
-    job.completed_at = now();
-    job.request_counts = { total: 1, completed: 0, failed: 1 };
-    const errId = `file-err-${++fileSeq}`;
-    files.set(errId, {
-      content:
-        JSON.stringify({
-          custom_id: 'turn',
-          error: { message: 'fake: model unavailable in batch' },
-        }) + '\n',
-    });
-    job.error_file_id = errId;
-    return job;
-  }
-  // happy / tools
+  // happy
   job.status = 'completed';
   job.in_progress_at ??= job.created_at + 1;
   job.completed_at = now();
   const lines = job.lines.map((line, i) => {
     const customId = JSON.parse(line).custom_id ?? String(i);
-    // The reply is keyed off the request body, like the real provider: a
-    // line whose assistant turn carries tool_calls without a following
-    // matching tool message is rejected, and the tools scenario returns
-    // tool_calls only while the conversation has no tool result yet.
-    const messages = JSON.parse(line).body?.messages ?? [];
-    const dangling = messages.some(
-      (m, idx) =>
-        m.role === 'assistant' &&
-        Array.isArray(m.tool_calls) &&
-        m.tool_calls.some(
-          (tc) =>
-            !messages.some(
-              (n, j) =>
-                j > idx && n.role === 'tool' && n.tool_call_id === tc.id,
-            ),
-        ),
-    );
-    if (SCENARIO === 'tools' && dangling) {
-      return JSON.stringify({
-        custom_id: customId,
-        response: {
-          status_code: 400,
-          body: {
-            error: {
-              message:
-                'fake: assistant tool_calls not followed by a matching tool message',
-            },
-          },
-        },
-      });
-    }
-    const hasToolResult = messages.some((m) => m.role === 'tool');
-    const kind =
-      SCENARIO === 'tools' && !hasToolResult && i === 0 ? 'tool_call' : 'text';
     return JSON.stringify({
       custom_id: customId,
       response: {
         status_code: 200,
-        body: completionBody(kind, `${job.id}-${i}`),
+        body: completionBody(`${job.id}-${i}`),
       },
     });
   });
@@ -277,12 +197,6 @@ const server = http.createServer((req, res) => {
     if (m && req.method === 'GET') {
       const job = batches.get(m[1]);
       if (!job) return send(res, 404, { error: { message: 'no such batch' } });
-      if (SCENARIO === 'unpollable') {
-        log({ event: 'poll_rejected', id: job.id });
-        return send(res, 500, {
-          error: { message: 'fake: upstream unavailable' },
-        });
-      }
       return send(res, 200, pollJob(job));
     }
 
@@ -290,7 +204,7 @@ const server = http.createServer((req, res) => {
     if (p === '/chat/completions' && req.method === 'POST') {
       const body = JSON.parse(raw || '{}');
       log({ event: 'realtime_chat', stream: !!body.stream, model: body.model });
-      const completion = completionBody('text', `rt-${Date.now()}`);
+      const completion = completionBody(`rt-${Date.now()}`);
       if (!body.stream) return send(res, 200, completion);
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const chunk = {

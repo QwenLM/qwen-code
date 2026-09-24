@@ -88,6 +88,13 @@ The skill makes the model do the semantic work only:
 reused, delivered items are never redone, and held items are re-attempted
 (after the user resolves a conflict) without any new paid request.
 
+The raw transport verbs (`submit`/`status`/`fetch`/`cancel`) stay a
+first-class, lower-level path on purpose — this is a deliberate two-track
+design, not accidental duplication: anything outside the document-transform
+contract (lines over 1 MB, hand-built request files, provider experiments)
+belongs to `qwen batch submit` with hand-checked input, not to a widened
+workflow.
+
 ### Automatic collection (interactive sessions)
 
 Collection is mechanical, so the user never has to run it. An interactive
@@ -299,11 +306,15 @@ Batch by invoking `/batch-api` — but it must not lie about money:
   `run → collect (running) → collect --wait → delivered files → idempotent
 re-collect → list → failure → retry → held → resolve → delivered →
 cancel → clean`. All 27 checks pass
-  (`docs/verification/batch-api/workflow-e2e.mjs`); no real API is touched.
+  (`docs/verification/batch-api/workflow-e2e.mjs`; run 2026-09-24 on the
+  review-fix head `d400a1c3`, macOS arm64 / Node 24 — the earlier run
+  covered `06a1278572`); no real API is touched.
   The fake server always answers `in_progress`, so the validation-rejection
   path and interactive auto-collect are covered by unit tests only.
-- The existing `qwen batch submit|status|fetch|cancel` behavior is unchanged
-  (its test suite passes unmodified).
+- The raw `qwen batch submit|status|fetch|cancel` behavior is unchanged
+  except for two review-driven hardening fixes: `fetch` validates the batch
+  id as a single safe path component, and `list` only reads the local task
+  store, so it no longer requires credentials.
 
 ## 8. Non-goals (deliberate)
 

@@ -6,8 +6,8 @@
 #
 # It drives the real CLI (`npm run dev`) through the subcommands and asserts on
 # exit codes, stdout, and the request log the fake server records. What it
-# proves is process behaviour; the provider's own protocol still needs the
-# 00/01/02 probes in this directory.
+# proves is process behaviour; the provider's own protocol was probed once
+# online (verdict recorded in this directory's README).
 set -u
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

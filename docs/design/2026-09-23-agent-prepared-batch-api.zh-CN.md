@@ -70,7 +70,12 @@
 
 `run` 打印任务 ID 后立即退出——等待不消耗 agent 轮次。`collect` 可以任意
 重复执行：已落盘的内容全部复用，已交付条目绝不重做，held 条目在用户解决
-冲突后重新尝试交付，全程不产生新的付费请求。
+冲突后无需新的付费请求即可重新尝试交付。
+
+裸传输命令（`submit`/`status`/`fetch`/`cancel`）是有意保留的底层一等入口
+——双轨是设计而非重复：凡是不属于 document-transform 约定的场景（超过
+1 MB 的行、手工组装的请求文件、服务商实验）都应走 `qwen batch submit`
+并自行核对输入，而不是把工作流加宽。
 
 ### 自动收取（交互会话）
 
@@ -250,10 +255,13 @@
 - 手工端到端（假 HTTP 服务器、隔离 HOME、真实构建产物 CLI）：
   `run → collect（运行中）→ collect --wait → 文件交付 → 幂等重收 →
 list → 失败 → 重试 → held → 解决 → 交付 → cancel → clean`，27 项断言全部
-  通过（`docs/verification/batch-api/workflow-e2e.mjs`）；不触碰真实 API。假服务器
+  通过（`docs/verification/batch-api/workflow-e2e.mjs`；2026-09-24 在 review
+  修复后的 head `d400a1c3` 上重跑，macOS arm64 / Node 24；更早一次覆盖
+  `06a1278572`）；不触碰真实 API。假服务器
   总是返回 `in_progress`，校验被拒与交互式自动收取只由单元测试覆盖。
-- 既有 `qwen batch submit|status|fetch|cancel` 行为不变（原测试套件
-  未修改并通过）。
+- 既有 `qwen batch submit|status|fetch|cancel` 行为基本不变，仅含 review
+  带来的两处加固：`fetch` 校验批次 id 为单个安全路径段；`list` 只读本地
+  任务记录，不再需要凭证。
 
 ## 8. 明确的非目标
 
