@@ -309,13 +309,15 @@ class RuntimeBrokerServiceTest {
             await(() -> fixture.executionRepository
                     .findByExecutionCallId(created.getExecutionCallId())
                     .getVersion() > initialVersion);
-            long firstRenewalVersion = fixture.executionRepository
-                    .findByExecutionCallId(created.getExecutionCallId())
-                    .getVersion();
             clock.advance(Duration.ofMillis(40));
+            // Wait for a renewal made at the advanced time. A version check
+            // can be met by a renewal that landed just before the advance,
+            // which leaves the lease ending before the next advance.
+            Instant renewedAt = clock.instant();
             await(() -> fixture.executionRepository
                     .findByExecutionCallId(created.getExecutionCallId())
-                    .getVersion() > firstRenewalVersion);
+                    .getDispatchLeaseUntil().isAfter(
+                            renewedAt.plus(Duration.ofMillis(40))));
             clock.advance(Duration.ofMillis(40));
             result.complete(Map.of("executionStatus", "success"));
 
@@ -340,11 +342,12 @@ class RuntimeBrokerServiceTest {
                     WORKSPACE_SCOPE, null);
             await(() -> fixture.bindingRepository.findActive(request)
                     .getVersion() > 1);
-            long firstRenewalVersion = fixture.bindingRepository
-                    .findActive(request).getVersion();
             clock.advance(Duration.ofMillis(40));
+            // Wait for a renewal made at the advanced time, as above.
+            Instant renewedAt = clock.instant();
             await(() -> fixture.bindingRepository.findActive(request)
-                    .getVersion() > firstRenewalVersion);
+                    .getOperationLeaseUntil().isAfter(
+                            renewedAt.plus(Duration.ofMillis(40))));
             clock.advance(Duration.ofMillis(40));
             lease.complete(lease(1));
 
