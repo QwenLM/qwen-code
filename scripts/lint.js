@@ -154,7 +154,7 @@ let lintersCache;
 // Built lazily: getPlatformArch() throws on platforms where the POSIX-only
 // linters cannot run (e.g. Windows test hosts importing getLinterTempDir).
 /** @returns {{[linterName: string]: Linter}} */
-function getLinters() {
+export function getLinters() {
   if (!lintersCache) {
     const platformArch = getPlatformArch();
     const actionlintArchive = join(
@@ -221,7 +221,11 @@ function getLinters() {
     `,
       },
       yamllint: {
-        check: 'command -v yamllint',
+        // Version probe, not `command -v`: a stale or broken yamllint on the
+        // runner image must fall through to the pinned install instead of
+        // satisfying the check and dying in the lint step (the 2026-09-24
+        // ecs-qwen-hk4-19 main-CI failure).
+        check: `test "$(yamllint --version 2>/dev/null)" = 'yamllint ${YAMLLINT_VERSION}'`,
         installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
         run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
       },
@@ -230,16 +234,29 @@ function getLinters() {
   return lintersCache;
 }
 
+// The pip --user bin dir leads the inherited PATH: a runner image can ship a
+// stale or broken yamllint ahead of it, and appending (the old order) let
+// that copy shadow the pinned install this script puts there.
+export function getLinterPath({
+  env = process.env,
+  platform = process.platform,
+  cwd = process.cwd(),
+} = {}) {
+  const nodeBin = join(cwd, 'node_modules', '.bin');
+  const ownBins = `${nodeBin}:${TEMP_DIR}/actionlint:${TEMP_DIR}/shellcheck`;
+  const userBin =
+    platform === 'darwin'
+      ? `${env.HOME}/Library/Python/3.12/bin`
+      : platform === 'linux'
+        ? `${env.HOME}/.local/bin`
+        : '';
+  return `${ownBins}${userBin ? `:${userBin}` : ''}:${env.PATH}`;
+}
+
 function runCommand(command, stdio = 'inherit') {
   try {
     const env = { ...process.env };
-    const nodeBin = join(process.cwd(), 'node_modules', '.bin');
-    env.PATH = `${nodeBin}:${TEMP_DIR}/actionlint:${TEMP_DIR}/shellcheck:${env.PATH}`;
-    if (process.platform === 'darwin') {
-      env.PATH = `${env.PATH}:${process.env.HOME}/Library/Python/3.12/bin`;
-    } else if (process.platform === 'linux') {
-      env.PATH = `${env.PATH}:${process.env.HOME}/.local/bin`;
-    }
+    env.PATH = getLinterPath();
     execSync(command, { stdio, env });
     return true;
   } catch (_e) {
