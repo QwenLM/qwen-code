@@ -3784,3 +3784,234 @@ describe('daemon error helpers', () => {
     });
   });
 });
+
+describe('session rotation', () => {
+  let bridge: ChannelAgentBridge;
+  let tempDirs: string[];
+
+  beforeEach(() => {
+    sessionCounter = 0;
+    bridge = mockBridge();
+    tempDirs = [];
+  });
+
+  afterEach(() => {
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rotates only the route that reached its message bound', async () => {
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const router = new SessionRouter(
+      { ...bridge, discardSession },
+      '/tmp',
+      'thread',
+    );
+    router.setChannelRotation('ch', { maxTurns: 2 });
+    const retired = vi.fn();
+    router.setRotationListener('ch', retired);
+
+    const first = await router.resolve('ch', 'alice', 'chat', 'thread-a');
+    const sibling = await router.resolve('ch', 'bob', 'chat', 'thread-b');
+    expect(await router.resolve('ch', 'alice', 'chat', 'thread-a')).toBe(first);
+    const replacement = await router.resolve('ch', 'alice', 'chat', 'thread-a');
+
+    expect(replacement).not.toBe(first);
+    expect(await router.resolve('ch', 'bob', 'chat', 'thread-b')).toBe(sibling);
+    expect(retired).toHaveBeenCalledWith(
+      first,
+      expect.objectContaining({ threadId: 'thread-a' }),
+    );
+    expect(discardSession).toHaveBeenCalledWith(first);
+  });
+
+  it('waits for a routed message and queued turn before retiring its session', async () => {
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const router = new SessionRouter(
+      { ...bridge, discardSession },
+      '/tmp',
+      'thread',
+    );
+    router.setChannelRotation('ch', { maxTurns: 1 });
+    const queued = new Set<string>();
+    router.setRotationActivityChecker('ch', (sessionId) =>
+      queued.has(sessionId),
+    );
+
+    const first = await router.resolve(
+      'ch',
+      'alice',
+      'chat',
+      'thread',
+      undefined,
+      false,
+      { holdForTurn: true },
+    );
+    expect(await router.resolve('ch', 'alice', 'chat', 'thread')).toBe(first);
+    queued.add(first);
+    router.releaseRoutingLease(first);
+    expect(await router.resolve('ch', 'alice', 'chat', 'thread')).toBe(first);
+    queued.delete(first);
+    expect(await router.resolve('ch', 'alice', 'chat', 'thread')).not.toBe(
+      first,
+    );
+    expect(discardSession).toHaveBeenCalledWith(first);
+  });
+
+  it('keeps the bound across lazy restart and starts old stores on first use', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'channel-rotation-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'routes.json');
+    const router = new SessionRouter(bridge, '/tmp', 'thread', file);
+    router.setChannelRotation('ch', { maxTurns: 2 });
+    const first = await router.resolve('ch', 'alice', 'chat', 'thread');
+    expect(JSON.parse(readFileSync(file, 'utf8'))['ch:thread'].turns).toBe(1);
+
+    const restarted = new SessionRouter(bridge, '/tmp', 'thread', file, {
+      recoveryMode: 'lazy',
+    });
+    restarted.setChannelRotation('ch', { maxTurns: 2 });
+    expect(restarted.restoreRoutes().restored).toBe(1);
+    expect(await restarted.resolve('ch', 'alice', 'chat', 'thread')).toBe(
+      first,
+    );
+    expect(await restarted.resolve('ch', 'alice', 'chat', 'thread')).not.toBe(
+      first,
+    );
+
+    writePersistedSession(file, 'ch:legacy');
+    const legacy = new SessionRouter(bridge, '/tmp', 'thread', file, {
+      recoveryMode: 'lazy',
+    });
+    legacy.setChannelRotation('ch', { maxTurns: 1 });
+    legacy.restoreRoutes();
+    expect(await legacy.resolve('ch', 'alice', 'chat', 'legacy')).toBe(
+      'old-session',
+    );
+    expect(await legacy.resolve('ch', 'alice', 'chat', 'legacy')).not.toBe(
+      'old-session',
+    );
+  });
+
+  it('keeps counts for every route during eager restore', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'channel-rotation-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'routes.json');
+    const router = new SessionRouter(bridge, '/tmp', 'thread', file);
+    router.setChannelRotation('ch', { maxTurns: 2 });
+    const first = await router.resolve('ch', 'alice', 'chat', 'thread-a');
+    await router.resolve('ch', 'bob', 'chat', 'thread-b');
+    router.setBridge(mockBridge());
+
+    expect(await router.restoreSessions()).toEqual({ restored: 2, failed: 0 });
+    expect(await router.resolve('ch', 'alice', 'chat', 'thread-a')).toBe(first);
+    expect(await router.resolve('ch', 'alice', 'chat', 'thread-a')).not.toBe(
+      first,
+    );
+    expect(JSON.parse(readFileSync(file, 'utf8'))['ch:thread-b'].turns).toBe(1);
+  });
+
+  it('does not persist a partial route store when a restored route receives a message', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'channel-rotation-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'routes.json');
+    const original = new SessionRouter(bridge, '/tmp', 'thread', file);
+    original.setChannelRotation('ch', { maxTurns: 3 });
+    const first = await original.resolve('ch', 'alice', 'chat', 'thread-a');
+    await original.resolve('ch', 'bob', 'chat', 'thread-b');
+
+    let finishSecond!: (sessionId: string) => void;
+    const secondLoad = new Promise<string>((resolve) => {
+      finishSecond = resolve;
+    });
+    const restoringBridge = {
+      ...mockBridge(),
+      loadSession: vi.fn((sessionId: string) =>
+        sessionId === first ? Promise.resolve(sessionId) : secondLoad,
+      ),
+    } as ChannelAgentBridge;
+    const restarted = new SessionRouter(
+      restoringBridge,
+      '/tmp',
+      'thread',
+      file,
+    );
+    restarted.setChannelRotation('ch', { maxTurns: 3 });
+    const restoring = restarted.restoreSessions();
+    await vi.waitFor(() =>
+      expect(restoringBridge.loadSession).toHaveBeenCalledTimes(2),
+    );
+
+    expect(await restarted.resolve('ch', 'alice', 'chat', 'thread-a')).toBe(
+      first,
+    );
+    expect(JSON.parse(readFileSync(file, 'utf8'))['ch:thread-b']).toBeDefined();
+    finishSecond('session-b');
+    await restoring;
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    expect(saved['ch:thread-a'].turns).toBe(2);
+    expect(saved['ch:thread-b'].turns).toBe(1);
+  });
+
+  it('does not flush a partial route store after restore is disposed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'channel-rotation-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'routes.json');
+    const original = new SessionRouter(bridge, '/tmp', 'thread', file);
+    original.setChannelRotation('ch', { maxTurns: 3 });
+    const first = await original.resolve('ch', 'alice', 'chat', 'thread-a');
+    await original.resolve('ch', 'bob', 'chat', 'thread-b');
+    const savedBefore = readFileSync(file, 'utf8');
+
+    let finishSecond!: (sessionId: string) => void;
+    const secondLoad = new Promise<string>((resolve) => {
+      finishSecond = resolve;
+    });
+    const restoringBridge = {
+      ...mockBridge(),
+      loadSession: vi.fn((sessionId: string) =>
+        sessionId === first ? Promise.resolve(sessionId) : secondLoad,
+      ),
+    } as ChannelAgentBridge;
+    const restarted = new SessionRouter(
+      restoringBridge,
+      '/tmp',
+      'thread',
+      file,
+    );
+    restarted.setChannelRotation('ch', { maxTurns: 3 });
+    const restoring = restarted.restoreSessions();
+    await vi.waitFor(() =>
+      expect(restoringBridge.loadSession).toHaveBeenCalledTimes(2),
+    );
+    await restarted.resolve('ch', 'alice', 'chat', 'thread-a');
+    restarted.dispose();
+    finishSecond('session-b');
+    await restoring;
+
+    expect(readFileSync(file, 'utf8')).toBe(savedBefore);
+  });
+
+  it('stops rotating when the channel removes its limit', async () => {
+    const router = new SessionRouter(bridge, '/tmp', 'thread');
+    router.setChannelRotation('ch', { maxTurns: 1 });
+    const first = await router.resolve('ch', 'alice', 'chat', 'thread');
+    router.setChannelRotation('ch', undefined);
+
+    expect(await router.resolve('ch', 'alice', 'chat', 'thread')).toBe(first);
+  });
+
+  it('rotates when the age bound elapses', async () => {
+    vi.useFakeTimers();
+    try {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      router.setChannelRotation('ch', { maxAgeHours: 1 });
+      const first = await router.resolve('ch', 'alice', 'chat', 'thread');
+      vi.advanceTimersByTime(60 * 60 * 1000);
+      expect(await router.resolve('ch', 'alice', 'chat', 'thread')).not.toBe(
+        first,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
