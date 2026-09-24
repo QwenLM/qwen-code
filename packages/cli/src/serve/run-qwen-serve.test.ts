@@ -17113,16 +17113,22 @@ describe('runQwenServe channel worker supervisor', () => {
         headers: { Authorization: 'Bearer secret' },
       });
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
+      const listed = await response.text();
+      // The daemon kept serving without the channel it was configured to
+      // host. Before the restore record this read `stopped`, which is what a
+      // channel nobody asked for reads as.
+      expect(JSON.parse(listed)).toMatchObject({
         instances: {
           telegram: {
             startsWithServe: true,
             runtime: {
-              state: 'stopped',
+              state: 'error',
+              lastError: 'worker failed before ready: Bearer <redacted>',
             },
           },
         },
       });
+      expect(listed).not.toContain(leakedCredential);
       const settingsFile = path.join(tmpDir, '.qwen', 'settings.json');
       const originalSettings = fs.readFileSync(settingsFile, 'utf8');
       fs.writeFileSync(
