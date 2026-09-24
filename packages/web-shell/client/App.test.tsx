@@ -38166,7 +38166,7 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('keeps the Live path for New task when no draft target exists', async () => {
+  it('opens a plain draft from New task in a Live chat when no draft target exists', async () => {
     mockConnection.sessionContext = { kind: 'live' };
     mockConnection.workspaceCwd = '';
     mockWorkspace.capabilities = {
@@ -38181,7 +38181,11 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const { container } = renderApp();
+    mockSessionActions.clearSession.mockImplementation(async () => {
+      mockConnection.sessionId = undefined;
+      mockConnection.sessionContext = undefined;
+    });
+    const { container, rerender } = renderApp();
     await flush();
 
     await act(async () => {
@@ -38190,10 +38194,26 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    await flush();
+    await act(async () => {
+      rerender();
+      await flush();
+    });
 
-    expect(mockWorkspace.client.startLive).toHaveBeenCalledWith('new');
-    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockWorkspace.client.startLive).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('task prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: undefined,
+        sessionContext: undefined,
+      }),
+    );
   });
 
   it('keeps a legacy Live runtime cwd out of workspace product context', async () => {
