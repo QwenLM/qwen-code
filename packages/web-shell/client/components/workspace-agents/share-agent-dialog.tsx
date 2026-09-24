@@ -156,7 +156,9 @@ export function ShareAgentDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      {/* One track as wide as the dialog: long commands and tokens must
+          truncate inside it instead of widening the dialog past the screen. */}
+      <DialogContent className="grid-cols-[minmax(0,1fr)] sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
             {t('collab.share.title', { name: agentName })}
