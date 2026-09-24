@@ -754,7 +754,11 @@ export function ThreadChat({
                 <span className="min-w-0 flex-1 truncate">
                   {run.error === 'agent_run_stalled'
                     ? t('collab.run.timedOut', { agent: run.agentName })
-                    : t('collab.run.failed', { agent: run.agentName })}
+                    : run.error === 'agent_program_unavailable'
+                      ? t('collab.run.programUnavailable', {
+                          agent: run.agentName,
+                        })
+                      : t('collab.run.failed', { agent: run.agentName })}
                 </span>
                 {!pending && (
                   <Button

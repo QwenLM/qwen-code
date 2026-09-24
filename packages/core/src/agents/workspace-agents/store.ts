@@ -47,6 +47,8 @@ import {
   type ThreadPriority,
   THREAD_PRIORITY_ORDER,
   DEFAULT_THREAD_PRIORITY,
+  hostOffersProgram,
+  isAgentProgram,
 } from './types.js';
 
 const AGENTS_DIRNAME = 'agent-host';
@@ -189,8 +191,7 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
           execution['hostIds'].every(isValidId) &&
           new Set(execution['hostIds']).size === execution['hostIds'].length &&
           (execution['provider'] === undefined ||
-            execution['provider'] === 'qwen' ||
-            execution['provider'] === 'codex'))));
+            isAgentProgram(execution['provider'])))));
   return (
     isValidId(value['id']) &&
     isValidAgentName(value['name']) &&
@@ -1160,7 +1161,8 @@ export async function readAgentWorkspace(
   });
 }
 
-async function readAgentHostsUnlocked(
+/** For callers already inside the workspace lock (a store transaction). */
+export async function readAgentHostsUnlocked(
   projectRoot: string,
 ): Promise<AgentHostsFile> {
   const filePath = getAgentHostsFilePath(projectRoot);
@@ -1411,7 +1413,8 @@ type WorkspaceAgentRosterChange =
   | 'not_found'
   | 'has_live_work'
   | 'retired'
-  | 'host_not_found';
+  | 'host_not_found'
+  | 'program_unavailable';
 
 async function agentHasLiveWork(
   transaction: AgentStoreTransaction,
@@ -1470,13 +1473,17 @@ export async function setWorkspaceAgentExecution(
     if (agent.retiredAt !== undefined) return 'retired';
     if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
     if (execution?.mode === 'managed-host') {
-      const known = new Set(
-        (await readAgentHostsUnlocked(projectRoot)).hosts.map(
-          (host) => host.id,
-        ),
+      const hosts = (await readAgentHostsUnlocked(projectRoot)).hosts;
+      const placed = hosts.filter((host) =>
+        execution.hostIds.includes(host.id),
       );
-      if (execution.hostIds.some((hostId) => !known.has(hostId))) {
-        return 'host_not_found';
+      if (placed.length !== execution.hostIds.length) return 'host_not_found';
+      const { provider } = execution;
+      if (
+        provider &&
+        !placed.some((host) => hostOffersProgram(host, provider))
+      ) {
+        return 'program_unavailable';
       }
     }
     await transaction.writeAgents(

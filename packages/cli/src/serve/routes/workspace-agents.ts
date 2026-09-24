@@ -66,7 +66,11 @@ import {
   HUMAN_AUTHOR_ID,
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
+  AGENT_PROGRAM_LABELS,
+  hostOffersProgram,
+  isAgentProgram,
   isThreadTerminal,
+  type AgentProgram,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import {
   decideDispatch,
@@ -229,7 +233,7 @@ function readAgentExecution(
     !hostIds.every(
       (hostId) => typeof hostId === 'string' && hostId.length > 0,
     ) ||
-    (provider !== undefined && provider !== 'qwen' && provider !== 'codex')
+    (provider !== undefined && !isAgentProgram(provider))
   ) {
     return 'invalid';
   }
@@ -595,6 +599,9 @@ export function registerWorkspaceAgentRoutes(
           kind: 'external' as const,
           label: host.name,
           provider: host.providers.join(', '),
+          programs: (
+            Object.keys(AGENT_PROGRAM_LABELS) as AgentProgram[]
+          ).filter((program) => hostOffersProgram(host, program)),
           status:
             host.lastSeenAt !== undefined &&
             now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
@@ -1304,11 +1311,19 @@ export function registerWorkspaceAgentRoutes(
           return;
         }
         if (execution?.mode === 'managed-host') {
-          const knownHosts = new Set(
-            (await readAgentHosts(root)).map((host) => host.id),
+          const placed = (await readAgentHosts(root)).filter((host) =>
+            execution.hostIds.includes(host.id),
           );
-          if (execution.hostIds.some((hostId) => !knownHosts.has(hostId))) {
+          if (placed.length !== execution.hostIds.length) {
             res.status(400).json({ error: 'agent_host_not_found' });
+            return;
+          }
+          const { provider } = execution;
+          if (
+            provider &&
+            !placed.some((host) => hostOffersProgram(host, provider))
+          ) {
+            res.status(400).json({ error: 'program_unavailable' });
             return;
           }
         }
@@ -1586,7 +1601,9 @@ export function registerWorkspaceAgentRoutes(
                   ? ([409, 'agent_retired'] as const)
                   : result === 'host_not_found'
                     ? ([400, 'agent_host_not_found'] as const)
-                    : ([409, 'agent_has_live_work'] as const);
+                    : result === 'program_unavailable'
+                      ? ([400, 'program_unavailable'] as const)
+                      : ([409, 'agent_has_live_work'] as const);
             res.status(status).json({ error });
             return;
           }

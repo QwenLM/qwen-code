@@ -30,6 +30,7 @@ import {
   isAgentAddressable,
   isAgentExecutableByHost,
   maxConcurrentRunsFor,
+  readAgentHostsUnlocked,
   withAgentStoreTransaction,
   type AgentStoreTransaction,
 } from './store.js';
@@ -39,6 +40,7 @@ import {
   type RunCloseRequest,
 } from './run-lifecycle.js';
 import {
+  hostOffersProgram,
   isThreadTerminal,
   threadPriorityRank,
   type RunLease,
@@ -46,6 +48,55 @@ import {
   type ThreadRun,
   type WorkspaceAgent,
 } from './types.js';
+
+type RunStep = NonNullable<NonNullable<ThreadRun['progress']>['steps']>[number];
+
+/** As many steps as the local path keeps; a host cannot send more. */
+const MAX_HOST_STEPS = 8;
+const MAX_STEP_TEXT = 200;
+const STEP_STATUSES: ReadonlySet<string> = new Set([
+  'running',
+  'done',
+  'failed',
+]);
+
+/**
+ * Reads the tool steps a host reports. The host is outside the daemon's trust
+ * boundary, so anything malformed or oversized is refused rather than trimmed.
+ */
+export function parseHostRunSteps(
+  value: unknown,
+): RunStep[] | undefined | 'invalid' {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HOST_STEPS) return 'invalid';
+  const steps: RunStep[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return 'invalid';
+    const { id, title, status } = entry as Record<string, unknown>;
+    if (
+      typeof id !== 'string' ||
+      id.length === 0 ||
+      id.length > MAX_STEP_TEXT ||
+      typeof title !== 'string' ||
+      title.length > MAX_STEP_TEXT ||
+      typeof status !== 'string' ||
+      !STEP_STATUSES.has(status)
+    ) {
+      return 'invalid';
+    }
+    steps.push({ id, title, status: status as RunStep['status'] });
+  }
+  return steps;
+}
+
+/** Set on a run whose bound program no runtime it may use offers. */
+export const AGENT_PROGRAM_UNAVAILABLE = 'agent_program_unavailable';
+
+function boundProgram(agent: WorkspaceAgent) {
+  return agent.execution?.mode === 'managed-host'
+    ? agent.execution.provider
+    : undefined;
+}
 
 /** Deliberately short. A dead Host should not hold work for long. */
 export const DEFAULT_RUN_LEASE_MS = 60_000;
@@ -157,6 +208,7 @@ export async function reportHostRunProgress(
     detail: string;
     outputText?: string;
     thoughtText?: string;
+    steps?: RunStep[];
   },
 ) {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
@@ -193,6 +245,11 @@ export async function reportHostRunProgress(
           ? previous.thoughtText
           : (input.thoughtText ?? previous?.thoughtText),
     };
+    const steps =
+      previous?.sequence === input.sequence
+        ? previous.steps
+        : (input.steps ?? previous?.steps);
+    if (steps) run.progress.steps = steps;
     await transaction.writeThread(thread);
     return { ok: true };
   });
@@ -274,12 +331,57 @@ export async function pickupRunForHost(
         .map((agent) => [agent.id, agent]),
     );
     if (placed.size === 0) return undefined;
-    const { threads, unreadable } = await transaction.listThreads();
-    if (unreadable.length > 0) {
+    const listed = await transaction.listThreads();
+    if (listed.unreadable.length > 0) {
       throw new Error(
-        `Cannot pick up Agent work while thread records are unreadable: ${unreadable.join(', ')}.`,
+        `Cannot pick up Agent work while thread records are unreadable: ${listed.unreadable.join(', ')}.`,
       );
     }
+
+    // A run bound to a program this host lacks is left for a host that has
+    // it. When none of its hosts has it, fail the run now: left queued it
+    // would wait forever with nothing on screen saying why.
+    const hosts = (await readAgentHostsUnlocked(projectRoot)).hosts;
+    const self = hosts.find((host) => host.id === hostId);
+    const runsHere = (agent: WorkspaceAgent) => {
+      const program = boundProgram(agent);
+      return (
+        !program || (self !== undefined && hostOffersProgram(self, program))
+      );
+    };
+    const runsNowhere = (agent: WorkspaceAgent) => {
+      const program = boundProgram(agent);
+      if (!program || agent.execution?.mode !== 'managed-host') return false;
+      const hostIds = agent.execution.hostIds;
+      return !hosts.some(
+        (host) => hostIds.includes(host.id) && hostOffersProgram(host, program),
+      );
+    };
+    let failedAny = false;
+    for (const thread of listed.threads) {
+      if (isThreadTerminal(thread.status)) continue;
+      for (const run of thread.runs) {
+        const agent = placed.get(run.agentId);
+        if (run.status === 'queued' && agent && runsNowhere(agent)) {
+          failedAny = true;
+          await finishRunInTransaction(transaction, {
+            threadId: thread.id,
+            runId: run.id,
+            outcome: {
+              status: 'failed',
+              error: AGENT_PROGRAM_UNAVAILABLE,
+              failureStage: 'pickup',
+            },
+            now,
+          });
+        }
+      }
+    }
+
+    // Re-read after failing runs so a later write never restores them.
+    const threads = failedAny
+      ? (await transaction.listThreads()).threads
+      : listed.threads;
 
     const held = threads
       .flatMap((thread) =>
@@ -335,6 +437,8 @@ export async function pickupRunForHost(
           agent: WorkspaceAgent;
         } =>
           candidate.agent !== undefined &&
+          runsHere(candidate.agent) &&
+          !runsNowhere(candidate.agent) &&
           // The dispatcher's `selectCandidates` refuses terminal threads; this
           // is the second selection path and has to agree with it. Without
           // this a Host is handed work on a thread whose caller cancelled it

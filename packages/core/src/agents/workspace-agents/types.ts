@@ -84,13 +84,40 @@ export interface WorkspaceAgentsFile {
   agents: WorkspaceAgent[];
 }
 
+/** A program a runtime can run an agent with. */
+export type AgentProgram = 'qwen' | 'codex' | 'claude';
+
+/**
+ * How a host names each program in its advertised `providers`. The one table
+ * the host, the daemon's validation and pickup all read.
+ */
+export const AGENT_PROGRAM_LABELS: Readonly<Record<AgentProgram, string>> = {
+  qwen: 'Qwen Code ACP',
+  codex: 'Codex CLI',
+  claude: 'Claude Code ACP',
+};
+
+export function isAgentProgram(value: unknown): value is AgentProgram {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(AGENT_PROGRAM_LABELS, value)
+  );
+}
+
+export function hostOffersProgram(
+  host: { providers: readonly string[] },
+  program: AgentProgram,
+): boolean {
+  return host.providers.includes(AGENT_PROGRAM_LABELS[program]);
+}
+
 export type WorkspaceAgentExecution =
   | { mode: 'local' }
   | {
       mode: 'managed-host';
       hostIds: string[];
       /** The program to run on the host; the host's default when absent. */
-      provider?: 'qwen' | 'codex';
+      provider?: AgentProgram;
     };
 
 /**

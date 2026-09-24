@@ -259,7 +259,9 @@ export function RunRowView({
         <span className={styles.runError}>
           {row.run.error === 'agent_run_stalled'
             ? t('collab.runRow.stalled')
-            : row.run.error}
+            : row.run.error === 'agent_program_unavailable'
+              ? t('collab.runRow.programUnavailable')
+              : row.run.error}
         </span>
       ) : null}
     </div>

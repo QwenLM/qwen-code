@@ -21,27 +21,32 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { runCodexAppServer } from '../external-agents/codex-subagent-executor.js';
 import { streamAgentTurn } from './workspace-agents/stream-agent-turn.js';
+import type { AgentRunStep } from './workspace-agents/agent-events.js';
 import { codexHostSession } from './workspace-agents/codex-host-session.js';
+import {
+  CLAUDE_ACP_COMMAND,
+  runClaudeHostTurn,
+} from './workspace-agents/claude-host-session.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   agentThreadSessionId,
 } from '../runtime/agent-session-source.js';
+import {
+  AGENT_PROGRAM_LABELS,
+  type AgentProgram,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 
 const HEARTBEAT_MS = 5_000;
 const LEASE_RENEW_MS = 20_000;
 const RETRY_MS = 2_000;
-const PROVIDER_LABELS = {
-  qwen: 'Qwen Code ACP',
-  codex: 'Codex CLI',
-} as const;
-type AgentHostProvider = keyof typeof PROVIDER_LABELS;
+type AgentHostProvider = AgentProgram;
 
 let detectedProviders: AgentHostProvider[] | undefined;
 
 /**
  * What this host can run: Qwen Code always (it is this process), Codex when
- * its CLI is installed or was asked for. Advertised as a list so one machine
+ * its CLI is installed or was asked for, Claude Code when its ACP adapter is. Advertised as a list so one machine
  * shows up as one runtime offering several programs.
  */
 function hostProviders(preferred: AgentHostProvider): string[] {
@@ -50,8 +55,11 @@ function hostProviders(preferred: AgentHostProvider): string[] {
     ...(preferred === 'codex' || isCommandAvailable('codex').available
       ? (['codex'] as const)
       : []),
+    ...(isCommandAvailable(CLAUDE_ACP_COMMAND).available
+      ? (['claude'] as const)
+      : []),
   ];
-  return detectedProviders.map((provider) => PROVIDER_LABELS[provider]);
+  return detectedProviders.map((provider) => AGENT_PROGRAM_LABELS[provider]);
 }
 
 interface AgentHostCredential {
@@ -67,7 +75,7 @@ export interface AgentHostConnectionOptions {
   serverUrl: string;
   workspaceId: string;
   workspaceCwd: string;
-  provider: keyof typeof PROVIDER_LABELS;
+  provider: AgentProgram;
   enrollmentToken?: string;
   allowHttp?: boolean;
   name?: string;
@@ -251,7 +259,14 @@ async function executeAssignment(
   const renew = setInterval(() => void renewLease(), LEASE_RENEW_MS);
   const updates = new AbortController();
   let stream: Promise<void> | undefined;
-  let progress = {
+  let progress: {
+    sequence: number;
+    stage: string;
+    detail: string;
+    outputText: string;
+    thoughtText: string;
+    steps?: AgentRunStep[];
+  } = {
     sequence: 1,
     stage: 'starting',
     detail: '执行器已接单，正在启动',
@@ -292,6 +307,7 @@ async function executeAssignment(
     detail: string,
     outputText = progress.outputText,
     thoughtText = progress.thoughtText,
+    steps = progress.steps,
   ) => {
     // ponytail: bounded live preview; the final result retains the full answer.
     progress = {
@@ -300,6 +316,7 @@ async function executeAssignment(
       detail: detail.slice(0, 1200),
       outputText: outputText.slice(0, 262144),
       thoughtText: thoughtText.slice(0, 65536),
+      ...(steps ? { steps } : {}),
     };
   };
   const progressHeartbeat = setInterval(() => void flush(), 500);
@@ -307,7 +324,22 @@ async function executeAssignment(
   renew.unref?.();
   let summary: string | undefined;
   try {
-    if (providerFor(assignment, options.provider) === 'codex') {
+    const program = providerFor(assignment, options.provider);
+    if (program === 'claude') {
+      summary = await runClaudeHostTurn({
+        cwd: options.workspaceCwd,
+        prompt: modelPrompt(assignment),
+        signal: execution.signal,
+        onUpdate: (update) =>
+          report(
+            update.stage,
+            update.detail ?? '',
+            update.outputText,
+            update.thoughtText,
+            update.steps,
+          ),
+      });
+    } else if (program === 'codex') {
       const session = await codexHostSession(
         path.join(Storage.getGlobalQwenDir(), 'agent-hosts', 'codex-sessions'),
         [
@@ -381,14 +413,13 @@ async function executeAssignment(
         sessionId,
         promptId,
         AbortSignal.any([updates.signal, execution.signal]),
-        // ponytail: remote runs report stage and text only; forward `steps`
-        // through the lease update when remote step lists are wanted.
         (update) =>
           report(
             update.stage,
             update.detail ?? '',
             update.outputText,
             update.thoughtText,
+            update.steps,
           ),
       ).catch((error: unknown) => {
         if (!updates.signal.aborted) execution.abort(error);

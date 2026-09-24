@@ -33,7 +33,9 @@ import {
   explainSkip,
   groupThreads,
   needsAttention,
+  programLabel,
   summarizePreview,
+  type AgentProgramView,
   type RoutingPreviewTarget,
   type ThreadGroup,
   type ThreadSummaryView,
@@ -53,7 +55,11 @@ export interface AgentConfigPatch {
   maxConcurrentRuns?: number | null;
   execution?:
     | { mode: 'local' }
-    | { mode: 'managed-host'; hostIds: string[]; provider?: 'qwen' | 'codex' };
+    | {
+        mode: 'managed-host';
+        hostIds: string[];
+        provider?: AgentProgramView;
+      };
 }
 
 /** What every agent in this workspace may do. A property of the subsystem. */
@@ -136,6 +142,8 @@ export interface WorkspaceAgentRuntimeView {
   kind: 'local' | 'external';
   label: string;
   provider: string;
+  /** Program ids the runtime reported it can run. */
+  programs?: readonly string[];
   status: 'online' | 'offline';
   workspaceId?: string;
   workspaceCwd?: string;
@@ -295,12 +303,11 @@ export function ThreadsPage({
     entry.kind === 'local' ? t('collab.agent.thisComputer') : entry.label;
   // "Program · Runtime": what the agent runs as, then where.
   const agentPlace = (agent: WorkspaceAgentSummaryView) =>
-    `${
-      agent.execution?.mode === 'managed-host' &&
-      agent.execution.provider === 'codex'
-        ? 'Codex'
-        : 'Qwen Code'
-    } · ${hostLabel(agent.runtime)}`;
+    `${programLabel(
+      agent.execution?.mode === 'managed-host'
+        ? agent.execution.provider
+        : undefined,
+    )} · ${hostLabel(agent.runtime)}`;
 
   const submitConfig =
     (agentId: string) => (event: FormEvent<HTMLFormElement>) => {

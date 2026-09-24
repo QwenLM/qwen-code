@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Application, Request, Response } from 'express';
 import type { HostRunResult } from '@qwen-code/qwen-code-core';
 import {
+  parseHostRunSteps,
   applyHostRunResult,
   reportHostRunProgress,
   pickupRunForHost,
@@ -132,7 +133,9 @@ export function registerAgentHostTransportRoutes(
         detail,
         outputText,
         thoughtText,
+        steps: rawSteps,
       } = body(req);
+      const steps = parseHostRunSteps(rawSteps);
       if (
         typeof threadId !== 'string' ||
         typeof runId !== 'string' ||
@@ -144,15 +147,21 @@ export function registerAgentHostTransportRoutes(
         !Number.isSafeInteger(sequence) ||
         sequence < 1 ||
         typeof stage !== 'string' ||
-        !['starting', 'waiting', 'thinking', 'tool', 'responding'].includes(
-          stage,
-        ) ||
+        ![
+          'starting',
+          'resuming',
+          'waiting',
+          'thinking',
+          'tool',
+          'responding',
+        ].includes(stage) ||
         typeof detail !== 'string' ||
         detail.length > 1200 ||
         (outputText !== undefined &&
           (typeof outputText !== 'string' || outputText.length > 262144)) ||
         (thoughtText !== undefined &&
-          (typeof thoughtText !== 'string' || thoughtText.length > 65536))
+          (typeof thoughtText !== 'string' || thoughtText.length > 65536)) ||
+        steps === 'invalid'
       ) {
         res.status(400).json({ error: 'Invalid progress.' });
         return;
@@ -168,6 +177,7 @@ export function registerAgentHostTransportRoutes(
         detail,
         outputText,
         thoughtText,
+        ...(steps ? { steps } : {}),
       });
       res.status(result.ok ? 200 : 409).json(result);
     },

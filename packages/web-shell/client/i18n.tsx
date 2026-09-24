@@ -630,6 +630,8 @@ const EN: Messages = {
     `${v?.agent} was stopped after 15 minutes without progress`,
   'collab.run.failed': (v) => `${v?.agent} stopped with an error`,
   'collab.run.retry': 'Retry',
+  'collab.run.programUnavailable': (v) =>
+    `${v?.agent} could not start: no runtime it may use offers its program`,
   'collab.run.steps': (v) => `Steps by ${v?.agent}`,
   'collab.step.running': 'Running',
   'collab.step.done': 'Done',
@@ -666,6 +668,8 @@ const EN: Messages = {
     'The live preview reached its length limit; the full reply is in the conversation.',
   'collab.runRow.openSession': (v) => `Open ${v?.agent}'s session`,
   'collab.runRow.stalled': 'Stopped after 15 minutes without progress',
+  'collab.runRow.programUnavailable':
+    'None of its runtimes offers the program this agent is bound to',
   'collab.preview.nobody': 'This message will not reach any agent.',
   'collab.preview.to': (v) => `Goes to ${v?.names}.`,
   'collab.preview.only': (v) =>
@@ -4886,6 +4890,8 @@ const ZH: Messages = {
   'collab.run.timedOut': (v) => `${v?.agent} 15 分钟没有进展，已停止`,
   'collab.run.failed': (v) => `${v?.agent} 出错停止了`,
   'collab.run.retry': '重试',
+  'collab.run.programUnavailable': (v) =>
+    `${v?.agent} 没能启动：它能用的 Runtime 都没有它绑定的程序`,
   'collab.run.steps': (v) => `${v?.agent} 的步骤`,
   'collab.step.running': '进行中',
   'collab.step.done': '已完成',
@@ -4918,6 +4924,7 @@ const ZH: Messages = {
   'collab.runRow.outputCap': '实时预览已达长度上限；完整回复见对话正文。',
   'collab.runRow.openSession': (v) => `打开 ${v?.agent} 的会话`,
   'collab.runRow.stalled': '15 分钟没有进展，已停止',
+  'collab.runRow.programUnavailable': '它的 Runtime 都没有它绑定的程序',
   'collab.preview.nobody': '这条消息不会发给任何 Agent。',
   'collab.preview.to': (v) => `发给 ${v?.names}。`,
   'collab.preview.only': (v) => `只发给 ${v?.names}，其他成员不会被打断。`,

@@ -44,6 +44,11 @@ import {
   selectBuiltInTools,
   selectDiscoverableMcpServerNames,
 } from './agent-tool-options';
+import {
+  AGENT_PROGRAMS,
+  programLabel,
+  type AgentProgramView,
+} from '../workspace-agents/agents-view-logic';
 
 interface AgentCreatePageProps {
   workspaceCwd?: string;
@@ -56,6 +61,8 @@ interface AgentCreatePageProps {
     label: string;
     status: 'online' | 'offline';
     provider?: string;
+    /** Program ids the runtime reported it can run. */
+    programs?: readonly string[];
     workspaceCwd?: string;
   }[];
   /** Preselects the runtime, e.g. right after it joined. */
@@ -72,7 +79,7 @@ interface AgentCreatePageProps {
       | {
           mode: 'managed-host';
           hostIds: string[];
-          provider?: 'qwen' | 'codex';
+          provider?: AgentProgramView;
         };
   }) => Promise<void>;
 }
@@ -168,9 +175,8 @@ export function AgentCreatePage({
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
-  const [executionProvider, setExecutionProvider] = useState<'qwen' | 'codex'>(
-    'qwen',
-  );
+  const [executionProvider, setExecutionProvider] =
+    useState<AgentProgramView>('qwen');
   const [executionHostIds, setExecutionHostIds] = useState(
     () => new Set<string>(initialHostId ? [initialHostId] : []),
   );
@@ -842,12 +848,12 @@ export function AgentCreatePage({
                   const host = executionHosts.find((entry) =>
                     executionHostIds.has(entry.id),
                   );
-                  const missing = (provider: 'qwen' | 'codex') =>
+                  const missing = (provider: AgentProgramView) =>
                     provider === 'qwen'
                       ? undefined
                       : !host
                         ? t('collab.agent.programLocal')
-                        : /codex/i.test(host.provider ?? '')
+                        : host.programs?.includes(provider)
                           ? undefined
                           : t('collab.agent.programMissing');
                   return (
@@ -858,7 +864,7 @@ export function AgentCreatePage({
                         aria-label={t('collab.runtime.program')}
                         className="grid gap-2 sm:grid-cols-2"
                       >
-                        {(['qwen', 'codex'] as const).map((provider) => {
+                        {AGENT_PROGRAMS.map((provider) => {
                           const reason = missing(provider);
                           return (
                             <label
@@ -873,7 +879,7 @@ export function AgentCreatePage({
                                 onChange={() => setExecutionProvider(provider)}
                               />
                               <span>
-                                {provider === 'qwen' ? 'Qwen Code' : 'Codex'}
+                                {programLabel(provider)}
                                 {reason && (
                                   <span className="block text-xs text-muted-foreground">
                                     {reason}
