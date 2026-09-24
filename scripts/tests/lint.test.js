@@ -264,3 +264,76 @@ describe('prettier lane', () => {
     expect(gateIsExperimental).toBe(formatIsExperimental);
   });
 });
+
+// #12635: on the shared ECS runners $HOME persists across jobs, so
+// `command -v yamllint` can resolve to a stale ~/.local/bin shim that no
+// longer runs (interpreter upgrade, interrupted pip install) or to the
+// wrong version — setup then skips the pinned reinstall and the Run
+// yamllint step fails instantly with no lint output on a clean tree. The
+// availability check must require the pinned version to actually run.
+describe('yamllint availability check', () => {
+  const repoRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '..',
+  );
+  const lintSource = readFileSync(
+    path.join(repoRoot, 'scripts', 'lint.js'),
+    'utf8',
+  );
+  const pinnedVersion = /const YAMLLINT_VERSION = '([^']+)'/.exec(
+    lintSource,
+  )?.[1];
+  // yamllint's is the only template-literal check; actionlint and
+  // shellcheck use plain strings.
+  const checkTemplate = /check: `([^`]+)`/.exec(lintSource)?.[1];
+  const check = checkTemplate?.replaceAll(
+    '${YAMLLINT_VERSION}',
+    pinnedVersion ?? '',
+  );
+
+  it('requires the pinned yamllint version to run, not just to exist', () => {
+    expect(pinnedVersion).toBeTruthy();
+    expect(checkTemplate).toBeTruthy();
+    expect(checkTemplate).toContain('yamllint --version');
+    expect(lintSource).not.toContain('command -v yamllint');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts only a running yamllint at the pinned version',
+    () => {
+      expect(check).toBeTruthy();
+      const root = mkdtempSync(path.join(tmpdir(), 'yamllint-check-'));
+      try {
+        const binDir = path.join(root, 'bin');
+        mkdirSync(binDir, { recursive: true });
+        const env = { PATH: `${binDir}:/usr/bin:/bin` };
+        const runCheck = () => spawnSync('sh', ['-c', check], { env }).status;
+        const writeShim = (body) => {
+          const shim = path.join(binDir, 'yamllint');
+          writeFileSync(shim, body);
+          chmodSync(shim, 0o755);
+        };
+
+        // Absent: install must run, as before.
+        expect(runCheck()).not.toBe(0);
+
+        // Present but fails when run: a stale broken shim must not satisfy
+        // the check — the #12635 failure mode.
+        writeShim('#!/bin/sh\nexit 1\n');
+        expect(runCheck()).not.toBe(0);
+
+        // Runs but reports another version: the tree is gated on the pin,
+        // so setup must reinstall it.
+        writeShim("#!/bin/sh\necho 'yamllint 0.0.0'\n");
+        expect(runCheck()).not.toBe(0);
+
+        // Runs and reports the pinned version: reuse it.
+        writeShim(`#!/bin/sh\necho 'yamllint ${pinnedVersion}'\n`);
+        expect(runCheck()).toBe(0);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});

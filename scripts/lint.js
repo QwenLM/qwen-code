@@ -221,7 +221,13 @@ function getLinters() {
     `,
       },
       yamllint: {
-        check: 'command -v yamllint',
+        // `command -v` proves only that a yamllint executable exists. On the
+        // shared ECS runners $HOME persists across jobs, so a stale
+        // ~/.local/bin/yamllint — broken by an interpreter upgrade or an
+        // interrupted pip install, or simply the wrong version — passes the
+        // check and the Run yamllint step then fails instantly with no lint
+        // output on a clean tree (#12635). Require the pinned version to run.
+        check: `yamllint --version | grep -qF 'yamllint ${YAMLLINT_VERSION}'`,
         installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
         run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
       },
