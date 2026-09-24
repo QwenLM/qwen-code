@@ -1109,13 +1109,13 @@ describe('repo-context providers and trust boundary', () => {
 
     const alias = join(root, 'alias.json');
     linkSync(planPath, alias);
-    // On a volume whose ids exceed the safe-integer range (NTFS) the alias
-    // guard this asserts is INERT, not untestable: `isSameFile` stats without
-    // `bigint`, so the comparison degrades to `realpathSync.native`, which
-    // cannot resolve a hard link, and the plan would be overwritten through
-    // the alias. Tracked in #11848 rather than left as a bare skip.
+    // The guard needs the volume to expose a file id at all. `isSameFile`
+    // stats with `{ bigint: true }` (the #11848 conversion), so a 64-bit
+    // NTFS id above 2^53 arrives exact and the alias is refused there too;
+    // only an ino-0 volume (FAT/exFAT/SMB) still degrades to canonical
+    // spellings, which cannot see a hard link — that skip is by design.
     const inode = statSync(planPath).ino;
-    if (!Number.isSafeInteger(inode) || inode <= 0) {
+    if (inode <= 0) {
       ctx.skip();
       return;
     }
