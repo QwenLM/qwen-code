@@ -52,6 +52,7 @@ Apply these common exclusions automatically:
 - `**/test/**`, `**/tests/**`
 - `**/package-lock.json`
 - `**/yarn.lock`
+- `**/pnpm-lock.yaml`
 - `**/*.min.js`
 - Binary files (images, fonts, etc.)
 - Files larger than 500KB (check size if needed)

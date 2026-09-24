@@ -62,6 +62,7 @@ import {
   parseSessionSource,
   summarizeReplay,
 } from '@qwen-code/acp-bridge';
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -161,6 +162,11 @@ import {
   omitSkillDetailsFromReplayArrays,
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import {
+  readSessionToolCalls,
+  SessionToolCallsLimitError,
+  SessionToolCallsReplayError,
+} from '../session-tool-calls.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
   PERSIST_REASONING_SELECTION_META_KEY,
@@ -1909,6 +1915,17 @@ export function registerSessionRoutes(
             safeBody(req)['rewindFiles'] !== false) ||
           (options.cwdBound === 'sync-output-language' &&
             safeBody(req)['syncOutputLanguage'] === true);
+        if (
+          runtime.routeFileSystemFactory.sshWorkspace &&
+          cwdBound &&
+          route !== 'POST /session/:id/continue'
+        ) {
+          res.status(501).json({
+            code: 'ssh_workspace_operation_unsupported',
+            error: 'This operation is not supported for SSH workspaces.',
+          });
+          return;
+        }
         if (standalone && (options.promptAdmission || cwdBound)) {
           const service = deps.standaloneSessionService;
           if (!service) {
@@ -2834,6 +2851,17 @@ export function registerSessionRoutes(
     const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
     if (resolvedRuntime === undefined) return;
     const { runtime, workspaceCwd } = resolvedRuntime;
+    if (
+      runtime.routeFileSystemFactory.sshWorkspace &&
+      (body['branch'] != null || body['worktree'] != null)
+    ) {
+      res.status(501).json({
+        code: 'ssh_workspace_operation_unsupported',
+        error:
+          'Create branches and worktrees through the remote agent or SSH terminal.',
+      });
+      return;
+    }
     if (runtime.provenance === 'live-conversation') {
       res.status(400).json({
         error:
@@ -5924,6 +5952,137 @@ export function registerSessionRoutes(
     }
   });
 
+  app.get('/workspaces/:workspace/session/:id/tool-calls', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/tool-calls';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const qualifiedTarget = resolveQualifiedSessionTarget(req, res, {
+      allowUntrustedSecondary: true,
+    });
+    if (!qualifiedTarget) return;
+    const turnId = req.query['turnId'];
+    if (typeof turnId !== 'string' || !turnId.trim() || turnId.length > 200) {
+      res.status(400).json({
+        error: '`turnId` must be a non-empty persisted turn record id',
+        code: 'invalid_turn_anchor',
+      });
+      return;
+    }
+    try {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const runtime =
+            qualifiedTarget.kind === 'ordinary'
+              ? qualifiedTarget.runtime
+              : await resolveQualifiedSessionRuntime(
+                  req,
+                  res,
+                  route,
+                  [sessionId],
+                  'active',
+                );
+          if (!runtime) return undefined;
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            await assertSessionLoadable(
+              runtime.workspaceCwd,
+              sessionId,
+              runtime.sessionRuntimeBaseDir,
+              {
+                allowActiveConflict: true,
+              },
+            );
+            try {
+              runtime.bridge.getSessionSummary(sessionId);
+              if (runtime.bridge.flushSessionTranscript) {
+                await runtime.bridge.flushSessionTranscript(sessionId);
+              } else {
+                await runtime.bridge.getSessionTranscriptPage({
+                  sessionId,
+                  direction: 'backward',
+                  limit: 1,
+                });
+              }
+            } catch (error) {
+              if (!(error instanceof SessionNotFoundError)) throw error;
+            }
+            const codec = getTranscriptCursorCodec(runtime);
+            const reader = new SessionTranscriptReader(
+              runtime.workspaceCwd,
+              codec,
+            );
+            const hasActivePrompt = () => {
+              try {
+                return runtime.bridge.getSessionSummary(sessionId)
+                  .hasActivePrompt;
+              } catch (error) {
+                if (error instanceof SessionNotFoundError) return false;
+                throw error;
+              }
+            };
+            let events;
+            try {
+              events = await readSessionToolCalls({
+                sessionId,
+                turnId,
+                reader,
+                codec,
+                hasActivePrompt,
+              });
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                throw error;
+              const location =
+                await createWorkspaceRuntimeSessionService(
+                  runtime,
+                ).getSessionLocation(sessionId);
+              if (location === 'archived')
+                throw new SessionArchivedError(sessionId);
+              if (location === 'conflict')
+                throw new SessionConflictError(sessionId);
+              throw new SessionNotFoundError(sessionId);
+            }
+            assertRuntimeGenerationOpen?.();
+            return {
+              v: 1 as const,
+              sessionId,
+              turnId,
+              events: events.map((event) =>
+                redactSdkSurfaceEvent(event, runtime.trusted),
+              ),
+            };
+          });
+        }),
+      );
+      if (result === undefined) return;
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serializeWorkspaceTranscriptResponse(result, sessionId));
+    } catch (error) {
+      if (error instanceof SessionToolCallsLimitError) {
+        res.status(413).json({
+          error: error.message,
+          code: 'tool_calls_limit_exceeded',
+          sessionId,
+        });
+        return;
+      }
+      if (error instanceof SessionToolCallsReplayError) {
+        res.status(500).json({
+          error: error.message,
+          code: 'tool_calls_replay_incomplete',
+          sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, error, { route, sessionId });
+    }
+  });
+
   app.get('/session/:id/turn-index', async (req, res) => {
     const route = 'GET /session/:id/turn-index';
     const sessionId = requireSessionId(req, res);
@@ -6617,18 +6776,20 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const action = safeBody(req)['action'];
+        const body = safeBody(req);
+        const action = body['action'];
         if (
           action !== 'pause' &&
           action !== 'resume' &&
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           res.status(400).json({
             error:
-              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           });
           return;
         }
@@ -6646,6 +6807,7 @@ export function registerSessionRoutes(
               taskId,
               action,
               clientId !== undefined ? { clientId } : undefined,
+              readServeWorkflowActionInput(body),
             ),
           );
       },

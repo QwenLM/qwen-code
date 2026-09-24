@@ -18,6 +18,7 @@ import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
+import type { MediaPolicyToolDescriptor } from './tools.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
@@ -470,6 +471,111 @@ describe('ToolRegistry', () => {
 
       expect(names).toContain('loaded-tool');
       expect(names).toContain('lazy-tool');
+    });
+  });
+
+  describe('media-policy tool visibility', () => {
+    class MockMediaPolicyTool extends MockTool {
+      override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+        return {
+          kind: 'media_policy',
+          inputMediaTypes: ['image'],
+          outputs: [{ kind: 'media', required: true }],
+        };
+      }
+    }
+
+    const enabledConfig = () =>
+      new Config({
+        ...baseConfigParams,
+        omniPolicyTools: {
+          omni_compress_image: { modelAccess: { enabled: true } },
+        },
+      });
+
+    it('excludes media-policy tools from getFunctionDeclarations by default', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['visible']);
+    });
+
+    it('keeps media-policy tools hidden even with includeDeferred: true', () => {
+      // agent-core's wildcard/default branches call
+      // getFunctionDeclarations({ includeDeferred: true }); the media-policy
+      // filter must hold there too.
+      toolRegistry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      const names = toolRegistry
+        .getFunctionDeclarations({ includeDeferred: true })
+        .map((d) => d.name);
+      expect(names).toEqual([]);
+    });
+
+    it('excludes media-policy tools from getFunctionDeclarationsFiltered even when named explicitly', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      const names = toolRegistry
+        .getFunctionDeclarationsFiltered(['visible', 'omni_compress_image'])
+        .map((d) => d.name);
+      expect(names).toEqual(['visible']);
+    });
+
+    it.each([false, true])(
+      'applies modelAccess=%s to CodeModeOnly bindings',
+      (enabled) => {
+        const config = new Config({
+          ...baseConfigParams,
+          codeModeOnly: true,
+          omniPolicyTools: {
+            omni_compress_image: { modelAccess: { enabled } },
+          },
+        });
+        const registry = new ToolRegistry(config);
+        const tool = new MockMediaPolicyTool({ name: 'omni_compress_image' });
+        registry.registerTool(tool);
+        registry.registerTool(new MockTool({ name: 'exec' }));
+        expect(
+          registry
+            .getCodeModeBindingPlan()
+            .bindings.some((binding) => binding.name === tool.name),
+        ).toBe(enabled);
+        for (const declarations of [
+          registry.getFunctionDeclarations(),
+          registry.getFunctionDeclarationsFiltered(['exec', tool.name]),
+        ]) {
+          expect(
+            declarations
+              .find((item) => item.name === 'exec')
+              ?.description?.includes('tools.omni_compress_image('),
+          ).toBe(enabled);
+        }
+        expect(registry.getTool(tool.name)).toBe(tool);
+      },
+    );
+
+    it('declares media-policy tools when modelAccess.enabled is true', () => {
+      const registry = new ToolRegistry(enabledConfig());
+      registry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toEqual([
+        'omni_compress_image',
+      ]);
+      expect(
+        registry
+          .getFunctionDeclarationsFiltered(['omni_compress_image'])
+          .map((d) => d.name),
+      ).toEqual(['omni_compress_image']);
     });
   });
 
@@ -1048,7 +1154,7 @@ describe('ToolRegistry', () => {
 
       registry.clearRevealedDeferredTools();
 
-      // The ToolSearch-discovered reveal is dropped by the reset...
+      // A transient reveal is dropped by the reset...
       expect(registry.isDeferredToolRevealed('discovered')).toBe(false);
       expect(
         registry.getFunctionDeclarations().map((d) => d.name),
@@ -1074,7 +1180,8 @@ describe('ToolRegistry', () => {
 
   // #10075: built-in tools an active `settings.tools.eager` allowlist does
   // not name are demoted to deferred instead of being dropped from the
-  // registry, so they stay listed in /tools and loadable via ToolSearch
+  // registry, so they stay listed in /tools and reachable through the
+  // `tool_search` + `tool_call` bridge
   // while their schemas stay out of the eager model request (#9827).
   describe('permission-deferred tools (#10075)', () => {
     it('registers the tool but hides it from the eager declarations', async () => {
@@ -1102,7 +1209,7 @@ describe('ToolRegistry', () => {
           .getFunctionDeclarations({ includeDeferred: true })
           .map((d) => d.name),
       ).toContain('hidden_by_allowlist');
-      // ...and discoverable through the deferred summary (ToolSearch).
+      // ...and discoverable through the deferred summary (ToolSearch + ToolCall).
       expect(
         toolRegistry.getDeferredToolSummary().map((t) => t.name),
       ).toContain('hidden_by_allowlist');
@@ -1133,7 +1240,7 @@ describe('ToolRegistry', () => {
       ).not.toContain('hidden_by_allowlist');
     });
 
-    it('reveals the schema once ToolSearch loads the tool', async () => {
+    it('includes a permission-deferred schema after an explicit reveal', async () => {
       toolRegistry.registerPermissionDeferredFactory(
         'hidden_by_allowlist',
         async () => new MockTool({ name: 'hidden_by_allowlist' }),

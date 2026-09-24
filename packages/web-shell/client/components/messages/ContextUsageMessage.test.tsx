@@ -74,6 +74,55 @@ function render(
 }
 
 describe('ContextUsageMessage', () => {
+  it.each(['en', 'zh-CN'] as const)(
+    'keeps the skill listing row separate from its loaded body cost (%s)',
+    (language) => {
+      const status = makeStatus(60, false);
+      status.usage.showDetails = true;
+      const name = 'agent-reproduce-feature';
+      status.usage.skills = [{ name, tokens: 2, loaded: true, bodyTokens: 3 }];
+      const container = render(status, false, undefined, language);
+      const label = language === 'en' ? 'body loaded' : '已加载正文';
+      const nameElement = container.querySelector(`[title="${name}"]`)!;
+      expect(nameElement.textContent).toBe(name);
+      expect(nameElement.parentElement?.textContent).toContain('2');
+      const skillBlock = nameElement.parentElement!.parentElement!;
+      expect(skillBlock.textContent?.split(label)).toHaveLength(2);
+      expect(skillBlock.textContent).toContain('+3');
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'toggles only the snapshot body without requesting context (%s)',
+    (language) => {
+      const read = vi.fn();
+      const container = render(makeStatus(60, false), false, read, language);
+      const card = container.querySelector('section')!;
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-expanded]',
+      )!;
+      const meter = container.querySelector('[data-web-shell-context-meter]');
+      expect(toggle).not.toBeNull();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(toggle.getAttribute('aria-label')).toBe(
+        language === 'en' ? 'Collapse' : '收起',
+      );
+      act(() => toggle.click());
+      expect(card.getAttribute('data-collapsed')).toBe('true');
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(toggle.getAttribute('aria-label')).toBe(
+        language === 'en' ? 'Expand' : '展开',
+      );
+      act(() => toggle.click());
+      expect(card.getAttribute('data-collapsed')).toBe('false');
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(container.querySelector('[data-web-shell-context-meter]')).toBe(
+        meter,
+      );
+      expect(read).not.toHaveBeenCalled();
+    },
+  );
+
   it('separates remaining capacity from free space and clamps exhausted capacity', () => {
     const container = render(makeStatus(60, false));
     expect(container.querySelector('[class*="total"]')?.textContent).toBe(
@@ -110,7 +159,7 @@ describe('ContextUsageMessage', () => {
     const read = vi.fn();
     const container = render(status, false, read);
     expect(container.textContent).toContain('Snapshot');
-    const button = container.querySelector('button')!;
+    const button = container.querySelector('button:not([aria-expanded])')!;
     expect(button.textContent).toBe('View current context');
     act(() => button.click());
     expect(read).toHaveBeenCalledOnce();
@@ -218,6 +267,7 @@ describe('ContextUsageMessage', () => {
   it('suppresses its own title in compact mode so the panel toolbar is the only heading', () => {
     const compactContainer = render(makeStatus(60, false), true);
     expect(compactContainer.querySelector('[class*="title"]')).toBeNull();
+    expect(compactContainer.querySelector('button[aria-expanded]')).toBeNull();
     expect(compactContainer.querySelector('section[aria-label]')).toBeNull();
     expect(compactContainer.querySelector('section[role]')).toBeNull();
     expect(compactContainer.querySelector('[class*="compact"]')).not.toBeNull();
@@ -265,12 +315,12 @@ describe('ContextUsageMessage', () => {
     const onShowDetail = vi.fn();
     const status = makeStatus(60, false);
     const container = render(status, false, onShowDetail);
-    const button = container.querySelector('button')!;
+    const button = container.querySelector('button:not([aria-expanded])')!;
     expect(button.textContent).toBe('View details');
     act(() => button.click());
     expect(onShowDetail).toHaveBeenCalledTimes(1);
     const readOnly = render(status);
-    expect(readOnly.querySelector('button')).toBeNull();
+    expect(readOnly.querySelector('button:not([aria-expanded])')).toBeNull();
     expect(readOnly.textContent).toContain(
       'Run /context detail for per-item breakdown.',
     );

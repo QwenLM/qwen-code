@@ -1926,7 +1926,17 @@ describe('cleanOrphanedFunctionCalls', () => {
 });
 
 describe('convertGeminiToolsToResponsesTools', () => {
-  it('converts functionDeclarations to Responses API function tools', () => {
+  it('preserves nullable optional parameters without disabling strict mode', () => {
+    const parameters = {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string' },
+        offset: { type: ['integer', 'null'] },
+        limit: { type: ['integer', 'null'] },
+        pages: { type: ['string', 'null'] },
+      },
+      required: ['file_path'],
+    };
     const tools = convertGeminiToolsToResponsesTools({
       model: 'gpt-5',
       contents: [],
@@ -1937,10 +1947,7 @@ describe('convertGeminiToolsToResponsesTools', () => {
               {
                 name: 'read_file',
                 description: 'reads a file',
-                parametersJsonSchema: {
-                  type: 'object',
-                  properties: { path: {} },
-                },
+                parametersJsonSchema: parameters,
               },
             ],
           },
@@ -1952,9 +1959,10 @@ describe('convertGeminiToolsToResponsesTools', () => {
         type: 'function',
         name: 'read_file',
         description: 'reads a file',
-        parameters: { type: 'object', properties: { path: {} } },
+        parameters,
       },
     ]);
+    expect(parameters.required).toEqual(['file_path']);
   });
 
   it('returns undefined when there are no tools', () => {
