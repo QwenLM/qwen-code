@@ -5811,6 +5811,40 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it('drops the connection session context through the real clearSession action', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession({ dropSessionContext: true });
+
+    expect(getConnection().sessionContext).toBeUndefined();
+    expect(getConnection().sessionId).toBeUndefined();
+  });
+
+  it('keeps the connection session context when clearSession drops only the session', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession();
+
+    expect(getConnection().sessionId).toBeUndefined();
+    expect(getConnection().sessionContext).toEqual({ kind: 'live' });
+  });
+
   it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');
     const replacement = createMockSession('session-b');
