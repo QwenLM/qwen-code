@@ -16450,6 +16450,133 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it("carries the adapter's own error for a channel another workspace defines", async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-crossowner-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    // Defines `feishu` but does not ask for it: the borrower does.
+    writeWorkspaceSettings(daemon.secondary, {
+      channels: { feishu: { type: 'feishu' } },
+    });
+    const borrower = path.join(tmpDir, 'borrower');
+    writeWorkspaceSettings(borrower, { serve: { channels: ['feishu'] } });
+    const owner = canonicalizeWorkspace(daemon.secondary);
+    daemon.factory.mockImplementation(
+      (opts: CreateChannelWorkerSupervisorOptions) => {
+        const worker = makeWorker({
+          enabled: true,
+          state: 'failed',
+          channels: [],
+        });
+        // The supervisor is created for the workspace whose settings define
+        // the channel, and stamps every attempt failure with it.
+        worker.start.mockRejectedValue(
+          new ChannelWorkerStartupError('Channel worker failed to start.', {
+            workspaceCwd: opts.workspace,
+            startupFailures: [
+              {
+                channel: 'feishu',
+                phase: 'connect',
+                message: 'feishu gateway rejected the upgrade',
+              },
+            ],
+          }),
+        );
+        return worker;
+      },
+    );
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      for (const cwd of [daemon.secondary, borrower]) {
+        expect(
+          (
+            await fetch(`${handle.url}/workspaces`, {
+              method: 'POST',
+              headers: daemon.headers,
+              body: JSON.stringify({ cwd }),
+            })
+          ).status,
+        ).toBe(201);
+      }
+
+      await vi.waitFor(async () => {
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`, {
+            headers: daemon.headers,
+          })
+        ).json()) as { issues: Array<{ code: string; message: string }> };
+        const restore = status.issues.filter(
+          (issue) => issue.code === 'channel_restore_failed',
+        );
+        // Recorded against the workspace that asked, carrying the error the
+        // worker reported — which is stamped with the owner, not the asker.
+        expect(restore.map((issue) => issue.message)).toEqual([
+          `serve.channels for workspace ${canonicalizeWorkspace(borrower)} were not restored: feishu (feishu gateway rejected the upgrade).`,
+        ]);
+        expect(restore[0]!.message).not.toContain(owner);
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('stops reporting a failed name once another workspace hosts it', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-commit-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const borrower = path.join(tmpDir, 'borrower');
+    // Lists a channel the secondary workspace defines, so its own restore
+    // cannot attribute the name until that workspace is registered too.
+    writeWorkspaceSettings(borrower, { serve: { channels: ['feishu'] } });
+    const handle = await daemon.start();
+    const restoreIssues = async () =>
+      (
+        (await (
+          await fetch(`${handle.url}/daemon/status`, {
+            headers: daemon.headers,
+          })
+        ).json()) as { issues: Array<{ code: string; message: string }> }
+      ).issues.filter((issue) => issue.code === 'channel_restore_failed');
+    const register = (cwd: string) =>
+      fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd }),
+      });
+
+    try {
+      await handle.runtimeReady;
+      expect((await register(borrower)).status).toBe(201);
+      await vi.waitFor(async () =>
+        expect((await restoreIssues()).map((issue) => issue.message)).toEqual([
+          expect.stringContaining(
+            `serve.channels for workspace ${canonicalizeWorkspace(borrower)} were not restored: feishu (`,
+          ),
+        ]),
+      );
+
+      // The owning workspace registers and its restore commits `feishu`. The
+      // channel the borrower asked for is up, so the record no longer
+      // describes anything true — and no operator acted to retire it.
+      expect((await register(daemon.secondary)).status).toBe(201);
+      await vi.waitFor(async () =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+      await vi.waitFor(async () => expect(await restoreIssues()).toEqual([]));
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('forgets a restore failure when its workspace is removed', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-failure-rm-')),
