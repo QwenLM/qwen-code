@@ -25,7 +25,15 @@ import { probeBackend } from '@qwen-code/qwen-code-core/superfast/decision-gate.
 const probeBackendMock = vi.mocked(probeBackend);
 
 function ctxWith(enabled: boolean): CommandContext {
-  const setValue = vi.fn();
+  const merged: { superfast: { enabled: boolean } } = {
+    superfast: { enabled },
+  };
+  const setValue = vi.fn(
+    (_scope: SettingScope, key: string, value: unknown) => {
+      if (key === 'superfast.enabled')
+        merged.superfast.enabled = value as boolean;
+    },
+  );
   const ctx = createMockCommandContext({
     services: {
       config: {
@@ -36,7 +44,12 @@ function ctxWith(enabled: boolean): CommandContext {
           timeoutMs: 150,
         }),
       },
-      settings: { setValue },
+      settings: {
+        setValue,
+        merged,
+        system: { settings: {} },
+        workspace: { settings: {} },
+      },
     },
   });
   return ctx;
@@ -75,6 +88,40 @@ describe('superfastCommand', () => {
     };
     expect(result.messageType).toBe('info');
     expect(ctx.services.settings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'superfast.enabled',
+      false,
+    );
+  });
+
+  it('warns and names the scope when a higher scope overrides the toggle', async () => {
+    const merged = { superfast: { enabled: true } };
+    const setValue = vi.fn();
+    const ctx = createMockCommandContext({
+      services: {
+        config: {
+          getSuperfastSettings: () => ({
+            enabled: true,
+            endpoint: 'http://localhost:8000/v1/systemone',
+            model: 'von-1.2.0',
+            timeoutMs: 150,
+          }),
+        },
+        settings: {
+          setValue,
+          merged,
+          system: { settings: {} },
+          workspace: { settings: { superfast: { enabled: true } } },
+        },
+      },
+    });
+    const result = (await superfastCommand.action?.(ctx, 'off')) as {
+      messageType: string;
+      content: string;
+    };
+    expect(result.messageType).toBe('warning');
+    expect(result.content).toContain('workspace');
+    expect(setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'superfast.enabled',
       false,

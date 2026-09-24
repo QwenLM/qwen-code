@@ -7,6 +7,8 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'Toggle the Superfast decision gate (local System One model)':
+    '切换 Superfast 决策门（本地 System One 模型）',
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',

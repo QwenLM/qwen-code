@@ -3481,24 +3481,26 @@ const SETTINGS_SCHEMA = {
     type: 'object',
     label: 'Superfast (Decision Gate)',
     category: 'Advanced',
-    requiresRestart: false,
+    requiresRestart: true,
     default: {},
     description:
       'Optional System One decision gate. When enabled, a small local decision ' +
-      'model (Von) classifies each turn in a single forward pass so the harness ' +
-      'can skip expensive work on obvious requests. Off by default; fails open ' +
-      'to normal behaviour whenever the model is unsure or unavailable. Run ' +
-      '`von-install` to set up the backend, then `/superfast on` to enable.',
+      'model (Von) classifies each turn in a single forward pass. This release ' +
+      'runs in shadow mode only: it records the routing recommendation but does ' +
+      'not change how the turn is handled, so it never skips work yet. Acting on ' +
+      'the recommendation is a later phase. Off by default; fails open to normal ' +
+      'behaviour whenever the model is unsure or unavailable. Run `von-install` ' +
+      'to set up the backend, then `/superfast on` to enable (restart required).',
     showInDialog: false,
     properties: {
       enabled: {
         type: 'boolean',
         label: 'Enable Superfast',
         category: 'Advanced',
-        requiresRestart: false,
+        requiresRestart: true,
         default: false,
         description:
-          'Master switch for the Superfast decision gate. Off by default.',
+          'Master switch for the Superfast decision gate. Off by default. Changing it requires a restart to take effect.',
         showInDialog: false,
       },
       endpoint: {
@@ -3522,14 +3524,16 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       timeoutMs: {
-        type: 'number',
+        type: 'integer',
         label: 'Decision Timeout (ms)',
         category: 'Advanced',
-        requiresRestart: false,
+        requiresRestart: true,
         default: undefined as number | undefined,
+        minimum: 1,
+        maximum: 2147483647,
         description:
           'Hard timeout for a single decision call. On timeout the gate fails ' +
-          'open. Default 150ms.',
+          'open. Default 150ms. Must be an integer between 1 and 2147483647.',
         showInDialog: false,
       },
     },

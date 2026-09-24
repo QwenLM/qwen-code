@@ -65,6 +65,7 @@ export const TOP_LEVEL_COMMANDS = [
   ],
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
+  ['von-install', 'Install the Von System One decision backend for /superfast'],
 ] as const;
 
 export const MCP_COMMANDS = [

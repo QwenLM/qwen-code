@@ -20,7 +20,10 @@ import process from 'node:process';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { classifyTurn } from '../superfast/decision-gate.js';
+import {
+  classifyTurn,
+  type DecisionGateSettings,
+} from '../superfast/decision-gate.js';
 import { partListUnionToString } from './llm-request.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
@@ -3061,8 +3064,14 @@ export class LlmClient {
    * route (skipping work) is a later phase once the model is validated.
    */
   private runSuperfastShadow(request: PartListUnion): void {
-    const settings = this.config.getSuperfastSettings();
-    if (!settings.enabled) return;
+    let settings: DecisionGateSettings;
+    try {
+      settings = this.config.getSuperfastSettings();
+    } catch {
+      // A Config without the accessor (e.g. a test double) fails open.
+      return;
+    }
+    if (!settings || !settings.enabled) return;
 
     let text: string;
     try {

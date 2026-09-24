@@ -353,6 +353,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     dialogs: ['stats'],
   },
   { name: 'summary', results: ['message', 'stream_messages'] },
+  { name: 'superfast', results: ['message'] },
   { name: 'theme', results: ['dialog', 'message'], dialogs: ['theme'] },
   { name: 'tools', results: ['none'] },
   { name: 'settings', results: ['dialog'], dialogs: ['settings'] },

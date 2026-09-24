@@ -83,14 +83,16 @@ export interface SuperfastSettingsInput {
 export function resolveGateSettings(
   input?: SuperfastSettingsInput,
 ): DecisionGateSettings {
+  const t = input?.timeoutMs;
+  const timeoutMs =
+    typeof t === 'number' && Number.isInteger(t) && t > 0 && t <= 2_147_483_647
+      ? t
+      : DEFAULT_GATE_SETTINGS.timeoutMs;
   return {
     enabled: input?.enabled ?? DEFAULT_GATE_SETTINGS.enabled,
     endpoint: input?.endpoint || DEFAULT_GATE_SETTINGS.endpoint,
     model: input?.model || DEFAULT_GATE_SETTINGS.model,
-    timeoutMs:
-      typeof input?.timeoutMs === 'number' && input.timeoutMs > 0
-        ? input.timeoutMs
-        : DEFAULT_GATE_SETTINGS.timeoutMs,
+    timeoutMs,
   };
 }
 
@@ -106,12 +108,12 @@ export async function querySystemOne(
   signal?: AbortSignal,
 ): Promise<Record<string, DecisionAnswer> | null> {
   const startedAt = Date.now();
-  const timeoutSignal = AbortSignal.timeout(settings.timeoutMs);
-  const combined = signal
-    ? AbortSignal.any([signal, timeoutSignal])
-    : timeoutSignal;
-
   try {
+    const timeoutSignal = AbortSignal.timeout(settings.timeoutMs);
+    const combined = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
+
     const res = await fetch(settings.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -225,26 +227,58 @@ export async function classifyTurn(
  * fast route when the relevant probabilities are decisive; otherwise it says
  * `unknown` so the caller falls back to the normal path.
  */
+
+/** Minimum calibrated intent confidence required for the plain_chat fast route. */
+const PLAIN_CHAT_CONFIDENCE_FLOOR = 0.5;
+
+/**
+ * Read a noul probability, returning it only when it is a real, finite value in
+ * the closed [0, 1] interval. Anything else (absent, NaN, Infinity, out of range,
+ * wrong type) is treated as "no evidence" (undefined), so a mis-scaled or missing
+ * answer can never produce a decisive fast route.
+ */
+function readNoul(answer?: DecisionAnswer): number | undefined {
+  const v = answer?.noul;
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1
+    ? v
+    : undefined;
+}
+
+/** True only for a real, finite confidence in [0, 1] at or above the floor. */
+function confident(answer: DecisionAnswer | undefined, floor: number): boolean {
+  const c = answer?.confidence;
+  return (
+    typeof c === 'number' &&
+    Number.isFinite(c) &&
+    c >= 0 &&
+    c <= 1 &&
+    c >= floor
+  );
+}
+
 function deriveRoute(answers: Record<string, DecisionAnswer>): TurnRoute {
-  const needsTool = answers['needs_tool']?.noul;
-  const fromContext = answers['answerable_from_context']?.noul;
+  const needsTool = readNoul(answers['needs_tool']);
+  const fromContext = readNoul(answers['answerable_from_context']);
 
   // Decisive "needs a tool" wins first — the harness must not skip work.
-  if (typeof needsTool === 'number' && needsTool >= 0.85) return 'needs_tool';
+  if (needsTool !== undefined && needsTool >= 0.85) return 'needs_tool';
 
-  // Strongly answerable from context and low tool need → answer from context.
+  // Strongly answerable from context, with a present and low tool-need signal.
   if (
-    typeof fromContext === 'number' &&
+    fromContext !== undefined &&
     fromContext >= 0.85 &&
-    (needsTool === undefined || needsTool <= 0.3)
+    needsTool !== undefined &&
+    needsTool <= 0.3
   ) {
     return 'answer_from_context';
   }
 
-  // Clearly chat with no tool need.
+  // Clearly chat, with a calibrated intent and a present, low tool-need signal.
   if (
     answers['intent']?.choice === 'chat' &&
-    (needsTool === undefined || needsTool <= 0.2)
+    confident(answers['intent'], PLAIN_CHAT_CONFIDENCE_FLOOR) &&
+    needsTool !== undefined &&
+    needsTool <= 0.2
   ) {
     return 'plain_chat';
   }
