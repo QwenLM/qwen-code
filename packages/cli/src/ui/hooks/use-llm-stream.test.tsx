@@ -385,6 +385,7 @@ describe('useLlmStream', () => {
     logger?: Parameters<typeof useLlmStream>[20],
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
+    initialHistory: HistoryItem[] = [],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -411,7 +412,7 @@ describe('useLlmStream', () => {
 
     const baseProps = {
       client,
-      history: [] as HistoryItem[],
+      history: initialHistory,
       addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
       config: mockConfig,
       onDebugMessage: mockOnDebugMessage,
@@ -493,6 +494,8 @@ describe('useLlmStream', () => {
       },
       rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
         rerender({ ...baseProps, toolCalls }),
+      rerenderWithHistory: (history: HistoryItem[]) =>
+        rerender({ ...baseProps, history }),
     };
   };
 
@@ -13283,7 +13286,8 @@ describe('useLlmStream', () => {
           }),
       );
       mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
-      const hook = renderTestHook([], undefined, undefined, undefined, {
+      const onCancelSubmit = vi.fn();
+      const hook = renderTestHook([], undefined, undefined, onCancelSubmit, {
         logMessage: mockLogMessage,
       } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
 
@@ -13298,11 +13302,17 @@ describe('useLlmStream', () => {
       );
       expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
 
+      act(() => {
+        hook.result.current.cancelOngoingRequest();
+      });
+      expect(onCancelSubmit).toHaveBeenCalledOnce();
+
       await act(async () => {
         releaseLog();
         await submitPromise;
       });
       expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
       expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
 
       let releaseStream!: () => void;
@@ -20572,6 +20582,77 @@ describe('useLlmStream', () => {
         expect(call[0]).not.toHaveProperty('timestamp');
       }
     });
+  });
+
+  it('logs YOLO completion telemetry once after a local slash command settles', async () => {
+    mockConfig.getApprovalMode = () => ApprovalMode.YOLO;
+    let releaseLog!: () => void;
+    mockLogMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseLog = resolve;
+        }),
+    );
+
+    const initialHistory: HistoryItem[] = [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'reply' },
+    ];
+    const hook = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      undefined,
+      { logMessage: mockLogMessage } as unknown as NonNullable<
+        Parameters<typeof useLlmStream>[20]
+      >,
+      undefined,
+      false,
+      initialHistory,
+    );
+
+    await waitFor(() => {
+      expect(mockLogConversationFinishedEvent).toHaveBeenCalledOnce();
+    });
+    mockLogConversationFinishedEvent.mockClear();
+
+    const firstCommandItem: HistoryItem = {
+      id: 3,
+      type: MessageType.INFO,
+      text: 'command started',
+    };
+    const secondCommandItem: HistoryItem = {
+      id: 4,
+      type: MessageType.INFO,
+      text: 'command completed',
+    };
+    mockHandleSlashCommand.mockImplementationOnce(async () => {
+      mockAddItem(firstCommandItem);
+      hook.rerenderWithHistory([...initialHistory, firstCommandItem]);
+      mockAddItem(secondCommandItem);
+      hook.rerenderWithHistory([
+        ...initialHistory,
+        firstCommandItem,
+        secondCommandItem,
+      ]);
+      return { type: 'handled' };
+    });
+
+    let submitPromise!: Promise<void>;
+    await act(async () => {
+      submitPromise = hook.result.current.submitQuery('/local-command');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(mockLogMessage).toHaveBeenCalledOnce());
+    expect(mockLogConversationFinishedEvent).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseLog();
+      await submitPromise;
+    });
+
+    expect(mockHandleSlashCommand).toHaveBeenCalledWith('/local-command');
+    expect(mockLogConversationFinishedEvent).toHaveBeenCalledOnce();
   });
 
   it('excludes sentToModel-false steer items from YOLO turn-count telemetry', async () => {

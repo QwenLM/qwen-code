@@ -1638,6 +1638,9 @@ export const useLlmStream = (
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        if (abortSignal.aborted) {
+          return { queryToSend: null, shouldProceed: false };
+        }
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
