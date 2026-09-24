@@ -378,6 +378,325 @@ test.describe('trajectory panel', () => {
     expect(after[1]!.y).toBe(before[1]!.y);
   });
 
+  test.describe('time selection', () => {
+    /** Centre of a span, where a press lands on it rather than beside it. */
+    async function centreOf(span: Locator) {
+      const box = await span.boundingBox();
+      expect(box).not.toBeNull();
+      return { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+    }
+
+    /** A real press, travel and release, as a hand makes it. */
+    async function dragBetween(
+      page: Page,
+      from: { x: number; y: number },
+      to: { x: number; y: number },
+    ) {
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x, to.y, { steps: 8 });
+      await page.mouse.up();
+    }
+
+    /**
+     * Drag from the middle of turn 11's request to the middle of turn 15's.
+     * Idle time is cut, so the stretch covers all of turns 12–14, turn 11's
+     * request and the tool after it, and turn 15's request but not its tool.
+     * Each kept turn keeps its header and prompt, and no answer ran in time:
+     * 5 headers + 5 prompts + 5 requests + 4 tools.
+     */
+    const NARROWED_ROWS = 19;
+    const requestSpan = (page: Page, turn: number) =>
+      overviewSpans(page).nth(2 * (turn - 1));
+
+    async function narrow(page: Page) {
+      await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+      await dragBetween(
+        page,
+        await centreOf(requestSpan(page, 11)),
+        await centreOf(requestSpan(page, 15)),
+      );
+    }
+
+    test('narrows the table to the dragged time @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const from = await centreOf(requestSpan(page, 11));
+      const to = await centreOf(requestSpan(page, 15));
+
+      await narrow(page);
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      await expect(page.getByTestId('trajectory-range-status')).toHaveText(
+        `Showing ${NARROWED_ROWS - 5} of ${TURNS * (ROWS_PER_TURN - 1)} rows in the selected time`,
+      );
+      // The band spans what the hand travelled, to within a pixel either end.
+      const band = await page.getByTestId('trajectory-range').boundingBox();
+      expect(band).not.toBeNull();
+      expect(Math.abs(band!.x - from.x)).toBeLessThanOrEqual(1.5);
+      expect(Math.abs(band!.x + band!.width - to.x)).toBeLessThanOrEqual(1.5);
+      await expect(
+        overviewSpans(page).and(page.locator('[data-dimmed]')),
+      ).toHaveCount(2 * TURNS - 9);
+    });
+
+    test('a click without a drag selects the span and leaves the table whole @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const point = await centreOf(requestSpan(page, 3));
+      await page.mouse.click(point.x, point.y);
+
+      await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(TURNS * ROWS_PER_TURN),
+      );
+      const row = await activeRowOf(page, grid);
+      await expect(row).toContainText('qwen3.8-max');
+    });
+
+    test('Escape and the clear button bring every row back @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const all = String(TURNS * ROWS_PER_TURN);
+
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      await grid.focus();
+      await page.keyboard.press('Escape');
+      await expect(grid).toHaveAttribute('aria-rowcount', all);
+      await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
+
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      await page.getByTestId('trajectory-range-clear').click();
+      await expect(grid).toHaveAttribute('aria-rowcount', all);
+      await expect(page.getByTestId('trajectory-range-clear')).toHaveCount(0);
+    });
+
+    test('a right click on the overview clears the selection @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+
+      const point = await centreOf(requestSpan(page, 30));
+      await page.mouse.click(point.x, point.y, { button: 'right' });
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(TURNS * ROWS_PER_TURN),
+      );
+      await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
+    });
+
+    test('holds the table where it is while it narrows and widens @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const before = await grid.boundingBox();
+
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      const narrowed = await grid.boundingBox();
+      await page.getByTestId('trajectory-range-clear').click();
+      await expect(page.getByTestId('trajectory-range-clear')).toHaveCount(0);
+      const after = await grid.boundingBox();
+
+      // The header grows a button and says something else, and neither may
+      // move the rows: the header and the overview are fixed-height siblings
+      // of the scrolled box.
+      expect(narrowed!.y).toBe(before!.y);
+      expect(after!.y).toBe(before!.y);
+    });
+
+    test.describe('zoom and pan', () => {
+      const plotBox = async (page: Page) => {
+        const box = await page.getByTestId('trajectory-plot').boundingBox();
+        expect(box).not.toBeNull();
+        return box!;
+      };
+
+      /** The axis value names the track's right end, so it must end there. */
+      async function expectValueAtTrackEnd(page: Page) {
+        const [value, plot] = await Promise.all([
+          page.getByTestId('trajectory-overview-busy').boundingBox(),
+          page.getByTestId('trajectory-plot').boundingBox(),
+        ]);
+        expect(
+          Math.abs(value!.x + value!.width - (plot!.x + plot!.width)),
+        ).toBeLessThanOrEqual(1);
+      }
+
+      /** Wait until the drawn layer says it is zoomed, or not. */
+      async function expectZoomed(page: Page, zoomed: boolean) {
+        const domain = page.getByTestId('trajectory-domain');
+        if (zoomed) await expect(domain).toHaveAttribute('data-zoomed', 'true');
+        else await expect(domain).not.toHaveAttribute('data-zoomed');
+      }
+
+      test('zooms in around the pointer @smoke', async ({ page }, testInfo) => {
+        const grid = await openTrajectory(
+          page,
+          String(testInfo.project.use.baseURL),
+        );
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        const target = requestSpan(page, 20);
+        const before = await target.boundingBox();
+        const gridBefore = await grid.boundingBox();
+        const point = await centreOf(target);
+
+        await page.mouse.move(point.x, point.y);
+        // Three turns of 600px: exp(-2.7), about 15× the length per pixel.
+        for (let i = 0; i < 3; i += 1) await page.mouse.wheel(0, -600);
+        await expectZoomed(page, true);
+
+        await expect
+          .poll(async () => (await target.boundingBox())!.width)
+          .toBeGreaterThan(before!.width * 5);
+        const after = (await target.boundingBox())!;
+        // The span that was under the pointer is still under it.
+        expect(
+          Math.abs(after.x + after.width / 2 - point.x),
+        ).toBeLessThanOrEqual(2);
+        await expectValueAtTrackEnd(page);
+        // Zooming happens inside the strip: nothing below it moves.
+        expect(
+          (await page.getByTestId('trajectory-overview').boundingBox())!.height,
+        ).toBe(64);
+        expect((await grid.boundingBox())!.y).toBe(gridBefore!.y);
+      });
+
+      test('pans with the right button once zoomed @smoke', async ({
+        page,
+      }, testInfo) => {
+        const grid = await openTrajectory(
+          page,
+          String(testInfo.project.use.baseURL),
+        );
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        const plot = await plotBox(page);
+        const centre = {
+          x: plot.x + plot.width / 2,
+          y: plot.y + plot.height / 2,
+        };
+        await page.mouse.move(centre.x, centre.y);
+        await page.mouse.wheel(0, -600);
+        await expectZoomed(page, true);
+
+        const target = requestSpan(page, 20);
+        const before = (await target.boundingBox())!;
+        await page.mouse.move(centre.x, centre.y);
+        await page.mouse.down({ button: 'right' });
+        await page.mouse.move(centre.x - 100, centre.y, { steps: 8 });
+        await page.mouse.up({ button: 'right' });
+
+        await expect
+          .poll(async () => (await target.boundingBox())!.x)
+          .toBeLessThan(before.x - 90);
+        const after = (await target.boundingBox())!;
+        expect(Math.abs(after.x - (before.x - 100))).toBeLessThanOrEqual(3);
+        // A pan is not a right click: nothing was filtered or cleared.
+        await expect(grid).toHaveAttribute(
+          'aria-rowcount',
+          String(TURNS * ROWS_PER_TURN),
+        );
+      });
+
+      test('selects the same rows through the zoom @smoke', async ({
+        page,
+      }, testInfo) => {
+        const grid = await openTrajectory(
+          page,
+          String(testInfo.project.use.baseURL),
+        );
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        // Halve the length around turn 13, which keeps turns 11–15 in view.
+        const anchor = await centreOf(requestSpan(page, 13));
+        await page.mouse.move(anchor.x, anchor.y);
+        await page.mouse.wheel(0, -462);
+        await expectZoomed(page, true);
+        const plot = await plotBox(page);
+        for (const turn of [11, 15]) {
+          const box = (await requestSpan(page, turn).boundingBox())!;
+          expect(box.x).toBeGreaterThanOrEqual(plot.x);
+          expect(box.x + box.width).toBeLessThanOrEqual(plot.x + plot.width);
+        }
+
+        await narrow(page);
+
+        await expect(grid).toHaveAttribute(
+          'aria-rowcount',
+          String(NARROWED_ROWS),
+        );
+      });
+
+      test('the reset button shows the whole run again @smoke', async ({
+        page,
+      }, testInfo) => {
+        await openTrajectory(page, String(testInfo.project.use.baseURL));
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        const plot = await plotBox(page);
+        await page.mouse.move(plot.x + plot.width / 2, plot.y + 10);
+        await page.mouse.wheel(0, -900);
+        await expectZoomed(page, true);
+        const first = overviewSpans(page).first();
+        const last = overviewSpans(page).last();
+        // Zoomed around the middle, both ends of the run are out of view.
+        expect((await first.boundingBox())!.x).toBeLessThan(plot.x);
+
+        await page.getByTestId('trajectory-zoom-reset').click();
+
+        await expectZoomed(page, false);
+        const firstBox = (await first.boundingBox())!;
+        const lastBox = (await last.boundingBox())!;
+        expect(firstBox.x).toBeGreaterThanOrEqual(plot.x - 1);
+        expect(lastBox.x + lastBox.width).toBeLessThanOrEqual(
+          plot.x + plot.width + 1,
+        );
+        await expect(page.getByTestId('trajectory-zoom-reset')).toHaveAttribute(
+          'aria-disabled',
+          'true',
+        );
+        await expectValueAtTrackEnd(page);
+      });
+    });
+  });
+
   test.describe('walking back through pages', () => {
     /** Turns per served page; each page is a different run of records. */
     const PAGE_TURNS = 20;

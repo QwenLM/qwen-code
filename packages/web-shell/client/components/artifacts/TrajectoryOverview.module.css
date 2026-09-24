@@ -58,6 +58,46 @@
 .plot {
   position: relative;
   margin: 0 6px;
+  /* A drag on a touch screen selects time rather than scrolling the page. */
+  touch-action: none;
+  cursor: crosshair;
+  /* Zoomed in, the layer below is wider than the track; only the stretch in
+     view is shown. */
+  overflow: hidden;
+}
+
+.plot[data-panning='true'] {
+  cursor: grabbing;
+}
+
+/*
+ * The whole run, drawn in percent of itself. Zoom and pan are this layer's
+ * offset and width alone: at no zoom it is exactly the track.
+ */
+.domain {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+/*
+ * The selected stretch. A wash of the text colour rather than a hue of its
+ * own: the three hues already mean request, tool and subagent, and a fourth
+ * would read as a fourth kind of record.
+ */
+.selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--left);
+  width: var(--width);
+  min-width: 1px;
+  box-sizing: border-box;
+  border-left: 1px solid var(--foreground);
+  border-right: 1px solid var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .turnMark {
@@ -73,7 +113,12 @@
 .span {
   position: absolute;
   top: calc(6px + var(--lane-offset, 0px));
-  left: var(--left);
+  /* A span narrower than the 3px floor at the very end of the run would push
+     its floor past the run's end, where the track clips it — a zero-length
+     last record would not be drawn or clickable at all. Held inside instead.
+     Any span wider than the floor already ends inside, so this moves no
+     other. */
+  left: min(var(--left), calc(100% - 3px));
   width: max(3px, var(--width));
   height: 8px;
   z-index: var(--stack, 1);
@@ -116,6 +161,10 @@
   background: var(--destructive);
 }
 
+.span[data-dimmed='true'] {
+  opacity: 0.25;
+}
+
 .span[data-current='true'] {
   z-index: 1002;
   outline: 2px solid var(--foreground);
@@ -131,6 +180,66 @@
   font-size: 9px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
+}
+
+.axisEnd {
+  display: flex;
+  align-items: center;
+  /* With each button's hit area 5px past its box, 10px apart makes the three
+     areas meet without overlapping, so a near miss lands on nothing rather
+     than on the neighbour. */
+  gap: 10px;
+}
+
+/* Sized to fit the 16px axis row, so the strip's height does not move. */
+.zoomButton {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+/* A 24px target around the 14px box: the axis row cannot grow past 16px. */
+.zoomButton::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+}
+
+.zoomButton:last-of-type {
+  margin-right: 6px;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.zoomButton:hover:not([aria-disabled='true']),
+.zoomButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.zoomButton:focus-visible {
+  outline: 1px solid var(--ring);
+}
+
+.zoomButton[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .notice {

@@ -632,6 +632,274 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationAfterALapseStillReachesTheRunningInvocation() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofHours(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+
+            // Renewal first ticks after a third of the lease in wall time,
+            // so the lease lapses before renewal notices while this process
+            // still serves the invocation.
+            clock.advance(Duration.ofHours(2));
+            join(fixture.service.cancelExecution("harness", "runtime",
+                    created.getExecutionCallId()));
+
+            assertEquals(1, fixture.transport.cancelCalls.get());
+            result.complete(Map.of("executionStatus", "success"));
+        }
+    }
+
+    @Test
+    void cancellationOfAFencedRunningInvocationStillReachesTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofMillis(30))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+            clock.advance(Duration.ofMinutes(1));
+            awaitExecution(fixture.executionRepository,
+                    created.getExecutionCallId(),
+                    ToolExecutionRecord.State.UNKNOWN);
+
+            ToolExecutionRecord cancelled = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId()));
+
+            assertEquals(1, fixture.transport.cancelCalls.get());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+            result.complete(Map.of("executionStatus", "success"));
+
+            ToolExecutionRecord repeated = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId()));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    repeated.getState());
+            assertEquals(1, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void lapsedCancellationThatNothingHereRunsIsFenced() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofMinutes(1))) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = reference("runtime", "digest");
+            fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("manual", "key",
+                            session.getBindingId(),
+                            session.getRuntimeGeneration(), "harness",
+                            "runtime", "prompt", "call", "digest",
+                            reference));
+            ToolExecutionRecord claimed = fixture.executionRepository
+                    .claimDispatch("manual", "broker",
+                            Duration.ofMinutes(1));
+            ToolExecutionRecord executing = fixture.executionRepository
+                    .compareAndSet(claimed, claimed.withState(
+                            ToolExecutionRecord.State.EXECUTING, false),
+                            "broker", claimed.getDispatchGeneration());
+            fixture.executionRepository.requestCancel("manual",
+                    executing.getVersion());
+
+            clock.advance(Duration.ofMinutes(2));
+            ToolExecutionRecord cancelled = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            "manual"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+            assertEquals(0, fixture.transport.executeCalls.get());
+
+            ToolExecutionRecord repeated = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            "manual"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    repeated.getState());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void cancellationDuringAFenceDoesNotReachTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
+                new FakeProvisioner(), transport,
+                new InMemoryRuntimeBindingRepository(clock,
+                        () -> "binding"),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
+                clock, () -> "execution")) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            executions.findOrCreate(ToolExecutionRecord.prepared("manual",
+                    "key", session.getBindingId(),
+                    session.getRuntimeGeneration(), "harness", "runtime",
+                    "prompt", "call", "digest",
+                    reference("runtime", "digest")));
+            ToolExecutionRecord claimed = executions.claimDispatch("manual",
+                    "broker", Duration.ofMinutes(1));
+            ToolExecutionRecord executing = executions.compareAndSet(
+                    claimed, claimed.withState(
+                            ToolExecutionRecord.State.EXECUTING, false),
+                    "broker", claimed.getDispatchGeneration());
+            executions.requestCancel("manual", executing.getVersion());
+            clock.advance(Duration.ofMinutes(2));
+            AtomicReference<ToolExecutionRecord> nested =
+                    new AtomicReference<>();
+            executions.beforeClaim = () -> nested.set(join(
+                    service.cancelExecution("harness", "runtime",
+                            "manual")));
+
+            ToolExecutionRecord cancelled = join(service.cancelExecution(
+                    "harness", "runtime", "manual"));
+
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                    nested.get().getState());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void settlementConflictUnderALiveClaimIsReported() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        CompletableFuture<Map<String, Object>> acknowledgement =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        transport.cancelResult = acknowledgement;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
+                new FakeProvisioner(), transport,
+                new InMemoryRuntimeBindingRepository(clock,
+                        () -> "binding"),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker", Duration.ofMinutes(1), Duration.ofHours(1),
+                clock, () -> "execution")) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+
+            // The claim is still live, so a settle that cannot land is a
+            // real conflict rather than a lapse to fence.
+            executions.rejectWrites = true;
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            assertEquals("runtime_execution_state_conflict",
+                    failure(cancelled).getCode());
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                    executions.findByExecutionCallId(
+                            created.getExecutionCallId()).getState());
+            executions.rejectWrites = false;
+            result.complete(Map.of("executionStatus", "cancelled"));
+        }
+    }
+
+    @Test
+    void cancellationOfAFinishedInvocationDoesNotReachTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
+                new FakeProvisioner(), transport,
+                new InMemoryRuntimeBindingRepository(clock,
+                        () -> "binding"),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker", Duration.ofMinutes(1), Duration.ofHours(1),
+                clock, () -> "execution")) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            AtomicReference<ToolExecutionRecord> nested =
+                    new AtomicReference<>();
+            executions.afterUnknown = () -> nested.set(join(
+                    service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId())));
+
+            // The failed invocation is written as UNKNOWN; a cancel that
+            // observes that write must not treat it as still running.
+            result.completeExceptionally(
+                    new IllegalStateException("connection lost"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    nested.get().getState());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void settledCancellationAfterALapseIsFencedInsteadOfConflicting() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofHours(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            CompletableFuture<Map<String, Object>> acknowledgement =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            fixture.transport.cancelResult = acknowledgement;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+
+            clock.advance(Duration.ofHours(2));
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    join(cancelled).getState());
+            result.complete(Map.of("executionStatus", "cancelled"));
+        }
+    }
+
+    @Test
     void invalidExecutionInputsUseTheCodedErrorChannel() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
@@ -1329,6 +1597,95 @@ class RuntimeBrokerServiceTest {
         @Override
         public ToolExecutionRecord claimDispatch(String executionCallId,
                 String owner, Duration leaseDuration) {
+            return delegate.claimDispatch(executionCallId, owner,
+                    leaseDuration);
+        }
+
+        @Override
+        public ToolExecutionRecord renewDispatch(String executionCallId,
+                String owner, long dispatchGeneration,
+                Duration leaseDuration) {
+            return delegate.renewDispatch(executionCallId, owner,
+                    dispatchGeneration, leaseDuration);
+        }
+
+        @Override
+        public ToolExecutionRecord requestCancel(String executionCallId,
+                long expectedVersion) {
+            return delegate.requestCancel(executionCallId, expectedVersion);
+        }
+
+        @Override
+        public ToolExecutionRecord resolveUnknown(
+                ToolExecutionRecord expected,
+                Map<String, Object> resolutionResult,
+                Instant resolutionTime) {
+            return delegate.resolveUnknown(expected, resolutionResult,
+                    resolutionTime);
+        }
+
+        @Override
+        public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
+            return delegate.hasActiveByRuntimeSession(runtimeSessionId);
+        }
+    }
+
+    private static final class HookedExecutionRepository
+            implements ToolExecutionRepository {
+        private final InMemoryToolExecutionRepository delegate;
+        volatile Runnable beforeClaim;
+        volatile Runnable afterUnknown;
+        volatile boolean rejectWrites;
+
+        HookedExecutionRepository(Clock clock) {
+            delegate = new InMemoryToolExecutionRepository(clock);
+        }
+
+        @Override
+        public ToolExecutionRecord findOrCreate(
+                ToolExecutionRecord candidate) {
+            return delegate.findOrCreate(candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord findByExecutionCallId(
+                String executionCallId) {
+            return delegate.findByExecutionCallId(executionCallId);
+        }
+
+        @Override
+        public ToolExecutionRecord findByIdempotencyKey(
+                String idempotencyKey) {
+            return delegate.findByIdempotencyKey(idempotencyKey);
+        }
+
+        @Override
+        public ToolExecutionRecord compareAndSet(
+                ToolExecutionRecord expected,
+                ToolExecutionRecord replacement, String owner,
+                long dispatchGeneration) {
+            if (rejectWrites) {
+                return null;
+            }
+            ToolExecutionRecord updated = delegate.compareAndSet(expected,
+                    replacement, owner, dispatchGeneration);
+            Runnable hook = afterUnknown;
+            if (hook != null && updated != null && updated.getState()
+                    == ToolExecutionRecord.State.UNKNOWN) {
+                afterUnknown = null;
+                hook.run();
+            }
+            return updated;
+        }
+
+        @Override
+        public ToolExecutionRecord claimDispatch(String executionCallId,
+                String owner, Duration leaseDuration) {
+            Runnable hook = beforeClaim;
+            beforeClaim = null;
+            if (hook != null) {
+                hook.run();
+            }
             return delegate.claimDispatch(executionCallId, owner,
                     leaseDuration);
         }
