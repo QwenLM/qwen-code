@@ -72,7 +72,7 @@ The language-neutral files live beside the TypeScript contract under `packages/c
 
 The TypeScript test materializes every case and sends it through `node:http` → the raw manifest gate → Express authentication and JSON parsing → the attestation handler. It checks status, classification, `no-store`, exact success body, and response size.
 
-The Java Runtime Broker test reads these exact repository files with Jackson. It pins route metadata, limits, closed field sets, fixture uniqueness, and the shared status classification. No Java production validator is added yet because `main` has no Java HTTP transport consumer; publishing one now would create an unused API. The future transport PR must move the fixture assertions into its real request emission and response parser while continuing to read the same files.
+The Java attestation client reads these same files, sends the canonical request to a real HTTP endpoint, and classifies the response by status. It enforces the 16 KiB limit, the closed field set, and exact success-identity equality; 404 is not retryable. See the [Java client slice](2026-09-23-java-runtime-attestation-client.md). The client still does not implement acquire/execute, and it does not write the result into the Broker service.
 
 ## Attestation-only Worker Shell
 
@@ -118,4 +118,4 @@ The focused TypeScript suite must pass all fixture cases through a real TCP list
 
 ## Follow-Up Boundary
 
-This change completes the independently reviewable A1 route source, TypeScript process mounting, and the schema/fixture portion of A2. A2 is complete only when the concrete Java client consumes the shared fixtures for request emission and strict response parsing and a required CI lane runs both implementations. Cross-language process E2E, restart/CAS behavior, deployment identity, and fault injection remain later acceptance gates.
+This change completes the independently reviewable A1 route source, TypeScript process mounting, and the schema/fixture portion of A2. The Java client now emits the shared canonical request and strictly parses the response. A2 still needs a required CI lane that runs both implementations together. Cross-language process E2E, restart/CAS, deployment identity, and fault injection remain later gates.

@@ -107,7 +107,9 @@ import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
+import type { WebShellModelManagementOptions } from '../../modelManagement';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
+import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
@@ -441,6 +443,7 @@ interface ArtifactPanelProps {
     title: string,
     fromFirstPrompt?: boolean,
   ) => void;
+  onSideTaskInitialPromptRefused?: (tabId: string) => void;
   onNestedRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onNestedArtifactsChange?: (
     sessionId: string,
@@ -457,10 +460,13 @@ interface ArtifactPanelProps {
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  modelManagement?: WebShellModelManagementOptions;
   workflow?: {
     todos: readonly TodoItem[];
     tools: readonly ACPToolCall[];
     tasks: readonly DaemonSessionTaskStatus[];
+    /** Shared per-render projection; also feeds the cockpit and its graph. */
+    projection?: SessionWorkflowProjection;
     artifacts: readonly DaemonSessionArtifact[];
     selectedTodoId?: string;
     onSelectedTodoIdChange: (todoId: string | undefined) => void;
@@ -509,6 +515,7 @@ export function ArtifactPanel({
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
+  onSideTaskInitialPromptRefused,
   onNestedRightPanelOpen,
   onNestedArtifactsChange,
   onOpenNestedSubagent,
@@ -518,6 +525,7 @@ export function ArtifactPanel({
   onOpenWorkflowAgent,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
   workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
@@ -1299,10 +1307,12 @@ export function ArtifactPanel({
             }
             onCreated={onSideTaskCreated ?? ignoreSideTaskCreated}
             onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
+            onInitialPromptRefused={onSideTaskInitialPromptRefused}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
+            modelManagement={modelManagement}
             onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'image' ? (

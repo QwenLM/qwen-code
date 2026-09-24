@@ -13,7 +13,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { CornerDownRightIcon, RefreshCwIcon } from 'lucide-react';
+import { CornerDownRightIcon, RefreshCwIcon, XIcon } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   DaemonTranscriptBlock,
@@ -36,6 +36,10 @@ import {
   buildTimeline,
   type TimelineSpan,
 } from '../../trajectory/buildTimeline';
+import {
+  rowKeysInRange,
+  type TimelineRange,
+} from '../../trajectory/timelineRange';
 import { TrajectoryOverview } from './TrajectoryOverview';
 import styles from './TrajectoryPanel.module.css';
 
@@ -267,8 +271,15 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
 
 export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const { t } = useI18n();
-  const { trajectory, status, error, truncated, refresh } =
-    useTrajectoryWindow(loadPage);
+  const {
+    trajectory,
+    status,
+    error,
+    loadedPages,
+    truncated,
+    olderFailure,
+    refresh,
+  } = useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -291,11 +302,49 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     scrollTopRef.current = element.scrollTop;
   }, []);
 
+  const timeline = useMemo(
+    () => (trajectory ? buildTimeline(trajectory) : undefined),
+    [trajectory],
+  );
+
+  // The selection belongs to the window it was drawn on. A refresh or another
+  // session re-lays the compressed time axis, so the same numbers would name a
+  // different stretch of the run; holding the window alongside the range lets
+  // the range lapse in the same render the window changes, with no frame in
+  // which the new table is filtered by the old one.
+  const [rangeState, setRangeState] = useState<
+    { range: TimelineRange; of: Trajectory } | undefined
+  >(undefined);
+  const range =
+    rangeState !== undefined && rangeState.of === trajectory
+      ? rangeState.range
+      : undefined;
+  const setRange = useCallback(
+    (next: TimelineRange | undefined) => {
+      setRangeState(
+        next !== undefined && trajectory !== undefined
+          ? { range: next, of: trajectory }
+          : undefined,
+      );
+    },
+    [trajectory],
+  );
+
+  /** Rows running in the selected time, or undefined when nothing is selected. */
+  const inRange = useMemo(
+    () => (range && timeline ? rowKeysInRange(timeline, range) : undefined),
+    [range, timeline],
+  );
+
   const visualRows = useMemo<VisualRow[]>(() => {
     if (!trajectory) return [];
     const byKey = new Map(trajectory.rows.map((row) => [row.key, row]));
     const out: VisualRow[] = [];
     for (const turn of trajectory.turns) {
+      // Under a time selection a turn stays only if something in it ran in
+      // that time, and then keeps its header and prompt so the rows that
+      // survive still say which turn and which ask they answered.
+      if (inRange && !turn.rowKeys.some((key) => inRange.has(key))) continue;
       // Named after the prompt that opened the turn, so a refresh that adds
       // newer turns leaves the selection on the turn it was on. Turn numbers
       // are window-relative and shift under exactly that. A turn the window
@@ -304,12 +353,15 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       const turnKey = turn.userRowKey ?? `ordinal:${turn.index}`;
       out.push({ kind: 'turn', key: `turn:${turnKey}`, turn });
       for (const rowKey of turn.rowKeys) {
+        if (inRange && !inRange.has(rowKey) && rowKey !== turn.userRowKey) {
+          continue;
+        }
         const row = byKey.get(rowKey);
         if (row) out.push({ kind: 'row', key: rowKey, row });
       }
     }
     return out;
-  }, [trajectory]);
+  }, [trajectory, inRange]);
 
   const virtualizer = useVirtualizer({
     count: visualRows.length,
@@ -389,6 +441,15 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key === 'Escape') {
+        // Only claimed when there is a selection to drop; otherwise Escape is
+        // left to whatever encloses the panel.
+        if (range !== undefined) {
+          event.preventDefault();
+          setRange(undefined);
+        }
+        return;
+      }
       if (visualRows.length === 0) return;
       const current = selectedIndex < 0 ? -1 : selectedIndex;
       if (event.key === 'ArrowDown') {
@@ -405,7 +466,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         moveSelection(visualRows.length - 1);
       }
     },
-    [moveSelection, selectedIndex, visualRows],
+    [moveSelection, range, selectedIndex, setRange, visualRows],
   );
 
   const totals = useMemo(() => {
@@ -424,24 +485,56 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const empty = status === 'ready' && visualRows.length === 0;
   const timingAbsent =
     trajectory !== undefined &&
-    visualRows.length > 0 &&
+    trajectory.rows.length > 0 &&
     !hasAnyTiming(trajectory);
+  const rangeCounts = useMemo(() => {
+    if (!range || !trajectory) return undefined;
+    return {
+      shown: visualRows.filter((row) => row.kind === 'row').length,
+      total: trajectory.rows.length,
+    };
+  }, [range, trajectory, visualRows]);
 
-  const timeline = useMemo(
-    () => (trajectory ? buildTimeline(trajectory) : undefined),
-    [trajectory],
-  );
+  const olderFailureText =
+    olderFailure === undefined
+      ? undefined
+      : olderFailure.kind === 'partial'
+        ? t('trajectory.olderPartial')
+        : t('trajectory.olderFailed', { message: olderFailure.message });
+
+  /**
+   * A span pressed outside the selected time: the selection is dropped so its
+   * row can be shown, and the reveal waits for the unfiltered table to render.
+   */
+  const pendingRevealRef = useRef<string | undefined>(undefined);
 
   /** A span stands for one row: select it and bring it into view. */
   const selectSpan = useCallback(
     (rowKey: string) => {
       const index = visualRows.findIndex((row) => row.key === rowKey);
-      if (index < 0) return;
+      if (index < 0) {
+        if (range === undefined) return;
+        pendingRevealRef.current = rowKey;
+        setRange(undefined);
+        selectRow(rowKey);
+        return;
+      }
       selectRow(rowKey);
       virtualizer.scrollToIndex(index, { align: 'auto' });
     },
-    [selectRow, virtualizer, visualRows],
+    [range, selectRow, setRange, virtualizer, visualRows],
   );
+
+  useLayoutEffect(() => {
+    const key = pendingRevealRef.current;
+    if (key === undefined) return;
+    // One attempt, on the first render after the selection was dropped. A key
+    // left waiting would scroll the table to it at some unrelated later
+    // change, long after the press that asked for it.
+    pendingRevealRef.current = undefined;
+    const index = visualRows.findIndex((row) => row.key === key);
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
+  }, [virtualizer, visualRows]);
 
   // Named the way the row reads, which already says a failed request failed
   // in words — the red of the span is never the only signal.
@@ -465,7 +558,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     <div className={styles.panel} data-testid="trajectory-panel">
       <div className={styles.header}>
         <div className={styles.summary}>
-          {totals ? (
+          {rangeCounts ? (
+            <span data-testid="trajectory-range-status" role="status">
+              {t('trajectory.range.status', rangeCounts)}
+            </span>
+          ) : totals ? (
             <span data-testid="trajectory-totals">
               {t('trajectory.totals', {
                 turns: totals.turns,
@@ -482,6 +579,18 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           )}
         </div>
         <div className={styles.headerActions}>
+          {range !== undefined && (
+            <button
+              type="button"
+              className={styles.iconButton}
+              onClick={() => setRange(undefined)}
+              title={t('trajectory.range.clear')}
+              aria-label={t('trajectory.range.clear')}
+              data-testid="trajectory-range-clear"
+            >
+              <XIcon size={14} strokeWidth={1.6} />
+            </button>
+          )}
           <button
             type="button"
             className={styles.iconButton}
@@ -505,6 +614,8 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         selectedKey={selectedKey}
         onSelect={selectSpan}
         describe={describeSpan}
+        {...(range !== undefined ? { range } : {})}
+        onRangeChange={setRange}
       />
 
       {error !== undefined && (
@@ -531,24 +642,59 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           // repeating it here as a placeholder would say it twice.
           status === 'error' ? null : (
             <div className={styles.placeholder} role="status">
-              {t(empty ? 'trajectory.empty' : 'common.loading')}
+              {empty
+                ? t('trajectory.empty')
+                : loadedPages > 0
+                  ? t('trajectory.loadingPages', { pages: loadedPages })
+                  : t('common.loading')}
             </div>
           )
         ) : (
           <>
             {/* Outside the scrolled box on purpose: inside it, its height
                 would offset every virtual row from the coordinates the
-                virtualizer computes. */}
-            {truncated && (
-              <div className={styles.olderBar}>
+                virtualizer computes. And always here, at one fixed height,
+                whatever it says: it is a flex sibling of the scrolled box, so
+                a bar that came and went with `truncated` would move every row
+                the moment a refresh changed its answer. */}
+            <div
+              className={styles.olderBar}
+              role="status"
+              data-testid="trajectory-older-bar"
+            >
+              {olderFailure !== undefined ? (
+                <>
+                  <span
+                    className={`${styles.olderNotice} ${styles.toneError}`}
+                    data-testid="trajectory-older-failed"
+                    title={olderFailureText}
+                  >
+                    {olderFailureText}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.headerButton}
+                    onClick={() => {
+                      if (status !== 'loading') refresh();
+                    }}
+                    // Not `disabled`: a disabled button drops the focus of a
+                    // reader who just pressed it, and this one is pressed
+                    // exactly when it is about to go busy.
+                    aria-disabled={status === 'loading' ? true : undefined}
+                    data-testid="trajectory-older-retry"
+                  >
+                    {t('common.retry')}
+                  </button>
+                </>
+              ) : truncated ? (
                 <span
                   className={styles.olderNotice}
                   data-testid="trajectory-truncated"
                 >
                   {t('trajectory.truncated')}
                 </span>
-              </div>
-            )}
+              ) : null}
+            </div>
             <div
               ref={scrollRef}
               className={styles.scroll}

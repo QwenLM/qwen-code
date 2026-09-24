@@ -81,7 +81,13 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     `The selected model reads its key from ${v?.env ?? ''}, which is not set in the daemon's environment.`,
   'settings.liveSetup.model': 'Realtime model',
   'settings.liveSetup.modelHint':
-    'Add a model with realtimeOnly: true under modelProviders in your user settings (~/.qwen/settings.json) to choose it here.',
+    'Pick “Other model id…” to use any Realtime model.',
+  'settings.liveSetup.modelCustom': 'Other model id…',
+  'settings.liveSetup.endpoint': 'Realtime endpoint',
+  'settings.liveSetup.endpointHint':
+    'The OpenAI-compatible base URL of your key’s region or dedicated domain. Leave empty for the default (Beijing).',
+  'settings.liveSetup.endpointFromRoute':
+    "Follows the base URL of the selected model's modelProviders route.",
   'settings.liveSetup.voice': 'Voice',
   'settings.liveSetup.voiceHint':
     'A voice name of the selected model. It is checked with the provider when Live Voice is on.',
@@ -208,8 +214,13 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.keyFromEnvMissing': (v) =>
     `所选模型从 ${v?.env ?? ''} 读取 key，但 daemon 的环境里没有设置它。`,
   'settings.liveSetup.model': 'Realtime 模型',
-  'settings.liveSetup.modelHint':
-    '在用户设置（~/.qwen/settings.json）的 modelProviders 下添加带 realtimeOnly: true 的模型后，即可在此选择。',
+  'settings.liveSetup.modelHint': '选“其他模型 id…”可填写任意 Realtime 模型。',
+  'settings.liveSetup.modelCustom': '其他模型 id…',
+  'settings.liveSetup.endpoint': 'Realtime 接入地址',
+  'settings.liveSetup.endpointHint':
+    '填写 Key 所属地域或专属域名的 OpenAI 兼容 baseUrl，留空使用默认地址（北京）。',
+  'settings.liveSetup.endpointFromRoute':
+    '跟随所选模型在 modelProviders 中路由的 baseUrl。',
   'settings.liveSetup.voice': '音色',
   'settings.liveSetup.voiceHint':
     '所选模型的音色名称。开启 Live Voice 时保存前会先向 provider 校验。',

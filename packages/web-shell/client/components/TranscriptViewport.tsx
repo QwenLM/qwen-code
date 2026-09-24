@@ -97,6 +97,8 @@ export const TranscriptViewport = forwardRef<
     viewKey,
     pin,
     toolSources,
+    selectSearchHit,
+    continueLive,
   } = viewport;
   const globalNavigation =
     !props.hideSessionTimeline &&
@@ -265,14 +267,29 @@ export const TranscriptViewport = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
-      scrollToMessage: (id, callId) =>
-        list.current?.scrollToMessage(id, callId) ?? false,
+      scrollToSearchHit: (hit, isCurrent) => selectSearchHit(hit, isCurrent),
+      scrollToMessage: (id, callId) => {
+        if (list.current?.scrollToMessage(id, callId)) return true;
+        if (!historical && !loading) return false;
+        const blockId = props.messages.find((message) => message.id === id)
+          ?.sourceBlockIds?.[0];
+        if (!blockId) return false;
+        continueLive(blockId);
+        return true;
+      },
       scrollToBottom: (behavior) => {
         if (historical || loading) returnToLive();
         if (!historical) list.current?.scrollToBottom(behavior);
       },
     }),
-    [historical, loading, returnToLive],
+    [
+      historical,
+      loading,
+      returnToLive,
+      selectSearchHit,
+      continueLive,
+      props.messages,
+    ],
   );
 
   useLayoutEffect(() => {
@@ -436,6 +453,7 @@ export const TranscriptViewport = forwardRef<
       {globalNavigation && (
         <div className={styles.navigation} hidden={!navigationVisible}>
           <GlobalTurnNavigation
+            action={props.timelineAction}
             state={viewport.navigation}
             store={viewport.store}
             follow={navigationVisible ? follow : undefined}
@@ -508,6 +526,9 @@ export const TranscriptViewport = forwardRef<
               key={viewport.viewKey}
               ref={list}
               messages={viewport.messages}
+              timelineAction={
+                globalNavigation ? undefined : props.timelineAction
+              }
               hideSessionTimeline={
                 historical || globalNavigation || props.hideSessionTimeline
               }

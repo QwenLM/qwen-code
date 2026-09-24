@@ -360,6 +360,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 | 属性                   | 类型                                  | 说明                                                                                                                                           |
 | ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `urlNavigation`        | `WebShellUrlNavigationOptions`        | 可选 URL 管理，含 `basePath`；默认关闭。详见 [URL 导航](#url-导航可选)。                                                                       |
 | `browserNotifications` | `WebShellBrowserNotificationsOptions` | 可选接入通知；`appName` 默认 QwenCode，`iconUrl` 默认内联 PNG（支持 CDN），`defaultEnabled` 默认 false；已保存偏好优先；不传时停用，不重建会话 |
 | `baseUrl`              | `string`                              | daemon API 地址，未传时使用 `window.location.origin`                                                                                           |
 | `token`                | `string`                              | daemon API Bearer token                                                                                                                        |
@@ -370,6 +371,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `lockWorkspaceCwd`     | `string`                              | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                                                             |
 | `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
 | `settings`             | `WebShellSettingsOptions`             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+| `modelManagement`      | `WebShellModelManagementOptions`      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
 
 ### Workspace 会话创建超时
 
@@ -419,6 +421,9 @@ daemon 参数的完整含义和配置方式见
 | `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
 | `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
 | `showToolCalls`            | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                        |
+| `modelManagement`          | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
+
+移动访问二维码入口由 `header.showMobileAccess?: boolean` 控制，默认隐藏，适用于主聊天和分屏页头。独立入口 `main.tsx` 显式设为 `true`，保留本地 Qwen Code 用户的入口。
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
 详情的打开操作：
@@ -595,6 +600,24 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 
 设计与验证范围见 [English](../../docs/design/web-shell-settings-allowlists.md) / [简体中文](../../docs/design/web-shell-settings-allowlists.zh-CN.md)。
 
+## 模型增删交互
+
+宿主可以保留模型列表和切换，同时关闭 WebShell 内的新增与删除入口：
+
+```tsx
+<WebShellWithProviders
+  modelManagement={{ allowAdd: false, allowDelete: false }}
+/>
+```
+
+公共类型 `WebShellModelManagementOptions` 的两个字段独立控制，省略均为 `true`。
+`allowAdd: false` 隐藏新增按钮和 `/auth` 建议，并在主窗口、欢迎页、分屏和侧任务中拦截手动输入的 `/auth` 及其别名 `/connect`、`/login`。输入框提交时，拦截位于宿主 `onSlashCommand` 回调之后、隐藏命令转发之前，宿主回调返回 `true` 即可接管；消息编辑、重试和侧任务初始发送不调用该回调。命令快照就绪后，daemon 命令按解析身份判断，同名项目/用户命令可保留；App 本地 `/auth` 路由仍是配置弹框入口。快照未就绪时，输入框保守拒绝配置命令名称；侧任务保留这类初始提示词等待加载，五秒后提示等待状态，信息到达后重新检查。添加模型弹框无法打开或保存。
+`allowDelete: false` 隐藏模型删除按钮并阻止删除动作。模型列表、当前标识、选择、`/model`、参数编辑及会话 `/delete` 保持原行为。
+
+动态收紧策略会关闭相关弹框或确认，之后的浏览器队列发送读取最新策略。已交给 SDK/daemon 的请求不能由 props 撤销。恢复允许不会重新打开旧弹框。
+
+这仅用于界面防误操作，不是安全权限。daemon API、CLI、配置文件写入和外部模型下发不受影响；`settings.excludeItems` 的呈现策略仍独立生效。
+
 ## Markdown 图表接入
 
 `WebShell` 已内置 `markdown-chart` renderer 和 ECharts 运行时。宿主只需将
@@ -700,3 +723,63 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
 | `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
+
+## 当前会话内容搜索
+
+`conversationSearchThreshold` 控制搜索入口的消息数阈值，默认 `10`。
+当前会话的用户和助手消息数严格超过阈值时显示入口（默认第 11 条起），
+搜索图标位于左侧会话时间轴下方，采用适配窄栏的小尺寸；时间轴刻度隐藏时同步隐藏搜索入口。
+`WebShell` 和 `WebShellWithProviders` 均支持此 prop，例如
+`<WebShellWithProviders conversationSearchThreshold={20} {...connectionProps} />`。
+
+弹框搜索用户和助手正文（包括代码），点击摘要可定位并高亮对应消息。
+支持 turn navigation 的 daemon 会分页搜索持久化历史，不受当前可见区域限制；
+旧 daemon 只能搜索已加载消息，弹框会明确提示。搜索结果最多展示 200 条，
+超过时可缩小关键词范围。搜索不修改草稿或中断正在进行的回复。
+
+### 宿主定位持久化消息
+
+宿主先通过 `WebShellWithProviders` 的 `sessionId` 和 workspace props 打开目标会话，再调用公开 API：
+
+```tsx
+import { useRef } from 'react';
+import { WebShellWithProviders, type WebShellApi } from '@qwen-code/web-shell';
+
+const shellRef = useRef<WebShellApi>(null);
+// 将 shellRef 传给 <WebShellWithProviders shellRef={shellRef} {...connectionProps} />。
+// 会话/历史就绪后，在宿主的结果点击处理函数里调用：
+const result = await shellRef.current?.navigateToMessage({
+  sessionId: selectedSessionId,
+  recordId: selectedPersistedRecordId,
+  signal: abortController.signal,
+});
+```
+
+公开类型为 `WebShellMessageNavigationRequest`、`WebShellMessageNavigationResult`。
+`recordId` 是持久化用户/助手转录记录 ID，不是渲染消息 ID 或摘要。
+接口分页加载尚未渲染的历史、激活目标并在随后渲染中滚动高亮，不修改草稿；
+搜索图标隐藏时也可调用。很旧的目标需要线性扫描历史，找到记录即停止。
+
+结果 `status` 为 `located`、`not_found`、`not_ready`、`session_mismatch`、`unsupported`、
+`cancelled` 或 `error`；`located` 不代表滚动动画已结束。未就绪时宿主须等待会话/视图就绪后再调用。聊天被面板或全页视图覆盖时返回 `not_ready`，宿主应先恢复聊天视图。
+新请求、会话/工作目录变化、卸载或 AbortSignal 取消会使旧请求失效。
+现有跨会话搜索接口仅返回会话和摘要，不提供 `recordId`；宿主搜索需补齐记录 ID 后才可精确定位。
+
+## URL 导航（可选）
+
+`WebShellWithProviders` 支持 `urlNavigation={{ basePath: '/agentic-code' }}`。
+独立入口默认启用同一实现，并推断既有部署基础路径（默认根路径）。嵌入组件默认不启用，原有受控
+`sessionId`、`workspaceId`、`workspaceCwd` 和 `sessionContext` 接入保持兼容。
+启用后，显式初始会话目标 props 优先于 URL，后续目标 props 变化 replace 地址；
+宿主必须停止自行写 history，避免双重控制。`lockWorkspaceCwd` 仍是宿主约束。
+
+基础路径下支持 `/session/<id>`、`/plugins`、`/channels`、`/scheduled-tasks`、
+`/goals` 和 `/settings`。会话保留原有 `workspace` / `context` 协议，页面仅定位
+页面，设置不持久化分类或作用域。无关参数（包括宿主的实例参数）和 fragment 保留。
+主动导航新增历史，重复点击不新增；浏览器前进后退恢复页面和会话。页面来源保存在
+history.state，直接打开或复制到新标签页的页面没有来源时返回空白聊天，不创建会话。
+
+宿主部署必须把基础路径和上述深层路径的文档请求返回宿主 HTML，并保留 API 路由。
+`basePath` 只配置客户端，不创建服务端 rewrite。Qwen daemon 自带五个页面的文档
+GET/HEAD 入口，JSON 请求、子路径和写请求仍走原有鉴权/API。
+详见[导航协议设计](../../docs/design/web-shell-url-navigation.zh-CN.md)。
