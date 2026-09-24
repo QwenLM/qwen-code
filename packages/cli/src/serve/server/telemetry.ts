@@ -628,6 +628,15 @@ export function resolveDaemonTelemetryRoute(
       sessionId: decodePathSegment(workspaceTurnIndex[1]),
     };
   }
+  const workspaceToolCalls = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/tool-calls$/,
+  );
+  if (workspaceToolCalls?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: decodePathSegment(workspaceToolCalls[1]),
+    };
+  }
   const workspaceExport = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/export$/,
   );

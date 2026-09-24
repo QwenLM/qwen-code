@@ -110,7 +110,8 @@ export function getNestedProperty(
 
 /**
  * Get the effective value for a setting, considering inheritance from higher scopes
- * Always returns a value (never undefined) - falls back to default if not set anywhere
+ * Returns the value if set, falling back to the default from the schema.
+ * Returns undefined when the key is unknown to the schema or has no default.
  */
 export function getEffectiveValue(
   key: string,

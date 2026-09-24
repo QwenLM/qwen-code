@@ -1,4 +1,5 @@
 import { useCallback, type ReactNode } from 'react';
+import { WrenchIcon } from 'lucide-react';
 import {
   warnClipboardWriteFailure,
   writeClipboardText,
@@ -21,6 +22,9 @@ interface MessageTimestampProps {
   /** When set, render an edit action after the copy button. */
   onEdit?: () => void;
   editTitle?: string;
+  /** When set, render an action that opens this turn's tool-call list. */
+  onOpenTurnCalls?: () => void;
+  turnCallsTitle?: string;
 }
 
 /**
@@ -37,6 +41,8 @@ export function MessageTimestamp({
   copyTitle = 'Copy',
   onEdit,
   editTitle = 'Edit',
+  onOpenTurnCalls,
+  turnCallsTitle = 'View tool calls',
 }: MessageTimestampProps) {
   const documentMode = useTranscriptRenderMode() === 'document';
   const [copied, flashCopied] = useCopiedFlash();
@@ -49,7 +55,13 @@ export function MessageTimestamp({
       .catch(warnClipboardWriteFailure);
   }, [copyText, flashCopied]);
   if (documentMode) return <>{children}</>;
-  if (timestamp === undefined && !copyText && !toolGroupSpacing && !onEdit) {
+  if (
+    timestamp === undefined &&
+    !copyText &&
+    !toolGroupSpacing &&
+    !onEdit &&
+    !onOpenTurnCalls
+  ) {
     return <>{children}</>;
   }
   const copyButton = copyText ? (
@@ -74,6 +86,17 @@ export function MessageTimestamp({
       <PencilIcon />
     </button>
   ) : null;
+  const turnCallsButton = onOpenTurnCalls ? (
+    <button
+      type="button"
+      className={styles.copyButton}
+      title={turnCallsTitle}
+      aria-label={turnCallsTitle}
+      onClick={onOpenTurnCalls}
+    >
+      <WrenchIcon strokeWidth={1.6} aria-hidden="true" />
+    </button>
+  ) : null;
   const rowClassName = chatMode
     ? styles.chatRow
     : toolGroupSpacing
@@ -84,6 +107,7 @@ export function MessageTimestamp({
       <div className={rowClassName}>
         {children}
         {copyButton}
+        {turnCallsButton}
         {editButton}
       </div>
     );
@@ -97,6 +121,7 @@ export function MessageTimestamp({
             {formatTimestamp(timestamp)}
           </span>
           {copyButton}
+          {turnCallsButton}
           {editButton}
         </span>
       ) : (
