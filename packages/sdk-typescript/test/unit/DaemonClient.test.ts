@@ -2044,6 +2044,11 @@ describe('DaemonClient', () => {
         base: 'main',
       });
       await ws.workspaceGitHubDefaultBranch();
+      await ws.workspaceGitWorktrees();
+      await ws.workspaceGitWorktreeStatus('/work/secondary/.qwen/wt');
+      await ws.workspaceGitRemoveWorktree('/work/secondary/.qwen/wt', {
+        force: true,
+      });
 
       const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
       expect(calls.map((c) => [c.method, c.url])).toEqual([
@@ -2055,7 +2060,19 @@ describe('DaemonClient', () => {
         ['POST', `${base}/git/commit`],
         ['POST', `${base}/github/prs/create`],
         ['GET', `${base}/github/default-branch`],
+        ['GET', `${base}/git/worktrees`],
+        [
+          'GET',
+          `${base}/git/worktrees/status?path=%2Fwork%2Fsecondary%2F.qwen%2Fwt`,
+        ],
+        ['POST', `${base}/git/worktrees/remove`],
       ]);
+      // The destructive one carries the path it was asked for and the force
+      // flag the second click adds.
+      expect(JSON.parse(calls[10]!.body!)).toEqual({
+        path: '/work/secondary/.qwen/wt',
+        force: true,
+      });
       expect(JSON.parse(calls[1]!.body!)).toEqual({ ref: 'feat/thing' });
       expect(JSON.parse(calls[2]!.body!)).toEqual({
         name: 'feat/new',
