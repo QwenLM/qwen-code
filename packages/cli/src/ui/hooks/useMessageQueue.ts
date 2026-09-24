@@ -318,13 +318,19 @@ export function useMessageQueue(): UseMessageQueueReturn {
         ({ text, peer }) => !isSlashCommand(text) && !peer,
       );
       if (plainMessages.length > 0) {
-        // One routing decision per batch: entries whose recorded shell
-        // intent differs from the first plain entry's stay queued for the
-        // next batch, so a shell command and a model prompt never merge
-        // into a blob the drain can only route one way (#11626).
-        const batch = plainMessages.filter(
-          ({ shellMode }) => shellMode === plainMessages[0].shellMode,
-        );
+        // One routing decision per batch: the batch is the contiguous run of
+        // entries from the head that share the first plain entry's recorded
+        // shell intent, so a shell command and a model prompt never merge
+        // into a blob the drain can only route one way (#11626). Stopping at
+        // the first difference keeps submission order too — a later entry
+        // with the head's intent never overtakes an earlier entry queued
+        // with a different one.
+        const headIntent = plainMessages[0].shellMode;
+        const batch: QueuedMessage[] = [];
+        for (const message of plainMessages) {
+          if (message.shellMode !== headIntent) break;
+          batch.push(message);
+        }
         const batchKeys = new Set(batch.map(({ key }) => key));
         queueRef.current = queueRef.current.filter(
           ({ key }) => !batchKeys.has(key),

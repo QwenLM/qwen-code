@@ -217,7 +217,7 @@ describe('useMessageQueue', () => {
       });
     });
 
-    it('keeps shell commands and model prompts in separate batches', () => {
+    it('keeps shell commands and model prompts in separate batches in submission order', () => {
       const { result } = renderHook(() => useMessageQueue());
       act(() => {
         result.current.addMessage('model one', false, undefined, false);
@@ -225,18 +225,19 @@ describe('useMessageQueue', () => {
         result.current.addMessage('model two', false, undefined, false);
       });
 
+      // The batch is the contiguous same-intent run from the head, so each
+      // entry keeps its own routing decision *and* nothing overtakes an
+      // earlier entry queued with a different intent.
       let first: ReturnType<typeof result.current.popNextSubmission> = null;
       act(() => {
         first = result.current.popNextSubmission();
       });
-      // Model-bound prompts aggregate with each other; the shell command
-      // stays queued for its own batch.
       expect(first).toMatchObject({
         kind: 'user',
-        modelText: 'model one\n\nmodel two',
+        modelText: 'model one',
         shellMode: false,
       });
-      expect(result.current.messageQueue).toEqual(['ls -la']);
+      expect(result.current.messageQueue).toEqual(['ls -la', 'model two']);
 
       let second: ReturnType<typeof result.current.popNextSubmission> = null;
       act(() => {
@@ -247,6 +248,49 @@ describe('useMessageQueue', () => {
         modelText: 'ls -la',
         shellMode: true,
       });
+      expect(result.current.messageQueue).toEqual(['model two']);
+
+      let third: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        third = result.current.popNextSubmission();
+      });
+      expect(third).toMatchObject({
+        kind: 'user',
+        modelText: 'model two',
+        shellMode: false,
+      });
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('still merges adjacent entries that share one intent', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('model one', false, undefined, false);
+        result.current.addMessage('model two', false, undefined, false);
+        result.current.addMessage('ls -la', false, undefined, true);
+        result.current.addMessage('pwd', false, undefined, true);
+      });
+
+      let first: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        first = result.current.popNextSubmission();
+      });
+      expect(first).toMatchObject({
+        kind: 'user',
+        modelText: 'model one\n\nmodel two',
+        shellMode: false,
+      });
+
+      let second: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        second = result.current.popNextSubmission();
+      });
+      expect(second).toMatchObject({
+        kind: 'user',
+        modelText: 'ls -la\n\npwd',
+        shellMode: true,
+      });
+      expect(result.current.messageQueue).toEqual([]);
     });
 
     it('leaves intent unrecorded for producers that do not pass it', () => {
