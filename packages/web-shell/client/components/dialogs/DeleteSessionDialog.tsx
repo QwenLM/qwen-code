@@ -12,7 +12,16 @@ import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
 
 interface DeleteSessionDialogProps {
-  onDeleted: (sessionIds: string[]) => void;
+  /**
+   * `attachedSessionId` is the session this client was attached to when the
+   * delete was confirmed. The daemon publishes the terminal `session_closed`
+   * frame before it answers the delete request, so by the time this fires the
+   * caller can no longer read the attachment off the connection (#12619).
+   */
+  onDeleted: (
+    sessionIds: string[],
+    meta?: { attachedSessionId?: string },
+  ) => void;
   onError: (error: unknown) => void;
   onClose: () => void;
   workspaceCwd?: string;
@@ -141,6 +150,10 @@ export function DeleteSessionDialog({
 
   const handleDelete = useCallback(() => {
     if (deleting) return;
+    // Captured before the request: the daemon's terminal `session_closed`
+    // frame clears `connection.sessionId` before the delete resolves, so this
+    // is the last point where the attachment is still readable (#12619).
+    const attachedSessionId = currentSessionId;
 
     if (selectedIds.size > 0) {
       const filteredSet = new Set(filtered.map((s) => s.sessionId));
@@ -187,7 +200,7 @@ export function DeleteSessionDialog({
             return;
           }
 
-          onDeleted([...res.removed, ...res.notFound]);
+          onDeleted([...res.removed, ...res.notFound], { attachedSessionId });
           onClose();
         })
         .catch((error: unknown) => {
@@ -211,7 +224,7 @@ export function DeleteSessionDialog({
           setDeleting(false);
           return;
         }
-        onDeleted([session.sessionId]);
+        onDeleted([session.sessionId], { attachedSessionId });
         onClose();
       })
       .catch((error: unknown) => {
@@ -220,6 +233,7 @@ export function DeleteSessionDialog({
       });
   }, [
     blocksCurrentDelete,
+    currentSessionId,
     deleteSession,
     deleteSessions,
     deleting,

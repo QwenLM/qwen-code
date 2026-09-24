@@ -235,7 +235,9 @@ describe('DeleteSessionDialog selection', () => {
     });
 
     expect(deleteSessionsMock).toHaveBeenCalledWith(['me']);
-    expect(onDeleted).toHaveBeenCalledWith(['me']);
+    expect(onDeleted).toHaveBeenCalledWith(['me'], {
+      attachedSessionId: 'me',
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
   });
@@ -345,7 +347,9 @@ describe('DeleteSessionDialog selection', () => {
     });
 
     expect(deleteSessionsMock).toHaveBeenCalledWith(['s0', 's1']);
-    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1']);
+    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1'], {
+      attachedSessionId: 'me',
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
   });

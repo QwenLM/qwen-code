@@ -430,7 +430,16 @@ interface WebShellSidebarProps {
     sessionId: string,
     displayName: string,
   ) => void;
-  onSessionsDeleted?: (sessionIds: string[]) => void;
+  /**
+   * `attachedSessionId` is the session this client was attached to when the
+   * delete was confirmed. The daemon publishes the terminal `session_closed`
+   * frame before the delete request resolves, so the attachment is no longer
+   * readable off the connection by the time this callback runs (#12619).
+   */
+  onSessionsDeleted?: (
+    sessionIds: string[],
+    meta?: { attachedSessionId?: string },
+  ) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -3106,6 +3115,12 @@ export function WebShellSidebar({
       setDeleteCandidate(null);
       return;
     }
+    // Captured before the request: the daemon's terminal `session_closed`
+    // frame clears `connection.sessionId` before the delete resolves, so this
+    // is the last point where the attachment is still readable (#12619).
+    const attachedSessionId = isCurrentSession(deleteCandidate)
+      ? sessionId
+      : undefined;
     const scope = resolveSessionWorkspaceScope(deleteCandidate);
     const isArchived = Boolean(deleteCandidate.isArchived);
     const removeSession =
@@ -3130,7 +3145,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
-        onSessionsDeleted?.([sessionId]);
+        onSessionsDeleted?.([sessionId], { attachedSessionId });
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
@@ -3149,6 +3164,7 @@ export function WebShellSidebar({
     deleteCandidate,
     deleteSession,
     getIdentityForSession,
+    isCurrentSession,
     onError,
     onSessionsDeleted,
     primaryWorkspaceCwd,

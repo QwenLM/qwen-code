@@ -13617,7 +13617,15 @@ export function App({
         current.sessionContext?.kind === 'standalone'
           ? ''
           : removed.workspaceCwd;
-      if (current.sessionId !== removed.sessionId) return;
+      // The daemon publishes the terminal `session_closed` frame before it
+      // answers the delete request, so the attachment is usually already
+      // cleared by the time this runs. Only a *different* attached session
+      // means the client moved on mid-delete (#12619).
+      if (
+        current.sessionId !== undefined &&
+        current.sessionId !== removed.sessionId
+      )
+        return;
       if (removedWorkspaceCwd) {
         const currentWorkspaceCwd =
           current.workspaceCwd ||
@@ -19232,18 +19240,20 @@ export function App({
             >
               <DeleteSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
-                onDeleted={(sessionIds) => {
+                onDeleted={(sessionIds, meta) => {
                   closeUsageTabs(sessionIds);
                   // Deleting the attached session must leave the deleted
                   // conversation: open a fresh draft in the same context,
-                  // mirroring the Session Overview (#12619).
+                  // mirroring the Session Overview (#12619). The daemon's
+                  // terminal `session_closed` frame clears the attachment
+                  // before the delete response resolves, so fall back to the
+                  // id the dialog captured at confirm time.
                   const current = connectionRef.current;
-                  if (
-                    current.sessionId &&
-                    sessionIds.includes(current.sessionId)
-                  ) {
+                  const attachedId =
+                    current.sessionId ?? meta?.attachedSessionId;
+                  if (attachedId && sessionIds.includes(attachedId)) {
                     void handleCurrentSessionRemoved({
-                      sessionId: current.sessionId,
+                      sessionId: attachedId,
                       workspaceCwd:
                         current.workspaceCwd ||
                         lockedWorkspaceCwd ||
@@ -19541,20 +19551,22 @@ export function App({
                     returnToChat();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
-                  onSessionsDeleted={(sessionIds) => {
+                  onSessionsDeleted={(sessionIds, meta) => {
                     closeUsageTabs(sessionIds);
                     // Deleting the attached session must leave the deleted
                     // conversation: open a fresh draft in the same context,
-                    // mirroring the Session Overview (#12619).
+                    // mirroring the Session Overview (#12619). The daemon's
+                    // terminal `session_closed` frame clears the attachment
+                    // before the delete response resolves, so fall back to the
+                    // id the sidebar captured at confirm time.
                     const current = connectionRef.current;
-                    if (
-                      !current.sessionId ||
-                      !sessionIds.includes(current.sessionId)
-                    ) {
+                    const attachedId =
+                      current.sessionId ?? meta?.attachedSessionId;
+                    if (!attachedId || !sessionIds.includes(attachedId)) {
                       return;
                     }
                     void handleCurrentSessionRemoved({
-                      sessionId: current.sessionId,
+                      sessionId: attachedId,
                       workspaceCwd:
                         current.workspaceCwd ||
                         lockedWorkspaceCwd ||

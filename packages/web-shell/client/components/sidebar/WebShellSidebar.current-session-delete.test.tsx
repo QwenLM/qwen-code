@@ -283,7 +283,12 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     });
 
     expect(active.deleteSession).toHaveBeenCalledWith('session-current');
-    expect(onSessionsDeleted).toHaveBeenCalledWith(['session-current']);
+    // The row is the attached one, so the sidebar reports the id it captured
+    // at confirm time: the daemon's terminal `session_closed` frame clears the
+    // attachment before the delete response resolves (#12619).
+    expect(onSessionsDeleted).toHaveBeenCalledWith(['session-current'], {
+      attachedSessionId: 'session-current',
+    });
   });
 
   it('disables delete for the current session while it is running', async () => {
@@ -327,6 +332,8 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     });
 
     expect(active.deleteSession).toHaveBeenCalledWith('session-other');
-    expect(onSessionsDeleted).toHaveBeenCalledWith(['session-other']);
+    expect(onSessionsDeleted).toHaveBeenCalledWith(['session-other'], {
+      attachedSessionId: undefined,
+    });
   });
 });
