@@ -25,7 +25,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             "begin-turn", "prepare", "confirmation", "confirm",
             "preflight");
     private static final Set<String> RUNTIME_EXECUTION_STATES = Set.of(
-            "prepared", "executing", "cancel_requested", "settled");
+            "prepared", "executing", "cancel_requested", "settled",
+            "unknown");
     private static final int MAX_CAS_ATTEMPTS = 16;
 
     private final HarnessSessionResolver sessionResolver;

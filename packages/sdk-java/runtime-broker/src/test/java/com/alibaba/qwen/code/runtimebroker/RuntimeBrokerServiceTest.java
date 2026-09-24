@@ -239,6 +239,28 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationAcceptsUnknownRuntimeStatus() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.transport.executeResult = new CompletableFuture<>();
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(
+                    Map.of("state", "unknown"));
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+
+            ToolExecutionRecord cancelling = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId()));
+
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                    cancelling.getState());
+        }
+    }
+
+    @Test
     void ambiguousTransportFailureMarksExecutionUnknown() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             fixture.transport.executeResult = CompletableFuture.failedFuture(
@@ -666,6 +688,8 @@ class RuntimeBrokerServiceTest {
             CompletableFuture<Map<String, Object>> result =
                     new CompletableFuture<>();
             fixture.transport.executeResult = result;
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(
+                    Map.of("state", "unknown"));
             join(fixture.service.acquire("harness", "runtime",
                     "bootstrap"));
             ToolExecutionRecord created = join(

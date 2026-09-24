@@ -9,9 +9,9 @@ import java.util.concurrent.CompletionStage;
  * <p>Acquire and release must be idempotent by Runtime Session identifier.
  * Execute results must contain a string {@code executionStatus}. Cancel
  * results must contain {@code state} with one of {@code prepared},
- * {@code executing}, {@code cancel_requested}, or {@code settled}; a settled
- * response must also contain a valid execution result. Release acknowledges
- * completion only with {@code true}.
+ * {@code executing}, {@code cancel_requested}, {@code settled}, or
+ * {@code unknown}; a settled response must also contain a valid execution
+ * result. Release acknowledges completion only with {@code true}.
  */
 public interface RuntimeTransport {
     CompletionStage<Void> acquire(RuntimeLease lease,
