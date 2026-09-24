@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useLayoutEffect, useRef } from 'react';
 import type { TodoItem } from '../../adapters/types';
 import {
   getOrderedStickyTodos,
@@ -49,7 +49,36 @@ export const StickyPlanStrip = memo(function StickyPlanStrip({
   const ordered = getOrderedStickyTodos(todos).filter(
     (todo) => todo.status !== 'completed',
   );
-  if (ordered.length === 0) return null;
+  const stripRef = useRef<HTMLElement>(null);
+  const mounted = ordered.length > 0;
+  // The strip sits above the transcript scroller, so every height change moves
+  // the text a reader has scrolled up to. Follow mode re-pins the bottom on its
+  // own; otherwise shift the scroll offset by the same amount.
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (!strip || typeof ResizeObserver === 'undefined') return;
+    const compensate = (delta: number) => {
+      const list = strip.parentElement?.querySelector<HTMLElement>(
+        '[data-web-shell-message-list]',
+      );
+      if (!list || delta === 0) return;
+      const fromBottomBefore =
+        list.scrollHeight - list.scrollTop - list.clientHeight - delta;
+      if (fromBottomBefore < 30) return;
+      list.scrollTop += delta;
+    };
+    let height = strip.getBoundingClientRect().height;
+    compensate(height);
+    const observer = new ResizeObserver(() => {
+      const next = strip.getBoundingClientRect().height;
+      const delta = next - height;
+      height = next;
+      compensate(delta);
+    });
+    observer.observe(strip);
+    return () => observer.disconnect();
+  }, [mounted]);
+  if (!mounted) return null;
 
   const inProgressIdx = todos.findIndex(
     (todo) => todo.status === 'in_progress',
@@ -66,7 +95,11 @@ export const StickyPlanStrip = memo(function StickyPlanStrip({
   });
 
   return (
-    <section className={styles.strip} aria-label={t('todo.title')}>
+    <section
+      ref={stripRef}
+      className={styles.strip}
+      aria-label={t('todo.title')}
+    >
       <div className={styles.header}>
         <button
           type="button"
