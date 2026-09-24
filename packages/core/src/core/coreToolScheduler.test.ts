@@ -14170,6 +14170,29 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
+  it('keeps a surrogate pair whole when it ends exactly at the cut', async () => {
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD - 2;
+    const hookContext = `${'h'.repeat(kept)}\u{1F600}${'t'.repeat(100)}`;
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext,
+    });
+
+    expect(message).toBe(
+      `${FAILURE_BODY}\n\n${'h'.repeat(kept)}\u{1F600}\n... [truncated, 100 more characters]`,
+    );
+  });
+
+  it('adds no truncation marker to failure-hook context exactly at the cap', async () => {
+    const hookContext = 'h'.repeat(DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD);
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext,
+    });
+
+    expect(message).toBe(`${FAILURE_BODY}\n\n${hookContext}`);
+  });
+
   it.each([ToolErrorType.EXECUTION_FAILED, ToolErrorType.EXECUTION_TIMEOUT])(
     'preserves %s execution when cancellation arrives during failure postprocessing',
     async (errorType) => {
