@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.withIdentity;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -513,6 +514,15 @@ class InMemoryRepositoryTest {
                         claimed.getDispatchLeaseUntil(),
                         claimed.getDispatchGeneration(), claimed.getState())
                 .withVersion(claimed.getVersion()));
+        Map<String, Object> extraReference = new LinkedHashMap<>(
+                claimed.getReference());
+        extraReference.put("extra", null);
+        forgeries.put("reference", ToolExecutionRecord.prepared("execution",
+                "key", "binding", 1, "harness", "session", "turn", "tool",
+                "digest", extraReference).withDispatch("owner-a",
+                        claimed.getDispatchLeaseUntil(),
+                        claimed.getDispatchGeneration(), claimed.getState())
+                .withVersion(claimed.getVersion()));
         forgeries.put("key", withIdentity(claimed, "other", "binding", 1,
                 "harness"));
         forgeries.put("binding", withIdentity(claimed, "key", "other", 1,
@@ -881,7 +891,16 @@ class InMemoryRepositoryTest {
                 "turn", "tool", "other", reference("other")).withVersion(
                         unknown.getVersion()), result("success"),
                 clock.instant()));
-        assertEquals("success", repository.resolveUnknown(unknown,
+        // A cancel records the intent without settling UNKNOWN, and its
+        // version bump invalidates a recovery snapshot taken before it.
+        ToolExecutionRecord cancel = repository.requestCancel(
+                created.getExecutionCallId(), unknown.getVersion());
+        assertEquals(ToolExecutionRecord.State.UNKNOWN, cancel.getState());
+        assertTrue(cancel.isCancelRequested());
+        assertEquals(unknown.getVersion() + 1, cancel.getVersion());
+        assertNull(repository.resolveUnknown(unknown, result("success"),
+                clock.instant()));
+        assertEquals("success", repository.resolveUnknown(cancel,
                 result("success"), clock.instant()).getExecutionStatus());
     }
 
@@ -1032,21 +1051,6 @@ class InMemoryRepositoryTest {
         return ToolExecutionRecord.prepared(executionCallId, "key",
                 "binding", 1, "harness", "session", "turn", "tool",
                 "digest", reference("digest"));
-    }
-
-    private static ToolExecutionRecord withIdentity(
-            ToolExecutionRecord claimed, String idempotencyKey,
-            String bindingId, long runtimeGeneration,
-            String harnessSessionId) {
-        return ToolExecutionRecord.prepared(claimed.getExecutionCallId(),
-                idempotencyKey, bindingId, runtimeGeneration,
-                harnessSessionId, claimed.getRuntimeSessionId(),
-                claimed.getTurnId(), claimed.getToolCallId(),
-                claimed.getRequestDigest(), claimed.getReference())
-                .withDispatch(claimed.getDispatchOwner(),
-                        claimed.getDispatchLeaseUntil(),
-                        claimed.getDispatchGeneration(), claimed.getState())
-                .withVersion(claimed.getVersion());
     }
 
     private static Map<String, Object> reference(String digest) {

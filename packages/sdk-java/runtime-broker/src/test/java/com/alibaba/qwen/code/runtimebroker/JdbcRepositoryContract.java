@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.withIdentity;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -636,6 +637,19 @@ final class JdbcRepositoryContract {
         assertEquals(ToolExecutionRecord.State.UNKNOWN,
                 second.findByExecutionCallId(
                         reported.getExecutionCallId()).getState());
+        // A cancel records the intent without settling UNKNOWN, and its
+        // version bump invalidates a recovery snapshot taken before it.
+        ToolExecutionRecord reportedCancel = first.requestCancel(
+                reported.getExecutionCallId(), reportedUnknown.getVersion());
+        assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                reportedCancel.getState());
+        assertTrue(reportedCancel.isCancelRequested());
+        assertEquals(reportedUnknown.getVersion() + 1,
+                reportedCancel.getVersion());
+        assertNull(second.resolveUnknown(reportedUnknown,
+                result("cancelled"), START));
+        assertEquals("cancelled", second.resolveUnknown(reportedCancel,
+                result("cancelled"), START).getExecutionStatus());
 
         String preparedKey = prefix + "-prepared-idempotency";
         ToolExecutionRecord prepared = first.findOrCreate(execution(
@@ -909,20 +923,6 @@ final class JdbcRepositoryContract {
                 assertThrows(IllegalStateException.class,
                         () -> repository.findByExecutionCallId(id))
                         .getMessage());
-    }
-
-    private static ToolExecutionRecord withIdentity(ToolExecutionRecord claim,
-            String idempotencyKey, String bindingId, long runtimeGeneration,
-            String harnessSessionId) {
-        return ToolExecutionRecord.prepared(claim.getExecutionCallId(),
-                idempotencyKey, bindingId, runtimeGeneration,
-                harnessSessionId, claim.getRuntimeSessionId(),
-                claim.getTurnId(), claim.getToolCallId(),
-                claim.getRequestDigest(), claim.getReference())
-                .withDispatch(claim.getDispatchOwner(),
-                        claim.getDispatchLeaseUntil(),
-                        claim.getDispatchGeneration(), claim.getState())
-                .withVersion(claim.getVersion());
     }
 
     private static ToolExecutionRecord execution(String executionCallId,

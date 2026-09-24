@@ -347,6 +347,24 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void sendsTheSameFixtureHeadersWhenExecuting() throws Exception {
+        reply.set(json(200, new byte[0]));
+
+        transport.execute(lease(server.getAddress().getPort()),
+                new RuntimeSession("harness", "session-1", "bootstrap",
+                        scope()), Map.of("callId", "tool"))
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals("/internal/managed-runtime/v2/execute",
+                capturedPath.get());
+        find("success").required("request").required("headers")
+                .properties().forEach(header -> assertEquals(
+                        List.of(header.getValue().textValue()),
+                        capturedHeaders.get().get(header.getKey()),
+                        header.getKey()));
+    }
+
+    @Test
     void rejectsAMalformedSuccessResponse() throws IOException {
         byte[] valid = JSON.writeValueAsBytes(successBody());
         ObjectNode unknownField = successBody();
@@ -541,26 +559,34 @@ class HttpRuntimeTransportTest {
             HttpRuntimeTransport client, int port, String seedLeaseId,
             long seedEpoch, String seedToken) {
         JsonNode identity = suite.required("identity");
-        RuntimeScope scope = new RuntimeScope(
+        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
+                identity.required("provisionRequestId").textValue(),
+                identity.required("runtimeInstanceId").textValue(),
+                identity.required("runtimeIncarnation").textValue(),
+                seedLeaseId, seedEpoch, seedToken);
+        return client.attest(lease(port),
+                new RuntimeProvisionRequest(scope(), "session-1"), seed);
+    }
+
+    private RuntimeScope scope() {
+        JsonNode identity = suite.required("identity");
+        return new RuntimeScope(
                 identity.required("tenantId").textValue(),
                 identity.required("workspaceId").textValue(),
                 identity.required("workspaceGeneration").textValue(),
                 identity.required("workspaceCwd").textValue(),
                 identity.required("capabilityDigest").textValue(),
                 identity.required("isolationClass").textValue());
-        RuntimeLease lease = new RuntimeLease(
+    }
+
+    private RuntimeLease lease(int port) {
+        JsonNode identity = suite.required("identity");
+        return new RuntimeLease(
                 identity.required("runtimeInstanceId").textValue(),
                 URI.create("http://127.0.0.1:" + port + "/"),
                 identity.required("token").textValue(),
                 identity.required("leaseId").textValue(),
                 identity.required("epoch").longValue());
-        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
-                identity.required("provisionRequestId").textValue(),
-                identity.required("runtimeInstanceId").textValue(),
-                identity.required("runtimeIncarnation").textValue(),
-                seedLeaseId, seedEpoch, seedToken);
-        return client.attest(lease,
-                new RuntimeProvisionRequest(scope, "session-1"), seed);
     }
 
     private RuntimeBrokerException awaitFailure() {
