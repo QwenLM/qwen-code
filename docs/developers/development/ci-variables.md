@@ -9,8 +9,9 @@ together with their defaults and where each one applies.
 ## Setting a variable
 
 Repository maintainers set these under **Settings → Secrets and variables →
-Actions → Variables**. An unset (or empty) variable always falls back to the
-default listed below.
+Actions → Variables**. An unset (or empty) variable uses the fallback in the
+workflow expression. The worker cap applies only on reserved runners, even when
+its variable is set.
 
 The workflow files are the source of truth for these levers, and the test
 suites pin the workflow expressions byte-for-byte:
@@ -19,8 +20,9 @@ expression in `release.yml` (`QWEN_CI_VITEST_MAX_WORKERS` with the
 `ecs-qwen-` guard), `scripts/tests/no-ak-integration-ci.test.js` pins the
 worker-cap expression in `ci.yml`, and
 `scripts/tests/release-workflow.test.js` pins the `release.yml` retry and
-`scripts/tests/package-scripts.test.js` also checks this table's defaults
-against both workflows. Because this guard runs on the full-profile CI lane
+workspace-test timeout expressions. `scripts/tests/package-scripts.test.js`
+also checks the documented defaults and workflow locations against both
+workflows. Because this guard runs on the full-profile CI lane
 (`test:scripts`) rather than on docs-only checks, verify edits confined to this
 page locally before opening a pull request with `npm run test:scripts` (or
 `npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/package-scripts.test.js`).
@@ -31,7 +33,7 @@ this page in the same change.
 
 | Variable                                 | Default | Used in                 | Controls                                                                                  |
 | ---------------------------------------- | ------- | ----------------------- | ----------------------------------------------------------------------------------------- |
-| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI Vitest suites                                                 |
+| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                |
 | `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                         |
 | `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                          |
 | `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners |
@@ -39,17 +41,16 @@ this page in the same change.
 ### Retry counts
 
 `QWEN_CI_VITEST_RETRY` and `QWEN_RELEASE_VITEST_RETRY` are passed to Vitest as
-`--retry=<n>` on the main CI lane (`npm run test:ci:workspaces` and
+`--retry=<n>` in the main CI test step (`npm run test:ci:workspaces` and
 `npm run test:scripts`) and on the release lane
 (`npm run test:release:workspaces`) respectively. The two lanes have separate
 variables so they can be tuned independently.
 
-Every attempt of a contended shard is a fresh roll: the same commit can fail
-three disjoint test sets on a busy shared runner, while a real break fails all
-attempts. The tradeoff is that a failure which recovers within the retry
-budget greens the check and is not recorded as a failure by the flaky-rerun
-tracker, so keep the budget modest instead of using retries to paper over a
-flaky suite. Both variables also accept the literal value `off`, which omits
+Vitest reruns failing tests within the same run. This can help with intermittent
+contention, but a failure that recovers within the retry budget greens the
+check and is not recorded as a failure by the flaky-rerun tracker. Keep the
+budget modest instead of using retries to paper over a flaky suite. Both
+variables also accept the literal value `off`, which omits
 the `--retry` flag entirely instead of passing `--retry=0` (a command-line
 `--retry=0` outranks a workspace's own Vitest config and would disable a
 deliberate retry policy).
@@ -69,9 +70,10 @@ test regression.
 `1`) on the reserved self-hosted runners whose name starts with `ecs-qwen-`.
 The variable is exported only by the main CI workspace-test step and the
 release `workspace_tests` and `quality_scripts` steps; other Vitest
-invocations that land on the same reserved pool (the `integration_no_ak` and
-`integration_cli` suites) do not consume it. The web-shell E2E smoke is pinned
-to `ubuntu-latest`, so the cap can never apply to it. On GitHub-hosted runners
+integration Vitest invocations that land on the same reserved pool in the CI
+and release workflows do not consume it; they use their own Vitest limits.
+The web-shell E2E smoke is pinned to `ubuntu-latest`, so the cap cannot apply
+to it. On GitHub-hosted runners
 the variable is ignored and Vitest uses its own defaults.
 
 ### Related variables outside test execution
