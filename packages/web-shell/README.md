@@ -46,6 +46,46 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 浏览器可访问的地址或已有端口转发；预览不会自动把浏览器的 `localhost`
 转成远程 daemon 地址，也不会转发 daemon 凭据。
 
+## 宿主接管产物与代码高亮
+
+`onRightPanelOpen` 同步返回 `false` 时继续 Web Shell 原生打开逻辑；返回
+`true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
+未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
+该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+
+`filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
+产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。
+它不删除产物记录、不改变会话产物同步结果，也不隐藏文件变更卡片。
+
+```tsx
+<WebShell
+  {...connectionProps}
+  onRightPanelOpen={(request) => {
+    if (request.kind !== 'artifact') return false;
+    openHostPreview(request);
+    return true;
+  }}
+  filterArtifact={(artifact) => artifact.id !== hiddenArtifactId}
+/>
+```
+
+预览组件可从独立入口复用高亮服务，无需导入聊天 UI 或样式：
+
+```ts
+import { highlightCode } from '@qwen-code/web-shell/code-highlighter';
+
+const html = await highlightCode({
+  code: 'SELECT id FROM orders',
+  language: 'sql',
+  theme: 'dark', // 或 'light'
+});
+```
+
+返回高亮 HTML；未知语言、纯文本、超出已有大小限制或高亮失败返回 `null`，
+宿主应回退为转义的纯文本。服务复用同一模块实例的 Shiki、语言加载和缓存，
+不暴露可变的高亮器实例。独立 JavaScript realm 或重复打包的模块不共享实例。
+样式和 HTML 的安全渲染由宿主负责。
+
 ## 环境要求
 
 - React：`^18.0.0 || ^19.0.0`
