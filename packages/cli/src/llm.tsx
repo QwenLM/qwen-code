@@ -617,7 +617,18 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
-  } else if (process.stdout.isTTY) {
+  } else if (
+    process.stdout.isTTY &&
+    // A TTY-attached run can still be non-interactive by output format
+    // (config.ts Priority 2: json/stream-json together with a query or
+    // prompt, unless `-i` forces interactive per Priority 1). Such a run
+    // renders no theme colors either, so it must not pay for the probe.
+    !(
+      !argv.promptInteractive &&
+      (argv.outputFormat === 'json' || argv.outputFormat === 'stream-json') &&
+      !!(argv.query || argv.prompt)
+    )
+  ) {
     // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
     // so non-interactive runs and any pre-render UI (e.g. the --resume
     // session picker) already have a sensible theme. The interactive

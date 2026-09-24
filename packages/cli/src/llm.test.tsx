@@ -1403,21 +1403,31 @@ describe('llm.tsx main function', () => {
   });
 
   // The synchronous 'auto' baseline runs `defaults read` on macOS, which
-  // blocks the event loop; piped headless output never renders theme colors.
+  // blocks the event loop; a run that renders no theme colors must not pay it.
   it.each([
-    { stdoutIsTTY: false, expectAuto: false },
-    { stdoutIsTTY: true, expectAuto: true },
+    { stdoutIsTTY: false, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: 'true', expectAuto: true },
   ])(
-    'resolves the auto theme baseline only when stdout is a terminal ($stdoutIsTTY)',
-    async ({ stdoutIsTTY, expectAuto }) => {
-      const originalIsTTY = Object.getOwnPropertyDescriptor(
-        process.stdout,
-        'isTTY',
-      );
-      Object.defineProperty(process.stdout, 'isTTY', {
-        value: stdoutIsTTY,
-        configurable: true,
-      });
+    'resolves the auto theme baseline only when the run can render it (stdoutIsTTY=$stdoutIsTTY, promptInteractive=$promptInteractive)',
+    async ({ stdoutIsTTY, promptInteractive, expectAuto }) => {
+      const stubIsTTY = (
+        stream: { isTTY?: unknown },
+        value: boolean | undefined,
+      ): (() => void) => {
+        const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+        Object.defineProperty(stream, 'isTTY', { value, configurable: true });
+        return () => {
+          if (original) {
+            Object.defineProperty(stream, 'isTTY', original);
+          } else {
+            delete stream.isTTY;
+          }
+        };
+      };
+      const restoreStdoutIsTTY = stubIsTTY(process.stdout, stdoutIsTTY);
+      // `-i` exits early unless stdin is a terminal.
+      const restoreStdinIsTTY = stubIsTTY(process.stdin, true);
       vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
 
       const { parseArguments } = await import('./config/config.js');
@@ -1433,6 +1443,7 @@ describe('llm.tsx main function', () => {
       vi.mocked(parseArguments).mockResolvedValue({
         prompt: 'hi',
         outputFormat: 'json',
+        promptInteractive,
       } as CliArgs);
       vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
       vi.mocked(loadSettings).mockReturnValue({
@@ -1457,11 +1468,8 @@ describe('llm.tsx main function', () => {
       } finally {
         setActiveTheme.mockRestore();
         vi.unstubAllEnvs();
-        if (originalIsTTY) {
-          Object.defineProperty(process.stdout, 'isTTY', originalIsTTY);
-        } else {
-          delete (process.stdout as { isTTY?: unknown }).isTTY;
-        }
+        restoreStdoutIsTTY();
+        restoreStdinIsTTY();
       }
     },
   );

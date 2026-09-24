@@ -103,7 +103,9 @@ export class BuiltinCommandLoader implements ICommandLoader {
     try {
       // `/ide` is interactive-only, and building it walks the process tree
       // with one `ps` per ancestor; headless and ACP runs would filter it out
-      // after paying for that on the way to their first request.
+      // after paying for that on the way to their first request. This saves
+      // nothing when `ideMode` is on — `connectIdeForStartup` performs the
+      // same walk earlier, on the awaited startup path.
       if (
         !this.config?.getExecutionEnvironment?.() &&
         !this.config?.getShellExecutionSandbox?.() &&
