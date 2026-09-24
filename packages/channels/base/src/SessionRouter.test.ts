@@ -3824,6 +3824,29 @@ describe('session rotation', () => {
     expect(discardSession).toHaveBeenCalledWith(first);
   });
 
+  it('releases the old bridge session before creating one for concurrent messages', async () => {
+    let releaseDiscard!: () => void;
+    const discardPending = new Promise<void>((resolve) => {
+      releaseDiscard = resolve;
+    });
+    const discardSession = vi.fn(() => discardPending);
+    const rotationBridge = { ...bridge, discardSession };
+    const router = new SessionRouter(rotationBridge, '/tmp', 'thread');
+    router.setChannelRotation('ch', { maxTurns: 1 });
+    const first = await router.resolve('ch', 'alice', 'chat', 'thread');
+
+    const second = router.resolve('ch', 'alice', 'chat', 'thread');
+    const concurrent = router.resolve('ch', 'alice', 'chat', 'thread');
+    await vi.waitFor(() => expect(discardSession).toHaveBeenCalledWith(first));
+    expect(rotationBridge.newSession).toHaveBeenCalledTimes(1);
+
+    releaseDiscard();
+    const next = await second;
+    expect(await concurrent).toBe(next);
+    expect(next).not.toBe(first);
+    expect(rotationBridge.newSession).toHaveBeenCalledTimes(2);
+  });
+
   it('waits for a routed message and queued turn before retiring its session', async () => {
     const discardSession = vi.fn().mockResolvedValue(undefined);
     const router = new SessionRouter(

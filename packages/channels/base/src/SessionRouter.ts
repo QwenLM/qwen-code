@@ -289,7 +289,6 @@ export class SessionRouter {
     }
     this.deleteByKey(key);
     this.persist();
-    void this.bridge.discardSession?.(sessionId).catch(() => undefined);
   }
 
   setChannelApprovalMode(
@@ -382,6 +381,9 @@ export class SessionRouter {
     let failedWaits = 0;
     for (;;) {
       let existing = this.toSession.get(key);
+      let retiring:
+        | { sessionId: string; bridge: ChannelAgentBridge }
+        | undefined;
       if (
         existing &&
         this.restoreDepth === 0 &&
@@ -391,6 +393,7 @@ export class SessionRouter {
         !this.rotationActivity.get(channelName)?.(existing) &&
         this.shouldRotate(channelName, existing)
       ) {
+        retiring = { sessionId: existing, bridge: this.bridge };
         this.rotateRoute(key, existing, channelName, input);
         existing = undefined;
       }
@@ -440,9 +443,22 @@ export class SessionRouter {
             : {}),
         },
         (currentOperation) =>
-          existing
-            ? this.loadOrReplaceSession(key, existing, input, currentOperation)
-            : this.createAndStoreSession(key, input, currentOperation),
+          retiring
+            ? Promise.resolve(
+                retiring.bridge.discardSession?.(retiring.sessionId),
+              )
+                .catch(() => undefined)
+                .then(() =>
+                  this.createAndStoreSession(key, input, currentOperation),
+                )
+            : existing
+              ? this.loadOrReplaceSession(
+                  key,
+                  existing,
+                  input,
+                  currentOperation,
+                )
+              : this.createAndStoreSession(key, input, currentOperation),
       );
       this.creatingSessions.set(key, operation);
       try {
