@@ -34,6 +34,20 @@ const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
 
 const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
   {
+    key: 'messageRoutes',
+    label: 'Message Routes',
+    kind: 'record',
+    description:
+      'Map message prefixes to instructions in separate route sessions',
+  },
+  {
+    key: 'defaultMessageRoute',
+    label: 'Default Message Route',
+    kind: 'string',
+    description:
+      'Route unmatched messages through this configured message route',
+  },
+  {
     key: 'privatePolicy',
     label: 'Private Policy',
     kind: 'enum',
