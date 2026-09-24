@@ -105,6 +105,14 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   if (typeof description === 'string' && description.trim()) {
     return description.trim();
   }
+  if (
+    request.toolName?.startsWith('mcp__') &&
+    request.title?.trim() === '{}' &&
+    request.rawInput &&
+    Object.keys(request.rawInput).length === 0
+  ) {
+    return undefined;
+  }
   return request.title;
 }
 

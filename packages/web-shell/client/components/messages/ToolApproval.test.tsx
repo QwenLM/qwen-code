@@ -433,7 +433,7 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
-  it('omits the content body when the tool input is empty', () => {
+  it('omits the empty MCP subtitle and content body without dangling descriptions', () => {
     const adapted = extractPendingPermission([
       {
         id: 'permission-empty-input',
@@ -450,7 +450,63 @@ describe('ToolApproval accessibility', () => {
     ])!;
     render(undefined, { ...adapted, options: request.options });
     expect(container!.querySelector('pre')).toBeNull();
+    expect(container!.querySelector('[class*="desc"]')).toBeNull();
+    expect(container!.textContent).toContain('mcp__sample__write');
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const descriptions = panel.getAttribute('aria-describedby')!.split(' ');
+    expect(descriptions).toHaveLength(1);
+    expect(document.getElementById(descriptions[0])?.textContent).toBe(
+      'Apply this change?',
+    );
+    expect(optionButtons()).toHaveLength(2);
+    pressKey(panel, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-empty-input',
+      'reject',
+    );
   });
+
+  it.each([
+    {
+      title: '  {}  ',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: undefined,
+    },
+    {
+      title: 'Check server health',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Check server health',
+    },
+    {
+      title: '{}',
+      rawInput: { description: '  Check server health  ' },
+      toolName: 'mcp__sample__ping',
+      description: 'Check server health',
+    },
+    {
+      title: '{"target":"health"}',
+      rawInput: { target: 'health' },
+      toolName: 'mcp__sample__ping',
+      description: '{"target":"health"}',
+    },
+    {
+      title: '{}',
+      rawInput: undefined,
+      toolName: 'mcp__sample__ping',
+      description: '{}',
+    },
+    { title: '{}', rawInput: {}, toolName: 'custom_tool', description: '{}' },
+  ])(
+    'preserves meaningful or unconfirmed subtitles: $title / $toolName',
+    ({ title, rawInput, toolName, description }) => {
+      render(undefined, { ...request, title, rawInput, toolName });
+      expect(container!.querySelector('[class*="desc"]')?.textContent).toBe(
+        description,
+      );
+    },
+  );
 
   it('renders the command block for an execute-kind tool under a non-canonical name', () => {
     const adapted = extractPendingPermission([
