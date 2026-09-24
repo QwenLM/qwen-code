@@ -99,10 +99,12 @@ class DurableRuntimeRecoveryTest {
 
         DurableProvisioner unknown = new DurableProvisioner();
         unknown.outcome = RuntimeObservation.Outcome.UNKNOWN;
+        // The deadline is four leases, so it must stay clear of the 50 ms
+        // first backoff by more than a loaded runner can consume.
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 unknown, new TestTransport(), bindings, sessions,
-                executions, "broker-two", Duration.ofMillis(20),
+                executions, "broker-two", Duration.ofMillis(100),
                 Duration.ofSeconds(1))) {
             Exception failure = assertThrows(Exception.class,
                     () -> service.warm("harness").toCompletableFuture()
@@ -506,6 +508,150 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void aTransientAttestationFailureDoesNotBlockRecovery() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        // What HttpRuntimeTransport reports for a throttled attestation: a
+        // non-retryable incompatibility that carries no identity evidence.
+        DurableProvisioner throttled = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(throttled,
+                new TestTransport(new RuntimeBrokerException(502,
+                        "managed_runtime_incompatible", "throttled", false)),
+                bindings, sessions, executions, "broker-two")) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+
+            assertEquals("managed_runtime_incompatible",
+                    brokerFailure(failure).getCode());
+            RuntimeBindingRecord waiting = bindings.findActive(
+                    request(throttled));
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    waiting.getState());
+            assertNull(waiting.getOperationOwner());
+        }
+
+        DurableProvisioner recovered = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(recovered,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-three")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+
+            RuntimeBindingRecord adopted = bindings.findActive(
+                    request(recovered));
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    adopted.getState());
+            assertTrue(adopted.getAttestationGeneration() >= 2);
+        }
+    }
+
+    @Test
+    void sessionsLeftAcquiringOrReleasingSettleAgainstALostBinding()
+            throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.acquire("harness", "sess-acquiring", "bootstrap")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            service.acquire("harness", "sess-releasing", "bootstrap")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+
+        // A Broker killed mid-acquire and mid-release leaves these behind.
+        RuntimeSessionRecord acquired = sessions.findById(SCOPE,
+                "sess-acquiring");
+        sessions.compareAndSet(acquired, acquired.withState(
+                RuntimeSessionRecord.State.ACQUIRING, Instant.now()));
+        RuntimeSessionRecord releasing = sessions.findById(SCOPE,
+                "sess-releasing");
+        sessions.compareAndSet(releasing, releasing.withState(
+                RuntimeSessionRecord.State.RELEASING, Instant.now()));
+
+        DurableProvisioner recovered = new DurableProvisioner();
+        recovered.notFoundOnce = true;
+        try (RuntimeBrokerService service = service(recovered,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-two")) {
+            Exception lost = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_runtime_lost",
+                    brokerFailure(lost).getCode());
+
+            assertTrue(service.release("harness", "sess-acquiring")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    sessions.findById(SCOPE, "sess-acquiring").getState());
+            assertTrue(service.release("harness", "sess-releasing")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    sessions.findById(SCOPE, "sess-releasing").getState());
+
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            RuntimeBindingRecord replacement = bindings.findActive(
+                    request(recovered));
+            assertEquals(2, replacement.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    replacement.getState());
+        }
+    }
+
+    @Test
+    void releaseDoesNotSettleLocallyWhileTheRuntimeIsNotProvenGone()
+            throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.acquire("harness", "live-session", "bootstrap")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner restored = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(restored,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-two")) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.release("harness", "live-session")
+                            .toCompletableFuture().get(2, TimeUnit.SECONDS));
+
+            assertEquals("runtime_reconciliation_required",
+                    brokerFailure(failure).getCode());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    sessions.findById(SCOPE, "live-session").getState());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    bindings.findActive(request(restored)).getState());
+        }
+    }
+
+    @Test
     void conflictObservationRetainsTheLastTrustedResourceHandle()
             throws Exception {
         InMemoryRuntimeBindingRepository bindings =
@@ -642,10 +788,12 @@ class DurableRuntimeRecoveryTest {
 
         DurableProvisioner starting = new DurableProvisioner();
         starting.outcome = RuntimeObservation.Outcome.STARTING;
+        // The deadline is four leases, so it must stay clear of the 50 ms
+        // first backoff by more than a loaded runner can consume.
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 starting, new TestTransport(), bindings, sessions,
-                executions, "broker-two", Duration.ofMillis(20),
+                executions, "broker-two", Duration.ofMillis(100),
                 Duration.ofSeconds(1))) {
             Exception failure = assertThrows(Exception.class,
                     () -> service.warm("harness").toCompletableFuture()

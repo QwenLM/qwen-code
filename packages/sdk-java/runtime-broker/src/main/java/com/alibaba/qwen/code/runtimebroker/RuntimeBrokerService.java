@@ -33,6 +33,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
             "unknown");
     private static final Set<String> RUNTIME_STATUS_FIELDS = Set.of(
             "state", "result");
+    // Only a failure that is evidence about identity may block the recovery of
+    // a restored binding. Other non-retryable transport codes say nothing
+    // about who is behind the endpoint - a throttle or an incompatible route
+    // answers 429, 408 or 404, which the transport reports as a
+    // non-retryable incompatibility - and blocking on those would wedge the
+    // binding behind an operator until the transient condition is forgotten.
+    private static final Set<String> IDENTITY_FAILURES = Set.of(
+            "managed_runtime_identity_conflict",
+            "managed_runtime_unauthorized");
     private static final int MAX_CAS_ATTEMPTS = 16;
 
     private final HarnessSessionResolver sessionResolver;
@@ -450,7 +459,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                     RuntimeBindingRecord binding = bindingRepository.findById(
                             record.getBindingId());
-                    if (record.getState() == RuntimeSessionRecord.State.READY
+                    // A Broker that died mid-acquire or mid-release leaves the
+                    // Session ACQUIRING or RELEASING; both pin a LOST
+                    // generation, and neither can ever be confirmed by a
+                    // Runtime that is proven gone.
+                    if (record.isActive()
                             && binding != null
                             && binding.getState()
                                     == RuntimeBindingRecord.State.LOST
@@ -458,10 +471,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     == record.getRuntimeGeneration()
                             && !executionRepository.hasActiveByRuntimeSession(
                                     runtimeSessionId)) {
-                        RuntimeSessionRecord releasing = sessionRepository
-                                .compareAndSet(record, record.withState(
-                                        RuntimeSessionRecord.State.RELEASING,
-                                        clock.instant()));
+                        RuntimeSessionRecord releasing = record;
+                        if (releasing.getState()
+                                != RuntimeSessionRecord.State.RELEASING) {
+                            releasing = sessionRepository.compareAndSet(
+                                    releasing, releasing.withState(
+                                            RuntimeSessionRecord.State
+                                                    .RELEASING,
+                                            clock.instant()));
+                        }
                         if (releasing != null) {
                             finishSessionRelease(releasing);
                             return true;
@@ -1242,7 +1260,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 .whenComplete((ignored, error) -> {
                     Throwable cause = unwrap(error);
                     if (cause instanceof RuntimeBrokerException failure
-                            && !failure.isRetryable()) {
+                            && IDENTITY_FAILURES.contains(failure.getCode())) {
                         blockRecovery(bindingId, operationGeneration);
                     }
                 })

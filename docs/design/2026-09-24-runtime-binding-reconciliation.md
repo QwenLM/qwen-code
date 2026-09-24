@@ -136,7 +136,13 @@ observes the resource through `provisioner.reconcile`:
   provisioner, and the Broker re-attests through `transport.attest` and
   compares the full identity (runtime instance, incarnation, lease, epoch,
   scope, provision request id). Success adopts the lease into `liveBindings`
-  with a bumped attestation generation; any mismatch blocks recovery.
+  with a bumped attestation generation; any mismatch blocks recovery. A
+  re-attestation failure blocks recovery only when it is evidence about
+  identity (`managed_runtime_identity_conflict`,
+  `managed_runtime_unauthorized`); every other non-retryable transport code —
+  a throttle, an incompatible or malformed attestation route — leaves the
+  binding `READY`, so a later attempt adopts it once the transient condition
+  passes instead of wedging the row behind an operator.
 - `STARTING` or `UNKNOWN`: retry with 50 ms exponential backoff capped at
   2 s until the operation deadline (four operation leases). The observation
   never creates or replaces the resource.
@@ -165,10 +171,13 @@ binding join the same reclamation and observe one new generation. While
 anything is still active the caller gets `runtime_broker_runtime_lost` and the
 binding stays `LOST`.
 
-An explicit `release` can settle a same-generation `READY` session locally
-when its binding is `LOST` and it has no active execution. The Runtime is
-proven gone, so no transport call is possible; an active execution continues
-to pin the session and the lost generation.
+An explicit `release` can settle a same-generation session locally while it is
+still active — `ACQUIRING`, `READY` or `RELEASING` — when its binding is
+`LOST` and it has no active execution. The Runtime is proven gone, so no
+transport call is possible, and a Broker killed mid-acquire or mid-release
+would otherwise leave a session that pins the lost generation forever; a
+session already `RELEASING` is settled without a further state transition. An
+active execution continues to pin the session and the lost generation.
 
 `RECOVERY_BLOCKED` never transitions on its own; it requires an operator,
 matching the rule that an ambiguous Runtime is never retried away.
@@ -183,8 +192,8 @@ every outcome.
 
 ## 4. Validation
 
-`mvn test` in `packages/sdk-java/runtime-broker`: 142 tests, including the new
-`DurableRuntimeRecoveryTest` (26 cases: gated reconcile-and-adopt, unknown
+`mvn test` in `packages/sdk-java/runtime-broker`: 188 tests, including the new
+`DurableRuntimeRecoveryTest` (29 cases: gated reconcile-and-adopt, unknown
 never replaces and retries to the deadline, starting never replaces, timeout
 releases the claim and resumes, in-flight reconcile bounded by the deadline,
 late attestation fenced, initial-provision mismatch blocks, every persisted
@@ -195,8 +204,11 @@ keeps the ensured resource, a retryable provision failure leaves a fresh
 binding retryable, provisioning is bounded by the operation deadline,
 concurrent provisioning and reclamation converge once, a late ensure result
 cannot overwrite a new owner, the SPI defaults fail closed, loss re-creates a
-generation only when idle, and loss stays pinned by an active session or an
-active execution until it can be safely released).
+generation only when idle, loss stays pinned by an active session or an active
+execution until it can be safely released, a transient attestation failure
+waits instead of blocking recovery, sessions a crash left `ACQUIRING` or
+`RELEASING` still settle against a lost binding, and nothing settles locally
+while the Runtime is not proven gone).
 `JdbcRepositoryContract` now round-trips the seed, handle, attestation
 generation and reconciliation time on H2, asserts the seed and the legacy
 lease token are stored encrypted, keeps the seed ciphertext stable across a

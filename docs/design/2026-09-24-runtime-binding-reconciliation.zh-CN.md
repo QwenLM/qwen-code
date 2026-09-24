@@ -61,7 +61,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 对账先认领操作，工作期间续租，并通过 `provisioner.reconcile` 观察资源：
 
-- `READY` 观察：观察中的 runtime 实例、lease id 与 epoch 必须等于持久化 seed 的值，句柄类型必须等于请求的 provisioner 类型；Broker 再经 `transport.attest` 重新证明，并比对完整身份（runtime 实例、incarnation、租约、epoch、scope、provision 请求 id）。成功后租约进入 `liveBindings`，attestation 代数递增；任何不匹配都会阻塞恢复。
+- `READY` 观察：观察中的 runtime 实例、lease id 与 epoch 必须等于持久化 seed 的值，句柄类型必须等于请求的 provisioner 类型；Broker 再经 `transport.attest` 重新证明，并比对完整身份（runtime 实例、incarnation、租约、epoch、scope、provision 请求 id）。成功后租约进入 `liveBindings`，attestation 代数递增；任何不匹配都会阻塞恢复。重新证明失败只在其构成身份证据时阻塞恢复（`managed_runtime_identity_conflict`、`managed_runtime_unauthorized`）；其余任何不可重试的 transport 错误码——限流、不兼容或格式错误的 attestation 路由——都让绑定保持 `READY`，因此在瞬时条件过去后由后续尝试接管，而不是把该行卡在需要运维介入的状态。
 - `STARTING` 或 `UNKNOWN`：以 50 毫秒起、上限 2 秒的指数退避重试，直到操作截止期（四倍操作租约）。观察结果从不创建或替换资源。
 - `NOT_FOUND`：绑定进入 `LOST`。
 - `CONFLICT` 或 provisioner 的不可重试错误：`RECOVERY_BLOCKED`。
@@ -72,7 +72,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 `LOST` 记录保持活跃，因此既有会话与执行仍指向已丢失的代数，而不会漂移到替代 Runtime。下一次 `warm`/`acquire` 只在 `countActiveByBinding` 与新增的 `ToolExecutionRepository.hasActiveByBinding` 都确认没有引用时才回收槽位——`LOST` 转 `RELEASED`，再经正常 provision 路径创建新代数。回收与对账共用同一个 binding key 的单飞，因此针对同一空闲 `LOST` 绑定的并发 `warm` 会加入同一次回收并观察到同一个新代数。只要仍有活跃引用，调用方得到 `runtime_broker_runtime_lost`，绑定保持 `LOST`。
 
-显式 `release` 可以在 binding 为 `LOST` 且没有活跃 execution 时，本地结算同代 `READY` Session。Runtime 已被证明不存在，因此无法调用 transport；活跃 execution 仍会钉住 Session 与已丢失代数。
+显式 `release` 可以在同代 Session 仍处于活跃状态（`ACQUIRING`、`READY` 或 `RELEASING`）、其 binding 为 `LOST` 且没有活跃 execution 时本地结算它。Runtime 已被证明不存在，因此无法调用 transport；否则在 acquire 或 release 途中被杀掉的 Broker 会留下一个永久钉住已丢失代数的 Session。已处于 `RELEASING` 的 Session 直接结算，不再做一次状态迁移。活跃 execution 仍会钉住 Session 与已丢失代数。
 
 `RECOVERY_BLOCKED` 从不自行迁移；它需要运维介入，与"状态不明的 Runtime 绝不被重试掉"的规则一致。
 
@@ -82,7 +82,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 ## 4. 验证
 
-在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：142 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 26 例（受门控的对账-接管、unknown 观察永不替换并重试到截止期、starting 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、每一项持久身份不匹配都阻塞、不可重试 attestation 失败会阻塞恢复、不可重试与可重试的 reconcile 失败、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、可重试 ensure 失败保留已确保资源、可重试 provision 失败让新绑定可重试、provision 受操作截止期约束、并发 provision 与回收各只收敛一次、迟到的 ensure 结果不能覆盖新 owner、SPI 默认实现失败关闭、丢失仅在空闲时创建新代数、丢失在有活跃会话或活跃执行时保持阻塞直至可以安全释放）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储、认领续租后 seed 密文保持不变、200 字符 provisioner kind 可往返，并覆盖 `releaseOperation` 移交与其拒绝路径。`mvn checkstyle:check` 通过。
+在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：188 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 29 例（受门控的对账-接管、unknown 观察永不替换并重试到截止期、starting 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、每一项持久身份不匹配都阻塞、不可重试 attestation 失败会阻塞恢复、不可重试与可重试的 reconcile 失败、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、可重试 ensure 失败保留已确保资源、可重试 provision 失败让新绑定可重试、provision 受操作截止期约束、并发 provision 与回收各只收敛一次、迟到的 ensure 结果不能覆盖新 owner、SPI 默认实现失败关闭、丢失仅在空闲时创建新代数、丢失在有活跃会话或活跃执行时保持阻塞直至可以安全释放、瞬时 attestation 失败选择等待而非阻塞恢复、崩溃遗留的 `ACQUIRING` 或 `RELEASING` 会话仍可对已丢失绑定结算、Runtime 未被证明消失时绝不本地结算）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储、认领续租后 seed 密文保持不变、200 字符 provisioner kind 可往返，并覆盖 `releaseOperation` 移交与其拒绝路径。`mvn checkstyle:check` 通过。
 
 ## 5. 后续工作
 
