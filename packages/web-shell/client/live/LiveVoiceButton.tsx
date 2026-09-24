@@ -162,7 +162,7 @@ export function LiveVoiceButton({
     }
     if (!wasDialogOpen.current) {
       wasDialogOpen.current = true;
-      autoStartPending.current = true;
+      autoStartPending.current = !statusActive || reconnectOwnHost.current;
       if (
         open !== undefined &&
         !statusActive &&
@@ -261,7 +261,8 @@ export function LiveVoiceButton({
     }
     setInternalOpen(nextOpen);
     onOpenChange?.(nextOpen);
-    autoStartPending.current = nextOpen;
+    autoStartPending.current =
+      nextOpen && (!active || reconnectOwnHost.current);
     setStarting(
       nextOpen && !active && (browserSupported || status?.available === true),
     );

@@ -220,6 +220,28 @@ describe('LiveVoiceButton', () => {
     expect(mocks.result.start).toHaveBeenNthCalledWith(2, 'new');
   });
 
+  it.each([false, true])(
+    'does not restart an externally stopped call when opened to manage it (controlled: %s)',
+    (controlled) => {
+      mocks.result.status = {
+        v: 1,
+        available: true,
+        state: 'listening',
+        shortcut: 'Command+Q',
+      };
+      const props = controlled ? { open: true } : {};
+      const container = mount(props);
+      if (!controlled) click(container.querySelector('button')!);
+      expect(mocks.result.start).not.toHaveBeenCalled();
+
+      mocks.result.status = { ...mocks.result.status, state: 'idle' };
+      act(() => mounted.at(-1)!.root.render(<LiveVoiceButton {...props} />));
+
+      expect(mocks.result.start).not.toHaveBeenCalled();
+      expect(mocks.result.begin).not.toHaveBeenCalled();
+    },
+  );
+
   it('lets an active call mute or stop without browser audio capture', () => {
     mocks.result.status = {
       v: 1,

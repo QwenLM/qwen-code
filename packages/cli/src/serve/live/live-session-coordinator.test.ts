@@ -1642,6 +1642,47 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.realtime.close).toHaveBeenCalledOnce();
   });
 
+  it('clears the retained session marker when transcript persistence outlasts the stop deadline', async () => {
+    const harness = makeHarness({
+      gracefulStopDrainMs: 5,
+      transcriptTail: [{ role: 'user', text: '最后一句' }],
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    let finishPersistence!: () => void;
+    vi.spyOn(harness.bridge, 'appendSessionLiveTranscript').mockImplementation(
+      () => new Promise<void>((resolve) => (finishPersistence = resolve)),
+    );
+    expect(
+      harness.bridge.setSessionLiveConversationActive,
+    ).toHaveBeenCalledWith('live-new', true);
+
+    vi.spyOn(
+      harness.bridge,
+      'setSessionLiveConversationActive',
+    ).mockImplementation(() => new Promise<void>(() => undefined));
+
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toEqual({
+      error: 'Live Voice could not finish stopping before the stop deadline.',
+    });
+    expect(
+      harness.bridge.setSessionLiveConversationActive,
+    ).toHaveBeenCalledWith('live-new', false);
+    finishPersistence();
+    await waitFor(() =>
+      expect(
+        harness.bridge.setSessionLiveConversationActive,
+      ).toHaveBeenCalledWith('live-new', false),
+    );
+    expect(harness.bridge.killSession).not.toHaveBeenCalled();
+    expect(harness.realtime.close).toHaveBeenCalledOnce();
+  });
+
   it('clears provider checking when a call stops during preparation', async () => {
     let finishPreparation: (() => void) | undefined;
     buildRealtimeStartupContext.mockImplementationOnce(

@@ -1389,6 +1389,11 @@ export class LiveSessionCoordinator {
       this.invalidateRealtime(context);
       realtime?.close({ discardPendingInput: true });
     }
+    if (context.runtime && context.coordinator) {
+      void context.runtime.bridge
+        .setSessionLiveConversationActive(context.coordinator.sessionId, false)
+        .catch(() => undefined);
+    }
     this.closeContextNow(context);
     const finish = context.finishStop;
     context.finishStop = undefined;
