@@ -4674,6 +4674,60 @@ describe('extension tests', () => {
         expect(tombstone?.config.version).toBe('1.0.0');
       });
 
+      it("derives a failed-scan tombstone's isActive from the store, not the head load", async () => {
+        // The head load derives isActive from the enablement projection,
+        // whose catch-all turns a read failure into "everything enabled". A
+        // tombstone copying that value would report a store-disabled
+        // extension as active for the rest of the session; the committed
+        // path's authority is the store snapshot (applyStoreActivation), so
+        // the rejection path must derive from it too.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'aaa-refusal',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+
+        // Disable through the store while the extension still loads cleanly,
+        // so the store's verdict (and the projection) record the disable.
+        const enabler = createExtensionManager();
+        await enabler.refreshCache();
+        await enabler.disableExtension('aaa-refusal', SettingScope.User);
+
+        // A dangling symlink at the extensions root rejects the next refresh
+        // after aaa-refusal's scan recorded its refusal.
+        fs.symlinkSync(
+          path.join(userExtensionsDir, 'missing-target'),
+          path.join(userExtensionsDir, 'zzz-dangling'),
+        );
+
+        // Make the projection unreadable for the fresh manager's head load:
+        // readEnablementConfig's catch-all reads that as "everything
+        // enabled", while the store snapshot (read via fs/promises, not the
+        // probed sync path) still says disabled.
+        fsProbe.failReadFileSyncFor = 'extension-enablement.json';
+        try {
+          const manager = createExtensionManager();
+          await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
+
+          const tombstone = manager
+            .getLoadedExtensions()
+            .find((extension) => extension.name === 'aaa-refusal');
+          // The refusal surface is the whole point of the tombstone...
+          expect(
+            tombstone?.agentExecutorRefusals?.get('explore'),
+          ).toBeInstanceOf(SubagentError);
+          // ...but its activation must be the store's verdict.
+          expect(tombstone?.isActive).toBe(false);
+        } finally {
+          fsProbe.failReadFileSyncFor = undefined;
+        }
+      });
+
       it('does not tombstone an extension the loader skipped when a sibling kills the refresh', async () => {
         // aaa-broken records an executor refusal mid-load, then its own
         // malformed hooks config makes the load throw a non-exhaustion

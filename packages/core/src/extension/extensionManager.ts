@@ -1550,6 +1550,16 @@ export class ExtensionManager {
       // and gains the fresh refusals (cloned — never mutate the shared
       // cached object); an absent one gets a subresource-free tombstone.
       if (scanRefusals.size > 0) {
+        // The rejected load's isActive came from the enablement projection,
+        // whose read failure defaults to "enabled" — copying it onto a
+        // tombstone would report a store-disabled extension as active. The
+        // committed path's authority is the store snapshot
+        // (applyStoreActivation), so derive activation from it the same way,
+        // falling back to the head-load value only when the snapshot itself
+        // is unreadable.
+        const storeSnapshot = await this.getExtensionStoreSnapshot().catch(
+          () => undefined,
+        );
         const cache = new Map(this.extensionCache ?? []);
         for (const [name, { extension, refusals }] of scanRefusals) {
           const cached = cache.get(name);
@@ -1576,7 +1586,13 @@ export class ExtensionManager {
               name: extension.name,
               displayName: extension.displayName,
               version: extension.version,
-              isActive: extension.isActive,
+              isActive: storeSnapshot
+                ? this.getExtensionActivationForNameFromSnapshot(
+                    extension.name,
+                    storeSnapshot,
+                    this.workspaceDir,
+                  ).effective === 'enabled'
+                : extension.isActive,
               path: extension.path,
               format: extension.format,
               installMetadata: extension.installMetadata,
