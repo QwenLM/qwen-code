@@ -329,6 +329,32 @@ class InMemoryRepositoryTest {
     }
 
     @Test
+    void claimDispatchNeverWritesALiveClaim() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        repository.findOrCreate(execution("execution"));
+        ToolExecutionRecord claimed = repository.claimDispatch("execution",
+                "owner-a", Duration.ofSeconds(30));
+        ToolExecutionRecord executing = repository.compareAndSet(claimed,
+                claimed.withState(ToolExecutionRecord.State.EXECUTING,
+                        false), "owner-a", 1);
+
+        ToolExecutionRecord own = repository.claimDispatch("execution",
+                "owner-a", Duration.ofMinutes(5));
+        assertNull(repository.claimDispatch("execution", "owner-b",
+                Duration.ofSeconds(30)));
+
+        ToolExecutionRecord stored = repository.findByExecutionCallId(
+                "execution");
+        assertEquals(executing.getVersion(), own.getVersion());
+        assertEquals(ToolExecutionRecord.State.EXECUTING, stored.getState());
+        assertEquals(executing.getVersion(), stored.getVersion());
+        assertEquals(executing.getDispatchLeaseUntil(),
+                stored.getDispatchLeaseUntil());
+    }
+
+    @Test
     void executionIdempotencyReturnsOriginalIdentityForConflictChecking() {
         InMemoryToolExecutionRepository repository =
                 new InMemoryToolExecutionRepository(new MutableClock(START));

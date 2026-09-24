@@ -485,13 +485,286 @@ describe('TrajectoryPanel', () => {
       expect(spansIn(container).length).toBeGreaterThan(0);
     });
 
+    /** Track geometry for the pointer maths; jsdom lays nothing out. */
+    const PLOT_LEFT = 50;
+    const PLOT_WIDTH = 400;
+    const at = (fraction: number) => PLOT_LEFT + fraction * PLOT_WIDTH;
+    const plotOf = (container: HTMLElement) => {
+      const plot = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-plot"]',
+      )!;
+      plot.getBoundingClientRect = () =>
+        ({
+          left: PLOT_LEFT,
+          width: PLOT_WIDTH,
+          top: 0,
+          height: 48,
+          right: PLOT_LEFT + PLOT_WIDTH,
+          bottom: 48,
+          x: PLOT_LEFT,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect;
+      return plot;
+    };
+    /** jsdom has no PointerEvent; React only reads the native type. */
+    const pointer = async (
+      target: Element,
+      type: 'pointerdown' | 'pointermove' | 'pointerup',
+      clientX: number,
+    ) => {
+      const event = new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        button: 0,
+      });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      await act(async () => {
+        target.dispatchEvent(event);
+      });
+    };
+    const pressSpan = async (container: HTMLElement, span: HTMLElement) => {
+      const plot = plotOf(container);
+      await pointer(span, 'pointerdown', at(0.5));
+      await pointer(plot, 'pointerup', at(0.5));
+    };
+    const drag = async (container: HTMLElement, from: number, to: number) => {
+      const plot = plotOf(container);
+      await pointer(plot, 'pointerdown', at(from));
+      await pointer(plot, 'pointermove', at(to));
+      await pointer(plot, 'pointerup', at(to));
+    };
+    const rowCount = (container: HTMLElement) =>
+      Number(
+        container
+          .querySelector('[role="grid"]')
+          ?.getAttribute('aria-rowcount') ?? 0,
+      );
+    const keydown = async (container: HTMLElement, key: string) => {
+      const grid = container.querySelector('[role="grid"]') as HTMLElement;
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        grid.dispatchEvent(event);
+      });
+      return event;
+    };
+
     it('selects the row a clicked span stands for', async () => {
       const container = await render(async () => page(timedTurns()));
       const tool = spansIn(container).find((el) => el.dataset['lane'] === '1')!;
 
-      await act(async () => tool.click());
+      await pressSpan(container, tool);
 
       expect(text(activeRow(container))).toContain('ReadFile: note.txt');
+    });
+
+    describe('time selection', () => {
+      // The domain is 1750 ms: the first turn's request (0–1000) and tool
+      // (1000–1250), then the second turn's request (1250–1750) once the
+      // minute of idle between them is cut. Seven rows unfiltered: two turn
+      // headers, two prompts, two requests and the tool.
+      const UNFILTERED_ROWS = 7;
+
+      it('keeps only the turns that ran in the dragged time', async () => {
+        const container = await render(async () => page(timedTurns()));
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+
+        // 1312–1662 ms: inside the second request only.
+        await drag(container, 0.75, 0.95);
+
+        expect(rowCount(container)).toBe(3);
+        const grid = container.querySelector('[role="grid"]')!;
+        expect(text(grid)).toContain('second');
+        expect(text(grid)).not.toContain('first');
+        expect(
+          text(
+            container.querySelector('[data-testid="trajectory-range-status"]'),
+          ),
+        ).toBe('Showing 2 of 5 rows in the selected time');
+        expect(
+          container.querySelector('[data-testid="trajectory-totals"]'),
+        ).toBeNull();
+      });
+
+      it('keeps a turn prompt but drops what ran outside the time', async () => {
+        const container = await render(async () => page(timedTurns()));
+
+        // 100–400 ms: the first request, not the tool after it.
+        await drag(container, 100 / 1750, 400 / 1750);
+
+        const grid = container.querySelector('[role="grid"]')!;
+        expect(rowCount(container)).toBe(3);
+        expect(text(grid)).toContain('first');
+        expect(text(grid)).not.toContain('ReadFile');
+      });
+
+      it('restores every row from the clear button', async () => {
+        const container = await render(async () => page(timedTurns()));
+        await drag(container, 0.75, 0.95);
+
+        const clear = container.querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-range-clear"]',
+        )!;
+        expect(clear.getAttribute('aria-label')).toBe('Clear time selection');
+        await act(async () => clear.click());
+
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        expect(
+          container.querySelector('[data-testid="trajectory-range-clear"]'),
+        ).toBeNull();
+        expect(
+          container.querySelector('[data-testid="trajectory-totals"]'),
+        ).not.toBeNull();
+      });
+
+      it('restores every row on Escape, and leaves Escape alone otherwise', async () => {
+        const container = await render(async () => page(timedTurns()));
+
+        expect((await keydown(container, 'Escape')).defaultPrevented).toBe(
+          false,
+        );
+
+        await drag(container, 0.75, 0.95);
+        expect(rowCount(container)).toBe(3);
+        expect((await keydown(container, 'Escape')).defaultPrevented).toBe(
+          true,
+        );
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+      });
+
+      it('drops the selection when the window is read again', async () => {
+        // A fresh page each read, as the daemon hands back.
+        const container = await render(async () => page(timedTurns()));
+        await drag(container, 0.75, 0.95);
+        expect(rowCount(container)).toBe(3);
+
+        const refresh = container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Refresh"]',
+        )!;
+        await act(async () => refresh.click());
+
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        expect(
+          container.querySelector('[data-testid="trajectory-range"]'),
+        ).toBeNull();
+      });
+
+      it('shows a span pressed outside the time by dropping the selection', async () => {
+        const container = await render(async () => page(timedTurns()));
+        await drag(container, 0.75, 0.95);
+        const tool = spansIn(container).find(
+          (el) => el.dataset['lane'] === '1',
+        )!;
+        expect(tool.dataset['dimmed']).toBe('true');
+
+        await pressSpan(container, tool);
+
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        expect(text(activeRow(container))).toContain('ReadFile: note.txt');
+      });
+    });
+
+    describe('real time', () => {
+      // On a real-time axis the same two turns span 60 500 ms: the first
+      // turn's request and tool fill 0–1250, then nothing until the second
+      // request at 60 000.
+      const UNFILTERED_ROWS = 7;
+      const switchMode = async (container: HTMLElement) => {
+        const toggle = container.querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-mode-clock"]',
+        )!;
+        await act(async () => toggle.click());
+        return toggle;
+      };
+      const axisFrom = (container: HTMLElement) =>
+        container.querySelector('[data-testid="trajectory-overview-from"]')!
+          .textContent;
+
+      it('switches the axis to clock time and keeps every row', async () => {
+        const container = await render(async () => page(timedTurns()));
+        expect(axisFrom(container)).toBe('0');
+
+        const toggle = await switchMode(container);
+
+        expect(toggle.getAttribute('aria-pressed')).toBe('true');
+        expect(axisFrom(container)).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        // The second request now starts most of the way along the track.
+        const second = spansIn(container).find(
+          (el) => el.dataset['lane'] === '0' && el.dataset['error'] === 'true',
+        )!;
+        expect(second.style.getPropertyValue('--left')).toBe('99.17355372%');
+      });
+
+      it('says so when a stretch of idle time has nothing in it', async () => {
+        const container = await render(async () => page(timedTurns()));
+        await switchMode(container);
+
+        // 6050–30 250 ms: inside the idle minute.
+        await drag(container, 0.1, 0.5);
+
+        const empty = container.querySelector(
+          '[data-testid="trajectory-range-empty"]',
+        )!;
+        expect(text(empty)).toContain(
+          'No request or tool ran in the selected time.',
+        );
+        expect(container.querySelector('[role="grid"]')).toBeNull();
+        expect(
+          text(
+            container.querySelector('[data-testid="trajectory-range-status"]'),
+          ),
+        ).toBe('Showing 0 of 5 rows in the selected time');
+        // Said once: the header's count is the live region, the message is not.
+        expect(empty.getAttribute('role')).toBeNull();
+        expect(empty.closest('[role="status"]')).toBeNull();
+
+        await act(async () =>
+          empty.querySelector<HTMLButtonElement>('button')!.click(),
+        );
+        expect(
+          container.querySelector('[data-testid="trajectory-range-empty"]'),
+        ).toBeNull();
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+      });
+
+      it('drops a selection made on the other axis', async () => {
+        const container = await render(async () => page(timedTurns()));
+        // 1312–1662 ms of active time: the second request alone.
+        await drag(container, 0.75, 0.95);
+        expect(rowCount(container)).toBe(3);
+
+        await switchMode(container);
+
+        // The same numbers on the real-time axis fall in the idle minute.
+        // Kept, they would empty the table; dropped, it is whole again.
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        expect(
+          container.querySelector('[data-testid="trajectory-range"]'),
+        ).toBeNull();
+        expect(
+          container.querySelector('[data-testid="trajectory-range-status"]'),
+        ).toBeNull();
+      });
+
+      it('cuts idle time out again when switched back', async () => {
+        const container = await render(async () => page(timedTurns()));
+        await switchMode(container);
+        await drag(container, 0.1, 0.5);
+        const toggle = await switchMode(container);
+
+        expect(toggle.getAttribute('aria-pressed')).toBe('false');
+        expect(axisFrom(container)).toBe('0');
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        expect(
+          container.querySelector('[data-testid="trajectory-range-empty"]'),
+        ).toBeNull();
+      });
     });
 
     it('lights the span of the row the keyboard selected', async () => {
@@ -706,6 +979,159 @@ describe('TrajectoryPanel', () => {
     expect(
       container.querySelector('[data-testid="trajectory-truncated"]'),
     ).toBeNull();
+    // The bar is still there, empty: it holds its height so a refresh that
+    // changes what it says cannot move the grid under it.
+    const bar = container.querySelector('[data-testid="trajectory-older-bar"]');
+    expect(bar).not.toBeNull();
+    expect(text(bar)).toBe('');
+  });
+
+  describe('walking back through pages', () => {
+    const prompts = (label: string, count: number) =>
+      Array.from({ length: count }, (_unused, index) =>
+        userText(`${label} prompt ${index + 1}`, `rec-${label}-${index + 1}`),
+      );
+
+    it('folds every page it walked back through into one table', async () => {
+      const loadPage: TrajectoryPageLoader = vi.fn(async ({ cursor }) =>
+        cursor === 'c1'
+          ? page(prompts('older', 2))
+          : page(prompts('newer', 3), { hasMore: true, nextCursor: 'c1' }),
+      );
+      const container = await render(loadPage);
+      await act(async () => {});
+
+      const grid = container.querySelector('[role="grid"]') as HTMLElement;
+      // Five prompts, each a turn header and a user row.
+      expect(grid.getAttribute('aria-rowcount')).toBe('10');
+      expect(
+        text(container.querySelector('[data-testid="trajectory-totals"]')),
+      ).toContain('5 turns');
+      expect(
+        container.querySelector('[data-testid="trajectory-truncated"]'),
+      ).toBeNull();
+    });
+
+    it('counts the pages read while it walks back', async () => {
+      let releaseOlder!: (value: TrajectoryPageResult) => void;
+      const older = new Promise<TrajectoryPageResult>((resolve) => {
+        releaseOlder = resolve;
+      });
+      const container = await render(async ({ cursor }) =>
+        cursor
+          ? older
+          : page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' }),
+      );
+      await act(async () => {});
+
+      expect(container.querySelector('[role="grid"]')).toBeNull();
+      expect(text(container.querySelector('[role="status"]'))).toContain(
+        '1 page so far',
+      );
+
+      await act(async () => {
+        releaseOlder(page(prompts('older', 1)));
+      });
+      expect(
+        (container.querySelector('[role="grid"]') as HTMLElement).getAttribute(
+          'aria-rowcount',
+        ),
+      ).toBe('4');
+    });
+
+    it('draws the newer pages and offers a retry when an older one fails', async () => {
+      let olderFails = true;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          return page(prompts('newer', 2), { hasMore: true, nextCursor: 'c1' });
+        }
+        if (olderFails) throw new Error('socket hang up');
+        return page(prompts('older', 1));
+      });
+      const container = await render(loadPage);
+      await act(async () => {});
+
+      const grid = () =>
+        container.querySelector('[role="grid"]') as HTMLElement;
+      expect(grid().getAttribute('aria-rowcount')).toBe('4');
+      const failed = container.querySelector(
+        '[data-testid="trajectory-older-failed"]',
+      );
+      expect(text(failed)).toBe(
+        'Earlier records could not be read: socket hang up',
+      );
+      // The newest page read fine, so nothing is raised as an alert.
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(grid().children).toHaveLength(1);
+      expect(grid().contains(failed)).toBe(false);
+
+      olderFails = false;
+      const retry = container.querySelector(
+        '[data-testid="trajectory-older-retry"]',
+      ) as HTMLButtonElement;
+      expect(retry.disabled).toBe(false);
+      await act(async () => {
+        retry.click();
+      });
+      await act(async () => {});
+
+      expect(grid().getAttribute('aria-rowcount')).toBe('6');
+      expect(
+        container.querySelector('[data-testid="trajectory-older-failed"]'),
+      ).toBeNull();
+    });
+
+    it('names an older page read only in part without quoting the flag', async () => {
+      const container = await render(async ({ cursor }) =>
+        cursor
+          ? page(prompts('older', 1), { partial: true as const })
+          : page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' }),
+      );
+      await act(async () => {});
+
+      expect(
+        text(
+          container.querySelector('[data-testid="trajectory-older-failed"]'),
+        ),
+      ).toBe(
+        'Earlier records could only be read in part, so they are left out.',
+      );
+    });
+
+    it('does not start a second walk while one is under way', async () => {
+      let releaseNewest: ((value: TrajectoryPageResult) => void) | undefined;
+      let reads = 0;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        reads += 1;
+        if (cursor) throw new Error('down');
+        if (reads === 1) {
+          return page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' });
+        }
+        return new Promise<TrajectoryPageResult>((resolve) => {
+          releaseNewest = resolve;
+        });
+      });
+      const container = await render(loadPage);
+      await act(async () => {});
+      const retry = () =>
+        container.querySelector(
+          '[data-testid="trajectory-older-retry"]',
+        ) as HTMLButtonElement;
+
+      await act(async () => {
+        retry().click();
+      });
+      const during = loadPage.mock.calls.length;
+      expect(retry().getAttribute('aria-disabled')).toBe('true');
+      await act(async () => {
+        retry().click();
+      });
+      expect(loadPage.mock.calls.length).toBe(during);
+
+      await act(async () => {
+        releaseNewest?.(page(prompts('newer', 1)));
+      });
+    });
   });
 
   it('numbers rows by their place in the whole table, not in the DOM', async () => {

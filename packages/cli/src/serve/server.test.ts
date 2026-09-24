@@ -37,6 +37,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import * as toolCallsReader from './session-tool-calls.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
@@ -4423,6 +4424,87 @@ describe('createServeApp', () => {
       expect(res.status).toBe(404);
       expect(res.text).not.toContain('<div id="root">');
     });
+
+    it.each([
+      '/plugins',
+      '/channels',
+      '/scheduled-tasks',
+      '/goals',
+      '/settings',
+    ])(
+      'serves page document %s without bypassing API authentication',
+      async (pagePath) => {
+        const app = createServeApp(
+          { ...baseOpts, token: 'secret' },
+          undefined,
+          { webShellDir },
+        );
+        for (const path of [pagePath, `${pagePath}/`, pagePath.toUpperCase()]) {
+          const document = await request(app)
+            .get(path)
+            .set('Host', host)
+            .set('Accept', 'text/html');
+          expect(document.status).toBe(200);
+          expect(document.text).toContain('<div id="root">');
+        }
+        await request(app)
+          .head(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(200)
+          .expect('Content-Type', /text\/html/);
+        await request(app)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', '*/*')
+          .set('Sec-Fetch-Mode', 'navigate')
+          .expect(200);
+        for (const path of [
+          pagePath,
+          `${pagePath}/data`,
+          `${pagePath}%2fdata`,
+        ]) {
+          await request(app)
+            .get(path)
+            .set('Host', host)
+            .set('Accept', 'application/json')
+            .expect(401);
+        }
+        await request(app)
+          .post(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(401);
+        const api = await request(app)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'application/json')
+          .set('Authorization', 'Bearer secret');
+        expect(api.text).not.toContain('<div id="root">');
+        if (pagePath === '/goals') {
+          expect(api.status).toBe(200);
+          expect(api.headers['content-type']).toContain('application/json');
+          expect(api.body.goals).toEqual([]);
+        }
+        const apiOnly = createServeApp(
+          { ...baseOpts, token: 'secret', serveWebShell: false },
+          undefined,
+          { webShellDir },
+        );
+        const apiWithoutShell = await request(apiOnly)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'application/json')
+          .set('Authorization', 'Bearer secret');
+        expect(api.status).toBe(apiWithoutShell.status);
+        expect(api.body).toEqual(apiWithoutShell.body);
+        await request(apiOnly)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(401);
+      },
+    );
 
     it('serves the shell for /session/:id document navigations (pre-auth route)', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
@@ -30311,6 +30393,237 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
+    it('reads tool calls only from the qualified persisted workspace without attaching ACP', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa1';
+      const secondaryCwd = path.join(wsDir, 'secondary-tools');
+      await fsp.mkdir(secondaryCwd);
+      await writeTranscriptSession(
+        sid,
+        'active',
+        wsDir,
+        'primary private text',
+      );
+      await writeTranscriptSession(
+        sid,
+        'active',
+        secondaryCwd,
+        'selected workspace prompt',
+      );
+      const primary = fakeBridge();
+      const secondary = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge: primary,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge: primary,
+          }),
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'secondary-tools',
+            workspaceCwd: secondaryCwd,
+            primary: false,
+            bridge: secondary,
+          }),
+        ]),
+      });
+      const response = await request(app)
+        .get(
+          `/workspaces/secondary-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.body).toMatchObject({
+        v: 1,
+        sessionId: sid,
+        turnId: `${sid}-user-1`,
+        events: expect.any(Array),
+      });
+      expect(JSON.stringify(response.body)).toContain(
+        'selected workspace prompt',
+      );
+      expect(JSON.stringify(response.body)).not.toContain(
+        'primary private text',
+      );
+      expect(response.body).not.toHaveProperty('nextCursor');
+      expect(response.body).not.toHaveProperty('hasMore');
+      const replayFailure = vi
+        .spyOn(toolCallsReader, 'readSessionToolCalls')
+        .mockRejectedValueOnce(
+          new toolCallsReader.SessionToolCallsReplayError(),
+        );
+      try {
+        const failed = await request(app)
+          .get(
+            `/workspaces/secondary-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(failed.status).toBe(500);
+        expect(failed.body.code).toBe('tool_calls_replay_incomplete');
+      } finally {
+        replayFailure.mockRestore();
+      }
+
+      for (const bridge of [primary, secondary]) {
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+        expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+        expect(bridge.flushSessionTranscriptCalls).toHaveLength(0);
+      }
+      const unknown = await request(app)
+        .get(
+          `/workspaces/unknown-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unknown.status).not.toBe(200);
+      expect(JSON.stringify(unknown.body)).not.toContain(
+        'primary private text',
+      );
+    });
+
+    it('flushes an already loaded session before freezing the tool calls snapshot', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa4';
+      await writeTranscriptSession(sid);
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          pendingInteractionCount: 0,
+          hasTurnError: false,
+        }),
+        flushSessionTranscriptImpl: async () => {
+          const base = {
+            sessionId: sid,
+            cwd: wsDir,
+            version: '1.0.0',
+            timestamp: '2026-05-28T12:00:01.000Z',
+          };
+          await fsp.appendFile(
+            path.join(
+              new Storage(wsDir).getProjectDir(),
+              'chats',
+              `${sid}.jsonl`,
+            ),
+            [
+              {
+                ...base,
+                uuid: 'flushed-call',
+                parentUuid: `${sid}-user-1`,
+                type: 'assistant',
+                message: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'flushed',
+                        name: 'read_file',
+                        args: { file_path: '/flushed' },
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                ...base,
+                uuid: 'flushed-result',
+                parentUuid: 'flushed-call',
+                type: 'tool_result',
+                message: {
+                  role: 'user',
+                  parts: [
+                    {
+                      functionResponse: {
+                        id: 'flushed',
+                        name: 'read_file',
+                        response: { output: 'flushed output' },
+                      },
+                    },
+                  ],
+                },
+                toolCallResult: {
+                  callId: 'flushed',
+                  responseParts: [],
+                  resultDisplay: 'flushed output',
+                },
+              },
+            ]
+              .map((record) => JSON.stringify(record))
+              .join('\n') + '\n',
+          );
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'flushed-tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge,
+          }),
+        ]),
+      });
+      const response = await request(app)
+        .get(
+          `/workspaces/flushed-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(JSON.stringify(response.body)).toContain('flushed output');
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.loadCalls).toHaveLength(0);
+      expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('requires a persisted turn anchor for tool calls and rejects archived sessions', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa2';
+      const archivedSid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa3';
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(archivedSid, 'archived');
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge,
+          }),
+        ]),
+      });
+      for (const suffix of [
+        '',
+        '?turnId=',
+        '?turnId=a&turnId=b',
+        '?turnId=missing',
+      ]) {
+        const response = await request(app)
+          .get(`/workspaces/tools/session/${sid}/tool-calls${suffix}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_turn_anchor');
+      }
+      const archived = await request(app)
+        .get(
+          `/workspaces/tools/session/${archivedSid}/tool-calls?turnId=${archivedSid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(archived.status).toBe(409);
+      expect(archived.body.code).toBe('session_archived');
+      expect(bridge.loadCalls).toHaveLength(0);
+    });
+
     it('flushes the first live backward workspace transcript page', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
       await writeTranscriptSession(sid);
@@ -41817,7 +42130,7 @@ describe('Live conversation runtime lifecycle', () => {
       expect(
         setup.registry.getManagedByWorkspaceCwd(setup.root.canonicalRoot),
       ).toBe(setup.liveRuntime);
-      expect(capabilities.body.features).toContain('realtime_voice');
+      expect(capabilities.body.features).toContain('realtime_voice_web');
       expect(capabilities.body.workspaces).toContainEqual(
         expect.objectContaining({
           id: 'live-conversations',
@@ -42391,7 +42704,7 @@ describe('Live conversation runtime lifecycle', () => {
       const enabledCapabilities = await request(setup.app)
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(enabledCapabilities.body.features).toContain('realtime_voice');
+      expect(enabledCapabilities.body.features).toContain('realtime_voice_web');
 
       await setEnabled(false);
       expect(setup.app.locals['liveVoiceEnabled']).toBe(false);
@@ -42399,7 +42712,7 @@ describe('Live conversation runtime lifecycle', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(disabledCapabilities.body.features).not.toContain(
-        'realtime_voice',
+        'realtime_voice_web',
       );
     } finally {
       await (
@@ -43653,11 +43966,13 @@ describe('Live Appshot server integration', () => {
   });
 
   it.each([
-    { runtimePlatform: 'linux' as const, native: false },
-    { runtimePlatform: 'darwin' as const, native: true },
+    { runtimePlatform: 'linux' as const, optIn: false, native: false },
+    { runtimePlatform: 'linux' as const, optIn: true, native: false },
+    { runtimePlatform: 'darwin' as const, optIn: false, native: false },
+    { runtimePlatform: 'darwin' as const, optIn: true, native: true },
   ])(
-    'advertises the browser Host on $runtimePlatform and the native Host only on macOS',
-    async ({ runtimePlatform, native }) => {
+    'advertises the browser Host on $runtimePlatform and the native Host only on opted-in macOS (opt-in: $optIn)',
+    async ({ runtimePlatform, optIn, native }) => {
       const tmp = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-live-browser-host-'),
       );
@@ -43679,7 +43994,7 @@ describe('Live Appshot server integration', () => {
         app = createServeApp(baseOpts, undefined, {
           bridge: fakeBridge(),
           persistSetting: vi.fn(async () => undefined),
-          daemonEnv: {},
+          daemonEnv: optIn ? { QWEN_SERVE_LIVE_NATIVE_HOST: '1' } : {},
           runtimePlatform,
           webShellDir: path.join(tmp, 'web-shell'),
         });
@@ -43709,6 +44024,22 @@ describe('Live Appshot server integration', () => {
           .get('/live/setup')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(setup.body.nativeHost).toBe(native);
+        if (!native) {
+          // Nothing to install: no probe, and the routes refuse rather than
+          // download or start the Host behind the Web Shell's back.
+          expect(setup.body.install).toMatchObject({
+            state: 'error',
+            retryable: false,
+          });
+          for (const route of ['/live/setup/install', '/live/setup/launch']) {
+            const response = await request(app)
+              .post(route)
+              .set('Host', `127.0.0.1:${baseOpts.port}`)
+              .send({});
+            expect(response.status).toBe(409);
+            expect(response.body.code).toBe('live_native_host_unavailable');
+          }
+        }
       } finally {
         (app?.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
         restoreEnv('QWEN_HOME', previousQwenHome);
@@ -44094,7 +44425,7 @@ describe('Live Appshot server integration', () => {
       const capabilities = await request(app)
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(capabilities.body.features).toContain('realtime_voice');
+      expect(capabilities.body.features).toContain('realtime_voice_web');
       expect(loadSettings).toHaveBeenCalledWith(
         (app.locals as { boundWorkspace: string }).boundWorkspace,
         expect.objectContaining({
