@@ -2,7 +2,7 @@
 
 本目录是 `qwen batch` 传输层与 `/batch-api` 工作流（PR #12492）的离线验证工具：
 假服务器 + 真实构建产物，不联网、不需要凭证、不花钱。设计约定见
-[`docs/design/2026-09-23-agent-prepared-batch-api.md`](../../design/2026-09-23-agent-prepared-batch-api.md)，
+[`docs/design/2026-09-23-batch-api-design.md`](../../design/2026-09-23-batch-api-design.md)，
 首轮人工实测数据与分析见 [`results-2026-09-23.md`](./results-2026-09-23.md)。
 
 ## 工作流 E2E（主验证入口）

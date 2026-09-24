@@ -276,7 +276,7 @@ nothing and deletes no remote file, and it refuses while a batch may still
 be running or holds uncollected results (the record is the only way to
 collect or reconcile them) unless you pass `--force`. Delivered files are
 yours and are never touched. The design contract for this workflow is
-[`docs/design/2026-09-23-agent-prepared-batch-api.md`](../../design/2026-09-23-agent-prepared-batch-api.md).
+[`docs/design/2026-09-23-batch-api-design.md`](../../design/2026-09-23-batch-api-design.md).
 
 ## Verifying locally without an API key
 
