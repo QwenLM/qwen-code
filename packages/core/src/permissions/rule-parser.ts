@@ -1702,12 +1702,20 @@ export function matchesMcpPattern(
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
-  // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+
+  // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+.
+  // The 3-part test is asked of every spelling the body matches against, not of
+  // the registered name alone: a long server key pushes the registered name past
+  // the 63-character budget, so truncation can cut the `__` separator out of it
+  // and leave it with two parts while the raw identity still exposes the tool
+  // segment. Judging the structure by the registered name only would drop the
+  // bare `mcp__<server>` spelling of a whole-server rule while its
+  // `mcp__<server>__*` spelling kept matching, and a deny that silently matches
+  // nothing is a fail-open on a rule the operator wrote to cover the server.
   const patternParts = pattern.split('__');
   const toolParts = toolName.split('__');
   if (
     patternParts.length === 2 &&
-    toolParts.length >= 3 &&
+    spellings.some((spelling) => spelling.split('__').length >= 3) &&
     patternParts[0] === toolParts[0]
   ) {
     return matchesPrefixLiterally(`${pattern}__`);

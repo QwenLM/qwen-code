@@ -15,6 +15,7 @@ import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import {
   generateLegacyMcpToolName,
+  normalizeMcpToolName,
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
@@ -524,6 +525,38 @@ describe('cross-server forgery witnesses (round-2 review)', () => {
       ),
     ).toBe(false);
 
+    // The rows above pass the production array, whose first element IS the exact
+    // raw identity, so `resolveRawMcpIdentity`'s `.find` answers with it and the
+    // lossy legacy alias is never considered — they cannot tell the vouching
+    // guard apart from taking the first alias blindly. Hand over a legacy-only
+    // array, which is what a caller publishing no exact raw identity would
+    // produce, and the guard becomes the only thing that can reject it: the
+    // alias does not vouch, and its injected `___` is exactly the `__` separator
+    // a prefix match needs. Under `return toolAliases?.[0]` both flip to true.
+    expect(normalizeMcpToolName(legacyAlias)).not.toBe(premium.name);
+    expect(legacyAlias.startsWith('mcp__weather-forecast-server__')).toBe(true);
+    const legacyOnly = [legacyAlias];
+    expect(
+      matchesRule(
+        rule,
+        premium.name,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        legacyOnly,
+      ),
+    ).toBe(false);
+    expect(
+      matchesToolPattern(
+        'mcp__weather-forecast-server',
+        premium.name,
+        legacyOnly,
+      ),
+    ).toBe(false);
+
     const pm = new PermissionManager(
       makeConfig({ permissionsAllow: ['mcp__weather-forecast-server'] }),
     );
@@ -652,8 +685,11 @@ describe('legacy-spelled deny coverage (round-2 review)', () => {
   it('pins the coverage boundary: a colon-keyed server is denied at every raw length', async () => {
     // The old hash reconstruction stopped verifying at raw length 56 (the
     // sanitized body is sliced to 63 - 8 = 55) and never recovered; the
-    // legacy alias middle-truncates past 63. Literal comparison against the
-    // raw identity has no length boundary.
+    // legacy alias middle-truncates past 63. This sweep varies the raw length
+    // through the TOOL segment under a short server key, so the registered
+    // name always keeps its `__` separator; the long-server-key case, where
+    // truncation cuts the separator out of the registration, is pinned
+    // separately below.
     for (const rawLength of [15, 44, 55, 56, 59, 63, 64, 69, 74, 80]) {
       const toolNameLength = rawLength - 'mcp__foo:bar__'.length;
       const tool = prodTool('foo:bar', 'x'.repeat(toolNameLength));
@@ -723,5 +759,75 @@ describe('legacy-spelled deny coverage (round-2 review)', () => {
         tool.permissionAliases,
       ),
     ).toBe(true);
+  });
+
+  // A server key long enough to push the registered name past the 63-character
+  // budget loses its `__` separator to truncation, so the registration has only
+  // two parts. Judging "does this tool name have a tool segment" by the
+  // registered name alone then failed the bare `mcp__<server>` spelling of a
+  // whole-server rule while the `mcp__<server>__*` spelling of the same rule
+  // still matched through the raw identity — two forms the docs present as
+  // equivalent, disagreeing, with the bare one a silent fail-open on deny.
+  it.each([
+    ['a long provider-safe key', 'k'.repeat(53)],
+    ['a long legacy-unsafe key', 'a.b-' + 'k'.repeat(50)],
+  ])(
+    'keeps both whole-server spellings effective for %s that truncates the separator away',
+    async (_label, serverKey) => {
+      const tool = prodTool(serverKey, 'tool');
+      // The registration really did lose the separator.
+      expect(tool.name.split('__')).toHaveLength(2);
+      const rule = `mcp__${serverKey}`;
+
+      for (const spelling of [rule, `${rule}__*`]) {
+        expect(
+          matchesRule(
+            parseRule(spelling),
+            tool.name,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            tool.permissionAliases,
+          ),
+        ).toBe(true);
+        expect(
+          matchesToolPattern(spelling, tool.name, tool.permissionAliases),
+        ).toBe(true);
+
+        const pm = new PermissionManager(
+          makeConfig({ permissionsDeny: [spelling] }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({
+            toolName: tool.name,
+            toolAliases: tool.permissionAliases,
+          }),
+        ).toBe('deny');
+        expect(
+          await pm.getToolRegistrationStatus(
+            tool.name,
+            tool.permissionAliases,
+          ),
+        ).toBe('disabled');
+      }
+    },
+  );
+
+  it('still keeps a differently-registered server out of a long key rule', () => {
+    // The guard now reads the raw identity too, so re-check that the literal
+    // `${pattern}__` prefix comparison — not the structure test — is what keeps
+    // a colliding key out: a `foo_bar` tool advertises no alias at all, so the
+    // only spelling on offer is its own registered name.
+    const safe = prodTool('foo_bar', 'x');
+    expect(safe.permissionAliases).toEqual([]);
+    expect(matchesMcpPattern('mcp__foo.bar', safe.name)).toBe(false);
+    expect(matchesMcpPattern('mcp__foo.bar__*', safe.name)).toBe(false);
+    expect(matchesMcpPattern('mcp__foo.bar', safe.name, 'mcp__foo_bar__x')).toBe(
+      false,
+    );
   });
 });
