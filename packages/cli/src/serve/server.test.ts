@@ -30754,6 +30754,73 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('reads persisted transcript and turn index for an explicit standalone session', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abababababac';
+      const internalDir = path.join(runtimeDir, 'internal-conversations');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(sid, 'active', internalWs);
+      await fsp.appendFile(
+        path.join(
+          new Storage(internalWs).getProjectDir(),
+          'chats',
+          `${sid}.jsonl`,
+        ),
+        JSON.stringify({
+          uuid: `${sid}-source-1`,
+          parentUuid: `${sid}-user-1`,
+          sessionId: sid,
+          timestamp: '2026-05-28T12:00:01.000Z',
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: { sourceType: 'standalone' },
+          cwd: internalWs,
+          version: '1.0.0',
+        }) + '\n',
+      );
+      const primaryBridge = fakeBridge();
+      const internalBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'internal-conversations',
+            workspaceCwd: internalWs,
+            primary: false,
+            bridge: internalBridge,
+          }),
+          provenance: 'live-conversation',
+          removable: false,
+        },
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${sid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const turnIndex = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(turnIndex.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, direction: 'backward' },
+      ]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([
+        { sessionId: sid },
+      ]);
+    });
+
     it('rejects transcript requests with ambiguous live session ownership', async () => {
       const sid = '55555555-bbbb-cccc-dddd-abcdabcdabcd';
       const secondaryDir = path.join(runtimeDir, 'ambiguous-secondary');

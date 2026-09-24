@@ -2027,7 +2027,7 @@ export function registerSessionRoutes(
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
+        (await readLoadableConversationSession(sessionId, service)) !==
         undefined
       );
     };
