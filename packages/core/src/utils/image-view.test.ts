@@ -14,6 +14,7 @@ import {
   orientedSize,
   renderImageOverview,
   renderNormalizedImageCrop,
+  sniffBoundableImageMime,
 } from './image-view.js';
 
 describe('image views', () => {
@@ -297,5 +298,27 @@ describe('image views with EXIF orientation', () => {
     });
     const metadata = await sharp(view.bytes).metadata();
     expect(metadata).toMatchObject({ width: 240, height: 400 });
+  });
+});
+
+describe('sniffBoundableImageMime', () => {
+  it('reads the formats the renderer can output from their magic bytes', () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const webp = Buffer.from('RIFF\0\0\0\0WEBP', 'latin1');
+    expect(sniffBoundableImageMime(png)).toBe('image/png');
+    expect(sniffBoundableImageMime(jpeg)).toBe('image/jpeg');
+    expect(sniffBoundableImageMime(webp)).toBe('image/webp');
+  });
+
+  it('rejects formats the renderer cannot output and non-images', () => {
+    expect(sniffBoundableImageMime(Buffer.from('GIF89a', 'latin1'))).toBe(null);
+    expect(sniffBoundableImageMime(Buffer.from('<svg xmlns=', 'latin1'))).toBe(
+      null,
+    );
+    expect(sniffBoundableImageMime(Buffer.from('%PDF-1.7', 'latin1'))).toBe(
+      null,
+    );
+    expect(sniffBoundableImageMime(Buffer.alloc(0))).toBe(null);
   });
 });

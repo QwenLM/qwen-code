@@ -45,6 +45,7 @@ import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
+import { matchMessageRoute } from './message-routes.js';
 import {
   NamedSessionManager,
   NamedSessionTaskError,
@@ -466,6 +467,8 @@ export abstract class ChannelBase {
   protected gate: SenderGate;
   protected readonly privatePolicy: PrivatePolicy;
   protected router: SessionRouter;
+  private readonly messageRoutes: ReadonlyMap<string, string>;
+  private readonly routedEnvelopes = new WeakSet<Envelope>();
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
   protected readonly identity: ChannelRuntimeIdentity;
@@ -1390,6 +1393,30 @@ export abstract class ChannelBase {
   ) {
     this.name = name;
     this.config = config;
+    this.messageRoutes = new Map(Object.entries(config.messageRoutes ?? {}));
+    if (config.multiSession && this.messageRoutes.size > 0) {
+      throw new Error('messageRoutes cannot be combined with multiSession.');
+    }
+    if (
+      [...this.messageRoutes].some(
+        ([prefix, instructions]) =>
+          !prefix.trim() ||
+          prefix !== prefix.trim() ||
+          typeof instructions !== 'string',
+      )
+    ) {
+      throw new Error(
+        'Message routes require non-empty prefixes and string instructions.',
+      );
+    }
+    if (
+      config.defaultMessageRoute !== undefined &&
+      !this.messageRoutes.has(config.defaultMessageRoute)
+    ) {
+      throw new Error(
+        'defaultMessageRoute must name a configured message route.',
+      );
+    }
     this.privatePolicy = resolvePrivatePolicy(config);
     this.bridge = bridge;
     this.locale = options?.locale ?? 'en';
@@ -1866,6 +1893,11 @@ export abstract class ChannelBase {
       if (this.config.instructions) {
         staticContext.push(this.config.instructions);
       }
+      const routeInstructions =
+        target.messageRoute === undefined
+          ? undefined
+          : this.messageRoutes.get(target.messageRoute);
+      if (routeInstructions) staticContext.push(routeInstructions);
       // Boundary block goes last: recency bias means later instructions win,
       // and the isolation boundary must not be overridable by operator text.
       if (this.shouldPrependChannelBoundaryPrompt()) {
@@ -2127,6 +2159,7 @@ export abstract class ChannelBase {
       job.target.threadId,
       job.cwd,
       job.target.isGroup,
+      { routeKey: job.target.messageRoute },
     );
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
@@ -3699,6 +3732,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
   }
 
@@ -4102,6 +4136,7 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
       if (retiringSessionId) this.onSessionRetiring(retiringSessionId);
       if (this.namedSessions) {
@@ -4138,6 +4173,7 @@ export abstract class ChannelBase {
           envelope.senderId,
           envelope.chatId,
           envelope.threadId,
+          envelope.messageRoute,
         );
       }
       this.clearPendingGroupHistory(envelope);
@@ -4334,6 +4370,7 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
       // `single` collapses EVERY DM and group to one `__single__` session, so it
       // is shared channel-wide regardless of where the /who came from — report
@@ -4469,6 +4506,7 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
       const policy =
         envelope.isGroup && !this.isPersonalConversation(envelope)
@@ -4902,6 +4940,9 @@ export abstract class ChannelBase {
   private loopTargetFromEnvelope(envelope: Envelope): SessionTarget {
     return this.normalizeLoopTarget({
       channelName: this.name,
+      ...(envelope.messageRoute !== undefined
+        ? { messageRoute: envelope.messageRoute }
+        : {}),
       senderId: envelope.senderId,
       chatId: envelope.chatId,
       threadId: envelope.threadId,
@@ -4936,6 +4977,11 @@ export abstract class ChannelBase {
     target: SessionTarget,
     senderName: string,
   ): boolean {
+    if (
+      target.messageRoute !== undefined &&
+      !this.messageRoutes.has(target.messageRoute)
+    )
+      return false;
     const normalizedTarget = this.normalizeLoopTarget(target);
     const envelope: Envelope = {
       channelName: this.name,
@@ -4968,6 +5014,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
     return sessionId && this.activePrompts.has(sessionId)
       ? sessionId
@@ -5053,6 +5100,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
     if (sessionId) {
       this.unattendedMemorySessions.delete(sessionId);
@@ -6028,6 +6076,7 @@ export abstract class ChannelBase {
       this.name,
       envelope.chatId,
       envelope.threadId ?? null,
+      ...(envelope.messageRoute !== undefined ? [envelope.messageRoute] : []),
     ]);
   }
 
@@ -6049,6 +6098,7 @@ export abstract class ChannelBase {
   }
 
   protected recordPendingGroupHistory(envelope: Envelope): void {
+    if (!this.applyMessageRoute(envelope)) return;
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
@@ -6217,6 +6267,7 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
+    if (!this.applyMessageRoute(envelope)) return false;
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -6547,6 +6598,28 @@ export abstract class ChannelBase {
     this.preflightedEnvelopes.add(envelope);
   }
 
+  private applyMessageRoute(envelope: Envelope): boolean {
+    if (this.routedEnvelopes.has(envelope)) return true;
+    if (
+      this.messageRoutes.size === 0 ||
+      envelope.bypassMessageRoutes ||
+      envelope.syntheticText
+    ) {
+      this.routedEnvelopes.add(envelope);
+      return true;
+    }
+    const matched = matchMessageRoute(
+      envelope.text,
+      this.messageRoutes,
+      this.config.defaultMessageRoute,
+    );
+    if (!matched) return false;
+    envelope.text = matched.text;
+    envelope.messageRoute = matched.prefix;
+    this.routedEnvelopes.add(envelope);
+    return true;
+  }
+
   /** Wait until the currently active bridge recovery, if any, has completed. */
   private async waitForBridgeRecovery(): Promise<void> {
     let completedRecovery: Promise<void> | undefined;
@@ -6775,6 +6848,7 @@ export abstract class ChannelBase {
         envelope.threadId,
         this.config.cwd,
         envelope.isGroup,
+        { routeKey: envelope.messageRoute },
       );
     }
 
@@ -7122,6 +7196,11 @@ export abstract class ChannelBase {
         if (this.config.instructions) {
           sessionContext.push(this.config.instructions);
         }
+        const routeInstructions =
+          envelope.messageRoute === undefined
+            ? undefined
+            : this.messageRoutes.get(envelope.messageRoute);
+        if (routeInstructions) sessionContext.push(routeInstructions);
         // Boundary block goes last: recency bias means later instructions win,
         // and the isolation boundary must not be overridable by operator text.
         if (this.shouldPrependChannelBoundaryPrompt()) {

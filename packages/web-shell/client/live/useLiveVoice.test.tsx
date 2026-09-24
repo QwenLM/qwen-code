@@ -3,7 +3,9 @@
 import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import { useLiveVoice, type UseLiveVoiceResult } from './useLiveVoice';
+import { getLivePresence, setLivePresence } from './live-presence';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -23,12 +25,21 @@ const mocks = vi.hoisted(() => {
     workspace: {
       capabilities: { features: ['realtime_voice'] },
       client,
+      refreshCapabilities: vi.fn(async () => undefined),
     },
   };
 });
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => mocks.workspace,
+}));
+
+const catalogMocks = vi.hoisted(() => ({
+  sessionCreated: vi.fn(),
+}));
+
+vi.mock('../session-catalog/session-catalog-hooks', () => ({
+  useSessionCatalogController: () => catalogMocks,
 }));
 
 const browserHostMock = vi.hoisted(() => ({
@@ -51,12 +62,65 @@ vi.mock('./useLiveBrowserHost', () => ({
 }));
 
 afterEach(() => {
+  setLivePresence(mocks.client as unknown as DaemonClient, undefined);
   document.body.replaceChildren();
   mocks.workspace.client = mocks.client;
   vi.clearAllMocks();
 });
 
 describe('useLiveVoice', () => {
+  it('publishes a pending voice row immediately and discovers its session without reload', async () => {
+    mocks.liveStatus.mockResolvedValue({
+      v: 1,
+      available: true,
+      state: 'idle',
+      shortcut: '',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let live: UseLiveVoiceResult | undefined;
+    function Harness() {
+      live = useLiveVoice();
+      return null;
+    }
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+
+    act(() => live?.begin());
+    expect(
+      getLivePresence(mocks.client as unknown as DaemonClient)?.state,
+    ).toBe('connecting');
+
+    await act(async () => {
+      browserHostMock.onStatus?.({
+        v: 1,
+        available: true,
+        state: 'starting',
+        shortcut: '',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: '/conversations',
+          workspaceId: 'conversations-workspace',
+          sessionId: 'voice-session',
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(catalogMocks.sessionCreated).toHaveBeenCalledWith(
+      '/conversations',
+      'voice-session',
+    );
+    expect(mocks.workspace.refreshCapabilities).toHaveBeenCalledOnce();
+    expect(
+      getLivePresence(mocks.client as unknown as DaemonClient)?.coordinator
+        ?.sessionId,
+    ).toBe('voice-session');
+    act(() => root.unmount());
+  });
   it('keeps asynchronous status updates mounted across StrictMode replay', async () => {
     let resolveStatus: ((value: unknown) => void) | undefined;
     mocks.liveStatus.mockReturnValue(
