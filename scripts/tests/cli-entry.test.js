@@ -60,6 +60,14 @@ describe('scripts/cli-entry.js production entry', () => {
     vi.clearAllMocks();
     homedirMock.mockReturnValue('/home/test-user');
     tmpdirMock.mockReturnValue('/tmp');
+    // Every import stamps these into the real process.env, and the pin's
+    // bootstrap guard cannot tell two imports of this file apart — Vitest drops
+    // the cache-buster query from import.meta.url — so a leftover pin would be
+    // honoured as an inherited managed-version pin and its updateRoot would win
+    // over the home this test is trying to observe. Each test here drives a
+    // top-level invocation, which starts with neither.
+    delete process.env.QWEN_CODE_MANAGED_NPM_PIN;
+    delete process.env.QWEN_CODE_MANAGED_NPM_ROOT;
     // A non-fast-path command, so the entry takes the spawnSync branch (mocked)
     // instead of importing the real dist/cli.js in-process.
     process.argv = ['node', 'scripts/cli-entry.js', 'review', 'check'];
