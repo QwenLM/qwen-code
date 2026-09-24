@@ -104,6 +104,7 @@ import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { validateFindings, type Finding } from './findings.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
 import { createWorkflowBatch } from './lib/workflow-batch.js';
 import {
@@ -146,6 +147,13 @@ interface AgentPromptArgs {
    * record, and the block stays small however long the list grows.
    */
   findings?: string;
+  /**
+   * The hunks `--fix` applied (`fix-delta --since` output), for a
+   * `--role fix-audit` build. Folded into the same digest-named list file
+   * the findings pointer names, beneath the `fixed` findings rendered from
+   * `--findings` — one file, one read, one digest.
+   */
+  hunks?: string;
   /**
    * Which round of a findings role this build is (1-based). Baked into the
    * identity line and the record key by the CLI, because the orchestrator
@@ -1228,7 +1236,7 @@ function diffReadingBlock(
 /** The closing half every prompt shares: how to report, and what "nothing" means. */
 function tail(
   rules?: string,
-  output: 'findings' | 'verdicts' = 'findings',
+  output: 'findings' | 'verdicts' | 'assumptions' = 'findings',
 ): string[] {
   // The verifier does not file findings, so it gets no finding format and no
   // severity ladder — its output shape is the verdict, defined in its own brief. It
@@ -1238,10 +1246,14 @@ function tail(
   // verifier must not get it: it rules on findings it was handed, and telling the
   // stage whose job is removing wrong findings to keep every candidate it cannot
   // rule out would disable the precision half of the pipeline.
+  // The fix auditor neither files nor rules: an unpinned assumption is not a
+  // finding and matches no Exclusion Criterion, so it gets none of the three.
   const parts =
     output === 'verdicts'
       ? ['', EXCLUSIONS]
-      : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS, '', RECALL];
+      : output === 'assumptions'
+        ? []
+        : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS, '', RECALL];
   if (rules && rules.trim()) {
     parts.push('', '## Project rules', '', rules.trim());
   }
@@ -2384,9 +2396,17 @@ export function buildRoleBrief(
   // hands the same --rules to every role, so the exclusion lives here, where both
   // the single-role and roster builds pass through. prose-exec sits on Agent
   // 7's side of that line: it executes recipes and files what diverged, and a
-  // reviewer's rules stapled onto an executor's brief steer what it runs.
+  // reviewer's rules stapled onto an executor's brief steer what it runs. The
+  // fix auditor is excluded on its declared output: project review rules tell
+  // a reviewer what to check, and handing them to the one agent that must not
+  // review is how it becomes one.
   const executor = role === '7' || role === 'prose-exec';
-  parts.push(...tail(executor ? undefined : opts.rules, brief.output));
+  parts.push(
+    ...tail(
+      executor || brief.output === 'assumptions' ? undefined : opts.rules,
+      brief.output,
+    ),
+  );
   return parts.join('\n');
 }
 
@@ -2609,11 +2629,133 @@ export function findingsSection(
             'brief; read it first.',
         ].join('\n');
   }
+  if (role === 'fix-audit') {
+    // Never empty: the build refuses an artifact with no `fixed` finding and
+    // a hunks file with nothing in it, so the pointer is always a real list.
+    return [
+      '## What you are auditing',
+      '',
+      'The hunks `--fix` applied, and the findings each claims to close, are ' +
+        'one file — your only input; the reviewed diff is not. This file does ' +
+        'not replace the brief; read it first.',
+      '',
+      listRef ?? '(no input was provided — there is nothing to audit)',
+    ].join('\n');
+  }
   throw new Error(
     `agent-prompt: --findings has no framing for role "${role}". A role that sets ` +
       '`acceptsFindings` needs a branch in findingsSection; do not let it inherit ' +
       "another role's framing by falling through.",
   );
+}
+
+/**
+ * The fix auditor's one input file: the `fixed` findings, then the hunks
+ * `--fix` applied — rendered by the CLI from the outcome-bearing artifact and
+ * the `fix-delta` diff, never assembled by the orchestrator.
+ *
+ * Refused where the audit could only return an all-clear that is false: an
+ * artifact whose outcomes were never recorded (a fixed finding cannot be told
+ * from a skipped one), no `fixed` finding (nothing was applied — or, beside
+ * hunks that landed, edits no outcome owns), an empty hunks file beside a
+ * ledger that says something was fixed, and a hunks file that is not a patch.
+ * Whether each `fixed` finding's edit is among the hunks is the auditor's
+ * question, not this function's: both are in front of it, and a fix can
+ * legitimately land in a file the finding does not name — which is why no
+ * path is parsed out of the patch here.
+ */
+export function renderFixAuditInput(artifact: unknown, hunks: string): string {
+  const findings = validateFindings(artifact);
+  const ids = (list: readonly Finding[]): string =>
+    list
+      .slice(0, 5)
+      .map((f) => f.id)
+      .join(', ') + (list.length > 5 ? ', …' : '');
+  const unrecorded = findings.filter((f) => f.outcome === undefined);
+  if (unrecorded.length > 0) {
+    throw new Error(
+      `agent-prompt: --role fix-audit needs the outcome-bearing artifact — ` +
+        `${unrecorded.length} of ${findings.length} finding(s) carry no outcome ` +
+        `(${ids(unrecorded)}). Record the ledger ` +
+        'first (`review findings --outcomes … --out <artifact>`) and pass that ' +
+        'artifact: the audit sees only findings whose outcome is `fixed`.',
+    );
+  }
+  const fixed = findings.filter((f) => f.outcome === 'fixed');
+  if (fixed.length === 0) {
+    throw new Error(
+      hunks.trim() !== ''
+        ? 'agent-prompt: --role fix-audit: the ledger records no `fixed` ' +
+          'outcome, but --hunks carries edits. Edits landed that no outcome ' +
+          'owns: a write from outside this flow (a watcher, a formatter), or ' +
+          'a fix the ledger never recorded. Only the second is a ledger to ' +
+          "correct; a foreign edit is not a finding's fix."
+        : 'agent-prompt: --role fix-audit: no finding has outcome `fixed` — ' +
+          'nothing was applied, so there is nothing to audit (a `skipped` or ' +
+          '`no_change_needed` finding has no edit). Skip the audit and say so.',
+    );
+  }
+  if (hunks.trim() === '') {
+    throw new Error(
+      `agent-prompt: --hunks is empty, but the ledger marks ${fixed.length} ` +
+        `finding(s) fixed (${ids(fixed)}). A fix that left no hunk is a ` +
+        'claim, not an edit: the snapshot was taken after the edits, the ' +
+        'edits never landed (then the outcomes are wrong), or they landed ' +
+        'outside the scope `fix-delta --since` printed.',
+    );
+  }
+  if (!hunks.startsWith('diff --git ')) {
+    throw new Error(
+      'agent-prompt: --hunks does not open with a `diff --git` header, so it is not ' +
+        'the patch `fix-delta --since` wrote. Pass the hunks file that ' +
+        'command produced.',
+    );
+  }
+  // Every location, not the first: the auditor's unattested check asks
+  // whether any hunk touches one of them, and a fix that lands at a
+  // finding's second location (the caller beside the declaration) would
+  // read as unattested against a heading that named only the first. Each
+  // display copy goes through `inertPath`, like every other prompt sink in
+  // this file: git permits a newline in a name, and a raw render let a path
+  // end the heading early and forge a section — the `applied hunks end`
+  // fence included — in the auditor's one input file.
+  // `validateFindings` guarantees at least one location per finding.
+  const where = (f: Finding): string =>
+    f.locations
+      .map(
+        (loc) =>
+          `${inertPath(loc.file)}${loc.line !== undefined ? `:${loc.line}` : ''}`,
+      )
+      .join(', ');
+  const entries = fixed.map((f) =>
+    [
+      `### ${f.id} — [${f.severity}] ${where(f)}`,
+      f.summary,
+      `Failure scenario: ${f.failureScenario}`,
+      ...(f.fixWitness ? [`Fix witness: ${f.fixWitness}`] : []),
+      // The premise the fix owed, when the finding recorded one — the
+      // assumption this audit most needs to check is pinned.
+      ...(f.fixConstraint ? [`Fix constraint: ${f.fixConstraint}`] : []),
+      ...(f.outcomeNote ? [`Fixer's note: ${f.outcomeNote}`] : []),
+    ].join('\n'),
+  );
+  return [
+    '# Fix audit input',
+    '',
+    // Every `fixed` outcome the artifact holds, not only this round's: an
+    // artifact rebuilt on the interactive path carries earlier fixes too,
+    // whose edits predate these hunks.
+    `## Findings recorded as \`fixed\` — ${fixed.length} (every \`fixed\` outcome in the artifact; one fixed earlier has no hunk here)`,
+    '',
+    entries.join('\n\n'),
+    '',
+    '## The hunks `--fix` applied',
+    '',
+    '----- applied hunks begin -----',
+    hunks.replace(/\n$/, ''),
+    '----- applied hunks end -----',
+    '',
+  ].join('\n');
 }
 
 /**
@@ -3522,6 +3664,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     typeof args.findings === 'string' && args.findings.length > 0;
   const hasWhole = !!args.wholeDiff;
   const hasRound = args.round !== undefined;
+  const hasHunks = typeof args.hunks === 'string' && args.hunks.length > 0;
   const bad = (msg: string): never => {
     throw new Error(`agent-prompt: ${msg}`);
   };
@@ -3534,13 +3677,15 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       hasRole ||
       hasFile ||
       hasFindings ||
+      hasHunks ||
       hasWhole ||
       args.allChunks ||
       hasRound
     ) {
       bad(
         '--roster builds every prompt the plan requires; it takes no --chunk, ' +
-          '--role, --file, --findings, --whole-diff, --all-chunks or --round. ' +
+          '--role, --file, --findings, --hunks, --whole-diff, --all-chunks or ' +
+          '--round. ' +
           '(Step 4/5 verify and reverse-audit prompts are built per round, ' +
           'with --role and --findings.)',
       );
@@ -3553,11 +3698,12 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       hasRole ||
       hasFile ||
       hasFindings ||
+      hasHunks ||
       args.allChunks ||
       hasRound
     ) {
       bad(
-        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file, --findings, --all-chunks or --round.',
+        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file, --findings, --hunks, --all-chunks or --round.',
       );
     }
   } else if (hasRole) {
@@ -3634,15 +3780,37 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           `does not.`,
       );
     }
-    // `--round` labels a repeat launch of a findings role. Only those roles run
-    // more than once per review, so only they take it — a round label on a
-    // single-run role would fork its record key away from the one the roster
-    // requires, and the delivery check would read "brief never reached an
-    // agent" on a run that did everything right.
+    // `--hunks` is the fix auditor's second input, and it is a pair with
+    // `--findings`: the audit needs both the edit and the claim the edit makes
+    // (which findings it closes). A build with one and not the other would
+    // print a block that audits hunks against nothing, or findings against no
+    // edit — and either is an audit that can only return the all-clear.
+    if (role === 'fix-audit' && !hasHunks) {
+      bad(
+        '--role fix-audit needs --hunks <file>: the diff `fix-delta --since` ' +
+          'wrote after the edits were applied. The audit reads the applied hunks, ' +
+          'never the reviewed diff, and this command folds them into the list ' +
+          'file the printed block points at.',
+      );
+    }
+    if (hasHunks && role !== 'fix-audit') {
+      bad(
+        `--hunks hands the applied hunks to a --role fix-audit block; role ` +
+          `"${role}" does not take it.`,
+      );
+    }
+    // `--round` labels a repeat launch of a role that runs more than once —
+    // declared on the brief (`multiRound`), not keyed on `acceptsFindings`:
+    // the fix auditor takes findings yet runs exactly once per review, and a
+    // round label on a single-run role forks its record key away from the
+    // one the roster requires (the delivery check would read "brief never
+    // reached an agent" on a run that did everything right), and lets a real
+    // round number ride an audit-input key into the resume-time findings
+    // enumeration, where round-bearing entries outrank the genuine lists.
     if (hasRound) {
-      if (!BRIEFS[role]?.acceptsFindings) {
+      if (!BRIEFS[role]?.multiRound) {
         const roundRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
-          (r) => BRIEFS[r].acceptsFindings,
+          (r) => BRIEFS[r].multiRound,
         );
         bad(
           `--round labels one round of a findings role (${roundRoles.join(', ')}); ` +
@@ -3682,6 +3850,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         `${findingRoles.map((r) => `--role ${r}`).join(' / ')} block; ` +
         'it needs one of those roles.',
     );
+  } else if (hasHunks) {
+    bad(
+      '--hunks hands the applied hunks to a --role fix-audit block; it needs ' +
+        'that role and --findings <the outcome-bearing findings artifact>.',
+    );
   } else if (args.allChunks) {
     // --all-chunks with no role reached the batch gate as a no-op: the gate
     // reads `allChunks && role && findings`, so `--chunk 13 --all-chunks`
@@ -3706,7 +3879,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // believing the round label — the thing that keys this round's record —
     // was applied.
     const roundRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
-      (r) => BRIEFS[r].acceptsFindings,
+      (r) => BRIEFS[r].multiRound,
     );
     bad(
       `--round labels one round of a findings role; it needs ` +
@@ -3843,6 +4016,38 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           "findings on the strength of that nothing. Pass the shard's " +
           'findings; only an early reverse-audit round passes an empty file.',
       );
+    }
+    // The fix auditor's list is RENDERED, not copied: `--findings` is the
+    // outcome-bearing artifact, and the audit sees only the `fixed` subset
+    // beside the hunks. Rendering here — before the digest — keeps every
+    // downstream step (digest, list file, fold, record) the one the other
+    // findings roles use, so the delivery floor reads this launch exactly as
+    // it reads a verifier's.
+    if (role === 'fix-audit') {
+      let hunksBytes: Buffer;
+      try {
+        hunksBytes = readFileSync(args.hunks as string);
+      } catch (err) {
+        throw new Error(
+          `agent-prompt: cannot read the hunks ${args.hunks}: ` +
+            `${(err as Error).message}. Pass the file \`fix-delta --since\` wrote.`,
+        );
+      }
+      // utf8 on purpose: the artifact holds git's raw patch bytes, and
+      // the prompt is the lossy copy — fidelity is preserved at the
+      // source, not here.
+      const hunks = hunksBytes.toString('utf8');
+      let artifact: unknown;
+      try {
+        artifact = JSON.parse(findingsContent);
+      } catch (err) {
+        throw new Error(
+          `agent-prompt: --findings for --role fix-audit must be the findings ` +
+            `artifact \`review findings --outcomes\` wrote (JSON): ` +
+            `${(err as Error).message}`,
+        );
+      }
+      findingsContent = renderFixAuditInput(artifact, hunks);
     }
   }
 
@@ -4216,6 +4421,14 @@ export const agentPromptCommand: CommandModule = {
           'so a launch that drops the read matches no record — paste the whole ' +
           'output verbatim, do not add a round number or reword it.',
       })
+      .option('hunks', {
+        type: 'string',
+        describe:
+          'Path to the hunks `--fix` applied (`fix-delta --since` output), for ' +
+          'a --role fix-audit build. With --findings pointing at the ' +
+          'outcome-bearing artifact, the command renders the `fixed` findings ' +
+          'above the hunks into the one list file the block points at.',
+      })
       .option('round', {
         type: 'number',
         describe:
@@ -4236,6 +4449,7 @@ export const agentPromptCommand: CommandModule = {
       allChunks: argv['all-chunks'] === true,
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,
+      hunks: argv['hunks'] as string | undefined,
       round: argv['round'] as number | undefined,
     });
   },

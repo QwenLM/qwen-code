@@ -3116,6 +3116,21 @@ const EN: Messages = {
   'trajectory.range.status': (v) =>
     `Showing ${v?.shown ?? 0} of ${v?.total ?? 0} rows in the selected time`,
   'trajectory.range.clear': 'Clear time selection',
+  'trajectory.range.empty': 'No request or tool ran in the selected time.',
+  'trajectory.mode.clock': 'Real time, idle included',
+  'trajectory.clock.window': (v) =>
+    `${v?.elapsed ?? ''} elapsed, ${v?.active ?? ''} active`,
+  'trajectory.clock.label': (v) =>
+    `Timeline of ${v?.spans ?? 0} timed records over ${v?.elapsed ?? ''}, ${v?.active ?? ''} of activity`,
+  'trajectory.clock.status': 'Showing real time, idle included',
+  'trajectory.active.status': 'Showing active time only',
+  'trajectory.zoom.in': 'Zoom in',
+  'trajectory.zoom.out': 'Zoom out',
+  'trajectory.zoom.reset': 'Show the whole run',
+  'trajectory.zoom.window': (v) => `${v?.to ?? ''} of ${v?.busy ?? ''}`,
+  'trajectory.zoom.aria': (v) => `, zoomed to ${v?.from ?? ''}–${v?.to ?? ''}`,
+  'trajectory.zoom.status': (v) =>
+    `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
   'trajectory.overview.lane.requests': 'req',
@@ -6997,6 +7012,21 @@ const ZH: Messages = {
   'trajectory.range.status': (v) =>
     `已筛选：区间内 ${v?.shown ?? 0} / ${v?.total ?? 0} 行`,
   'trajectory.range.clear': '清除时间区间',
+  'trajectory.range.empty': '所选区间内没有请求或工具运行。',
+  'trajectory.mode.clock': '真实时间（含空闲）',
+  'trajectory.clock.window': (v) =>
+    `历时 ${v?.elapsed ?? ''}，活跃 ${v?.active ?? ''}`,
+  'trajectory.clock.label': (v) =>
+    `${v?.spans ?? 0} 条计时记录，历时 ${v?.elapsed ?? ''}，活跃 ${v?.active ?? ''}`,
+  'trajectory.clock.status': '已切换为真实时间，含空闲',
+  'trajectory.active.status': '已切换为只看活跃时间',
+  'trajectory.zoom.in': '放大',
+  'trajectory.zoom.out': '缩小',
+  'trajectory.zoom.reset': '显示整段',
+  'trajectory.zoom.window': (v) => `${v?.to ?? ''} / ${v?.busy ?? ''}`,
+  'trajectory.zoom.aria': (v) => `，已放大到 ${v?.from ?? ''}–${v?.to ?? ''}`,
+  'trajectory.zoom.status': (v) =>
+    `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
   'trajectory.overview.lane.requests': '请求',
   'trajectory.overview.lane.tools': '工具',

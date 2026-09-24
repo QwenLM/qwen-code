@@ -14,9 +14,14 @@ intent, and fails ambiguous dispatch outcomes as `UNKNOWN`. A persisted
 reconciliation; this core currently fails closed when it has no process-local
 attestation for that binding.
 
-The module intentionally does not implement a process or container provider,
-expose an HTTP API, wire Spring, call the Hosted Harness, or define public
-Agent resources. Those adapters belong to later PRs.
+The module ships one local process provider, `LocalProcessRuntimeProvisioner`,
+which starts the merged Managed Runtime worker and adopts it only after
+attestation; see
+[Managed Runtime process adoption](../../../docs/design/2026-09-23-managed-runtime-process-adoption.md).
+The embedding service still owns the worker command wiring, reconciliation of
+persisted `READY` bindings, and any container or remote provider. The module
+intentionally does not expose an HTTP API, wire Spring, call the Hosted
+Harness, or define public Agent resources. Those adapters belong to later PRs.
 
 Building and running this module requires JDK 21 or later. Its Maven release
 target is 21; services embedding the resulting JAR must also use JDK 21 or later.
