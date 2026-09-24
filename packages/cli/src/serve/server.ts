@@ -28,6 +28,7 @@ import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
 } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type {
   ChannelWorkerControlState,
@@ -303,6 +304,7 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
@@ -579,6 +581,7 @@ export interface ServeAppDeps {
   maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
   isChannelControlDraining?: () => boolean;
   isChannelControlInitializing?: () => boolean;
@@ -1956,6 +1959,7 @@ export function createServeApp(
     onStart: (call) => liveSessionCoordinator.start(call),
     onStop: (call) => liveSessionCoordinator.stop(call),
     onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
+    onScreenFeed: (message) => liveSessionCoordinator.handleScreenFeed(message),
   });
   const publishLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
     const updateDiscovery = (
@@ -2384,6 +2388,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    getChannelRestoreFailures: deps.getChannelRestoreFailures,
     maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
@@ -2620,6 +2625,11 @@ export function createServeApp(
     mutate,
   });
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitWorktreeRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
     mutate,

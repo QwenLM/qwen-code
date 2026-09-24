@@ -1,3 +1,4 @@
+import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
   useContext,
@@ -193,6 +194,8 @@ export type WebShellChatHeaderItem =
   | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
+  /** Show the mobile-access QR entry in chat headers. Defaults to false. */
+  showMobileAccess?: boolean;
   /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
@@ -700,6 +703,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;

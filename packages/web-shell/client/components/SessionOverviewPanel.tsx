@@ -347,7 +347,8 @@ function SessionOverviewPanelInner({
       : (registeredWorkspaces ?? []).filter(
           (entry) => entry.primary || entry.trusted,
         );
-    return visible.length > 0 && visible.every((entry) => entry.trusted)
+    return visible.length > 0 &&
+      visible.every((entry) => entry.trusted && entry.kind !== 'live')
       ? visible.map((entry) => entry.cwd)
       : [];
   }, [

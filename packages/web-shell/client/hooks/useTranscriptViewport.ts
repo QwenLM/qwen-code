@@ -268,6 +268,7 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
     cancelSelection,
     continueLive,
     messages: range ? messages : liveMessages,
+    blocks: range ? blocks : undefined,
     toolSources,
     historical: !!range,
     viewKey: range

@@ -227,6 +227,7 @@ export default defineConfig(({ mode }) => ({
           : {
               index: 'client/index.tsx',
               'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+              'code-highlighter': 'client/code-highlighter.ts',
             },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,

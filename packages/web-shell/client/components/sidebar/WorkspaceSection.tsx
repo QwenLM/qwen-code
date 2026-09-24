@@ -141,6 +141,7 @@ interface WorkspaceSectionProps {
   searchQuery?: string;
   expanded?: boolean;
   autoExpandKey?: string;
+  forceAutoExpand?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
   renderSessions?: boolean;
   /**
@@ -154,6 +155,12 @@ interface WorkspaceSectionProps {
     session: DaemonSessionSummary,
     options?: { searchSnippet?: string | undefined },
   ) => ReactNode;
+  pendingSession?: {
+    key: string;
+    sessionId?: string;
+    sourceId?: string;
+    node: ReactNode;
+  };
   mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
   /**
@@ -248,9 +255,11 @@ export function WorkspaceSection({
   searchQuery = '',
   expanded: controlledExpanded,
   autoExpandKey,
+  forceAutoExpand = false,
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  pendingSession,
   mapSession,
   showSessionDetails = true,
   headerActions,
@@ -287,6 +296,7 @@ export function WorkspaceSection({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
+  const fulfilledPendingSessions = useRef(new Set<string>());
   const channelCatalogLoadRequestId = useRef(0);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
@@ -317,11 +327,11 @@ export function WorkspaceSection({
     if (
       controlledExpanded === undefined &&
       autoExpandKey &&
-      !hasWorkspaceExpansionPreference(workspace.id)
+      (forceAutoExpand || !hasWorkspaceExpansionPreference(workspace.id))
     ) {
       setInternalExpanded(true);
     }
-  }, [autoExpandKey, controlledExpanded, workspace.id]);
+  }, [autoExpandKey, controlledExpanded, forceAutoExpand, workspace.id]);
 
   const sessionsEnabled = renderSessions && !disabled;
   const sessionsVisible = expanded || Boolean(searchQuery.trim());
@@ -643,6 +653,21 @@ export function WorkspaceSection({
         .join('|'),
     [sessions],
   );
+  const pendingSessionMatched = Boolean(
+    pendingSession &&
+      sessions.some(
+        (session) =>
+          (pendingSession.sessionId !== undefined &&
+            session.sessionId === pendingSession.sessionId) ||
+          (pendingSession.sourceId !== undefined &&
+            session.sourceId === pendingSession.sourceId),
+      ),
+  );
+  useEffect(() => {
+    if (!pendingSession) fulfilledPendingSessions.current.clear();
+    else if (pendingSessionMatched)
+      fulfilledPendingSessions.current.add(pendingSession.key);
+  }, [pendingSession, pendingSessionMatched]);
   const contentSearchHits = useSessionContentSearch(
     sessionsEnabled ? client : undefined,
     workspace.cwd,
@@ -899,6 +924,11 @@ export function WorkspaceSection({
         (expanded || Boolean(searchQuery.trim())) &&
         !disabled && (
           <div className={styles.sessions}>
+            {pendingSession &&
+            !pendingSessionMatched &&
+            !fulfilledPendingSessions.current.has(pendingSession.key)
+              ? pendingSession.node
+              : null}
             {loadError ? (
               <div className={styles.error} role="status">
                 {loadErrorLabel}
@@ -919,7 +949,8 @@ export function WorkspaceSection({
               // A source switch swaps the query key; until the new source's
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.
-              sessionsLoading && sessionsPage === undefined ? null : (
+              pendingSession ||
+              (sessionsLoading && sessionsPage === undefined) ? null : (
                 <div className={styles.empty}>{noSessionsLabel}</div>
               )
             ) : channelSessionGroups ? (
