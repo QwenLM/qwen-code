@@ -24,7 +24,7 @@ import {
   type CollectSummary,
   type WorkflowApi,
 } from './batch-workflow.js';
-import { isInsideRoot } from './batch-docs.js';
+import { isWithinRoot } from '../config/path-comparison.js';
 
 export interface BatchAutoCollectOptions {
   /** Project root of this session; only its tasks are collected. */
@@ -66,7 +66,7 @@ const realPath = (p: string) => {
 /** The task belongs to this session: its root is the session root or below
  * it (the agent's shell may have run `qwen batch run` from a subdirectory). */
 const belongsTo = (sessionRoot: string, taskRoot: string) =>
-  isInsideRoot(realPath(sessionRoot), realPath(taskRoot));
+  isWithinRoot(realPath(taskRoot), realPath(sessionRoot));
 
 const isOpen = (task: BatchTask) =>
   task.attempts.some(
@@ -126,6 +126,8 @@ export function createBatchAutoCollector(
   // One-time warnings: a submission that cannot be reconciled, and a
   // session that cannot reach the Batch API at all.
   const warnedAmbiguous = new Set<string>();
+  // Tasks already told they are pinned to another endpoint or key.
+  const warnedEndpoint = new Set<string>();
   let warnedNoEndpoint = false;
   let nextResolveAt = 0;
 
@@ -228,6 +230,17 @@ export function createBatchAutoCollector(
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error);
+            // Persistent until the user switches back, so say it once rather
+            // than leave them waiting for a notice that cannot come.
+            if (
+              /was submitted (to|with)/.test(message) &&
+              !warnedEndpoint.has(task.id)
+            ) {
+              warnedEndpoint.add(task.id);
+              options.notify(
+                `Batch task ${task.id} cannot be collected automatically: ${message}`,
+              );
+            }
             reconciled = /has no submitted batch/.test(message);
             log(`batch auto-collect: ${task.id}: ${message}`);
           }

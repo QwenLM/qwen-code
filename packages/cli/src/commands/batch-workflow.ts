@@ -55,6 +55,7 @@ import {
   freezeRequest,
   describeThinking,
 } from './batch-docs.js';
+import type { DeliveryOutcome } from './batch-docs.js';
 
 // Batch bills successful requests at half the realtime list price and does
 // not hit the context cache. Monetary estimates exist only when the operator
@@ -385,11 +386,11 @@ async function submitAttempt(
     attempt.error = `create did not complete cleanly: ${error instanceof Error ? error.message : String(error)}`;
     refreshTaskStatus(task);
     store.save(task);
-    deps.err(
-      `[batch] the create request did not complete cleanly; the batch may exist and be billing.`,
-    );
-    deps.err(
-      `[batch] run \`qwen batch collect ${task.id}\` to reconcile before doing anything else.`,
+    // A failure, not a submission: the caller (often the agent) must stop
+    // and reconcile, not report success.
+    throw new Error(
+      `task ${task.id}: the create request did not complete cleanly, so the batch may exist and be billing. ` +
+        `Run \`qwen batch collect ${task.id}\` to reconcile before doing anything else.`,
     );
   }
 }
@@ -792,12 +793,22 @@ async function collectLocked(
           item.truncated = verdict.truncated || undefined;
           continue;
         }
-        const outcome = deliverResult(
-          item,
-          verdict.content,
-          task.projectRoot,
-          item.sourceSha256,
-        );
+        // A target that cannot be written (it is a directory, a parent is a
+        // file, no permission) holds its item; it must not stop the others.
+        let outcome: DeliveryOutcome;
+        try {
+          outcome = deliverResult(
+            item,
+            verdict.content,
+            task.projectRoot,
+            item.sourceSha256,
+          );
+        } catch (error) {
+          outcome = {
+            kind: 'held',
+            reason: `cannot write target "${item.target}": ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
         if (outcome.kind === 'delivered') {
           item.state = 'delivered';
           item.deliveredSha256 = sha256(verdict.content);

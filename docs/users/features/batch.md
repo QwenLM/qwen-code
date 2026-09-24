@@ -98,9 +98,9 @@ output files are deleted.
 - A task is tied to the endpoint and API key it was submitted with (only a
   short hash of the key is stored); after switching accounts or regions,
   commands refuse until you switch back.
-- If the create call's answer is lost, the task is marked `submit-unknown` and
-  `collect` reconciles against the provider's batch list instead of
-  resubmitting — a duplicate would bill twice.
+- If the create call's answer is lost, `run` fails, the task is marked
+  `submit-unknown`, and `collect` reconciles against the provider's batch
+  list instead of resubmitting — a duplicate would bill twice.
 - Only one `qwen batch` command works on a task at a time.
 - A run freezes your current sampling parameters, output limit and thinking
   mode; retries reuse them.

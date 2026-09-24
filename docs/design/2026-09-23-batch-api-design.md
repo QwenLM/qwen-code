@@ -175,22 +175,22 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
 
 ## 5. Boundary behaviors
 
-| Case                                                       | Behavior                                                                                                          |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Source path escapes the project root (incl. via symlink)   | Refused at assembly; nothing is uploaded                                                                          |
-| Assembled line over 1 MB                                   | Refused before upload; split the document                                                                         |
-| Create returns a definite 4xx                              | Orphan upload deleted, items `failed`, `retry` is safe                                                            |
-| Create answer lost (5xx / dropped socket)                  | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                                         |
-| Reconcile finds 0 or 2+ candidates                         | Report and stop; the provider list is the source of truth                                                         |
-| Batch not settled at collect                               | Report status; `--wait` polls (no lock held) with 10s → 60s backoff until it settles or `--timeout`               |
-| Result truncated / tool calls / empty                      | Item `failed` with the reason; a truncated item needs a larger limit to retry                                     |
-| Result custom_id unknown or duplicated                     | Ignored with a warning                                                                                            |
-| Item missing from all result files                         | `failed` ("no result line", or the provider's reason when the whole batch failed)                                 |
-| Result files present, but no line maps to the attempt      | Nothing marked failed, remote files kept, local copies dropped for a fresh download; collect reports it           |
-| Create accepted, but its body names no batch id            | `submit-unknown`, reconciled like a lost answer                                                                   |
-| Source changed since submission                            | `held`; `retry` resubmits it against the new source                                                               |
-| Target exists with other content / target symlinks outside | `held`; re-collect after resolving delivers from the local record, no new cost                                    |
-| After collect                                              | Remote input/output/error files deleted (404 counts as deleted); a failed deletion is retried by the next collect |
+| Case                                                                    | Behavior                                                                                                          |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Source path escapes the project root (incl. via symlink)                | Refused at assembly; nothing is uploaded                                                                          |
+| Assembled line over 1 MB                                                | Refused before upload; split the document                                                                         |
+| Create returns a definite 4xx                                           | Orphan upload deleted, items `failed`, `retry` is safe                                                            |
+| Create answer lost (5xx / dropped socket)                               | `submit-unknown`, and `run` exits with an error; `collect` reconciles via the provider list; no resubmit          |
+| Reconcile finds 0 or 2+ candidates                                      | Report and stop; the provider list is the source of truth                                                         |
+| Batch not settled at collect                                            | Report status; `--wait` polls (no lock held) with 10s → 60s backoff until it settles or `--timeout`               |
+| Result truncated / tool calls / empty                                   | Item `failed` with the reason; a truncated item needs a larger limit to retry                                     |
+| Result custom_id unknown or duplicated                                  | Ignored with a warning                                                                                            |
+| Item missing from all result files                                      | `failed` ("no result line", or the provider's reason when the whole batch failed)                                 |
+| Result files present, but no line maps to the attempt                   | Nothing marked failed, remote files kept, local copies dropped for a fresh download; collect reports it           |
+| Create accepted, but its body names no batch id                         | `submit-unknown`, reconciled like a lost answer                                                                   |
+| Source changed since submission                                         | `held`; `retry` resubmits it against the new source                                                               |
+| Target exists with other content / symlinks outside / cannot be written | `held` (other items still deliver); re-collect after resolving delivers from the local record, no new cost        |
+| After collect                                                           | Remote input/output/error files deleted (404 counts as deleted); a failed deletion is retried by the next collect |
 
 Retry semantics:
 
@@ -227,9 +227,9 @@ involved only once, when results are in.
       command.
     - Same safety as a manual collect: the same lock, idempotency and
       no-overwrite delivery.
-    - What it cannot collect is said once: no usable Batch credentials, or a
-      submission with no matching provider batch. A task pinned to another
-      endpoint backs off until the session switches back.
+    - What it cannot collect is said once: no usable Batch credentials, a
+      submission with no matching provider batch, or a task pinned to another
+      endpoint or key (it backs off until the session switches back).
   - `general.batchAutoCollect` (default `true`) turns it off.
   - Not covered: headless, `qwen serve`, ACP, web-shell — no model-free notice
     channel there; use `qwen batch collect`.

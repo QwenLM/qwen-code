@@ -16,7 +16,6 @@ import {
   describeThinking,
   estimateTokens,
   freezeRequest,
-  isInsideRoot,
   parseOutputJsonl,
   sha256,
 } from './batch-docs.js';
@@ -456,25 +455,6 @@ describe('deliverResult', () => {
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
-  });
-});
-
-describe('isInsideRoot', () => {
-  it('accepts the root and paths below it, including names starting with ..', () => {
-    expect(isInsideRoot('/proj', '/proj')).toBe(true);
-    expect(isInsideRoot('/proj', '/proj/a/b.md')).toBe(true);
-    expect(isInsideRoot('/proj', '/proj/..notes.md')).toBe(true);
-  });
-
-  it('rejects siblings, parents and prefix look-alikes', () => {
-    expect(isInsideRoot('/proj', '/project/a.md')).toBe(false);
-    expect(isInsideRoot('/proj', '/a.md')).toBe(false);
-    expect(isInsideRoot('/proj/sub', '/proj')).toBe(false);
-  });
-
-  it('works when the root itself ends in a separator', () => {
-    // `realRoot + sep` used to turn `/` into `//`, holding every target.
-    expect(isInsideRoot('/', '/proj/a.md')).toBe(true);
   });
 });
 

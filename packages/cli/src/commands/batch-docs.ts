@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { isWithinRoot } from '../config/path-comparison.js';
 import type { BatchPlan, TaskItem } from './batch-task.js';
 import { customIdOf } from './batch-task.js';
 
@@ -204,18 +205,6 @@ export function assembleRequests(
   return requests;
 }
 
-/**
- * `p` is `root` or below it. Uses `path.relative`, so a root that already
- * ends in a separator (`/`, `C:\\`) and a different Windows drive both work.
- */
-export function isInsideRoot(root: string, p: string): boolean {
-  const relative = path.relative(root, p);
-  if (relative === '') return true;
-  if (path.isAbsolute(relative)) return false;
-  // `..foo` is a file inside the root; only a `..` segment leaves it.
-  return relative !== '..' && !relative.startsWith(`..${path.sep}`);
-}
-
 // A path that does not exist yet has nothing to follow; the read that
 // comes next reports it by name.
 function isRealPathInsideRoot(projectRoot: string, p: string): boolean {
@@ -226,7 +215,7 @@ function isRealPathInsideRoot(projectRoot: string, p: string): boolean {
     return true;
   }
   const realRoot = fs.realpathSync(projectRoot);
-  return isInsideRoot(realRoot, real);
+  return isWithinRoot(real, realRoot);
 }
 
 function resolveInsideRoot(
@@ -235,7 +224,7 @@ function resolveInsideRoot(
 ): string | undefined {
   if (path.isAbsolute(relative)) return undefined;
   const resolved = path.resolve(projectRoot, relative);
-  return isInsideRoot(projectRoot, resolved) ? resolved : undefined;
+  return isWithinRoot(resolved, projectRoot) ? resolved : undefined;
 }
 
 export interface OutputLine {
@@ -401,7 +390,7 @@ export function deliverResult(
     if (up === ancestor) break;
     ancestor = up;
   }
-  if (!isInsideRoot(realRoot, fs.realpathSync(ancestor))) {
+  if (!isWithinRoot(fs.realpathSync(ancestor), realRoot)) {
     return {
       kind: 'held',
       reason: `target directory "${item.target}" resolves outside the project root`,
@@ -411,7 +400,7 @@ export function deliverResult(
   // Revalidate the created parent: the chain must really live under the
   // project at delivery time, not just before the mkdir.
   const realParent = fs.realpathSync(parent);
-  if (!isInsideRoot(realRoot, realParent)) {
+  if (!isWithinRoot(realParent, realRoot)) {
     return {
       kind: 'held',
       reason: `target directory "${item.target}" resolves outside the project root`,

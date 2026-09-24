@@ -304,10 +304,12 @@ describe('runPlan', () => {
       },
     );
 
-    await runPlan(h.deps, h.planPath); // must not throw
+    // Recorded, then reported as a failure so nobody calls it submitted.
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(
+      /may exist and be billing/,
+    );
     const task = h.store.load(taskIdOf(h));
     expect(task.status).toBe('submit-unknown');
-    expect(h.err.join('\n')).toMatch(/may exist and be billing/);
 
     await collectTask(h.deps, task.id);
     expect(h.api.createBatch).toHaveBeenCalledTimes(1); // never resubmitted
@@ -707,7 +709,7 @@ describe('collectTask', () => {
         throw Object.assign(new Error('HTTP 502'), { status: 502 });
       },
     );
-    await runPlan(h.deps, h.planPath);
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(/reconcile/);
     const taskId = taskIdOf(h);
     await collectTask(h.deps, taskId);
     const task = h.store.load(taskId);
@@ -1252,9 +1254,23 @@ describe('review fixes', () => {
   it('treats a create answer without a batch id as ambiguous', async () => {
     const h = (harness = setup());
     h.api.createBatch.mockImplementationOnce(async () => ({}) as BatchJob);
-    await runPlan(h.deps, h.planPath);
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(/reconcile/);
     const task = h.store.load(taskIdOf(h));
     expect(task.attempts[0].submitState).toBe('unknown');
     expect(task.attempts[0].batchId).toBeUndefined();
+  });
+
+  it('holds an item whose target cannot be written and still delivers the rest', async () => {
+    const h = (harness = setup());
+    // The target path is a directory: reading or writing it throws.
+    fs.mkdirSync(path.join(h.root, 'docs', 'en', 'a.md'), { recursive: true });
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual(['held', 'delivered']);
+    expect(task.items[0].heldReason).toMatch(/cannot write target/);
   });
 });

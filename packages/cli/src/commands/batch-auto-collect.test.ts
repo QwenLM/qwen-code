@@ -133,7 +133,10 @@ async function submit(h: Harness) {
     api: h.api,
     sleep: async () => {},
   };
-  await runPlan(deps, 'plan.json');
+  // A lost create answer is recorded and then reported as an error.
+  await runPlan(deps, 'plan.json').catch((error: unknown) => {
+    if (!/reconcile/.test(String(error))) throw error;
+  });
   return new BatchTaskStore(h.home).list()[0].id;
 }
 
@@ -332,15 +335,17 @@ describe('batch auto-collect', () => {
     await ac.tick();
     h.clock.now += 10 * 60_000;
     await ac.tick(); // still the wrong key: refused again after the backoff
-    expect(h.notices).toEqual([]);
+    // Said once, so nobody waits for a notice that cannot come.
+    expect(h.notices).toHaveLength(1);
+    expect(h.notices[0]).toMatch(/cannot be collected automatically.*API key/);
     expect(h.api.getBatch).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledTimes(2);
 
     apiKey = 'k'; // back on the key the task was submitted with
     h.clock.now += 10 * 60_000;
     await ac.tick();
-    expect(h.notices).toHaveLength(1);
-    expect(h.notices[0]).toMatch(/2 result\(s\) delivered/);
+    expect(h.notices).toHaveLength(2);
+    expect(h.notices[1]).toMatch(/2 result\(s\) delivered/);
   });
 
   it('says once that it cannot collect without usable Batch credentials', async () => {
