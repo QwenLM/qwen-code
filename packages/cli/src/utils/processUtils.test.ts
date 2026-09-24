@@ -58,7 +58,6 @@ describe('processUtils', () => {
     expect(requestUpdateOnExit()).toBe(false);
   });
 
-  // Last: superviseInProcess switches module state for the rest of the file.
   describe('getRelaunchExecArgv', () => {
     const originalGc = globalThis.gc;
     const originalExecArgv = [...process.execArgv];
@@ -90,6 +89,7 @@ describe('processUtils', () => {
     });
   });
 
+  // Last: superviseInProcess switches module state for the rest of the file.
   describe('without a supervising parent', () => {
     const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
     const execve = vi.fn();

@@ -221,7 +221,7 @@
 - 操作真实的文件夹信任对话框：启动执行了两次，提示符恢复可输入，会话始终是单进程。
 - 以退出码 44 退出的模拟安装会重新启动，参数保留、`gc` 可用、退出码正确传递。
 - 在 `npm install -g` 安装上执行真实的 `/update`，由本地 registry 提供更新版本：更新被安装，并重新启动到新版本。
-- 在所有启动模式下，会话进程都有 `global.gc`：交互式、`-p`、ACP、stream-json 以及 `advanced.autoConfigureMemory`。在 Node 22.23、Node 22.3（没有 `process.execve`）以及文件夹信任重启之后均成立。
+- 在以下启动模式中，会话进程都有 `global.gc`：交互式、`-p`、ACP、stream-json 以及 `advanced.autoConfigureMemory`。在 Node 22.23、Node 22.3（没有 `process.execve`）以及文件夹信任重启之后均成立。
 - `qwen review --help` 正常工作。
 
 ## 11. 验收标准

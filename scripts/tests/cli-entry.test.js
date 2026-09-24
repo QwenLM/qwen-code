@@ -319,6 +319,24 @@ describe('scripts/cli-entry.js production entry', () => {
       expect(process.env.NODE_COMPILE_CACHE).toBe('/tmp/node-compile-cache');
     });
 
+    it('keeps the spawned child with --expose-gc under Bun', async () => {
+      Object.defineProperty(process.versions, 'bun', {
+        value: '1.3.14',
+        configurable: true,
+      });
+      try {
+        await import('../cli-entry.js?bun');
+
+        expect(spawnSyncMock).toHaveBeenCalledWith(
+          process.execPath,
+          ['--expose-gc', expect.stringMatching(/cli\.js$/), 'review', 'check'],
+          expect.anything(),
+        );
+      } finally {
+        delete process.versions.bun;
+      }
+    });
+
     it('relaunches through the launcher when the CLI exits after an update', async () => {
       const exitListeners = process.listeners('exit');
       process.env.QWEN_CODE_LAUNCHER_PATH = '/opt/qwen-standalone/bin/qwen';

@@ -9,14 +9,13 @@
 /**
  * Production bin entry wrapper.
  *
- * For most commands: launches the bundled CLI with --expose-gc so that
- * global.gc() is available for the memory-pressure monitor's critical-tier
- * cleanup.
+ * For most commands, global.gc() must be available for the memory-pressure
+ * monitor's critical-tier cleanup. On POSIX under Node the entry exposes gc at
+ * runtime and imports cli.js in this process; on Windows and under Bun it
+ * launches the bundled CLI as a child with --expose-gc.
  *
  * For bootstrap fast paths: imports cli.js directly in-process, skipping the
- * spawnSync overhead. These paths do not need global.gc(); the normal
- * interactive path still relaunches with --expose-gc for the memory-pressure
- * monitor.
+ * spawnSync overhead. These paths do not need global.gc().
  */
 
 const relaunchArgs = process.env['QWEN_CODE_RELAUNCH_ARGS'];
@@ -401,7 +400,9 @@ if (isInProcessFastPath()) {
       ? { NODE_COMPILE_CACHE: compileCache.directory }
       : {};
 
-  if (process.platform !== 'win32') {
+  // Bun cannot expose gc at runtime (no v8.setFlagsFromString), so it keeps
+  // the child with --expose-gc in argv, as Windows does.
+  if (process.platform !== 'win32' && !process.versions.bun) {
     // Running the CLI in this process instead of a child saves a Node boot and
     // the idle launcher's memory for the whole session. The memory-pressure
     // monitor's global.gc() comes from the runtime flag instead of argv.

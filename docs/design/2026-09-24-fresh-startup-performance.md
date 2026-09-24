@@ -293,7 +293,7 @@ New tests cover:
   available, and the exit code propagated.
 - A real `/update` on an `npm install -g` install, with a local registry
   serving a newer version, installed it and relaunched into the new version.
-- `global.gc` is available in the session process in every launch mode:
+- `global.gc` is available in the session process in these launch modes:
   interactive, `-p`, ACP, stream-json, and `advanced.autoConfigureMemory`. This
   holds on Node 22.23, on Node 22.3 (which has no `process.execve`), and after
   a folder-trust restart.
