@@ -152,6 +152,23 @@ function legacyOptionalMethodTransportError(
   );
 }
 
+function legacyOptionalMethodSseTransportError(
+  status?: number,
+  code = -32601,
+): Error {
+  const methodMessage =
+    code === -32601 ? 'Method not found' : 'Session not found';
+  const responseBody = JSON.stringify({
+    jsonrpc: '2.0',
+    error: { code, message: methodMessage },
+    id: null,
+  });
+  const statusMessage = status === undefined ? '' : ` (HTTP ${status})`;
+  return new Error(
+    `Error POSTing to endpoint${statusMessage}: ${responseBody}`,
+  );
+}
+
 describe('mcp-client', () => {
   afterEach(() => {
     _setMcpFetchForTest(undefined);
@@ -885,9 +902,22 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
   });
 
   describe('McpClient', () => {
-    it.each([400, 404, 405, 422, 501])(
-      'does not disconnect for a legacy HTTP -32601 optional-method response with status %i',
-      async (status) => {
+    it.each(
+      ([400, 404, 405, 422, 501] as const).flatMap((status) => [
+        {
+          status,
+          transport: 'structured HTTP status',
+          makeError: () => legacyOptionalMethodTransportError(status),
+        },
+        {
+          status,
+          transport: 'legacy SSE error message',
+          makeError: () => legacyOptionalMethodSseTransportError(status),
+        },
+      ]),
+    )(
+      'does not disconnect for a legacy HTTP -32601 optional-method response from $transport with status $status',
+      async ({ makeError }) => {
         const mockedClient = {
           connect: vi.fn(),
           registerCapabilities: vi.fn(),
@@ -915,7 +945,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         );
         await client.connect();
 
-        mockedClient.onerror?.(legacyOptionalMethodTransportError(status));
+        mockedClient.onerror?.(makeError());
 
         expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
         expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
@@ -939,6 +969,14 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       {
         description: 'a method-not-found response with HTTP 403',
         error: () => legacyOptionalMethodTransportError(403),
+      },
+      {
+        description: 'a legacy SSE method-not-found response with HTTP 401',
+        error: () => legacyOptionalMethodSseTransportError(401),
+      },
+      {
+        description: 'a legacy SSE method-not-found response without a status',
+        error: () => legacyOptionalMethodSseTransportError(),
       },
     ])('still disconnects for $description', async ({ error }) => {
       const mockedClient = {

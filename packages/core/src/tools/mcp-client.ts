@@ -1753,37 +1753,35 @@ function isMethodNotFound(error: unknown): boolean {
 }
 
 /**
- * The legacy Streamable HTTP transport can turn a JSON-RPC method-not-found
- * response into an HTTP 400 error before the discovery request sees it. That
- * response is benign for optional MCP method families, but unrelated errors
- * must still retire the connection.
+ * Legacy HTTP transports may surface JSON-RPC method-not-found as a structured
+ * HTTP error or as a plain error message containing `(HTTP nnn): {body}`.
+ * Only allow known method-not-found status mappings with a valid JSON-RPC body;
+ * unrelated HTTP and transport errors must still retire the connection.
  */
 function isBenignMcpMethodNotFound(error: unknown): boolean {
-  const status = getErrorStatus(error);
+  const text = (error as { text?: unknown } | null)?.text;
+  const rawMessage = (error as { message?: unknown } | null)?.message;
+  const errorMessage = typeof rawMessage === 'string' ? rawMessage : undefined;
+  const responseText = typeof text === 'string' ? text : errorMessage;
+  const embeddedStatus = [errorMessage, responseText]
+    .filter((part): part is string => part !== undefined)
+    .join('\n')
+    .match(/\bHTTP\s+(\d{3})\b/i)?.[1];
+  const status =
+    getErrorStatus(error) ??
+    (embeddedStatus === undefined ? undefined : Number(embeddedStatus));
   // Legacy servers and gateways use more than HTTP 400 for this JSON-RPC
   // response. Keep the accepted mappings explicit so authentication errors
   // and unrelated server failures still retire the connection.
-  if (status !== undefined && ![400, 404, 405, 422, 501].includes(status)) {
+  if (status === undefined || ![400, 404, 405, 422, 501].includes(status)) {
     return false;
   }
+  if (responseText === undefined) return false;
 
-  const code = (error as { code?: unknown } | null)?.code;
-  if (code === -32601) return true;
-  if (status === undefined) return false;
-
-  const text = (error as { text?: unknown } | null)?.text;
-  const message =
-    typeof text === 'string'
-      ? text
-      : error instanceof Error
-        ? error.message
-        : undefined;
-  if (message === undefined) return false;
-
-  const jsonStart = message.indexOf('{');
+  const jsonStart = responseText.indexOf('{');
   if (jsonStart === -1) return false;
   try {
-    const payload = JSON.parse(message.slice(jsonStart)) as {
+    const payload = JSON.parse(responseText.slice(jsonStart)) as {
       jsonrpc?: unknown;
       error?: { code?: unknown };
     };
