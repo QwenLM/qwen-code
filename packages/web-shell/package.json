@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.24.3",
+  "version": "0.24.5",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -22,6 +22,10 @@
     "./transcript": {
       "types": "./dist/types/transcript.d.ts",
       "import": "./dist/transcript.js"
+    },
+    "./code-highlighter": {
+      "types": "./dist/types/code-highlighter.d.ts",
+      "import": "./dist/code-highlighter.js"
     }
   },
   "files": [

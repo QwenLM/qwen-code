@@ -24,6 +24,7 @@ import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 
 vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -34,7 +35,6 @@ vi.mock('../../WebShellContexts', async () => {
 });
 
 const {
-  buildUnifiedDiff,
   extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,
@@ -2751,6 +2751,38 @@ describe('tool output logic', () => {
         }),
       ),
     ).toContain('-deleted content');
+  });
+
+  it('builds a diff from the edit tool’s real parameter names on the full projection', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'REAL_PARAMETER_DIFF',
+          },
+        }),
+      ),
+    ).toContain('REAL_PARAMETER_DIFF');
+  });
+
+  it('does not render an attempted real-parameter diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
   });
 
   it('does not render an attempted typed diff for a failed edit', () => {

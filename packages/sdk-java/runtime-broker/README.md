@@ -3,19 +3,27 @@
 This Java 21 module defines the state and embeddable orchestration core for a
 Managed Agent Runtime Broker. It contains Runtime binding, Runtime Session,
 and Tool execution records; repository contracts; thread-safe in-memory
-implementations; and a framework-neutral service that composes authoritative
-scope resolution, Runtime provisioning, and Runtime transport adapters.
+and JDBC implementations; and a framework-neutral service that composes
+authoritative scope resolution, Runtime provisioning, and Runtime transport
+adapters.
 
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
-intent, and fails ambiguous dispatch outcomes as `UNKNOWN`. A persisted
-`READY` binding is never reused by a new process without explicit adoption or
-reconciliation; this core currently fails closed when it has no process-local
-attestation for that binding.
+intent, and fails ambiguous dispatch outcomes as `UNKNOWN`.
+`reconcileExecution` asks the original Runtime about an `UNKNOWN` execution
+and settles it only on that Runtime's terminal answer; it never replays the
+call. A persisted `READY` binding is never reused by a new process without
+explicit adoption or reconciliation; this core currently fails closed when it
+has no process-local attestation for that binding.
 
-The module intentionally does not implement a process or container provider,
-expose an HTTP API, wire Spring, call the Hosted Harness, or define public
-Agent resources. Those adapters belong to later PRs.
+The module ships one local process provider, `LocalProcessRuntimeProvisioner`,
+which starts the merged Managed Runtime worker and adopts it only after
+attestation; see
+[Managed Runtime process adoption](../../../docs/design/2026-09-23-managed-runtime-process-adoption.md).
+The embedding service still owns the worker command wiring, reconciliation of
+persisted `READY` bindings, and any container or remote provider. The module
+intentionally does not expose an HTTP API, wire Spring, call the Hosted
+Harness, or define public Agent resources. Those adapters belong to later PRs.
 
 Building and running this module requires JDK 21 or later. Its Maven release
 target is 21; services embedding the resulting JAR must also use JDK 21 or later.
@@ -29,10 +37,18 @@ mvn checkstyle:check
 
 ## JDBC persistence
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the three private
-Broker tables. The JDBC implementations use only `javax.sql.DataSource`; the
-embedding service owns the connection pool and schema lifecycle. This module
-intentionally does not persist Tool executions or wire a Spring/HTTP adapter.
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
+Broker tables. The JDBC implementations use `javax.sql.DataSource` for
+database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
+codec; the embedding service owns the connection pool and schema lifecycle.
+Tool execution rows preserve idempotency identity, dispatch ownership and
+lease, cancellation intent, `UNKNOWN` recovery state, and the final result.
+Tool execution identifiers are globally unique repository keys. The embedding
+service must derive them from authenticated tenant, workspace, and session
+context because this repository interface does not carry separate scope
+arguments.
+This module intentionally does not wire a Spring service or dispatch Tool
+calls.
 
 Run the optional real-MySQL contract with:
 

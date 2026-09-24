@@ -26,6 +26,7 @@ import {
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { ShellToolOutput } from './tools/ShellToolOutput';
 import {
   extractTodosFromToolCall,
@@ -181,8 +182,10 @@ export function extractDiff(tool: ACPToolCall): string {
 
   const previewPatch = tool.args?.patch;
   if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
-  const previewNewText = tool.args?.newText;
-  const previewOldText = tool.args?.oldText;
+  // `newText`/`oldText` come from the safe tool preview projection; the full
+  // projection carries the edit tool's real parameter names instead.
+  const previewNewText = tool.args?.newText ?? tool.args?.new_string;
+  const previewOldText = tool.args?.oldText ?? tool.args?.old_string;
   if (
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
@@ -209,53 +212,6 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
   return (
     raw.truncatedForSession === true && 'fileName' in raw && 'newContent' in raw
   );
-}
-
-const MAX_DIFF_PRODUCT = 250_000;
-
-export function buildUnifiedDiff(oldText: string, newText: string): string {
-  const oldLines = oldText.split('\n');
-  const newLines = newText.split('\n');
-
-  const n = oldLines.length;
-  const m = newLines.length;
-
-  if (n * m > MAX_DIFF_PRODUCT) {
-    const removed = oldLines.map((l) => (l ? `-${l}` : '-'));
-    const added = newLines.map((l) => (l ? `+${l}` : '+'));
-    return [...removed, ...added].join('\n');
-  }
-
-  const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    Array(m + 1).fill(0),
-  );
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      dp[i][j] =
-        oldLines[i - 1] === newLines[j - 1]
-          ? dp[i - 1][j - 1] + 1
-          : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
-
-  const result: string[] = [];
-  let i = n,
-    j = m;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-      result.push(` ${oldLines[i - 1]}`);
-      i--;
-      j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      result.push(`+${newLines[j - 1]}`);
-      j--;
-    } else {
-      result.push(`-${oldLines[i - 1]}`);
-      i--;
-    }
-  }
-
-  return result.reverse().join('\n');
 }
 
 // A description longer than this is likely ellipsised on a normal-width row, so
@@ -1004,7 +960,7 @@ function AgentIcon() {
   );
 }
 
-function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
+export function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
   const kind = getToolHeaderKind(tool);
   if (kind === 'agent') return <AgentIcon />;
   if (kind === 'ask') return <AskUserIcon />;
