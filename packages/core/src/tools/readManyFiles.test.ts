@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import net from 'node:net';
 import sharp from 'sharp';
 import type { Part, PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
@@ -210,6 +211,13 @@ describe('readManyFiles', () => {
         'replacement secret',
       );
       expect(result.files).toHaveLength(0);
+      expect(result.dropped).toEqual([
+        {
+          path: absolutePath,
+          canonicalPath: absolutePath,
+          reason: 'identity-changed',
+        },
+      ]);
     });
 
     it('surfaces an error when validated inode identity is unverifiable', async () => {
@@ -575,6 +583,13 @@ describe('readManyFiles', () => {
         expect(content).not.toContain('unsaved buffer');
         expect(content).not.toContain('replacement secret');
         expect(result.files).toHaveLength(0);
+        expect(result.dropped).toEqual([
+          {
+            path: absolutePath,
+            canonicalPath: absolutePath,
+            reason: 'identity-changed',
+          },
+        ]);
         expect(cache.size()).toBe(0);
         const decision = await checkPriorRead(cache, absolutePath, 'editing');
         expect(decision.ok).toBe(false);
@@ -820,6 +835,13 @@ describe('readManyFiles', () => {
         });
 
         expect(result.files).toHaveLength(0);
+        expect(result.dropped).toEqual([
+          {
+            path: absolutePath,
+            canonicalPath: absolutePath,
+            reason: 'identity-changed',
+          },
+        ]);
         expect(contentToString(result.contentParts)).not.toContain(
           'approved.bin',
         );
@@ -910,6 +932,127 @@ describe('readManyFiles', () => {
       expect(contentToString(result.contentParts)).toContain(
         'No files matching the criteria were found',
       );
+    });
+  });
+
+  describe('dropped reference reporting (#8226)', () => {
+    it('reports a path missing from the validated identity map', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('unmapped.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map(),
+      });
+
+      expect(result.dropped).toEqual([
+        {
+          path: absolutePath,
+          canonicalPath: absolutePath,
+          reason: 'not-validated',
+        },
+      ]);
+      expect(result.files).toHaveLength(0);
+    });
+
+    it('labels a drop with the caller-facing display path', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('displayed.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      await fs.rename(absolutePath, `${absolutePath}.original`);
+      await fs.writeFile(absolutePath, 'replacement');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+        ]),
+        displayPaths: new Map([[absolutePath, 'displayed.txt']]),
+      });
+
+      expect(result.dropped).toEqual([
+        {
+          path: 'displayed.txt',
+          canonicalPath: absolutePath,
+          reason: 'identity-changed',
+        },
+      ]);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'reports a validated reference that is not a regular file',
+      async () => {
+        // A bound socket path must fit the platform's sun_path limit, and the
+        // test root can be long, so bind under its own short directory.
+        const socketDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qw-s-'));
+        const socketPath = path.join(socketDir, 'p.sock');
+        if (socketPath.length > 100) {
+          await fs.rm(socketDir, { recursive: true, force: true });
+          return;
+        }
+        const server = net.createServer();
+        await new Promise<void>((resolve) =>
+          server.listen(socketPath, resolve),
+        );
+        const stats = await fs.stat(socketPath);
+        const mockConfig = createMockConfig(tempRootDir);
+
+        try {
+          const result = await readManyFiles(mockConfig, {
+            paths: [socketPath],
+            validatedPathIdentities: new Map([
+              [socketPath, { dev: stats.dev, ino: stats.ino }],
+            ]),
+          });
+
+          expect(result.files).toHaveLength(0);
+          expect(result.dropped).toEqual([
+            {
+              path: socketPath,
+              canonicalPath: socketPath,
+              reason: 'identity-changed',
+            },
+          ]);
+        } finally {
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+          await fs.rm(socketDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'delivers a reference whose name contains a literal backslash',
+      async () => {
+        const name = 'weird\\name.txt';
+        const absolutePath = path.join(tempRootDir, name);
+        await fs.writeFile(absolutePath, 'backslash content');
+        const stats = await fs.stat(absolutePath);
+        const mockConfig = createMockConfig(tempRootDir);
+
+        const result = await readManyFiles(mockConfig, {
+          paths: [absolutePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: stats.dev, ino: stats.ino }],
+          ]),
+          displayPaths: new Map([[absolutePath, name]]),
+        });
+
+        expect(result.dropped).toEqual([]);
+        expect(contentToString(result.contentParts)).toContain(
+          'backslash content',
+        );
+      },
+    );
+
+    it('reports nothing when every reference resolves', async () => {
+      const { relativePath } = await createTestFile('kept.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      expect(result.dropped).toEqual([]);
     });
   });
 
@@ -1103,6 +1246,7 @@ describe('readManyFiles', () => {
       const result = await readManyFiles(mockConfig, { paths: ['file.txt'] });
 
       expect(result.files).toHaveLength(0);
+      expect(result.dropped).toEqual([]);
       expect(result.error).toBeDefined();
     });
   });

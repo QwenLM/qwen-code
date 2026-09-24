@@ -5402,6 +5402,85 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.\n');
   });
 
+  it('reports dropped @-references on stderr instead of swallowing them', async () => {
+    setupMetricsMock();
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: [{ text: 'Summarize @missing.txt' }],
+      shouldProceed: true,
+      droppedReferences: [{ path: 'missing.txt', reason: 'not-found' }],
+    });
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Summary complete.' },
+      {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Summarize @missing.txt',
+      'prompt-id-dropped',
+    );
+
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Skipped 1 @-reference: @missing.txt (not found)\n',
+    );
+  });
+
+  it('emits the dropped-reference notice as a system message in JSON mode', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: [{ text: 'Summarize @missing.txt' }],
+      shouldProceed: true,
+      droppedReferences: [{ path: 'missing.txt', reason: 'not-found' }],
+    });
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Summary complete.' },
+      {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Summarize @missing.txt',
+      'prompt-id-json-dropped',
+    );
+
+    const stdout = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('');
+    const messages = JSON.parse(stdout) as Array<{
+      type?: string;
+      subtype?: string;
+      data?: { notice?: string };
+    }>;
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: 'system',
+        subtype: 'at_reference_dropped',
+        data: { notice: 'Skipped 1 @-reference: @missing.txt (not found)' },
+      }),
+    );
+  });
+
   it('keeps an agent-capable image route for the full headless tool chain', async () => {
     setupMetricsMock();
     await mockHeadlessImageInput();
