@@ -26,6 +26,8 @@ import type { Response } from 'express';
 export const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
   2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
 export const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
+export const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
+  'Transcript pagination state exceeds the safe limit';
 
 export function parseTranscriptLimitQuery(
   rawLimit: unknown,

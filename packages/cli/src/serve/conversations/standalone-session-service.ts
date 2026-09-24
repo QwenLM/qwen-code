@@ -82,6 +82,10 @@ import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
 import {
+  TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR,
+  workspaceTranscriptCursorExceedsLimit,
+} from '../routes/transcript-query-validation.js';
+import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
@@ -144,8 +148,7 @@ function getLivePromptState(
   try {
     return {
       live: true,
-      activePrompt:
-        runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
+      activePrompt: runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
     };
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
@@ -1061,6 +1064,9 @@ export class StandaloneSessionService {
             encodeCursor: (state: SessionTranscriptCursorState) =>
               encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
           });
+          const cursorTooLarge =
+            replay.nextCursor !== undefined &&
+            workspaceTranscriptCursorExceedsLimit(replay.nextCursor);
           return {
             v: 1 as const,
             sessionId,
@@ -1071,14 +1077,18 @@ export class StandaloneSessionService {
                 data: update,
               }),
             ),
-            ...(replay.nextCursor ? { nextCursor: replay.nextCursor } : {}),
-            hasMore: replay.hasMore,
+            ...(replay.nextCursor && !cursorTooLarge
+              ? { nextCursor: replay.nextCursor }
+              : {}),
+            hasMore: cursorTooLarge ? false : replay.hasMore,
             startTime: replay.startTime,
             lastUpdated: replay.lastUpdated,
-            ...(replay.partial
+            ...(replay.partial || cursorTooLarge
               ? {
                   partial: true as const,
-                  replayError: replay.replayError,
+                  replayError: cursorTooLarge
+                    ? TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR
+                    : replay.replayError,
                 }
               : {}),
             ...(page.targetRecordId

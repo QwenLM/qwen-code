@@ -9,6 +9,7 @@ import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES } from './transcript-query-validation.js';
 import {
   StandaloneSessionServiceError,
   type ListStandaloneSessionsOptions,
@@ -642,8 +643,42 @@ describe('standalone session routes', () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual({
+      v: 1,
+      sessionId,
+      snapshot: 'snap-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [],
+    });
     expect(service.getTurnIndexPage).toHaveBeenCalledWith(sessionId, {
       limit: 10,
+    });
+  });
+
+  it('continues a frozen turn index', async () => {
+    const { app, service } = createHarness();
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?snapshot=snap-1&start=2&limit=10`,
+    );
+    expect(response.status).toBe(200);
+    expect(service.getTurnIndexPage).toHaveBeenCalledWith(sessionId, {
+      snapshot: 'snap-1',
+      start: 2,
+      limit: 10,
+    });
+  });
+
+  it('accepts a backward anchor within a frozen snapshot', async () => {
+    const { app, service } = createHarness();
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?beforeRecordId=rec-1&snapshot=snap-1`,
+    );
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      beforeRecordId: 'rec-1',
+      snapshot: 'snap-1',
     });
   });
 
@@ -775,8 +810,6 @@ describe('standalone session routes', () => {
       ],
       hasMore: true,
       nextCursor: 'next-cursor',
-      partial: true,
-      replayError: 'boom',
       targetRecordId: 'rec-9',
       hasOlder: true,
       startTime: '2026-01-01T00:00:00.000Z',
@@ -819,6 +852,90 @@ describe('standalone session routes', () => {
       cursor: 'next-cursor',
     });
   });
+
+  it('returns a partial transcript without a continuation cursor', async () => {
+    const { app, service } = createHarness();
+    const page = {
+      v: 1 as const,
+      sessionId,
+      events: [],
+      hasMore: false,
+      partial: true as const,
+      replayError: 'replay failed',
+    };
+    service.getTranscriptPage.mockResolvedValueOnce(page as never);
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(page);
+    expect(response.body.nextCursor).toBeUndefined();
+    expect(response.body.hasMore).toBe(false);
+  });
+
+  it.each(['', '?compactedReplayMode=full'])(
+    'preserves full replay frames with query %s',
+    async (query) => {
+      const { app, service } = createHarness();
+      const events = [
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            status: 'in_progress',
+            _meta: { shellProgress: { chunks: ['x'] } },
+          },
+        },
+      ];
+      service.getTranscriptPage.mockResolvedValueOnce({
+        v: 1,
+        sessionId,
+        events,
+        hasMore: false,
+      } as never);
+      const response = await request(app).get(
+        `/standalone/sessions/${sessionId}/transcript${query}`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.events).toEqual(events);
+    },
+  );
+
+  it.each(['transcript', 'turn-index'] as const)(
+    'rejects an oversized %s response',
+    async (route) => {
+      const { app, service } = createHarness();
+      const oversized = 'x'.repeat(WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES + 1);
+      if (route === 'transcript') {
+        service.getTranscriptPage.mockResolvedValueOnce({
+          v: 1,
+          sessionId,
+          events: [{ v: 1, type: 'session_update', data: { text: oversized } }],
+          hasMore: false,
+        } as never);
+      } else {
+        service.getTurnIndexPage.mockResolvedValueOnce({
+          v: 1,
+          sessionId,
+          snapshot: 'snap-1',
+          totalTurns: 1,
+          start: 0,
+          turns: [{ label: oversized }],
+        } as never);
+      }
+      const response = await request(app).get(
+        `/standalone/sessions/${sessionId}/${route}`,
+      );
+      expect(response.status).toBe(413);
+      expect(response.body).toMatchObject({
+        code: 'transcript_page_too_large',
+        sessionId,
+        maxBytes: WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES,
+      });
+    },
+  );
 
   it('rejects an invalid standalone transcript compactedReplayMode', async () => {
     const { app, service } = createHarness();

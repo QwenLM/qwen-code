@@ -82,6 +82,7 @@ import express, {
 } from 'express';
 import {
   WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
+  TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR,
   isConflictingTranscriptAnchorCombination,
   parseReplayMode,
   parseTranscriptCursorQuery,
@@ -301,8 +302,6 @@ interface RegisterSessionRoutesDeps {
   >;
 }
 
-const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
-  'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded

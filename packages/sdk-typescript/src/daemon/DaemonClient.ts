@@ -3166,8 +3166,8 @@ export class DaemonClient {
       timeoutMs?: number;
       // Read-only poll paths (turn-index/transcript paging) use a cached
       // capability preflight: a fresh probe on every read would double the
-      // request volume of the hot navigation loop, and a failing probe would
-      // degrade a healthy session before the read is even attempted.
+      // request volume of the hot navigation loop while the cache is valid.
+      // A failed refresh still rejects the read before contacting its route.
       preflight?: 'fresh' | 'cached';
       // Route-specific capability tag; defaults to the standalone baseline.
       capability?: string;

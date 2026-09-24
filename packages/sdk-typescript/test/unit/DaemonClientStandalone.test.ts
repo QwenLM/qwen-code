@@ -35,6 +35,7 @@ function jsonResponse(status: number, body: unknown): Response {
 function capabilityResponse(
   enabled = true,
   optionsEnabled = enabled,
+  transcriptEnabled = false,
 ): Response {
   return jsonResponse(200, {
     v: 1,
@@ -42,6 +43,7 @@ function capabilityResponse(
     features: [
       ...(enabled ? ['standalone_sessions_v1'] : []),
       ...(optionsEnabled ? ['standalone_session_options_v1'] : []),
+      ...(transcriptEnabled ? ['standalone_session_transcript_v1'] : []),
     ],
   });
 }
@@ -954,14 +956,7 @@ describe('DaemonClient standalone sessions', () => {
     });
     const { fetch, calls } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : jsonResponse(200, transcriptResponse()),
     );
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -988,14 +983,7 @@ describe('DaemonClient standalone sessions', () => {
   it('caches the capability preflight across transcript reads', async () => {
     const { fetch, calls } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : jsonResponse(200, {
             v: 1,
             sessionId: SESSION_ID,
@@ -1016,14 +1004,7 @@ describe('DaemonClient standalone sessions', () => {
   it('rejects a transcript page whose session id does not match', async () => {
     const { fetch } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : jsonResponse(200, {
             v: 1,
             sessionId: '00000000-0000-4000-8000-000000000000',
@@ -1056,14 +1037,7 @@ describe('DaemonClient standalone sessions', () => {
   it('caches the capability preflight across turn-index reads', async () => {
     const { fetch, calls } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : jsonResponse(200, {
             v: 1,
             sessionId: SESSION_ID,
@@ -1086,14 +1060,7 @@ describe('DaemonClient standalone sessions', () => {
   it('re-probes capabilities when a cached read is followed by a write', async () => {
     const { fetch, calls } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : request.method === 'POST'
           ? jsonResponse(200, {
               v: 1,
@@ -1124,14 +1091,7 @@ describe('DaemonClient standalone sessions', () => {
   it('rejects a turn-index page missing the snapshot', async () => {
     const { fetch } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : jsonResponse(200, {
             v: 1,
             sessionId: SESSION_ID,
@@ -1148,22 +1108,57 @@ describe('DaemonClient standalone sessions', () => {
   });
 
   it.each([
-    ['missing totalTurns', { v: 1, sessionId: SESSION_ID, snapshot: 'snap-1', start: 0, turns: [] }],
-    ['missing start', { v: 1, sessionId: SESSION_ID, snapshot: 'snap-1', totalTurns: 0, turns: [] }],
-    ['totalTurns wrong type', { v: 1, sessionId: SESSION_ID, snapshot: 'snap-1', totalTurns: 'x', start: 0, turns: [] }],
-    ['turns not array', { v: 1, sessionId: SESSION_ID, snapshot: 'snap-1', totalTurns: 0, start: 0, turns: null }],
-    ['turns contains null', { v: 1, sessionId: SESSION_ID, snapshot: 'snap-1', totalTurns: 0, start: 0, turns: [null] }],
+    [
+      'missing totalTurns',
+      { v: 1, sessionId: SESSION_ID, snapshot: 'snap-1', start: 0, turns: [] },
+    ],
+    [
+      'missing start',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 0,
+        turns: [],
+      },
+    ],
+    [
+      'totalTurns wrong type',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 'x',
+        start: 0,
+        turns: [],
+      },
+    ],
+    [
+      'turns not array',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 0,
+        start: 0,
+        turns: null,
+      },
+    ],
+    [
+      'turns contains null',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 0,
+        start: 0,
+        turns: [null],
+      },
+    ],
   ])('rejects a malformed turn-index page (%s)', async (_label, body) => {
     const { fetch } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : jsonResponse(200, body),
     );
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -1173,17 +1168,46 @@ describe('DaemonClient standalone sessions', () => {
     ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
   });
 
+  it('rejects a turn-index page from another session', async () => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, {
+            v: 1,
+            sessionId: '550e8400-e29b-41d4-a716-446655440001',
+            snapshot: 'snap-1',
+            totalTurns: 0,
+            start: 0,
+            turns: [],
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.getStandaloneSessionTurnIndexPage(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it.each([
+    ['missing hasMore', { events: [] }],
+    ['non-boolean hasMore', { events: [], hasMore: 'false' }],
+    ['non-string nextCursor', { events: [], hasMore: true, nextCursor: 42 }],
+    ['non-array events', { events: {}, hasMore: false }],
+  ])('rejects a malformed transcript page (%s)', async (_label, fields) => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, { v: 1, sessionId: SESSION_ID, ...fields }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.getStandaloneSessionTranscriptPage(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
   it('rejects a transcript page whose events contain null', async () => {
     const { fetch } = recordingFetch((request) =>
       request.url.endsWith('/capabilities')
-        ? jsonResponse(200, {
-            v: 1,
-            mode: 'serve',
-            features: [
-              'standalone_sessions_v1',
-              'standalone_session_transcript_v1',
-            ],
-          })
+        ? capabilityResponse(true, true, true)
         : jsonResponse(200, {
             v: 1,
             sessionId: SESSION_ID,

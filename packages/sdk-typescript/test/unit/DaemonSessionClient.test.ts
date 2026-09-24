@@ -393,8 +393,8 @@ describe('DaemonSessionClient', () => {
       atRecordId: 'rec-1',
       snapshot: 'snap-1',
     });
-    // The image attachment reference is hydrated through the standalone
-    // branch: the 404 collapses it to the unavailability placeholder.
+    // The generic session attachment route returns 404, which hydration
+    // turns into the unavailability placeholder.
     expect(page.events[0]?.data.items[0].content[0]).toEqual({
       type: 'text',
       text: '[Attachment is no longer available]',
