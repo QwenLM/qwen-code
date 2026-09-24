@@ -96,8 +96,13 @@ export function registerCapabilitiesRoutes(
       try {
         const snapshot = await deps.workspaceRegistrationStore.read();
         pinnedAts = snapshot.pinnedAts;
-      } catch {
+      } catch (err) {
         // Pin state is best-effort; do not block capabilities.
+        writeStderrLine(
+          `qwen serve: failed to read workspace pin state for /capabilities: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
       }
     }
     const envelope: CapabilitiesEnvelope = {

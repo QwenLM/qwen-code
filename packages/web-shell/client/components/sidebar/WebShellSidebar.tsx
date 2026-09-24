@@ -3529,23 +3529,9 @@ export function WebShellSidebar({
     (workspaceCapability: DaemonWorkspaceCapability) => {
       const targetPinned = !workspaceCapability.isPinned;
       void (async () => {
-        let registrationId: string;
-        try {
-          const hashBuffer = await crypto.subtle.digest(
-            'SHA-256',
-            new TextEncoder().encode(workspaceCapability.cwd),
-          );
-          const hashArray = Array.from(new Uint8Array(hashBuffer));
-          registrationId = hashArray
-            .map((b) => b.toString(16).padStart(2, '0'))
-            .join('')
-            .slice(0, 16);
-        } catch {
-          return;
-        }
         try {
           await workspaceActions.updateWorkspacePin(
-            registrationId,
+            workspaceCapability.id,
             targetPinned,
           );
         } catch (error) {

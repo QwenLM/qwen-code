@@ -298,6 +298,13 @@ function parseSnapshot(
           `Workspace registration store pinnedAts[${JSON.stringify(registrationId)}] must be a non-empty string`,
         );
       }
+      // Validate ISO-8601 timestamp format.
+      const parsed = Date.parse(value);
+      if (Number.isNaN(parsed)) {
+        throw new WorkspaceRegistrationStoreError(
+          `Workspace registration store pinnedAts[${JSON.stringify(registrationId)}] must be a valid ISO-8601 timestamp, got ${JSON.stringify(value)}`,
+        );
+      }
       pinnedAts ??= {};
       pinnedAts[registrationId] = value;
     }

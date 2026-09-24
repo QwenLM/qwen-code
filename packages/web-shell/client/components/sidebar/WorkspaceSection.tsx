@@ -819,7 +819,7 @@ export function WorkspaceSection({
               {workspace.isPinned && (
                 <span
                   className={styles.pinBadge}
-                  title={t('sidebar.unpinWorkspace')}
+                  title={t('sidebar.pinnedWorkspace')}
                 >
                   📌
                 </span>

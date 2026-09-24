@@ -1958,7 +1958,7 @@ export function registerWorkspaceManagementRoutes(
           if (!exists) {
             res.status(404).json({
               error: 'Workspace registration not found',
-              code: 'registration_not_found',
+              code: 'workspace_registration_not_found',
             });
             return;
           }
@@ -1971,6 +1971,19 @@ export function registerWorkspaceManagementRoutes(
           ...(pinnedAt !== undefined ? { pinnedAt } : {}),
         });
       } catch (err) {
+        if (err instanceof WorkspaceRegistrationStoreCommittedError) {
+          // The store already committed the change; treat as success.
+          writeStderrLine(`qwen serve: ${err.message}`);
+          const snapshot = await workspaceRegistrationStore.read();
+          const pinnedAt = snapshot.pinnedAts?.[registrationId];
+          res.json({
+            id: registrationId,
+            isPinned: pinnedAt !== undefined,
+            ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+          });
+          operationFinished();
+          return;
+        }
         writeStderrLine(
           `qwen serve: failed to update workspace pin state: ${
             err instanceof Error ? err.message : String(err)

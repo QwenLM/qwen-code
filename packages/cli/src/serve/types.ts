@@ -467,6 +467,10 @@ export interface CapabilitiesEnvelope {
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
+    /** Present when the workspace is pinned in the sidebar. */
+    isPinned?: boolean;
+    /** ISO-8601 timestamp of when the workspace was pinned. */
+    pinnedAt?: string;
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
