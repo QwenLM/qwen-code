@@ -491,8 +491,6 @@ const EN: Messages = {
   'collab.elapsed.minutes': (v) => `${v?.minutes ?? 0}m ${v?.seconds ?? 0}s`,
   'collab.run.queued': (v) =>
     `${v?.agent} is queued and starts when it is free`,
-  'collab.run.hostOffline': (v) =>
-    `${v?.agent} is waiting for its runtime to come back online`,
   'collab.run.starting': (v) => `Starting ${v?.agent}…`,
   'collab.run.stopping': (v) => `Stopping ${v?.agent}…`,
   'collab.run.thinking': (v) => `${v?.agent} is thinking · ${v?.elapsed}`,
@@ -506,71 +504,12 @@ const EN: Messages = {
   'collab.run.stalled': (v) =>
     `${v?.agent} has shown no progress for ${v?.elapsed}. It may be stuck.`,
   'collab.run.stop': 'Stop',
-  'collab.runtime.addTitle': 'Add a runtime',
-  'collab.runtime.addDescription':
-    'Let another computer run agents for this workspace. It can offer Qwen Code and, if installed, Codex.',
-  'collab.runtime.methodCommand': 'Run one command there',
-  'collab.runtime.methodExisting': 'I have its address and token',
-  'collab.runtime.address':
-    'This computer’s address, as the other computer sees it',
-  'collab.runtime.addressHint':
-    'The other computer connects out to this address, so it only has to be reachable from there.',
-  'collab.runtime.loopbackHint':
-    'localhost only works on this computer. Use its network address (for example http://192.168.1.8:4170) so the other computer can reach it.',
-  'collab.runtime.generate': 'Create join command',
-  'collab.runtime.runThis':
-    'On the other computer, run this in the project folder:',
-  'collab.runtime.noQwen': 'Qwen Code not installed there? This works too:',
-  'collab.runtime.copy': 'Copy',
-  'collab.runtime.copied': 'Copied',
-  'collab.runtime.expires': (v) =>
-    `The link works once and expires in ${v?.minutes ?? 0} min.`,
-  'collab.runtime.httpHint':
-    'It uses plain HTTP, so only use it on a network you trust.',
-  'collab.runtime.waiting': 'Waiting for it to connect…',
-  'collab.runtime.waitingFor': (v) =>
-    `${v?.seconds ?? 0}s so far. This updates by itself when it connects.`,
-  'collab.runtime.closeKeepLink': 'Close (the link keeps working)',
-  'collab.runtime.connected': (v) => `${v?.name} is connected`,
-  'collab.runtime.offers': (v) => `Offers ${v?.programs}`,
-  'collab.runtime.done': 'Done',
-  'collab.runtime.createAgentOn': (v) => `Create an agent on ${v?.name}`,
-  'collab.runtime.remoteUrl': 'Its Qwen Code address',
-  'collab.runtime.remoteToken': 'Its access token',
-  'collab.runtime.remoteCwd': 'Project folder on that computer',
-  'collab.runtime.program': 'Program',
-  'collab.runtime.allowHttp':
-    'Allow plain HTTP (trusted networks only; token and tasks are unencrypted)',
-  'collab.runtime.connect': 'Connect',
-  'collab.share.title': (v) => `Share ${v?.name}`,
-  'collab.share.description':
-    'Anyone with the token can send this agent work over A2A. It keeps running on this computer, in this workspace.',
-  'collab.share.scope': 'What they may ask for',
-  'collab.share.scope.analysis': 'Read-only: look at the code and answer',
-  'collab.share.scope.analysisHint': 'The agent cannot change files for them.',
-  'collab.share.scope.full': 'Everything this agent can do',
-  'collab.share.scope.fullHint': 'Same as you asking it directly.',
-  'collab.share.create': 'Create link',
-  'collab.share.endpoint': 'A2A endpoint',
-  'collab.share.token': 'Token',
-  'collab.share.try': 'Try it',
-  'collab.share.once':
-    'The token is shown only now. It expires in 7 days; revoke it here any time.',
-  'collab.share.loopback':
-    'This address only works on this computer. Open Web Shell through an address the caller can reach, then create the share.',
-  'collab.share.active': (v) => `Active shares (${v?.count ?? 0})`,
-  'collab.share.until': (v) => `until ${v?.date}`,
-  'collab.share.revoke': 'Revoke',
-  'collab.agent.share': 'Share',
   'collab.tabs.agents': 'Agents',
   'collab.tabs.tasks': 'Conversations',
-  'collab.tabs.runtime': 'Runtimes',
   'collab.tabs.agentsHint':
-    'Agents are teammates you create. Each runs on a runtime with one program. @ an agent in any conversation to bring it in; it can bring in others.',
+    'Agents are teammates you create. @ an agent in any conversation to bring it in; it can bring in others.',
   'collab.tabs.tasksHint':
     'Conversations where agents are working, grouped by what they need from you.',
-  'collab.tabs.runtimeHint':
-    'Runtimes are the computers agents run on: this one, and any that joined with a link.',
   'collab.agent.new': 'New agent',
   'collab.agent.roles': 'Role templates',
   'collab.agent.mentionIt': '@ Mention',
@@ -596,13 +535,6 @@ const EN: Messages = {
   'collab.agent.concurrency': 'Conversations at once',
   'collab.agent.concurrencyInvalid':
     'Conversations at once must be between 1 and 8.',
-  'collab.agent.runsOn': 'Runs on',
-  'collab.agent.thisComputer': 'This computer',
-  'collab.agent.cwdUnknown': 'Folder not reported yet',
-  'collab.agent.runsOnHint':
-    'A joined runtime works in its own folder, shown under its name. Files here are not copied to it.',
-  'collab.agent.programLocal': 'Runs only on a joined runtime',
-  'collab.agent.programMissing': 'Not found on this runtime',
   'collab.agent.afterCreate':
     'It starts working when you mention it in a conversation.',
   'collab.thread.new': 'New conversation',
@@ -613,15 +545,6 @@ const EN: Messages = {
     'Say what you need and who should take it. The conversation opens once it is created.',
   'collab.agent.empty':
     'No agents yet. Create one, then @ it in any conversation.',
-  'collab.runtime.localNote':
-    'This computer. Its agents run in this workspace with Qwen Code.',
-  'collab.runtime.remoteNote':
-    'Another computer that joined this workspace. Agents assigned to it run there.',
-  'collab.runtime.programs': 'Programs',
-  'collab.runtime.empty': 'No runtime yet.',
-  'collab.runtime.emptyHint':
-    'Add a runtime to let another computer run agents, then create an agent on it.',
-  'collab.runtime.badAddress': 'Enter an address like http://192.168.1.8:4170.',
   'collab.run.keepWaiting': 'Keep waiting',
   'collab.run.timedOut': (v) =>
     `${v?.agent} was stopped after 15 minutes without progress`,
@@ -674,7 +597,6 @@ const EN: Messages = {
   'collab.team.history': (v) => `Past runs (${v?.count ?? 0})`,
   'collab.member.idle': 'Idle',
   'collab.member.queued': 'Queued',
-  'collab.member.offline': 'Runtime offline',
   'collab.member.starting': 'Starting',
   'collab.member.thinking': 'Thinking',
   'collab.member.responding': 'Replying',
@@ -4727,8 +4649,6 @@ const ZH: Messages = {
   'collab.elapsed.minutes': (v) =>
     `${v?.minutes ?? 0} 分 ${v?.seconds ?? 0} 秒`,
   'collab.run.queued': (v) => `${v?.agent} 排队中，空出来就开始`,
-  'collab.run.hostOffline': (v) =>
-    `${v?.agent} 所在的 Runtime 离线，回来后自动继续`,
   'collab.run.starting': (v) => `正在唤起 ${v?.agent}…`,
   'collab.run.stopping': (v) => `正在停止 ${v?.agent}…`,
   'collab.run.thinking': (v) => `${v?.agent} 正在思考，${v?.elapsed}`,
@@ -4742,65 +4662,11 @@ const ZH: Messages = {
   'collab.run.stalled': (v) =>
     `${v?.agent} 已经 ${v?.elapsed} 没有进展，可能卡住了`,
   'collab.run.stop': '停止',
-  'collab.runtime.addTitle': '添加 Runtime',
-  'collab.runtime.addDescription':
-    '让另一台电脑为这个工作区运行 Agent。它可以提供 Qwen Code，装了的话还有 Codex。',
-  'collab.runtime.methodCommand': '在那台电脑上运行一行命令',
-  'collab.runtime.methodExisting': '我已有地址和令牌',
-  'collab.runtime.address': '这台电脑的地址（从那台电脑看过来）',
-  'collab.runtime.addressHint':
-    '那台电脑会主动连到这个地址，只要从那边能访问到就行。',
-  'collab.runtime.loopbackHint':
-    'localhost 只在这台电脑上有效。请换成它的局域网地址（例如 http://192.168.1.8:4170），另一台电脑才能连上。',
-  'collab.runtime.generate': '生成加入命令',
-  'collab.runtime.runThis': '在那台电脑的项目目录里运行：',
-  'collab.runtime.noQwen': '那台电脑没装 Qwen Code？用这条也行：',
-  'collab.runtime.copy': '复制',
-  'collab.runtime.copied': '已复制',
-  'collab.runtime.expires': (v) =>
-    `链接只能用一次，${v?.minutes ?? 0} 分钟后失效。`,
-  'collab.runtime.httpHint': '使用的是 HTTP 明文，只在可信网络里用。',
-  'collab.runtime.waiting': '正在等待连接…',
-  'collab.runtime.waitingFor': (v) =>
-    `已等待 ${v?.seconds ?? 0} 秒。连上后这里会自动更新。`,
-  'collab.runtime.closeKeepLink': '关闭（链接仍然有效）',
-  'collab.runtime.connected': (v) => `${v?.name} 已连接`,
-  'collab.runtime.offers': (v) => `提供 ${v?.programs}`,
-  'collab.runtime.done': '完成',
-  'collab.runtime.createAgentOn': (v) => `在 ${v?.name} 上新建 Agent`,
-  'collab.runtime.remoteUrl': '它的 Qwen Code 地址',
-  'collab.runtime.remoteToken': '它的访问令牌',
-  'collab.runtime.remoteCwd': '那台电脑上的项目目录',
-  'collab.runtime.program': '执行程序',
-  'collab.runtime.allowHttp': '允许 HTTP 明文（仅可信网络，令牌和任务不加密）',
-  'collab.runtime.connect': '连接',
-  'collab.share.title': (v) => `分享 ${v?.name}`,
-  'collab.share.description':
-    '拿到令牌的人可以通过 A2A 给这个 Agent 派活。它仍然运行在这台电脑上、这个工作区里。',
-  'collab.share.scope': '对方能让它做什么',
-  'collab.share.scope.analysis': '只读：看代码、回答问题',
-  'collab.share.scope.analysisHint': 'Agent 不会替对方改文件。',
-  'collab.share.scope.full': '这个 Agent 能做的一切',
-  'collab.share.scope.fullHint': '和你直接找它一样。',
-  'collab.share.create': '生成分享',
-  'collab.share.endpoint': 'A2A 地址',
-  'collab.share.token': '令牌',
-  'collab.share.try': '试一下',
-  'collab.share.once': '令牌只显示这一次，7 天后失效，随时可以在这里撤销。',
-  'collab.share.loopback':
-    '这个地址只在本机可用。请用别人能访问到的地址打开 Web Shell，再生成分享。',
-  'collab.share.active': (v) => `已分享（${v?.count ?? 0}）`,
-  'collab.share.until': (v) => `有效至 ${v?.date}`,
-  'collab.share.revoke': '撤销',
-  'collab.agent.share': '分享',
   'collab.tabs.agents': 'Agent',
   'collab.tabs.tasks': '协作对话',
-  'collab.tabs.runtime': 'Runtime',
   'collab.tabs.agentsHint':
-    'Agent 是你新建的队友，每个都跑在某个 Runtime 上、用一个程序。在任何对话里 @ 它就能叫它来，它也能再叫别的 Agent。',
+    'Agent 是你新建的队友。在任何对话里 @ 它就能叫它来，它也能再叫别的 Agent。',
   'collab.tabs.tasksHint': 'Agent 正在工作的对话，按需要你做什么来分组。',
-  'collab.tabs.runtimeHint':
-    'Runtime 是运行 Agent 的电脑：这台电脑，以及用链接加入的其他电脑。',
   'collab.agent.new': '新建 Agent',
   'collab.agent.roles': '角色模板',
   'collab.agent.mentionIt': '@ 它',
@@ -4822,13 +4688,6 @@ const ZH: Messages = {
   'collab.agent.description': '其他 Agent 什么时候该找它（可选）',
   'collab.agent.concurrency': '同时处理的对话数',
   'collab.agent.concurrencyInvalid': '同时处理的对话数必须在 1 到 8 之间。',
-  'collab.agent.runsOn': '运行在',
-  'collab.agent.thisComputer': '这台电脑',
-  'collab.agent.cwdUnknown': '尚未上报目录',
-  'collab.agent.runsOnHint':
-    '加入的 Runtime 在它自己的目录里工作（显示在名字下方），这里的文件不会复制过去。',
-  'collab.agent.programLocal': '只能在加入的 Runtime 上运行',
-  'collab.agent.programMissing': '这个 Runtime 上没有检测到',
   'collab.agent.afterCreate': '在对话里 @ 它，它就开始工作。',
   'collab.thread.new': '新建协作对话',
   'collab.noWorkspace': '先打开一个工作区，才能和 Agent 协作。',
@@ -4836,15 +4695,6 @@ const ZH: Messages = {
   'collab.thread.loading': '正在加载对话…',
   'collab.thread.newHint': '写下要做什么、交给谁。创建后会打开这个对话。',
   'collab.agent.empty': '还没有 Agent。新建一个，然后在任意对话里 @ 它。',
-  'collab.runtime.localNote':
-    '这台电脑。它上面的 Agent 用 Qwen Code 在这个工作区里运行。',
-  'collab.runtime.remoteNote':
-    '加入了这个工作区的另一台电脑。分配给它的 Agent 在那边运行。',
-  'collab.runtime.programs': '程序',
-  'collab.runtime.empty': '还没有 Runtime。',
-  'collab.runtime.emptyHint':
-    '添加一个 Runtime，让另一台电脑运行 Agent，再在它上面新建 Agent。',
-  'collab.runtime.badAddress': '请填写类似 http://192.168.1.8:4170 的地址。',
   'collab.run.keepWaiting': '再等等',
   'collab.run.timedOut': (v) => `${v?.agent} 15 分钟没有进展，已停止`,
   'collab.run.failed': (v) => `${v?.agent} 出错停止了`,
@@ -4891,7 +4741,6 @@ const ZH: Messages = {
   'collab.team.history': (v) => `历史运行（${v?.count ?? 0}）`,
   'collab.member.idle': '空闲',
   'collab.member.queued': '排队中',
-  'collab.member.offline': 'Runtime 离线',
   'collab.member.starting': '正在唤起',
   'collab.member.thinking': '正在思考',
   'collab.member.responding': '正在回复',

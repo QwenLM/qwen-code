@@ -52,88 +52,6 @@
   border-bottom: 1px solid var(--border);
 }
 
-.runtimeCard {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 6px 20px;
-  align-items: center;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.enrollmentCard {
-  display: grid;
-  gap: 8px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.enrollmentCard code {
-  overflow-x: auto;
-  padding: 10px;
-  border-radius: calc(var(--radius) - 2px);
-  background: var(--muted);
-  color: var(--foreground);
-  white-space: nowrap;
-}
-
-.runtimeHeader {
-  min-width: 0;
-}
-
-.runtimeTitle {
-  margin: 0 0 4px;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.runtimeStatus {
-  color: var(--status-running-fg);
-  font-size: 12px;
-  text-transform: capitalize;
-}
-
-.runtimeStatus[data-runtime-status='offline'] {
-  color: var(--muted-foreground);
-}
-
-.runtimeFacts {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 20px;
-  margin: 10px 0 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.runtimeFacts div {
-  min-width: 0;
-}
-
-.runtimeFacts dt {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.runtimeFacts dd {
-  margin: 2px 0 0;
-  overflow: hidden;
-  color: var(--foreground);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.runtimeFacts code {
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
 .sectionTitle {
   margin-bottom: 6px;
   color: var(--muted-foreground);
@@ -223,10 +141,6 @@
 
 .agentAction:hover:not(:disabled) {
   color: var(--foreground);
-}
-
-.agentRemove:hover:not(:disabled) {
-  color: var(--status-attention-fg);
 }
 
 .agentAction:disabled {

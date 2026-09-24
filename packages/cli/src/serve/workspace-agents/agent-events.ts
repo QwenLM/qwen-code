@@ -8,10 +8,10 @@
  * Live updates for the Web Shell collaboration views.
  *
  * Two sources feed one stream per workspace:
- * - `changed`: a write under the workspace's agent store (agents, hosts or a
+ * - `changed`: a write under the workspace's agent store (agents or a
  *   thread). Found with `fs.watch`, so every writer — routes, the dispatch
- *   loop, host routes, thread tools inside agent sessions — is covered without
- *   each of them having to remember to publish.
+ *   loop, thread tools inside agent sessions — is covered without each of them
+ *   having to remember to publish.
  * - `progress`: a running agent's reply as it streams, published by the
  *   dispatch port. It goes straight to the browser and never waits on disk.
  */
@@ -21,13 +21,7 @@ import { mkdir } from 'node:fs/promises';
 import {
   getAgentsDir,
   getThreadsDir,
-  readAgentHosts,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
-
-/** A runtime counts as online while its last heartbeat is this recent. */
-export const AGENT_HOST_ONLINE_WINDOW_MS = 15_000;
-const HOST_LIVENESS_CHECK_MS = 5_000;
-const HOSTS_FILE = 'hosts.json';
 
 export interface AgentPermissionPrompt {
   requestId: string;
@@ -68,8 +62,6 @@ interface Hub {
   watchers: FSWatcher[];
   pending: Set<string>;
   timer?: ReturnType<typeof setTimeout>;
-  hostsKey?: string;
-  liveness?: ReturnType<typeof setInterval>;
 }
 
 const hubs = new Map<string, Hub>();
@@ -99,35 +91,6 @@ function queueChange(hub: Hub, threadId: string): void {
       for (const listener of hub.listeners) listener(event);
     }
   }, CHANGE_DEBOUNCE_MS);
-}
-
-/**
- * Heartbeats rewrite hosts.json every few seconds. Only what a person can see
- * is news: a runtime joined or left, went on- or offline, or changed what it
- * offers. Called on every hosts.json write and on a timer, since a runtime
- * that died goes offline precisely by writing nothing.
- */
-async function checkHosts(hub: Hub, workspaceCwd: string): Promise<void> {
-  let hosts: Awaited<ReturnType<typeof readAgentHosts>>;
-  try {
-    hosts = await readAgentHosts(workspaceCwd);
-  } catch {
-    // A busy store lock is not "every runtime left"; the next check decides.
-    return;
-  }
-  const now = Date.now();
-  const key = JSON.stringify(
-    hosts.map(({ lastSeenAt, ...host }) => ({
-      ...host,
-      online:
-        lastSeenAt !== undefined &&
-        now - lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS,
-    })),
-  );
-  const known = hub.hostsKey !== undefined;
-  if (key === hub.hostsKey) return;
-  hub.hostsKey = key;
-  if (known) queueChange(hub, WORKSPACE_CHANGE);
 }
 
 function watchDir(hub: Hub, dir: string, onFile: (name: string) => void): void {
@@ -164,20 +127,12 @@ export async function subscribeAgentEvents(
     hubs.set(workspaceCwd, created);
     const threadsDir = getThreadsDir(workspaceCwd);
     await mkdir(threadsDir, { recursive: true }).catch(() => {});
-    await checkHosts(created, workspaceCwd);
-    watchDir(created, getAgentsDir(workspaceCwd), (name) =>
-      name === HOSTS_FILE
-        ? void checkHosts(created, workspaceCwd)
-        : queueChange(created, WORKSPACE_CHANGE),
+    watchDir(created, getAgentsDir(workspaceCwd), () =>
+      queueChange(created, WORKSPACE_CHANGE),
     );
     watchDir(created, threadsDir, (name) =>
       queueChange(created, name.slice(0, -5)),
     );
-    created.liveness = setInterval(
-      () => void checkHosts(created, workspaceCwd),
-      HOST_LIVENESS_CHECK_MS,
-    );
-    created.liveness.unref();
   }
   const current = hub;
   current.listeners.add(listener);
@@ -187,7 +142,6 @@ export async function subscribeAgentEvents(
       return;
     hubs.delete(workspaceCwd);
     if (current.timer) clearTimeout(current.timer);
-    clearInterval(current.liveness);
     for (const watcher of current.watchers) watcher.close();
   };
 }

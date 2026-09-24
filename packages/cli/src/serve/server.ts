@@ -324,8 +324,6 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
-import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
-import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -1097,9 +1095,9 @@ export function createServeApp(
   };
   // Resolved once, below, from the settings read at daemon startup — not per
   // request and not per session. The collaboration surface includes work no
-  // session owns: a recovery scan, a 5s dispatch timer and the Host transport
-  // routes. A per-session read cannot govern those, so the setting carries
-  // `requiresRestart: true` and this value is fixed for the daemon's lifetime.
+  // session owns: a recovery scan and a 5s dispatch timer. A per-session read
+  // cannot govern those, so the setting carries `requiresRestart: true` and
+  // this value is fixed for the daemon's lifetime.
   // `agentTeamEnabled` reads per session; this one deliberately does not.
   let agentCollaborationEnabled = false;
   let standaloneSessionsAvailable = false;
@@ -1538,9 +1536,8 @@ export function createServeApp(
   // `Config.isAgentCollaborationEnabled` so a daemon and the sessions it hosts
   // cannot disagree about whether the feature is on.
   agentCollaborationEnabled =
-    !opts.agentHostWorker &&
-    (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
-      liveSettingsAtBoot?.experimental?.agentCollaboration === true);
+    process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
+    liveSettingsAtBoot?.experimental?.agentCollaboration === true;
 
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
@@ -2243,14 +2240,6 @@ export function createServeApp(
       rateLimiter,
       daemonLog,
     });
-  }
-
-  // Same opt-in. These routes carry Host enrollment and heartbeat; that they
-  // authenticate is not a substitute for the experiment gate, since an
-  // enrolled Host is exactly the outbound execution path the opt-in governs.
-  if (agentCollaborationEnabled) {
-    registerAgentHostTransportRoutes(app, workspaceRegistry);
-    registerA2ATransportRoutes(app, workspaceRegistry);
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control
@@ -3375,13 +3364,13 @@ export function createServeApp(
       workspaceRegistry,
       mutate,
     });
-  } else if (!opts.agentHostWorker) {
-    // Close out runs the switch left mid-flight (architecture §6). Recovery
-    // cannot tell "the daemon crashed" from "the operator turned this off"
-    // — both look like a live run whose body is gone — so if these were left
-    // as they are, opting back in would silently re-dispatch work nobody
-    // asked to resume. Marking them terminal here means recovery later finds
-    // a closed run, and a person decides whether the work happens again.
+  } else {
+    // Close out runs the switch left mid-flight. Recovery cannot tell "the
+    // daemon crashed" from "the operator turned this off" — both look like a
+    // live run whose body is gone — so if these were left as they are,
+    // opting back in would silently re-dispatch work nobody asked to resume.
+    // Marking them terminal here means recovery later finds a closed run, and
+    // a person decides whether the work happens again.
     //
     // A one-shot, not a scanner: no timer, no routes, nothing created in a
     // workspace that never used collaboration, and untrusted workspaces are

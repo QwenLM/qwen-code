@@ -18,8 +18,6 @@ of expertise. This changes the previous display-only description contract.
 本入口暂不支持附件。成员关系来自工作区名单，不要求额外建立 Team；
 提示词中的成员职责简介只帮助选择协作者，不授予权限，也不保证其能力。
 
-> **Development handoff (2026-09-09):** Read the [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md) and [successor implementation plan](./2026-09-09-agent-service-collaboration-plan.md) before continuing. Start at P0: independent default-off experimental gates. The successor architecture §8 explicitly identifies superseded decisions; other storage and safety contracts below remain applicable. Historical runtime observations are not evidence that the new service boundary is implemented. Do not resume the old §5.2 sequence by default.
-
 > Current session-adapter caveat (2026-09-08): the earlier live demo below does
 > not verify the replacement ACP-session execution path. Dispatch now prepares
 > and binds a session before asynchronously activating its prompt. Live replies
@@ -184,29 +182,11 @@ ordinary conversation appeared in the existing Agents session list as
 sessions remain untouched. This is local-daemon product-path evidence, not a
 claim of a Multica-compatible remote Runtime.
 
-**Verified through the existing local Runtime owner (2026-09-08).** Before the
-registered-Host slice, the Agent surface projected Qwen Code's selected
-`WorkspaceRuntime`, the workspace's durable
-`hostSessionId`, and the bridge's real heartbeat. Restarting the daemon kept
-host session `f210855f-45ab-4624-a858-bf11785e22d0`; the non-empty roster
-restored its owner without a task mutation, and the displayed heartbeat moved
-from 20:29:10 to 20:29:19. The Runtime view also showed provider, Agent/session
-counts, and running/queued task counts. A binding unknown to this daemon is
-reported offline and the dispatcher leaves its work queued as
-`runtime_unavailable`; it is not converted into a terminal launch failure.
-This proves the one local host and its restart continuity, not remote
-registration or placement.
-
-**Verified through registered-Host H1 (2026-09-08).** The primary daemon now
-owns a workspace-scoped Host registry. A ten-minute one-time credential was
-exchanged by a second `qwen serve` process for Host
-`host_d43cad67-c491-4915-9186-481732a0458e`; replaying the enrollment returned 401. Its provider and workspace advertisement appeared beside the local daemon
-in the Runtime view. Stopping it for more than the 15-second liveness window
-changed the stored Host to offline. Restarting it without the enrollment token
-restored the same Host id, and restarting the primary daemon while it was alive
-produced a heartbeat failure followed by automatic reconnection with that same
-id. This proves registration and liveness only: H1 does not permit binding an
-Agent to that Host or executing a run there.
+**Verified through the existing local host owner (2026-09-08).** The
+workspace's durable `hostSessionId` survived a daemon restart: host session
+`f210855f-45ab-4624-a858-bf11785e22d0` was kept, and the non-empty roster
+restored its owner without a task mutation. This proves the one local host and
+its restart continuity, not remote execution or placement.
 
 An earlier browser run exposed a prompt-level ping-pong: Bob and Alice used
 peer mentions in result prose, and each mention correctly booked another run.
@@ -353,10 +333,7 @@ process, so a process failure affects every local agent session.
 
 The cost is N live session contexts and model clients inside that process. A
 local roster is expected to stay small — two to five agents — and the machine's
-memory is the practical limit. The registered-Host H1 slice adds durable
-identity, advertisement and daemon heartbeat, but remote Agent execution and
-per-agent process boundaries still require the H2 run protocol; this demo does
-not claim those capabilities.
+memory is the practical limit.
 
 Everything the execution layer needs still exists:
 
@@ -422,15 +399,10 @@ read-only; a private server or trusted-looking name is not evidence.
 AgentWorkspaceState  schemaVersion, workspaceId, hostSessionId,
                     nextRunSequence
 AgentAgentsFile      schemaVersion, agents[]
-AgentHostsFile       schemaVersion, hosts[], enrollment?
-
-AgentHost            id, name, secretHash, workspaceCwd, providers[],
-                    createdAt, lastSeenAt
 
 WorkspaceAgent           id, name, description, color, agentType, model,
                     instructions, queueLimit, maxConcurrentRuns,
                     enabled, createdAt, retiredAt,
-                    execution: local | managed-host(hostIds[])
                     runtimeId                                ← legacy field
 
 Thread              schemaVersion, id, title, body, acceptanceCriteria,
@@ -467,10 +439,7 @@ V1 declares and validates this whole shape in one storage version. The owner
 chose one migration rather than serial schema bumps for fields already designed
 for steps 5-8. Fields whose producers do not exist yet remain optional and do
 not claim that delivery, provenance, recovery, or transcript slicing is
-implemented. `hostSessionId` is a workspace singleton. An absent `execution`
-is local; `managed-host` contains the exact registered Host ids allowed to
-claim that Agent's work. Registration alone grants no work and `runtimeId` is
-not reused as authorization. A task session id is derived from `(agent id, thread id)` and is
+implemented. `hostSessionId` is a workspace singleton. A task session id is derived from `(agent id, thread id)` and is
 stored on each run, so there is no ambiguous Agent-wide conversation handle.
 
 `authorKind` is `human | agent | system`. Until the ambient producer lands in
@@ -763,27 +732,24 @@ action on the child caused it.
 
 Implemented on the single #11206 delivery branch:
 
-| File                                                      | Responsibility                                          |
-| --------------------------------------------------------- | ------------------------------------------------------- |
-| `core/src/agents/workspace-agents/types.ts`               | Entities and limits                                     |
-| `core/src/agents/workspace-agents/store.ts`               | Paths, validation, locking, CRUD and Host registry      |
-| `core/src/agents/workspace-agents/mentions.ts`            | `@name` → agent ids                                     |
-| `core/src/agents/workspace-agents/dispatch-policy.ts`     | `decideDispatch` — pure                                 |
-| `core/src/agents/workspace-agents/thread-actions.ts`      | `postMessage` — append and book under one lock          |
-| `core/src/agents/workspace-agents/thread-status.ts`       | Aggregate status over every run's close obligation      |
-| `core/src/agents/workspace-agents/run-lifecycle.ts`       | Run close, terminal state, status application, outbox   |
-| `core/src/agents/workspace-agents/run-context.ts`         | Per-turn ambient `(agent, run, thread)` binding         |
-| `core/src/agents/workspace-agents/prompt.ts`              | Turn envelope: thread frame, delta, gap, peers          |
-| `core/src/agents/workspace-agents/capability.ts`          | Read-only name and invocation boundary                  |
-| `core/src/agents/workspace-agents/persona.ts`             | Resolves an agent's persona for its own session         |
-| `core/src/tools/thread-tools.ts`                          | The six thread tools; ambient identity only             |
-| `core/src/agents/workspace-agents/dispatcher.ts`          | FIFO selection, runtime entry point, parent reports     |
-| `cli/src/serve/workspace-agents/session-dispatch-port.ts` | The one binding to the local agent session runtime      |
-| `cli/src/serve/workspace-agents/agent-host-session.ts`    | Hidden ACP host ownership, keepalive, reload            |
-| `core/src/agents/workspace-agents/host-lease.ts`          | Atomic Host pickup, lease validation and result commit  |
-| `cli/src/serve/routes/agent-hosts.ts`                     | Host enrollment, heartbeat, pickup and result transport |
-| `cli/src/serve/agent-host-client.ts`                      | Remote daemon credential and heartbeat client           |
-| `cli/src/acp-integration/acpAgent.ts`                     | Applies the persona when an agent session spawns        |
+| File                                                      | Responsibility                                        |
+| --------------------------------------------------------- | ----------------------------------------------------- |
+| `core/src/agents/workspace-agents/types.ts`               | Entities and limits                                   |
+| `core/src/agents/workspace-agents/store.ts`               | Paths, validation, locking and CRUD                   |
+| `core/src/agents/workspace-agents/mentions.ts`            | `@name` → agent ids                                   |
+| `core/src/agents/workspace-agents/dispatch-policy.ts`     | `decideDispatch` — pure                               |
+| `core/src/agents/workspace-agents/thread-actions.ts`      | `postMessage` — append and book under one lock        |
+| `core/src/agents/workspace-agents/thread-status.ts`       | Aggregate status over every run's close obligation    |
+| `core/src/agents/workspace-agents/run-lifecycle.ts`       | Run close, terminal state, status application, outbox |
+| `core/src/agents/workspace-agents/run-context.ts`         | Per-turn ambient `(agent, run, thread)` binding       |
+| `core/src/agents/workspace-agents/prompt.ts`              | Turn envelope: thread frame, delta, gap, peers        |
+| `core/src/agents/workspace-agents/capability.ts`          | Read-only name and invocation boundary                |
+| `core/src/agents/workspace-agents/persona.ts`             | Resolves an agent's persona for its own session       |
+| `core/src/tools/thread-tools.ts`                          | The six thread tools; ambient identity only           |
+| `core/src/agents/workspace-agents/dispatcher.ts`          | FIFO selection, runtime entry point, parent reports   |
+| `cli/src/serve/workspace-agents/session-dispatch-port.ts` | The one binding to the local agent session runtime    |
+| `cli/src/serve/workspace-agents/agent-host-session.ts`    | Hidden ACP host ownership, keepalive, reload          |
+| `cli/src/acp-integration/acpAgent.ts`                     | Applies the persona when an agent session spawns      |
 
 ### 5.1 Local review correction — committed and verified
 
@@ -1127,12 +1093,7 @@ source-task attribution at every hop (`ReasonInvocationNotAllowed`,
 `ReasonAttributionBlocked`). V1 here permits any agent to mention any enabled
 workspace peer, but still records non-spoofable source-run provenance.
 
-**Partially implemented.** An Agent can now be placed on an explicit set of
-registered Hosts. Only those Hosts can claim its queued run; lease takeover,
-late-result refusal and idempotent result commit are implemented. The execution
-machine's client still has no model worker loop, so placement and transport do
-not yet equal remote model execution. Cloud and non-Qwen runtimes remain the
-hard gap. Scheduled and external-event triggers are absent but the cron scheduler and
+Scheduled and external-event triggers are absent but the cron scheduler and
 channel workers already exist to carry them. Board views, labels, search and
 cross-issue references have no equivalent.
 
@@ -1303,14 +1264,9 @@ remain genuinely open:
 
 ### Resolved during step 3
 
-Runtime shape is settled: an Agent carries execution placement rather than being
-the runtime. V1 permits local execution or an explicit list of registered Host
-ids. Qwen Code's existing
-`WorkspaceRuntime`, durable host-session claim and ACP bridge heartbeat are its
-local implementation. H1's separate registry authenticates remote Qwen Host
-daemons; H2 now lets only explicitly selected Hosts claim runs and routes result
-mutations through the primary's lease-checked store. Registration still does
-not mean placement, and the Host-side model worker remains unimplemented.
+Runtime shape is settled: an Agent is an identity, not the runtime. Qwen Code's
+existing `WorkspaceRuntime`, durable host-session claim and ACP bridge
+heartbeat are its local implementation.
 
 ## 10. Out of scope
 

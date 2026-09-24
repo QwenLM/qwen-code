@@ -408,7 +408,7 @@ interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
-  onOpenAgents?: (view?: 'agents' | 'tasks' | 'runtime') => void;
+  onOpenAgents?: (view?: 'agents' | 'tasks') => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;

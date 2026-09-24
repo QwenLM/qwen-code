@@ -9030,7 +9030,7 @@ export function App({
     );
   }, []);
   const [agentsNav, setAgentsNav] = useState<{
-    view: 'agents' | 'tasks' | 'runtime' | 'new-agent';
+    view: 'agents' | 'tasks' | 'new-agent';
     request: number;
   }>({ view: 'agents', request: 0 });
   useEffect(() => {

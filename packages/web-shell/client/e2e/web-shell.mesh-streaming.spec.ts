@@ -53,8 +53,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
     id: 'ag_stream',
     name: 'stream-worker',
     enabled: true,
-    status: 'offline',
-    runtime: { label: 'Demo-Host', status: 'offline' },
+    status: 'idle',
   };
   let sent = 0;
   let releaseReply!: () => void;
@@ -139,7 +138,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await expect(
     page
       .getByRole('status')
-      .filter({ hasText: 'stream-worker 所在的 Runtime 离线' }),
+      .filter({ hasText: 'stream-worker 排队中，空出来就开始' }),
   ).toBeVisible();
   const activity = page.getByRole('region', {
     name: '团队',
@@ -150,10 +149,8 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await expect(
     page.getByRole('tab', { name: '团队', exact: true }),
   ).toBeVisible();
-  await expect(activity).toContainText('Demo-Host 离线');
+  await expect(activity).toContainText('消息已接收，排队等待启动');
   const run = thread.runs[0];
-  agent.status = 'idle';
-  agent.runtime.status = 'online';
   run.status = 'running';
   const initialProgress = run.progress!;
   run.progress = undefined;
@@ -250,7 +247,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await page.screenshot({ path: info.outputPath('02-completed.png') });
 });
 
-test('mesh real Host streams into the browser @mesh-live', async ({
+test('mesh real agent streams into the browser @mesh-live', async ({
   page,
   request,
 }, info) => {
@@ -267,7 +264,7 @@ test('mesh real Host streams into the browser @mesh-live', async ({
   const agentsResponse = await request.get(`${prefix}/agents`);
   expect(
     agentsResponse.ok(),
-    'Start a collaboration-enabled loopback daemon and connect an online Host first',
+    'Start a collaboration-enabled loopback daemon first',
   ).toBeTruthy();
   const { agents } = await agentsResponse.json();
   expect(

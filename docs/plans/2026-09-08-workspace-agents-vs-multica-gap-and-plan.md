@@ -1,7 +1,5 @@
 # What is missing against Multica, and how to close it
 
-> **Development handoff (2026-09-09):** Continue with the [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md) and [successor plan](./2026-09-09-agent-service-collaboration-plan.md), starting at P0 rather than automatically implementing H2. Registered execution Hosts and existing external Agent services are different integration paths. H1 and the observations below remain evidence for their stated scope; they do not prove bidirectional service interoperability or experimental-off isolation.
-
 ## Architecture correction — persistent identity, task-scoped sessions
 
 The previous implementation score confused a working collaboration engine with
@@ -30,9 +28,9 @@ definition first. Existing definitions remain a secondary linking/template path
 for compatibility, not a prerequisite for a new persistent Agent.
 The existing Agents navigation now opens the runnable Agent roster and shared
 tasks first; reusable definition files are a secondary Definitions view.
-New Agents bind explicitly to the local Runtime. An Agent with no task session
-is idle while that Runtime is online; a task/run, not the Agent row, owns the
-link to its ordinary conversation transcript.
+New Agents run on the local daemon. An Agent with no task session is idle; a
+task/run, not the Agent row, owns the link to its ordinary conversation
+transcript.
 
 ## Current correction — task orchestration before process isolation
 
@@ -378,11 +376,8 @@ it survives the change below.
 **Implemented, but narrower than Multica.** Each identity owns a task-scoped
 top-level ACP session with its own persona, model setting and transcript. It is
 no longer a background subagent, and work on another task gets another session.
-The ACP bridge still multiplexes those sessions in one process. The produced
-`local` binding resolves through Qwen Code's existing workspace Runtime. Its
-durable host-session claim, provider, bridge heartbeat and live workload appear
-in the Runtime view. H1 now also registers remote Qwen Host daemons and tracks
-liveness, but placement and remote execution remain absent.
+The ACP bridge still multiplexes those sessions in one process, owned by Qwen
+Code's existing workspace Runtime and its durable host-session claim.
 
 **Missing entirely.** Remote placement and execution; labels and due date on the
 work item; squads; inbox; projects. Priority, acceptance criteria,
@@ -568,112 +563,29 @@ Stage A's initial sessionization is complete: `launcher.ts`, `dispatch-port.ts` 
 `dispatchAgentRuns` and the two ACP control methods behind them. Dispatch runs
 in the daemon, where the sessions are. The follow-up correction scopes those
 sessions to `(agent, thread)` instead of one transcript per identity.
-H1 now supplies Multica-style Host registration and liveness; its remote
-task-execution boundary remains absent.
 
-Before H1, the local Runtime follow-up deliberately reused existing
-infrastructure rather than adding a parallel host store. A non-empty roster restores the persisted
-host-session owner after daemon restart, and the page reads the bridge heartbeat
-plus live Agent/session/run counts. Unknown runtime bindings stay offline and
-their work remains queued instead of failing terminally. The observed restart
-reused host session `f210855f-45ab-4624-a858-bf11785e22d0`, with the heartbeat
-advancing in the browser. This is one real local host; it is not the remote
-Runtime registry, heartbeat transport or placement layer Multica has.
+The local host follow-up deliberately reused existing infrastructure rather
+than adding a parallel host store. A non-empty roster restores the persisted
+host-session owner after daemon restart. The observed restart reused host
+session `f210855f-45ab-4624-a858-bf11785e22d0`. This is one real local host; it
+is not the remote Runtime registry, heartbeat transport or placement layer
+Multica has.
 
 ### Original-goal acceptance audit, 2026-09-08
 
 This is a bounded acceptance pass against the original request, not a
 percentage estimate.
 
-| Original requirement                                    | Acceptance evidence on this branch                                                                                                                                                           | Result                                                                                       |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Declare persistent Agent identities                     | The roster survives daemon restart; a fresh no-definition Agent applied its own durable instructions and model in its task session                                                           | Passed locally                                                                               |
-| Agent is not a background subagent or Agent Team member | Dispatch creates a top-level ACP session with `sourceType: agent`; the workspace-agent execution path no longer uses `BackgroundTaskRegistry` or Agent Team                                  | Passed; sessions still share one ACP daemon                                                  |
-| Assign and orchestrate tasks in a panel                 | The Web Shell creates root tasks with assignee, priority and acceptance criteria, nests child tasks, shows aggregate status, and lets a person mark work done                                | Passed locally                                                                               |
-| Agents collaborate through a shared thread              | Live runs covered peer mentions, child delegation, parent reports, waiting, blocking and review                                                                                              | Passed locally                                                                               |
-| A person can intervene while an Agent is working        | A live mid-turn message was persisted in the same run's transcript and consumed window, and changed the submitted review                                                                     | Passed for the normal path; late-drain crash windows remain open                             |
-| Reuse Qwen Code conversations                           | Agent task sessions appear under the existing sidebar's Agents source and open in the ordinary session view; the shared task keeps only cross-Agent coordination state                       | Passed locally                                                                               |
-| Multica/Harness-style Host layer                        | The primary daemon persists registered Hosts; a second daemon keeps a stable Host id across both daemon restarts, advertises provider/workspace, and drives online/offline through heartbeat | H1 passed locally; no Agent binding, remote execution, placement or transcript proxy (H2/H3) |
-| Full Multica tracker breadth                            | Agent instructions/model/concurrency and task priority/acceptance criteria exist                                                                                                             | Partial: labels, projects, inbox, squads, due dates and invocation policy are absent         |
-
-The audit's next step, registered-Host H1, is now implemented and accepted below.
-
-### Registered-Host feasibility gate
-
-Source review rejects treating remote Hosts as one more `runtimeId`. Qwen
-Code's existing `WorkspaceRuntime` is a live object inside one daemon: it owns
-the local workspace path, filesystem, ACP bridge and session service. The
-workspace-agent ledger is also local to that path, and every current dispatch,
-thread tool and transcript link terminates at that same daemon. A second daemon
-cannot safely execute a run merely by appearing in the Runtime list: it cannot
-read the authoritative ledger, prove ambient run identity, apply `thread_*`
-mutations, or expose its task session through the primary daemon's conversation
-list.
-
-There are three real product shapes:
-
-1. A shared service owns the ledger and runtime registry, as Multica and
-   Harness do.
-2. The primary Qwen daemon becomes that control plane, and remote Host daemons
-   connect outbound as execution workers. Thread mutations and session events
-   must be authenticated and proxied back to the primary.
-3. Keep the current local-only Host and make no remote claim.
-
-For an open-source demo without introducing a separate hosted service, option
-2 is the recommended shape. Its design gate must settle the enrollment
-credential, remote workspace/repository mapping, scoped run protocol,
-transcript ownership, reconnect/replay contract, and whether a remote Host may
-invoke only `thread_*` on the primary or a wider tool surface. Implementing a
-Host card or picker before those decisions would be a false capability.
-
-The existing code already supplies part of the transport, and should be reused:
-
-- `@qwen-code/sdk/daemon` has a network `DaemonClient` and
-  `DaemonSessionClient` for capability discovery, workspace selection,
-  create/resume, prompt, event streaming and cancellation.
-- `bearerAuth` protects a non-loopback `qwen serve`, and the capabilities plus
-  workspace-qualified routes already fail when a requested workspace is absent
-  or untrusted.
-- `agentThreadSessionId` and `sourceType: agent` already define the stable
-  `(agent, thread)` session identity.
-
-Those pieces do not provide a Host credential. The server bearer token grants
-the whole daemon and is too broad; the channel worker's prompt authorization is
-a local child-process sentinel, not a remote enrollment credential. Nor do they
-make current `thread_*` tools remote: every mutation currently opens the local
-JSON store and proves the ambient run there. A remote Host therefore needs a
-scoped run credential and a primary-side tool endpoint that repeats the same
-live-run check inside the authoritative transaction. This should be a direct
-built-in transport, not MCP: enabling arbitrary MCP would silently widen the
-read-only capability ceiling.
-
-Implementation has three separately accepted slices:
-
-1. **H1 — Host registry and heartbeat.** A one-time enrollment credential is
-   exchanged for a stable Host id and scoped secret; a second daemon advertises
-   its provider set and workspace mapping; heartbeat drives online/offline and
-   survives primary restart; the Runtime page shows only these stored/live
-   facts. No Agent can bind to the Host yet.
-2. **H2 — Bound remote run.** An Agent binds to one online Host; only that Host
-   may claim its run; the claim carries an immutable persona/tool snapshot and
-   attempt-scoped credential; remote `thread_*` calls execute on the primary
-   and recheck the run before writing; disconnect leaves unconsumed work
-   replayable rather than terminally failed.
-3. **H3 — Conversation continuity.** The primary session catalog records the
-   remote session owner and proxies its events/transcript/cancel surface, so the
-   existing Agents conversation list opens the same `(agent, thread)` history
-   before and after either daemon restarts.
-
-H1 observation: enrollment replay returned 401; stopping the Host past the
-15-second window changed it to offline; restarting it without the token restored
-Host `host_d43cad67-c491-4915-9186-481732a0458e`; restarting the primary caused
-one failed heartbeat followed by reconnection with that same id. The Runtime
-page showed both the local daemon and `Demo-Host`, with the advertised provider,
-workspace and moving heartbeat. No API or UI path can bind an Agent to it.
-
-The registered-Host capability is accepted only after H1-H3 pass together.
-Cloud scheduling, autoscaling and one permanent process per Agent remain out of
-scope.
+| Original requirement                                    | Acceptance evidence on this branch                                                                                                                                     | Result                                                                               |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Declare persistent Agent identities                     | The roster survives daemon restart; a fresh no-definition Agent applied its own durable instructions and model in its task session                                     | Passed locally                                                                       |
+| Agent is not a background subagent or Agent Team member | Dispatch creates a top-level ACP session with `sourceType: agent`; the workspace-agent execution path no longer uses `BackgroundTaskRegistry` or Agent Team            | Passed; sessions still share one ACP daemon                                          |
+| Assign and orchestrate tasks in a panel                 | The Web Shell creates root tasks with assignee, priority and acceptance criteria, nests child tasks, shows aggregate status, and lets a person mark work done          | Passed locally                                                                       |
+| Agents collaborate through a shared thread              | Live runs covered peer mentions, child delegation, parent reports, waiting, blocking and review                                                                        | Passed locally                                                                       |
+| A person can intervene while an Agent is working        | A live mid-turn message was persisted in the same run's transcript and consumed window, and changed the submitted review                                               | Passed for the normal path; late-drain crash windows remain open                     |
+| Reuse Qwen Code conversations                           | Agent task sessions appear under the existing sidebar's Agents source and open in the ordinary session view; the shared task keeps only cross-Agent coordination state | Passed locally                                                                       |
+| Multica/Harness-style Host layer                        | Registered Hosts, remote placement and remote execution are not part of this PR                                                                                        | Out of scope for this PR                                                             |
+| Full Multica tracker breadth                            | Agent instructions/model/concurrency and task priority/acceptance criteria exist                                                                                       | Partial: labels, projects, inbox, squads, due dates and invocation policy are absent |
 
 A later source audit found that sessionization alone had not delivered the
 claimed persona: persona fields were assigned after `Config.initialize()` had
@@ -750,7 +662,7 @@ three kinds, and the distinction matters more than the number:
   not assumed — but a single field check can be disabled with every suite
   still green. That is a real if minor gap.
 
-Retired 2026-09-09 per the successor plan §1: `run-workspace-agents-concurrency.mjs`,
+Retired 2026-09-09: `run-workspace-agents-concurrency.mjs`,
 `run-workspace-agents-crash.mjs` and `fuzz-workspace-agents.mjs`. Their results above
 stand as recorded; the questions they answered were one-time. The orphan sweep, the
 two tsconfigs and `run-workspace-agents.mjs` were removed later with the rest of
@@ -797,7 +709,7 @@ question for whoever owns that surface.
 
 **Multica 实际是什么**：Linear 形态的 issue tracker，assignee 可以是 agent，外加一层 runtime 注册。`agent_runtime` 是独立实体（workspace + daemon_id + provider，带在线状态和心跳），agent 绑定到它上面；`agent_task_queue` 是 agent × issue 的派发队列；`issue` 有优先级、7 种状态、验收标准、截止日期、标签、项目；对话就是 issue 上的 comment。页面里有独立的 runtimes 和 runtimes/[id]。
 
-**我们的状态**：底层协作规则已经具备；每个 `(agent, task)` 都是独立的顶层 ACP session，不再是 background subagent，同一 Agent 处理不同任务也不会共用 transcript。本地 `runtimeId` 已产生、校验并在面板展示，但这些 session 仍共享一个 ACP daemon；H1 已实现远程 Host 注册和心跳，放置、远程执行和进程级故障隔离尚未实现。工作项已有优先级和验收标准；标签、截止日期、project、squad、inbox 仍未实现。
+**我们的状态**：底层协作规则已经具备；每个 `(agent, task)` 都是独立的顶层 ACP session，不再是 background subagent，同一 Agent 处理不同任务也不会共用 transcript。这些 session 仍共享一个 ACP daemon；远程 Host 注册、放置、远程执行和进程级故障隔离都不在本 PR 范围内。工作项已有优先级和验收标准；标签、截止日期、project、squad、inbox 仍未实现。
 
 **之前那个七八成错在哪**：我拿自己那份设计文档当卷子打分，而文档 §1 当时就把执行模型定错了。现在修正的是本地 demo 主链路；若按 Multica 完整产品计算，远程 Runtime、权限、项目和收件箱仍然不存在，不能再用百分比掩盖不同分母。
 

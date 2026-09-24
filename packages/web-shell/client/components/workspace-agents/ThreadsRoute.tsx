@@ -13,7 +13,6 @@ import {
 import {
   ThreadsPage,
   type WorkspaceAgentSummaryView,
-  type WorkspaceAgentRuntimeView,
   type AgentWorkspaceView,
   type NewWorkspaceAgent,
   type NewThread,
@@ -34,36 +33,16 @@ import {
   type AgentRunProgressEvent,
   type AgentStreamState,
 } from './agent-events';
-import type { JoinToken } from './add-runtime-dialog';
-import type { AgentShare, AgentShareSummary } from './share-agent-dialog';
 
 interface CreateThreadResult {
   id: string;
 }
 
 export interface ThreadsApi {
-  connectRemoteHost?(input: {
-    remoteUrl: string;
-    remoteToken: string;
-    remoteCwd: string;
-    serverUrl: string;
-    provider: 'qwen' | 'codex';
-    allowHttp: boolean;
-  }): Promise<unknown>;
   listAgents(): Promise<{
     agents: WorkspaceAgentSummaryView[];
-    runtime?: WorkspaceAgentRuntimeView;
-    runtimes?: WorkspaceAgentRuntimeView[];
     capabilities?: AgentCapabilitiesView;
   }>;
-  /** A single-use token for `qwen serve --join` on another machine. */
-  createJoinToken?(): Promise<JoinToken>;
-  createShare?(
-    agentId: string,
-    scope: 'analysis' | 'full',
-  ): Promise<AgentShare>;
-  listShares?(agentId: string): Promise<{ shares: AgentShareSummary[] }>;
-  revokeShare?(agentId: string, callerId: string): Promise<unknown>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
@@ -122,18 +101,7 @@ export function createThreadsHttpApi(
     request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 
   return {
-    connectRemoteHost: (input) => post('/hosts/remote-connect', input),
     listAgents: () => request('/agents'),
-    createJoinToken: () => post('/hosts/enrollment', {}),
-    createShare: (agentId, scope) =>
-      post(`/agents/${encodeURIComponent(agentId)}/shares`, { scope }),
-    listShares: (agentId) =>
-      request(`/agents/${encodeURIComponent(agentId)}/shares`),
-    revokeShare: (agentId, callerId) =>
-      request(
-        `/agents/${encodeURIComponent(agentId)}/shares/${encodeURIComponent(callerId)}`,
-        { method: 'DELETE' },
-      ),
     listThreads: () => request('/threads'),
     getThread: (id) => request(`/threads/${encodeURIComponent(id)}`),
     createAgent: (input) => post('/agents', input),
@@ -274,7 +242,6 @@ export function ThreadsRoute({
   );
   const { t } = useI18n();
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
-  const [runtimes, setRuntimes] = useState<WorkspaceAgentRuntimeView[]>([]);
   const [view, setView] = useState<AgentWorkspaceView>(
     initialView === undefined || initialView === 'new-agent'
       ? 'agents'
@@ -295,10 +262,10 @@ export function ThreadsRoute({
     RoutingPreviewTarget[] | undefined
   >();
   const [pending, setPending] = useState(false);
-  // Set while the New agent page is open; may name the runtime to preselect.
-  const [creatingAgent, setCreatingAgent] = useState<
-    { hostId?: string } | undefined
-  >(initialView === 'new-agent' ? {} : undefined);
+  // Set while the New agent page is open.
+  const [creatingAgent, setCreatingAgent] = useState(
+    initialView === 'new-agent',
+  );
   const [refreshError, setRefreshError] = useState<string | undefined>();
   const [actionError, setActionError] = useState<string | undefined>();
   const error = actionError ?? refreshError;
@@ -337,9 +304,6 @@ export function ThreadsRoute({
       }
       appliedRefresh.current = sequence;
       setAgents(nextAgents.agents);
-      setRuntimes(
-        nextAgents.runtimes ?? (nextAgents.runtime ? [nextAgents.runtime] : []),
-      );
       if (nextAgents.capabilities) setCapabilities(nextAgents.capabilities);
       setThreads(nextThreads.threads);
       setDetail(nextDetail);
@@ -481,12 +445,8 @@ export function ThreadsRoute({
       <AgentCreatePage
         initialScope="workspace"
         workspaceCwd={workspaceCwd}
-        executionHosts={runtimes.filter((entry) => entry.kind === 'external')}
-        {...(creatingAgent.hostId
-          ? { initialHostId: creatingAgent.hostId }
-          : {})}
-        onCancel={() => setCreatingAgent(undefined)}
-        onCreated={() => setCreatingAgent(undefined)}
+        onCancel={() => setCreatingAgent(false)}
+        onCreated={() => setCreatingAgent(false)}
         onSaveWorkspaceAgent={async (input) => {
           await client.createAgent(input);
           await refresh();
@@ -637,12 +597,6 @@ export function ThreadsRoute({
         threads={threads}
         view={view}
         onViewChange={setView}
-        runtimes={runtimes}
-        onConnectRemoteHost={
-          client.connectRemoteHost
-            ? (input) => mutate(() => client.connectRemoteHost!(input))
-            : undefined
-        }
         createPreview={createPreview}
         pending={pending}
         onOpenThread={openThread}
@@ -653,24 +607,10 @@ export function ThreadsRoute({
         onUpdateAgent={(id, patch) =>
           void mutate(() => client.updateAgent(id, patch))
         }
-        onOpenAgentBuilder={(hostId) => setCreatingAgent({ hostId })}
-        {...(client.createJoinToken
-          ? { onCreateJoinToken: client.createJoinToken }
-          : {})}
-        {...(client.createShare && client.listShares && client.revokeShare
-          ? {
-              shares: {
-                create: client.createShare,
-                list: async (agentId: string) =>
-                  (await client.listShares!(agentId)).shares,
-                revoke: client.revokeShare,
-              },
-            }
-          : {})}
+        onOpenAgentBuilder={() => setCreatingAgent(true)}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
         workspaceCwd={workspaceCwd}
-        hostServerUrl={workspace.baseUrl}
         workspaces={workspace.capabilities?.workspaces ?? []}
         onWorkspaceChange={(cwd) => {
           setSelectedWorkspaceCwd(cwd);
