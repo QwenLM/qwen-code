@@ -9,6 +9,7 @@ import {
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
+  getRelaunchExecArgv,
   relaunchApp,
   relaunchForUpdate,
   requestUpdateOnExit,
@@ -58,6 +59,37 @@ describe('processUtils', () => {
   });
 
   // Last: superviseInProcess switches module state for the rest of the file.
+  describe('getRelaunchExecArgv', () => {
+    const originalGc = globalThis.gc;
+    const originalExecArgv = [...process.execArgv];
+
+    afterEach(() => {
+      globalThis.gc = originalGc;
+      process.execArgv = [...originalExecArgv];
+    });
+
+    it('adds --expose-gc when gc was exposed at runtime', () => {
+      process.execArgv = ['--trace-warnings'];
+      globalThis.gc = vi.fn() as unknown as typeof globalThis.gc;
+      expect(getRelaunchExecArgv()).toEqual([
+        '--trace-warnings',
+        '--expose-gc',
+      ]);
+    });
+
+    it('does not repeat --expose-gc from the command line', () => {
+      process.execArgv = ['--expose-gc'];
+      globalThis.gc = vi.fn() as unknown as typeof globalThis.gc;
+      expect(getRelaunchExecArgv()).toEqual(['--expose-gc']);
+    });
+
+    it('keeps the flags as they are when gc is not exposed', () => {
+      process.execArgv = ['--trace-warnings'];
+      globalThis.gc = undefined;
+      expect(getRelaunchExecArgv()).toEqual(['--trace-warnings']);
+    });
+  });
+
   describe('without a supervising parent', () => {
     const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
     const execve = vi.fn();
@@ -83,6 +115,22 @@ describe('processUtils', () => {
         ...process.execArgv,
         ...process.argv.slice(1),
       ]);
+    });
+
+    it('keeps gc the launcher exposed at runtime across the restart', async () => {
+      const originalGc = globalThis.gc;
+      globalThis.gc = vi.fn() as unknown as typeof globalThis.gc;
+      try {
+        await relaunchApp();
+        expect(execve).toHaveBeenCalledWith(process.execPath, [
+          process.execPath,
+          ...process.execArgv,
+          '--expose-gc',
+          ...process.argv.slice(1),
+        ]);
+      } finally {
+        globalThis.gc = originalGc;
+      }
     });
 
     it('runs the update here and exits with its code', async () => {

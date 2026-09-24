@@ -40,6 +40,20 @@ export function superviseInProcess(onUpdateRelaunch: UpdateRelaunchHandler) {
 }
 
 /**
+ * Node flags for a process that relaunches this one. On POSIX the bin launcher
+ * exposes gc at runtime rather than via argv, so `process.execArgv` alone would
+ * start the relaunched CLI without the gc the memory-pressure monitor calls.
+ */
+export function getRelaunchExecArgv(): string[] {
+  const needsExposeGc =
+    typeof globalThis.gc === 'function' &&
+    !process.execArgv.includes('--expose-gc');
+  return needsExposeGc
+    ? [...process.execArgv, '--expose-gc']
+    : [...process.execArgv];
+}
+
+/**
  * Exits the process with a special code to signal that the parent process should relaunch it.
  */
 export async function relaunchApp(): Promise<void> {
@@ -49,16 +63,9 @@ export async function relaunchApp(): Promise<void> {
     execve?: (file: string, args: string[]) => never;
   };
   if (supervisedInProcess && proc.execve) {
-    // The bin launcher may have exposed gc at runtime rather than via argv.
-    const gcArgs =
-      typeof globalThis.gc === 'function' &&
-      !process.execArgv.includes('--expose-gc')
-        ? ['--expose-gc']
-        : [];
     proc.execve(process.execPath, [
       process.execPath,
-      ...process.execArgv,
-      ...gcArgs,
+      ...getRelaunchExecArgv(),
       ...process.argv.slice(1),
     ]);
   }

@@ -9,6 +9,7 @@ import {
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
+  getRelaunchExecArgv,
 } from './processUtils.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -56,7 +57,7 @@ export async function relaunchAppInChildProcess(
   const script = process.argv[1];
   const scriptArgs = process.argv.slice(2);
   const nodeArgs = [
-    ...process.execArgv,
+    ...getRelaunchExecArgv(),
     ...additionalNodeArgs,
     script,
     ...additionalScriptArgs,

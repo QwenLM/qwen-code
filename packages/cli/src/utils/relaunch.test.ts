@@ -258,6 +258,76 @@ describe('relaunchAppInChildProcess', () => {
     }
   });
 
+  describe('when the bin launcher exposed gc at runtime', () => {
+    const originalGc = globalThis.gc;
+    const originalPlatform = process.platform;
+
+    beforeEach(() => {
+      // cli-entry.js on POSIX: gc comes from v8.setFlagsFromString, not argv.
+      globalThis.gc = vi.fn() as unknown as typeof globalThis.gc;
+      process.execArgv = [];
+      process.argv = ['/usr/bin/node', '/app/cli.js', '--acp'];
+    });
+
+    afterEach(() => {
+      globalThis.gc = originalGc;
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    });
+
+    it('starts the supervised child with --expose-gc', async () => {
+      const child = createMockChildProcess(0, false);
+      mockedSpawn.mockReturnValue(child);
+
+      const promise = relaunchAppInChildProcess([], []);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(mockedSpawn.mock.calls[0][1]).toEqual([
+        '--expose-gc',
+        '/app/cli.js',
+        '--acp',
+      ]);
+      child.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    });
+
+    it('replaces the process with --expose-gc', async () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const execveSpy = vi.fn(() => undefined as never);
+      process.execve = execveSpy;
+
+      await relaunchAppInChildProcess(['--max-old-space-size=4096'], [], {
+        replaceProcess: true,
+      });
+
+      expect(execveSpy).toHaveBeenCalledWith(
+        '/usr/bin/node',
+        [
+          '/usr/bin/node',
+          '--expose-gc',
+          '--max-old-space-size=4096',
+          '/app/cli.js',
+          '--acp',
+        ],
+        expect.any(Object),
+      );
+    });
+
+    it('does not repeat --expose-gc already on the command line', async () => {
+      process.execArgv = ['--expose-gc'];
+      const child = createMockChildProcess(0, false);
+      mockedSpawn.mockReturnValue(child);
+
+      const promise = relaunchAppInChildProcess([], []);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(mockedSpawn.mock.calls[0][1]).toEqual([
+        '--expose-gc',
+        '/app/cli.js',
+        '--acp',
+      ]);
+      child.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    });
+  });
+
   it('preserves file values and passes their provenance to the child', async () => {
     resetEnvironmentTrackingForTesting();
     delete process.env['TRACK_A_FILE_VALUE'];

@@ -159,7 +159,9 @@ no separate supervisor, the CLI marks itself as supervising in-process:
   It adds `--expose-gc` if gc had been exposed at runtime.
 - `relaunchForUpdate()` runs the update handler in-process and exits with its
   code. When that code is 44, the launcher's exit hook relaunches.
-- Every other mode keeps the supervised relaunch.
+- Every other mode keeps the supervised relaunch. Its child gets
+  `--expose-gc` by the same rule, because the launcher no longer passes that
+  flag in argv.
 
 ## 6. Results
 
@@ -274,7 +276,8 @@ New tests cover:
 - the IDE-walk gate;
 - branch priming;
 - the update-check delay;
-- the in-process launcher and its exit-44 relaunch.
+- the in-process launcher and its exit-44 relaunch;
+- `--expose-gc` on both relaunch paths when gc was exposed at runtime.
 
 **Integration:**
 
@@ -288,6 +291,12 @@ New tests cover:
   typeable again, and the session stayed a single process.
 - A fake install that exits 44 relaunched with its arguments preserved, `gc`
   available, and the exit code propagated.
+- A real `/update` on an `npm install -g` install, with a local registry
+  serving a newer version, installed it and relaunched into the new version.
+- `global.gc` is available in the session process in every launch mode:
+  interactive, `-p`, ACP, stream-json, and `advanced.autoConfigureMemory`. This
+  holds on Node 22.23, on Node 22.3 (which has no `process.execve`), and after
+  a folder-trust restart.
 - `qwen review --help` works.
 
 ## 11. Acceptance criteria
