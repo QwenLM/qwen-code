@@ -33,7 +33,7 @@
 
 `RuntimeProvisionRequest` 新增 `provisionerKind`（两参构造器保持 `legacy` 默认）。类型既不是 `legacy` 也不是 `static` 的请求要求持久身份：仓储在 `findOrCreate` 时分配 `RuntimeProvisionSeed`，且此类请求的 `READY` 记录必须携带 seed、租约、资源句柄、attestation 代数和对账时间。seed 由 binding id 与 generation 生成，因此同一次绑定的 provision 重试保持稳定身份；其 `provisionRequestId`、`provisionalRuntimeId` 与 `gatewayIncarnation` 把记录绑定到唯一一个 Runtime 化身。
 
-JDBC 仓储用必需的 `SecretProtector`（附带 `AesGcmSecretProtector`）按 `runtime-provision-seed:<bindingId>` 上下文加密 seed。带 seed 记录的租约令牌随加密 seed 存储；legacy 记录的租约令牌在 `runtime-lease-token:<bindingId>` 下单独加密。schema 中不再有任何明文令牌列。slot 表与 binding 表同时持久化 `provisioner_kind`，请求哈希也覆盖它，因此恢复出的行绝不会被另一种 provisioner 重新解释。
+JDBC 仓储用必需的 `SecretProtector`（附带 `AesGcmSecretProtector`）按 `runtime-provision-seed:<sha256(bindingId)>` 上下文加密 seed。带 seed 记录的租约令牌随加密 seed 存储；legacy 记录的租约令牌在 `runtime-lease-token:<sha256(bindingId)>` 下单独加密。两个上下文都由 binding id 的定宽摘要派生，因此合法的 512 字符标识绝不会超出 protector 自身的上下文上限。schema 中不再有任何明文令牌列。slot 表与 binding 表同时持久化 `provisioner_kind`，请求哈希也覆盖它，因此恢复出的行绝不会被另一种 provisioner 重新解释。
 
 ### 3.2 Provisioner 与 transport SPI
 
@@ -48,7 +48,7 @@ JDBC 仓储用必需的 `SecretProtector`（附带 `AesGcmSecretProtector`）按
 
 ### 3.3 持久 provision
 
-对持久请求，`provisionBinding` 先认领操作，再确保调度器资源、用持久化的 seed 执行 provision，然后由 Broker 自己对返回的租约做 attestation。记录经由 `withAttestation(lease, handle, …)` 进入 `READY`，首个 attestation 代数与对账时间随同一次 compare-and-set 写入。不可重试的身份失败——句柄类型冲突、attestation 不匹配——把绑定置为 `RECOVERY_BLOCKED` 而不是 `FAILED`，因此重试不会在状态不明的资源上铸造替代 Runtime。操作结束时释放认领，与对账路径一致，后续 Broker 无需等待租约过期即可接管。
+对持久请求，`provisionBinding` 先认领操作，再确保调度器资源、用持久化的 seed 执行 provision，然后由 Broker 自己对返回的租约做 attestation。确保得到的资源句柄会在继续 provision 前持久化，因此之后的可重试失败会让记录保持 `PROVISIONING`，重试的 `ensureResource` 会拿到它自己已创建的句柄，而不是铸造替代资源。记录经由 `withAttestation(lease, handle, …)` 进入 `READY`，首个 attestation 代数与对账时间随同一次 compare-and-set 写入。不可重试的身份失败——句柄类型冲突、attestation 不匹配——把绑定置为 `RECOVERY_BLOCKED` 而不是 `FAILED`，因此重试不会在状态不明的资源上铸造替代 Runtime。provision 与对账使用相同的操作截止期，因此停在 `ensureResource`、provision 或 attestation 里的调用无法无限期占用绑定；截止期触发时先释放认领，从而围栏该超时操作的迟到写入。操作结束时释放认领，与对账路径一致，后续 Broker 无需等待租约过期即可接管。
 
 legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
@@ -70,7 +70,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 ### 3.5 丢失与回收
 
-`LOST` 记录保持活跃，因此既有会话与执行仍指向已丢失的代数，而不会漂移到替代 Runtime。下一次 `warm`/`acquire` 只在 `countActiveByBinding` 与新增的 `ToolExecutionRepository.hasActiveByBinding` 都确认没有引用时才回收槽位——`LOST` 转 `RELEASED`，再经正常 provision 路径创建新代数。只要仍有活跃引用，调用方得到 `runtime_broker_runtime_lost`，绑定保持 `LOST`。
+`LOST` 记录保持活跃，因此既有会话与执行仍指向已丢失的代数，而不会漂移到替代 Runtime。下一次 `warm`/`acquire` 只在 `countActiveByBinding` 与新增的 `ToolExecutionRepository.hasActiveByBinding` 都确认没有引用时才回收槽位——`LOST` 转 `RELEASED`，再经正常 provision 路径创建新代数。回收与对账共用同一个 binding key 的单飞，因此针对同一空闲 `LOST` 绑定的并发 `warm` 会加入同一次回收并观察到同一个新代数。只要仍有活跃引用，调用方得到 `runtime_broker_runtime_lost`，绑定保持 `LOST`。
 
 显式 `release` 可以在 binding 为 `LOST` 且没有活跃 execution 时，本地结算同代 `READY` Session。Runtime 已被证明不存在，因此无法调用 transport；活跃 execution 仍会钉住 Session 与已丢失代数。
 
@@ -82,7 +82,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 ## 4. 验证
 
-在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：124 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 12 例（受门控的对账-接管、unknown 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、不可重试 attestation 失败会阻塞恢复、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、迟到的 ensure 结果不能覆盖新 owner、丢失仅在空闲时创建新代数、有活跃会话时丢失保持阻塞直至可以安全释放）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储，并覆盖 `releaseOperation` 移交。`mvn checkstyle:check` 通过。
+在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：142 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 26 例（受门控的对账-接管、unknown 观察永不替换并重试到截止期、starting 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、每一项持久身份不匹配都阻塞、不可重试 attestation 失败会阻塞恢复、不可重试与可重试的 reconcile 失败、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、可重试 ensure 失败保留已确保资源、可重试 provision 失败让新绑定可重试、provision 受操作截止期约束、并发 provision 与回收各只收敛一次、迟到的 ensure 结果不能覆盖新 owner、SPI 默认实现失败关闭、丢失仅在空闲时创建新代数、丢失在有活跃会话或活跃执行时保持阻塞直至可以安全释放）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储、认领续租后 seed 密文保持不变、200 字符 provisioner kind 可往返，并覆盖 `releaseOperation` 移交与其拒绝路径。`mvn checkstyle:check` 通过。
 
 ## 5. 后续工作
 

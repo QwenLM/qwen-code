@@ -42,6 +42,11 @@ mvn checkstyle:check
 Broker tables. The JDBC implementations use `javax.sql.DataSource` for
 database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
+`JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
+(`AesGcmSecretProtector` is included): the provision seed of a durable binding
+and the lease token of a legacy binding are stored encrypted, so the key
+material must come from the embedding service's own durable secret store and
+stay stable across restarts and instances.
 Tool execution rows preserve idempotency identity, dispatch ownership and
 lease, cancellation intent, `UNKNOWN` recovery state, and the final result.
 Tool execution identifiers are globally unique repository keys. The embedding
@@ -62,5 +67,6 @@ mvn -Pmysql-integration \
 ```
 
 Durable rows alone do not make a stopped local Runtime process recoverable.
-The embedding service must reconcile a persisted lease before reuse and own the
-process adoption or reprovisioning policy.
+For a binding without durable identity the embedding service must reconcile a
+persisted lease before reuse and own the process adoption or reprovisioning
+policy; a durable binding is reconciled and adopted by the Broker itself.

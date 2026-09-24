@@ -22,7 +22,10 @@ The Runtime Broker repositories define durable identities, lifecycle states, com
 
 - Exposing the Broker as an HTTP service or defining public Agent resources.
 - Implementing a local process, container, Kubernetes, or remote Runtime provisioner.
-- Adopting or reconciling a Runtime after Broker process restart.
+- Adopting or reconciling a legacy binding after Broker process restart; a
+  binding with durable identity is adopted by the Broker itself, as described
+  in
+  [Runtime binding reconciliation](2026-09-24-runtime-binding-reconciliation.md).
 - Persisting Tool execution state in JDBC.
 - Draining idle Runtime bindings or releasing physical Runtime processes.
 - Implementing Hosted Harness callbacks or the Qwen CLI integration.
@@ -37,9 +40,9 @@ The Runtime Broker repositories define durable identities, lifecycle states, com
 
 ## Binding lifecycle
 
-The service calls `findOrCreate` for the exact placement request and converges concurrent work in the same process by binding identifier. A `PROVISIONING` record must be claimed through `claimOperation` before the provisioner is called. The service renews that operation claim while provisioning is in flight and writes `READY` only with the latest claimed version. A failed provision writes `FAILED` when the claim is still valid. A lost or expired claim never publishes the returned lease.
+The service calls `findOrCreate` for the exact placement request and converges concurrent work in the same process by binding identifier. A `PROVISIONING` record must be claimed through `claimOperation` before the provisioner is called. The service renews that operation claim while provisioning is in flight and writes `READY` only with the latest claimed version. A failed provision writes `FAILED` when the claim is still valid. A durable binding never writes `FAILED` once its scheduler resource is known: a non-retryable identity failure writes `RECOVERY_BLOCKED`, and a retryable failure keeps the record `PROVISIONING` so the retry converges on the ensured resource instead of minting a replacement. A lost or expired claim never publishes the returned lease.
 
-A `READY` row is only durable control-plane evidence. It does not prove that its endpoint is alive or that a restarted Broker process owns the credentials and local resource. This service records leases attested by its own successful provisioning in process-local memory. When a repository returns `READY` without a matching process-local lease, the service fails with `runtime_reconciliation_required`; it never silently reuses the endpoint or creates an in-memory replacement.
+A `READY` row is only durable control-plane evidence. It does not prove that its endpoint is alive or that a restarted Broker process owns the credentials and local resource. This service records leases attested by its own successful provisioning in process-local memory. When a repository returns `READY` without a matching process-local lease, a legacy binding fails with `runtime_reconciliation_required`, while a binding with durable identity enters Broker-side reconciliation: the provisioner observes the physical resource and the transport re-attests the Runtime identity before any Session may use the lease. Neither path silently reuses the endpoint or creates an in-memory replacement; see [Runtime binding reconciliation](2026-09-24-runtime-binding-reconciliation.md).
 
 ## Runtime Session lifecycle
 
@@ -67,13 +70,13 @@ Closing the service rejects new work, cancels its internal waiters, and stops it
 
 `RuntimeBrokerException` carries a stable code, retryability flag, and adapter-oriented status code. Validation and identity conflicts are non-retryable. Provisioning, scope resolution, transport failure, claim loss, and missing reconciliation are retryable service-unavailable conditions.
 
-Runtime tokens stay inside `RuntimeLease`. The service passes a lease to the binding repository and Runtime transport, and `warm` returns a binding record that carries the lease to the embedding caller. The JDBC binding repository persists the token in `runtime_token`; the binding row and its backups are therefore secret material that require restricted access and appropriate encryption and rotation controls. An embedding adapter must not serialize the lease or token to an untrusted caller. The service does not log tokens, invocation references, or Tool results. The embedding adapter remains responsible for authenticating callers and for mapping a caller to the Harness Session identifier supplied to this service.
+Runtime tokens stay inside `RuntimeLease`. The service passes a lease to the binding repository and Runtime transport, and `warm` returns a binding record that carries the lease to the embedding caller. The JDBC binding repository persists secrets encrypted: a durable binding's provision seed (which carries the lease token) and a legacy binding's lease token are both stored as ciphertext through a required `SecretProtector` (`AesGcmSecretProtector` is included), and no plaintext token column remains in the schema. The key material must come from the embedding service's own durable secret store and stay stable across restarts and instances; the binding rows and their backups remain secret material that require restricted access and rotation controls. An embedding adapter must not serialize the lease or token to an untrusted caller. The service does not log tokens, invocation references, or Tool results. The embedding adapter remains responsible for authenticating callers and for mapping a caller to the Harness Session identifier supplied to this service.
 
 ## Validation
 
 - Workspace-isolated Sessions share one provisioned binding; session-isolated Harness Sessions receive separate bindings.
 - Concurrent acquisition of one Runtime Session invokes the Runtime acquire operation once in process.
-- A persisted `READY` binding without process-local attestation fails closed.
+- A persisted `READY` legacy binding without process-local attestation fails closed; a durable binding is reconciled and adopted instead.
 - Duplicate execution creation converges on one record and one dispatch; changed content for the same idempotency key conflicts.
 - Cancellation intent is persisted before the Runtime cancellation call and survives until the physical result settles.
 - Ambiguous execution transport failure becomes `UNKNOWN`.
@@ -94,4 +97,4 @@ Runtime tokens stay inside `RuntimeLease`. The service passes a lease to the bin
 
 ## Follow-up work
 
-Add explicit process adoption and reconciliation before enabling restart recovery, add JDBC Tool execution persistence for multi-instance dispatch convergence, and then expose this core through a private HTTP adapter. Physical Runtime draining, Hosted Harness integration, and the Qwen-side Broker client remain separate reviewable slices.
+Adoption and reconciliation of a durable binding after a Broker restart are implemented; the remaining slices are recoverable local-process provisioning, JDBC Tool execution persistence for multi-instance dispatch convergence, and exposing this core through a private HTTP adapter. Physical Runtime draining, Hosted Harness integration, and the Qwen-side Broker client remain separate reviewable slices.

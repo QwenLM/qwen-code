@@ -68,12 +68,14 @@ identity, and its `provisionRequestId`, `provisionalRuntimeId`, and
 
 The JDBC repository encrypts the seed with a required `SecretProtector`
 (`AesGcmSecretProtector` is included) under the per-binding context
-`runtime-provision-seed:<bindingId>`. The lease token of a seeded record rides
-inside the encrypted seed; a legacy record's lease token is encrypted
-separately under `runtime-lease-token:<bindingId>`. No plaintext token column
-remains in the schema. The slot and binding tables also persist
-`provisioner_kind`, and the request hash now covers it, so a restored row can
-never be reinterpreted under a different provisioner.
+`runtime-provision-seed:<sha256(bindingId)>`. The lease token of a seeded
+record rides inside the encrypted seed; a legacy record's lease token is
+encrypted separately under `runtime-lease-token:<sha256(bindingId)>`. Both
+contexts derive from a fixed-width digest of the binding id, so a legal
+512-character identifier can never exceed the protector's own context bound.
+No plaintext token column remains in the schema. The slot and binding tables
+also persist `provisioner_kind`, and the request hash now covers it, so a
+restored row can never be reinterpreted under a different provisioner.
 
 ### 3.2 Provisioner and transport SPI
 
@@ -97,14 +99,21 @@ implements `RuntimeTransport` yet, so production wiring remains a later slice.
 
 For a durable request, `provisionBinding` claims the operation, ensures the
 scheduler resource, provisions with the persisted seed, and then attests the
-returned lease itself. The record becomes `READY` through
-`withAttestation(lease, handle, …)`, so the first attestation generation and
-the reconciliation timestamp are written with the same compare-and-set. A
-non-retryable identity failure — a handle kind conflict, an attestation
-mismatch — moves the binding to `RECOVERY_BLOCKED` rather than `FAILED`, so a
-retry cannot mint a replacement Runtime over an ambiguous resource. The claim
-is released when the operation completes, in the same way reconciliation
-releases it, so a later Broker can take over without waiting out the lease.
+returned lease itself. The ensured resource handle is persisted before
+provisioning continues, so a retryable failure afterwards keeps the record
+`PROVISIONING` and the retry's `ensureResource` receives the handle it already
+created instead of minting a replacement resource. The record becomes `READY`
+through `withAttestation(lease, handle, …)`, so the first attestation
+generation and the reconciliation timestamp are written with the same
+compare-and-set. A non-retryable identity failure — a handle kind conflict, an
+attestation mismatch — moves the binding to `RECOVERY_BLOCKED` rather than
+`FAILED`, so a retry cannot mint a replacement Runtime over an ambiguous
+resource. Provisioning runs under the same operation deadline as
+reconciliation, so a parked `ensureResource`, provision, or attestation call
+cannot hold the binding open; the deadline releases the claim first, which
+fences any late write from the timed-out operation. The claim is released when
+the operation completes, in the same way reconciliation releases it, so a
+later Broker can take over without waiting out the lease.
 
 The legacy path is byte-for-byte the reviewed behavior, including its claim
 lifecycle.
@@ -150,8 +159,11 @@ pointing at the lost generation instead of drifting to a replacement. The next
 generation through the normal provisioning path — only while
 `countActiveByBinding` and the new
 `ToolExecutionRepository.hasActiveByBinding` both report nothing referencing
-the lost generation. While anything is still active the caller gets
-`runtime_broker_runtime_lost` and the binding stays `LOST`.
+the lost generation. Reclamation is single-flighted on the binding key
+together with reconciliation, so concurrent `warm` calls for one idle `LOST`
+binding join the same reclamation and observe one new generation. While
+anything is still active the caller gets `runtime_broker_runtime_lost` and the
+binding stays `LOST`.
 
 An explicit `release` can settle a same-generation `READY` session locally
 when its binding is `LOST` and it has no active execution. The Runtime is
@@ -171,17 +183,25 @@ every outcome.
 
 ## 4. Validation
 
-`mvn test` in `packages/sdk-java/runtime-broker`: 124 tests, including the new
-`DurableRuntimeRecoveryTest` (12 cases: gated reconcile-and-adopt, unknown
-never replaces, timeout releases the claim and resumes, in-flight reconcile
-bounded by the deadline, late attestation fenced, initial-provision mismatch
-blocks, non-retryable attestation failure blocks recovery, conflict keeps the
-last trusted handle, non-retryable ensure failure stops, a late ensure result
-cannot overwrite a new owner, loss re-creates a generation only when idle,
-and loss stays pinned until an active session can be safely released).
+`mvn test` in `packages/sdk-java/runtime-broker`: 142 tests, including the new
+`DurableRuntimeRecoveryTest` (26 cases: gated reconcile-and-adopt, unknown
+never replaces and retries to the deadline, starting never replaces, timeout
+releases the claim and resumes, in-flight reconcile bounded by the deadline,
+late attestation fenced, initial-provision mismatch blocks, every persisted
+identity mismatch blocks, non-retryable attestation failure blocks recovery,
+non-retryable and retryable reconcile failures, conflict keeps the last
+trusted handle, non-retryable ensure failure stops, a retryable ensure failure
+keeps the ensured resource, a retryable provision failure leaves a fresh
+binding retryable, provisioning is bounded by the operation deadline,
+concurrent provisioning and reclamation converge once, a late ensure result
+cannot overwrite a new owner, the SPI defaults fail closed, loss re-creates a
+generation only when idle, and loss stays pinned by an active session or an
+active execution until it can be safely released).
 `JdbcRepositoryContract` now round-trips the seed, handle, attestation
 generation and reconciliation time on H2, asserts the seed and the legacy
-lease token are stored encrypted, and covers `releaseOperation` handoff.
+lease token are stored encrypted, keeps the seed ciphertext stable across a
+claim renewal, round-trips a 200-character provisioner kind, and covers
+`releaseOperation` handoff and its rejection paths.
 `mvn checkstyle:check` passes.
 
 ## 5. Follow-up work
