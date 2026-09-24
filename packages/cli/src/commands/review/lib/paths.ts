@@ -14,6 +14,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   realpathSync,
   statSync,
 } from 'node:fs';
@@ -584,10 +585,86 @@ export function ensureReviewTmpDir(command: string): void {
       `${command}: the workspace tracks ${what} at ${inertText(path)} — on ` +
         `the scratch directory ${REVIEW_TMP_DIR} or a path through it — and ` +
         `a plain write to that name would follow it out of the tree. ` +
-        `Refusing to run; untrack it and retry.`,
+        `Refusing to run; remove it from the index AND the working tree ` +
+        `(\`git rm -f -- <path>\`) and retry.`,
+    );
+  }
+  const onDisk = roundOwnedLinkOnDisk(command);
+  if (onDisk !== null) {
+    throw new Error(
+      `${command}: ${inertText(onDisk)} is a symbolic link on disk, at a ` +
+        `name this review writes — a plain write to it would follow the ` +
+        `link out of the tree. Refusing to run; delete the link and retry.`,
     );
   }
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+}
+
+/**
+ * A symbolic link at a name the round writes through, found by `lstat` on
+ * the DISK — tracked or not. The index sweep above cannot be the whole
+ * answer, because the write follows what is on disk, not what is tracked:
+ * its own remedy for a tracked link used to be "untrack it", and
+ * `git rm --cached` removes only the index entry, so following it passed
+ * the sweep while the link stayed where every plain `writeFileSync` of the
+ * round follows it (R10-3). `.qwen/*` is gitignored, so nothing else ever
+ * shows the surviving link to anyone.
+ *
+ * Keyed on `isSymbolicLink()`, never on mere existence: the round's side
+ * files and worktrees are real files and directories that legitimately
+ * exist from the last round. Two name classes, because the directory is
+ * shared (the skill-args file, a model's intermediates): every
+ * `qwen-review-*` entry, walked in full — side files, and the per-target
+ * directories the round writes INTO, where a link one level down is the
+ * same redirect — and the worktree names, checked at their own entry only:
+ * inside a worktree the links are the checkout's own (`node_modules`), and
+ * a redirected worktree root is the one that matters. Case-folded like the
+ * index sweep, for the same case-insensitive filesystem.
+ *
+ * The directory is shared by concurrent reviews, so an entry listed a moment
+ * ago can be gone (another target's `cleanup`) or replaced by a file: that
+ * is "nothing here", not a failure. Any other listing error refuses under
+ * the command's name — a directory this cannot list is one it cannot clear.
+ */
+function roundOwnedLinkOnDisk(command: string): string | null {
+  const list = (dir: string) => {
+    try {
+      return readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return [];
+      throw new Error(
+        `${command}: could not list ${inertText(dir)} ` +
+          `(${inertText((err as Error).message)}) — refusing to run rather ` +
+          `than write through a link the listing might have named.`,
+      );
+    }
+  };
+  const walk = (dir: string): string | null => {
+    for (const entry of list(dir)) {
+      const path = join(dir, entry.name);
+      if (entry.isSymbolicLink()) return path;
+      if (entry.isDirectory()) {
+        const hit = walk(path);
+        if (hit !== null) return hit;
+      }
+    }
+    return null;
+  };
+  for (const entry of list(REVIEW_TMP_DIR)) {
+    const path = join(REVIEW_TMP_DIR, entry.name);
+    const name = entry.name.toLowerCase();
+    if (name.startsWith('qwen-review-')) {
+      if (entry.isSymbolicLink()) return path;
+      if (entry.isDirectory()) {
+        const hit = walk(path);
+        if (hit !== null) return hit;
+      }
+    } else if (isReviewWorktreeName(name) && entry.isSymbolicLink()) {
+      return path;
+    }
+  }
+  return null;
 }
 
 /**

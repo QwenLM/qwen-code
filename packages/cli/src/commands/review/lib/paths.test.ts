@@ -517,23 +517,103 @@ describe('ensureReviewTmpDir', () => {
   }
 
   it.skipIf(process.platform === 'win32')(
-    'refuses a TRACKED symlink inside .qwen/tmp, and leaves an untracked one alone',
+    'refuses a TRACKED symlink inside .qwen/tmp by its index entry',
     () => {
       // The directory itself is real; the plant is one level down, at the
       // deterministic name of a file the round writes with `writeFileSync`.
-      // Untracked is not the workspace's doing and `lstat` on the directory
-      // sees nothing — the sweep is about what a branch can COMMIT.
+      // Staged straight into the index with nothing on disk, so the refusal
+      // can only be the index sweep's — the disk sweep below has no link to
+      // see.
+      const { git, blob, dispose } = plantedRepo();
+      try {
+        git(
+          'update-index',
+          '--add',
+          '--cacheinfo',
+          `120000,${blob},.qwen/tmp/qwen-review-local-diff.txt`,
+        );
+        expect(() => ensureReviewTmpDir('capture-local')).toThrow(
+          /^capture-local: the workspace tracks a symbolic link at .*qwen-review-local-diff\.txt.*git rm -f/s,
+        );
+      } finally {
+        dispose();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'still refuses after the remedy is only half-followed — the write follows the DISK (R10-3)',
+    () => {
+      // `git rm --cached` removes only the index entry. The sweep used to
+      // read nothing else and pass, while the link stayed on disk for the
+      // round's plain `writeFileSync` to follow out of the tree — and
+      // `.qwen/*` is gitignored, so `git status` never shows it again.
       const { root, git, dispose } = plantedRepo();
       try {
-        symlinkSync(
-          join(root, 'victim.txt'),
-          join(root, '.qwen', 'tmp', 'qwen-review-local-diff.txt'),
-        );
-        expect(() => ensureReviewTmpDir('capture-local')).not.toThrow();
+        const victim = join(root, 'victim.txt');
+        writeFileSync(victim, 'ORIGINAL');
+        const leaf = join(root, '.qwen', 'tmp', 'qwen-review-local-diff.txt');
+        symlinkSync(victim, leaf);
         git('add', '-f', '.qwen/tmp/qwen-review-local-diff.txt');
         expect(() => ensureReviewTmpDir('capture-local')).toThrow(
-          /^capture-local: the workspace tracks a symbolic link at .*qwen-review-local-diff\.txt/s,
+          /tracks a symbolic link/,
         );
+        git('rm', '-q', '--cached', '.qwen/tmp/qwen-review-local-diff.txt');
+        expect(lstatSync(leaf).isSymbolicLink()).toBe(true);
+        expect(() => ensureReviewTmpDir('capture-local')).toThrow(
+          /^capture-local: .*qwen-review-local-diff\.txt is a symbolic link on disk/s,
+        );
+        // One level down, inside a round-owned directory the round writes
+        // INTO, is the same redirect.
+        rmSync(leaf);
+        mkdirSync(join(root, '.qwen', 'tmp', 'qwen-review-local-records'));
+        symlinkSync(
+          victim,
+          join(root, '.qwen', 'tmp', 'qwen-review-local-records', 'r1.json'),
+        );
+        expect(() => ensureReviewTmpDir('capture-local')).toThrow(
+          /qwen-review-local-records.r1\.json is a symbolic link on disk/s,
+        );
+        rmSync(join(root, '.qwen', 'tmp', 'qwen-review-local-records'), {
+          recursive: true,
+        });
+        // A worktree name is checked at its own entry.
+        symlinkSync(root, join(root, '.qwen', 'tmp', 'review-pr-7'));
+        expect(() => ensureReviewTmpDir('fetch-pr')).toThrow(
+          /review-pr-7 is a symbolic link on disk/,
+        );
+        rmSync(join(root, '.qwen', 'tmp', 'review-pr-7'));
+        // Case-folded: on a case-insensitive filesystem the round's write to
+        // `qwen-review-…` resolves through this spelling.
+        symlinkSync(
+          victim,
+          join(root, '.qwen', 'tmp', 'QWEN-Review-local-plan.json'),
+        );
+        expect(() => ensureReviewTmpDir('capture-local')).toThrow(
+          /QWEN-Review-local-plan\.json is a symbolic link on disk/,
+        );
+        rmSync(join(root, '.qwen', 'tmp', 'QWEN-Review-local-plan.json'));
+        expect(readFileSync(victim, 'utf8')).toBe('ORIGINAL');
+      } finally {
+        dispose();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'leaves links the review never writes through alone',
+    () => {
+      // The directory is shared — the skill-args file, a model's
+      // intermediates — so a link at a name outside the round's namespace
+      // is not the round's business, and inside a worktree the links are
+      // the checkout's own (`node_modules`).
+      const { root, dispose } = plantedRepo();
+      try {
+        symlinkSync(root, join(root, '.qwen', 'tmp', 'someone-elses-link'));
+        const wt = join(root, '.qwen', 'tmp', 'review-pr-7');
+        mkdirSync(join(wt, 'node_modules'), { recursive: true });
+        symlinkSync(root, join(wt, 'node_modules', 'pkg'));
+        expect(() => ensureReviewTmpDir('capture-local')).not.toThrow();
       } finally {
         dispose();
       }
