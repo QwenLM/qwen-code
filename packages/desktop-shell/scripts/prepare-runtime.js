@@ -231,13 +231,15 @@ function stageNodePty(desktopTarget) {
   const packageNames = ['@lydell/node-pty', prebuildPackage];
   const specs = nodePtyPackageSpecs(packageNames);
   if (!specs) {
-    // Degrade only where the repo pins nothing. desktopTarget() throws for any
+    // Degrade when the source root leaves either name in the pair unpinned —
+    // the wrapper or this target's prebuild. desktopTarget() throws for any
     // target outside the five it allows and NODE_PTY_PREBUILD_PACKAGE maps
     // exactly those five, so prebuildPackage is always a real name: reaching
     // this arm means the source root's optionalDependencies dropped a pin, not
-    // that the target is unknown. Degrading still beats failing — a checkout
-    // missing one pin would otherwise trade a missing Web Terminal for no app
-    // at all. The release job still refuses to publish such a runtime —
+    // that the target is unknown. The warning below names the prebuild package
+    // whichever of the two is missing. Degrading still beats failing — a
+    // checkout missing one pin would otherwise trade a missing Web Terminal for
+    // no app at all. The release job still refuses to publish such a runtime —
     // smoke-runtime.js's PTY round-trip hard-fails.
     console.warn(
       `[desktop] ${prebuildPackage} is not pinned in ` +

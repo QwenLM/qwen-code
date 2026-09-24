@@ -550,11 +550,17 @@ function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
 // the archive declares the packages in optionalDependencies but ships none of
 // them, so every web terminal creation fails with "PTY not available"
 // (#11872). Missing packages warn-and-degrade locally (like the audio-capture
-// step) rather than failing the build, so a developer archive stays usable on
-// an unmapped future target. Release builds cannot degrade silently:
-// release.yml exports QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 for the
-// archive build, turning a missing prebuild into a hard failure now that every
-// shipped target has a pinned package.
+// step) rather than failing the build, so a developer archive still builds for
+// a target whose prebuild the host install does not have: npm skips
+// optionalDependencies whose os/cpu do not match the installing machine, and a
+// staged --native-modules-dir can carry the clipboard packages without this
+// target's node-pty prebuild. An unmapped target is not that case —
+// copyNativeAddon reads the same TARGET_PREBUILD_DIR and its unconditional
+// path.join() throws on the undefined dir name before this step is reached.
+// Release builds cannot degrade silently: release.yml exports
+// QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 for the archive build, turning a
+// missing prebuild into a hard failure now that every shipped target has a
+// pinned package.
 function copyNodePtyAddon(packageRoot, target, nativeModulesDir) {
   const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
   const nativePackage = `@lydell/node-pty-${prebuildDirName}`;
