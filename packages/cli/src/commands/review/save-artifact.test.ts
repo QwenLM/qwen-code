@@ -253,51 +253,6 @@ describe('saveReviewArtifact', () => {
     },
   );
 
-  // Issue #12578: a hardlink between the output path and any of the three
-  // input paths (`findings`, `composed`, `report`) must trip the overwrite
-  // guard in `save-artifact.ts:649-657`. realpathSync never resolves hard
-  // links — two names of one inode compare as different path strings —
-  // so a string-identity guard admits the alias and the previous artifact
-  // is overwritten through the link. The shared `isSameFile` comparator
-  // (post-#12568: `stat(..., { bigint: true })`) is the only thing that
-  // catches this; on a volume whose ids exceed the safe-integer range
-  // (NTFS) the guard under test is INERT, so the assertion is gated by the
-  // same `inode <= 0 / !Number.isSafeInteger(inode)` check used in the
-  // sibling findings.test.ts / repo-context.test.ts hard-link witnesses.
-  it.each(['findings', 'composed', 'report'] as const)(
-    'refuses to overwrite a %s input when the output is hardlinked to it (#12578)',
-    (input, ctx) => {
-      const paths = fixture();
-      // The output hardlink's target must be one of the three input paths
-      // — that is the overwrite scenario the guard protects against. The
-      // existing same-path test above covers the no-link case; this row
-      // is the one that breaks when `isSameFile` loses inode sight again.
-      const inputPath = paths[input];
-      const alias = join(root, '.qwen/reviews', `out-${input}-alias`);
-      linkSync(inputPath, alias);
-      const inode = statSync(inputPath).ino;
-      if (!Number.isSafeInteger(inode) || inode <= 0) {
-        if (existsSync(alias)) rmSync(alias);
-        ctx.skip();
-        return;
-      }
-      const original = readFileSync(inputPath, 'utf8');
-      try {
-        expect(() =>
-          saveReviewArtifact({
-            ...paths,
-            out: alias,
-            target: 'local',
-            effort: 'medium',
-          }),
-        ).toThrow(/must not overwrite the/);
-        expect(readFileSync(inputPath, 'utf8')).toBe(original);
-      } finally {
-        if (existsSync(alias)) rmSync(alias);
-      }
-    },
-  );
-
   it('fails closed on malformed findings without leaving output', () => {
     const paths = fixture();
     writeFileSync(paths.findings, '{');
@@ -900,6 +855,36 @@ describe('saveReviewArtifact', () => {
       expect(readFileSync(inputPath, 'utf8')).toBe(original);
     },
   );
+
+  // Issue #12578: realpathSync never resolves hard links — two names of one
+  // inode are different path strings, so a string-identity guard admits the
+  // alias and the write goes through to the input. The three labels in the
+  // guard loop (findings, composed, report) share one isSameFile call shape,
+  // so a witness on the findings input pins dev/ino sight for all three.
+  // Since #12568, isSameFile stats with { bigint: true }, so 64-bit ids
+  // above 2^53 arrive exact; the only skip left is an unusable inode, the
+  // same narrow gate the findings.test.ts / repo-context.test.ts witnesses
+  // use.
+  it('refuses to overwrite the findings input when the output is hardlinked to it (#12578)', (ctx) => {
+    const paths = fixture();
+    const alias = join(root, '.qwen/reviews', 'out-findings-alias');
+    linkSync(paths.findings, alias);
+    const inode = statSync(paths.findings).ino;
+    if (inode <= 0) {
+      ctx.skip();
+      return;
+    }
+    const original = readFileSync(paths.findings, 'utf8');
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        out: alias,
+        target: 'local',
+        effort: 'medium',
+      }),
+    ).toThrow(/must not overwrite the findings input/);
+    expect(readFileSync(paths.findings, 'utf8')).toBe(original);
+  });
 
   it('refuses an absent output spelled through a symlink onto an absent input', () => {
     // The hardened absent-side semantics: neither file is on disk yet, but
