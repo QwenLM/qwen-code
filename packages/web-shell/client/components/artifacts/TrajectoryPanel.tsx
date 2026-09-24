@@ -620,7 +620,6 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         describe={describeSpan}
         {...(range !== undefined ? { range } : {})}
         onRangeChange={setRange}
-        mode={mode}
         onModeChange={setMode}
       />
 
