@@ -257,6 +257,9 @@ class DurableRuntimeRecoveryTest {
 
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findActive(request(provisioner)).getState());
+            assertEquals(1, provisioner.releaseCalls.get());
+            assertEquals(provisioner.provisionedLease,
+                    provisioner.releasedLease);
         }
     }
 
@@ -478,12 +481,15 @@ class DurableRuntimeRecoveryTest {
             implements RuntimeProvisioner {
         private final AtomicInteger ensures = new AtomicInteger();
         private final AtomicInteger reconciliations = new AtomicInteger();
+        private final AtomicInteger releaseCalls = new AtomicInteger();
         private RuntimeObservation.Outcome outcome =
                 RuntimeObservation.Outcome.READY;
         private RuntimeResourceHandle conflictHandle = HANDLE;
         private RuntimeException ensureFailure;
         private CompletableFuture<RuntimeResourceHandle> ensureGate;
         private CompletableFuture<RuntimeObservation> reconcileGate;
+        private RuntimeLease provisionedLease;
+        private RuntimeLease releasedLease;
         private boolean notFoundOnce;
 
         @Override
@@ -514,10 +520,18 @@ class DurableRuntimeRecoveryTest {
         @Override
         public CompletionStage<RuntimeLease> provision(
                 RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-            return CompletableFuture.completedFuture(new RuntimeLease(
-                    seed.getProvisionalRuntimeId(),
+            provisionedLease = new RuntimeLease(seed.getProvisionalRuntimeId(),
                     URI.create("http://127.0.0.1:4190"), seed.getToken(),
-                    seed.getLeaseId(), seed.getEpoch()));
+                    seed.getLeaseId(), seed.getEpoch());
+            return CompletableFuture.completedFuture(provisionedLease);
+        }
+
+        @Override
+        public CompletionStage<Void> release(RuntimeProvisionRequest request,
+                RuntimeLease lease) {
+            releaseCalls.incrementAndGet();
+            releasedLease = lease;
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override

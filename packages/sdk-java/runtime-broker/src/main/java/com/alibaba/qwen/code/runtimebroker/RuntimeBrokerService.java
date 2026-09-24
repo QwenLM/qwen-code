@@ -785,7 +785,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             })
                             .whenComplete((attestedLease, attestError) -> {
                                 if (attestError != null) {
-                                    releaseQuietly(request, attestedLease);
+                                    releaseQuietly(request, lease);
                                 }
                             });
                 });

@@ -77,7 +77,7 @@ never be reinterpreted under a different provisioner.
 
 ### 3.2 Provisioner and transport SPI
 
-`RuntimeProvisioner` gains three defaults:
+`RuntimeProvisioner` gains four defaults:
 
 - `kind()` returns `legacy`;
 - `provision(request, seed)` ignores the seed and falls back to the legacy
@@ -90,8 +90,8 @@ never be reinterpreted under a different provisioner.
   proves nothing, and the Broker waits instead of guessing.
 
 `RuntimeTransport` gains a default `attest(lease, request, seed)` that fails
-closed with `runtime_broker_attestation_unavailable`. `HttpRuntimeTransport`
-already implements it.
+closed with `runtime_broker_attestation_unavailable`. No production transport
+implements `RuntimeTransport` yet, so production wiring remains a later slice.
 
 ### 3.3 Durable provisioning
 

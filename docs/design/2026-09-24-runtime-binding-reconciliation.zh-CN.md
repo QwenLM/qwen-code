@@ -44,7 +44,7 @@ JDBC 仓储用必需的 `SecretProtector`（附带 `AesGcmSecretProtector`）按
 - `ensureResource(request, seed, knownHandle)` 以 `UnsupportedOperationException` 失败——启用持久类型的 provisioner 必须实现持久 provision 路径；
 - `reconcile(request, seed, handle, lastLease)` 返回 `RuntimeObservation.unknown(handle)`——无法观察的 provisioner 什么都证明不了，Broker 选择等待而不是猜测。
 
-`RuntimeTransport` 新增默认 `attest(lease, request, seed)`，以 `runtime_broker_attestation_unavailable` 失败关闭。`HttpRuntimeTransport` 已实现该方法。
+`RuntimeTransport` 新增默认 `attest(lease, request, seed)`，以 `runtime_broker_attestation_unavailable` 失败关闭。目前尚无生产 transport 实现 `RuntimeTransport`，因此生产接线仍留待后续切片。
 
 ### 3.3 持久 provision
 
