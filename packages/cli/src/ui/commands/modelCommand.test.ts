@@ -812,6 +812,37 @@ describe('modelCommand', () => {
     });
   });
 
+  it('rejects typed non-runtime Qwen OAuth selections', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model qwen-max(${AuthType.QWEN_OAUTH})`,
+        name: 'model',
+        args: `qwen-max(${AuthType.QWEN_OAUTH})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await expect(
+      modelCommand.action!(mockContext, `qwen-max(${AuthType.QWEN_OAUTH})`),
+    ).rejects.toThrow('Qwen OAuth free tier was discontinued');
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('should switch provider-qualified models through switchModel', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);

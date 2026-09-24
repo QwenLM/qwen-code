@@ -137,6 +137,15 @@ async function switchMainModel(
   persistSelection = true,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
+  const isRuntimeOAuthSelection = parsed.modelId.startsWith(
+    `$runtime|${AuthType.QWEN_OAUTH}|`,
+  );
+
+  if (parsed.authType === AuthType.QWEN_OAUTH && !isRuntimeOAuthSelection) {
+    throw new Error(
+      'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+    );
+  }
 
   if (parsed.authType) {
     await config.switchModel(
