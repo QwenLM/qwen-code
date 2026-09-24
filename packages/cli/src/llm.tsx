@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getRelaunchEnvProvenance } from './config/environment.js';
+import {
+  getRelaunchEnvProvenance,
+  hasLoadedEnvironmentValues,
+} from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
@@ -811,6 +814,7 @@ export async function main() {
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
         childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
+        environmentChangedSinceBoot: hasLoadedEnvironmentValues(),
         onUpdateRelaunch,
         replaceProcess:
           !isAcpMode &&
