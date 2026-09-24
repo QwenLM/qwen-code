@@ -16,6 +16,8 @@ import { RunRowView, type ThreadDetailView } from './ThreadView';
 import {
   buildRunRows,
   CONVERSATION_CONTEXT_PREFIX,
+  formatElapsed,
+  statusReasonLabel,
   type RoutingPreviewTarget,
 } from './agents-view-logic';
 import {
@@ -37,18 +39,6 @@ function useNow(active: boolean): number {
     return () => clearInterval(timer);
   }, [active]);
   return now;
-}
-
-function formatElapsed(
-  ms: number,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): string {
-  const seconds = Math.max(0, Math.floor(ms / 1_000));
-  if (seconds < 60) return t('collab.elapsed.seconds', { count: seconds });
-  return t('collab.elapsed.minutes', {
-    minutes: Math.floor(seconds / 60),
-    seconds: seconds % 60,
-  });
 }
 
 /**
@@ -295,7 +285,7 @@ export function ThreadChat({
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   // "Keep waiting" on a quiet run hides the stall warning for a while.
   const [snoozedUntil, setSnoozedUntil] = useState<Record<string, number>>({});
-  const { live, past } = buildRunRows(thread.runs);
+  const { live, past } = buildRunRows(thread.runs, t);
   const now = useNow(live.length > 0);
   // Offer a retry for an agent whose latest run failed and that is not
   // already working again on this thread.
@@ -346,7 +336,9 @@ export function ThreadChat({
               id: `${run.id}:thought`,
               role: 'thinking',
               content: `${run.agentName}\n\n${run.progress!.thoughtText}`,
-              timestamp: run.startedAt,
+              // Last update, not start: text being written now belongs
+              // after anything the run posted along the way.
+              timestamp: run.progress?.receivedAt ?? run.startedAt,
               isStreaming:
                 run.status === 'running' && run.progress?.stage === 'thinking',
             }),
@@ -370,7 +362,9 @@ export function ThreadChat({
               id: `${run.id}:output`,
               role: 'assistant',
               content: `**${run.agentName}**\n\n${run.progress?.outputText}`,
-              timestamp: run.startedAt,
+              // Last update, not start: text being written now belongs
+              // after anything the run posted along the way.
+              timestamp: run.progress?.receivedAt ?? run.startedAt,
               isStreaming: run.status === 'running',
             }),
           ),
@@ -468,7 +462,7 @@ export function ThreadChat({
                   >
                     <span className="block truncate">{child.title}</span>
                     <span className="block truncate text-xs text-muted-foreground">
-                      {[child.assigneeName, child.reason]
+                      {[child.assigneeName, statusReasonLabel(child.reason, t)]
                         .filter(Boolean)
                         .join(' · ')}
                     </span>
@@ -552,7 +546,9 @@ export function ThreadChat({
           {actions}
         </header>
       )}
-      <p className="px-4 py-2 text-xs text-muted-foreground">{thread.reason}</p>
+      <p className="px-4 py-2 text-xs text-muted-foreground">
+        {statusReasonLabel(thread.reason, t)}
+      </p>
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
           {thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX) && (
@@ -648,7 +644,13 @@ export function ThreadChat({
                             ).then((ok) => ok === false && reopen(), reopen);
                           }}
                         >
-                          {option.name}
+                          {/* The agent names its options in English; the
+                              common ones read as the main approval card does. */}
+                          {option.kind === 'allow_once'
+                            ? t('approval.option.allowOnce')
+                            : option.kind === 'reject_once'
+                              ? t('approval.option.rejectOnce')
+                              : option.name}
                         </Button>
                       ))}
                     </div>

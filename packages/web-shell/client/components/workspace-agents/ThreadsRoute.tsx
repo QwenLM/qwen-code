@@ -570,17 +570,6 @@ export function ThreadsRoute({
     }
     return (
       <>
-        {(chat || onOpenThreadChat) && (
-          <button
-            type="button"
-            onClick={() => {
-              if (chat) setShowDetails(false);
-              else if (workspaceCwd) onOpenThreadChat?.(openId, workspaceCwd);
-            }}
-          >
-            Open conversation
-          </button>
-        )}
         {error ? (
           <p role="alert" className="mb-3 text-sm text-destructive">
             {error}
@@ -589,6 +578,15 @@ export function ThreadsRoute({
         <ThreadView
           key={openId}
           thread={detail}
+          {...(chat || (onOpenThreadChat && workspaceCwd)
+            ? {
+                onOpenConversation: () => {
+                  if (chat) setShowDetails(false);
+                  else if (workspaceCwd)
+                    onOpenThreadChat?.(openId, workspaceCwd);
+                },
+              }
+            : {})}
           agents={agents}
           draft={draft}
           onDraftChange={setDraft}

@@ -192,29 +192,33 @@ export interface RunRow {
  * A failed run reports its failure whatever close it managed to record first,
  * because the failure is the thing a person has to act on.
  */
-export function describeRun(run: RunView): string {
+export function describeRun(run: RunView, t: Translate): string {
   if (run.status === 'failed') {
-    return run.failureStage ? `failed at ${run.failureStage}` : 'failed';
+    return run.failureStage
+      ? t('collab.runState.failedAt', { stage: run.failureStage })
+      : t('collab.runState.failed');
   }
-  if (run.status === 'cancelled') return 'cancelled';
-  if (run.status === 'queued') return 'waiting to start';
-  if (run.status === 'running') return 'working';
-  if (run.status === 'cancelling') return 'stopping';
+  if (run.status === 'cancelled') return t('collab.runState.cancelled');
+  if (run.status === 'queued') return t('collab.runState.queued');
+  if (run.status === 'running') return t('collab.runState.working');
+  if (run.status === 'cancelling') return t('collab.runState.stopping');
   switch (run.closeKind) {
     case 'blocked':
-      return 'asked a question';
+      return t('collab.runState.blocked');
     case 'review':
-      return 'submitted for review';
+      return t('collab.runState.review');
     case 'waiting':
-      return 'waiting for other work';
+      return t('collab.runState.waiting');
     case 'unclosed':
-      return 'ended without a hand-off';
+      return t('collab.runState.unclosed');
     case 'stranded':
       // Says what happened to it, not what the agent did — nothing the agent
       // did ended this run, and a person has to decide what happens next.
-      return 'stranded when collaboration was turned off';
+      return t('collab.runState.stranded');
     default:
-      return run.status === 'finishing' ? 'finishing' : 'nothing outstanding';
+      return run.status === 'finishing'
+        ? t('collab.runState.finishing')
+        : t('collab.runState.idle');
   }
 }
 
@@ -233,13 +237,16 @@ const LIVE_RUN_STATUSES = new Set([
  * reachable is not this row's story — the run's own state is, and a second
  * signal beside it competes for the same glance.
  */
-export function buildRunRows(runs: readonly RunView[]): {
+export function buildRunRows(
+  runs: readonly RunView[],
+  t: Translate,
+): {
   live: RunRow[];
   past: RunRow[];
 } {
   const rows = runs.map((run) => ({
     run,
-    state: describeRun(run),
+    state: describeRun(run, t),
     live: LIVE_RUN_STATUSES.has(run.status),
     outstanding:
       !run.closeAcknowledged &&
@@ -265,18 +272,27 @@ export function buildRunRows(runs: readonly RunView[]): {
  * One line, not a bar. A budget is a limit you want to notice before it trips,
  * not a goal you are filling, and a bar invites the second reading.
  */
-export function formatBudget(budget: {
-  turnsUsed: number;
-  turnLimit: number;
-  tokensUsed: number;
-  tokenLimit: number;
-}): { turns: string; tokens: string; scope: string } {
+export function formatBudget(
+  budget: {
+    turnsUsed: number;
+    turnLimit: number;
+    tokensUsed: number;
+    tokenLimit: number;
+  },
+  t: Translate,
+): { turns: string; tokens: string; scope: string } {
   const compact = (value: number) =>
     value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
   return {
-    turns: `${budget.turnsUsed} of ${budget.turnLimit} unattended turns`,
-    tokens: `${compact(budget.tokensUsed)} of ${compact(budget.tokenLimit)} tokens`,
-    scope: 'across this thread tree',
+    turns: t('collab.budget.turns', {
+      used: budget.turnsUsed,
+      limit: budget.turnLimit,
+    }),
+    tokens: t('collab.budget.tokens', {
+      used: compact(budget.tokensUsed),
+      limit: compact(budget.tokenLimit),
+    }),
+    scope: t('collab.budget.scope'),
   };
 }
 
@@ -303,62 +319,23 @@ export interface RoutingPreviewTarget {
 export function explainSkip(
   reason: string,
   target: string,
-): { what: string; fix: string } {
-  switch (reason) {
-    case 'agent_unknown':
-      return {
-        what: `no agent named "${target}" in this workspace`,
-        fix: 'Check the spelling, or add the agent.',
-      };
-    case 'agent_disabled':
-      return {
-        what: `${target} is disabled and cannot take work`,
-        fix: `Enable ${target} to let it take work again.`,
-      };
-    case 'agent_retired':
-      // Deliberately not the disabled copy: enabling a retired agent is
-      // refused, so telling someone to enable it sends them at a wall.
-      return {
-        what: `${target} is retired and takes no new work`,
-        fix: `Its posts stay on every thread. Hand this to another agent.`,
-      };
-    case 'no_target':
-      return {
-        what: 'your reply would reach nobody',
-        fix: 'Mention an agent, or set an assignee for this thread.',
-      };
-    case 'queue_full':
-      return {
-        what: `${target} already has a full backlog`,
-        fix: 'Wait for it to catch up, or give this to another agent.',
-      };
-    case 'turn_budget_exhausted':
-      return {
-        what: 'this thread has spent its unattended turns',
-        fix: 'Your own reply resets the count and continues the work.',
-      };
-    case 'token_budget_exhausted':
-      return {
-        what: 'this thread tree has spent its token budget, so agents no longer wake each other',
-        fix: 'A reply from you can still wake them.',
-      };
-    case 'thread_done':
-      return {
-        what: 'this thread is done and takes no new work',
-        fix: 'Open a new thread.',
-      };
-    case 'self_trigger':
-      return {
-        what: `${target} wrote this post and cannot wake itself`,
-        fix: 'Mention a different agent.',
-      };
-    default:
-      // Never invent a cause the code did not carry.
-      return {
-        what: `${target} will not be woken`,
-        fix: 'Open the thread after posting to see what happened.',
-      };
-  }
+  t: Translate,
+): string {
+  const known = new Set([
+    'agent_unknown',
+    'agent_disabled',
+    'agent_retired',
+    'no_target',
+    'queue_full',
+    'turn_budget_exhausted',
+    'token_budget_exhausted',
+    'thread_done',
+    'self_trigger',
+  ]);
+  // Never invent a cause the code did not carry.
+  return t(known.has(reason) ? `collab.skip.${reason}` : 'collab.skip.other', {
+    name: target,
+  });
 }
 
 /**
@@ -370,14 +347,98 @@ export function explainSkip(
  */
 export function summarizePreview(
   targets: readonly RoutingPreviewTarget[],
+  t: Translate,
 ): string {
   const waking = targets.filter((target) => target.willWake);
-  if (waking.length === 0) return '这条消息不会启动任何智能体。';
+  if (waking.length === 0) return t('collab.preview.nobody');
   return waking
     .map((target) =>
       target.kind === 'coalesce'
-        ? `${target.agentName} 会在${target.into === 'running' ? '当前执行' : '排队任务'}中收到这条消息。`
-        : `将为 ${target.agentName} 安排执行。`,
+        ? t(
+            target.into === 'running'
+              ? 'collab.preview.intoRunning'
+              : 'collab.preview.intoQueued',
+            { name: target.agentName },
+          )
+        : t('collab.preview.dispatch', { name: target.agentName }),
     )
     .join(' ');
+}
+
+type Translate = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
+
+/** "45 秒" or "6 分 45 秒": the one duration format the collaboration UI uses. */
+export function formatElapsed(ms: number, t: Translate): string {
+  const seconds = Math.max(0, Math.floor(ms / 1_000));
+  if (seconds < 60) return t('collab.elapsed.seconds', { count: seconds });
+  return t('collab.elapsed.minutes', {
+    minutes: Math.floor(seconds / 60),
+    seconds: seconds % 60,
+  });
+}
+
+/**
+ * Why a run exists, in the reader's language. The server words this in
+ * English from a fixed set; anything outside it is shown as sent.
+ */
+export function triggerLabel(trigger: string, t: Translate): string {
+  switch (trigger) {
+    case 'started by the dispatcher':
+      return t('collab.trigger.dispatcher');
+    case 'assigned to this thread':
+      return t('collab.trigger.assigned');
+    case 'a sub-thread reported back':
+      return t('collab.trigger.childReport');
+    case 'mentioned by you':
+      return t('collab.trigger.mentionedByYou');
+    case 'assigned by you':
+      return t('collab.trigger.assignedByYou');
+    default: {
+      const by = /^mentioned by (.+)$/.exec(trigger)?.[1];
+      return by ? t('collab.trigger.mentionedBy', { name: by }) : trigger;
+    }
+  }
+}
+
+const STATUS_REASON_KEYS: Record<string, string> = {
+  'this thread was cancelled': 'collab.reason.cancelled',
+  'a person marked this thread done': 'collab.reason.done',
+  'an Agent asked a question and is waiting for you': 'collab.reason.question',
+  'an Agent run was cancelled and no successor is runnable':
+    'collab.reason.runCancelled',
+  'an Agent run failed and no successor is runnable': 'collab.reason.runFailed',
+  'an Agent ended without a hand-off': 'collab.reason.noHandoff',
+  'an Agent is waiting on work that no longer exists':
+    'collab.reason.strandedWait',
+  'an Agent submitted a summary for review': 'collab.reason.review',
+  'an Agent is waiting on a live subtask': 'collab.reason.waitingSubtask',
+  'no outstanding close obligation': 'collab.reason.idle',
+};
+
+/**
+ * A thread's status reason in the reader's language. The server words it
+ * from a fixed set (the live-run line in Chinese, the rest in English);
+ * anything outside it is shown as sent.
+ */
+export function statusReasonLabel(reason: string, t: Translate): string {
+  const key = STATUS_REASON_KEYS[reason];
+  if (key) return t(key);
+  if (reason.startsWith('the last post booked no work')) {
+    return t('collab.reason.bookedNothing');
+  }
+  const queued = /^(\d+) 个智能体排队中/.exec(reason);
+  if (queued) return t('collab.reason.queued', { count: Number(queued[1]) });
+  const working = /^(\d+) 个智能体执行中(?:，(\d+) 个排队中)?$/.exec(reason);
+  if (working) {
+    return working[2]
+      ? t('collab.reason.workingQueued', {
+          count: Number(working[1]),
+          queued: Number(working[2]),
+        })
+      : t('collab.reason.working', { count: Number(working[1]) });
+  }
+  return reason;
 }

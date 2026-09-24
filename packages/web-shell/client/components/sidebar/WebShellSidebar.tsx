@@ -5872,7 +5872,9 @@ export function WebShellSidebar({
               )}
             {projectConversations.error && (
               <p role="status" className={styles.notice}>
-                {projectConversations.error}
+                {t('collab.sidebar.loadFailed', {
+                  name: projectConversations.error,
+                })}
               </p>
             )}
             {showLive && livePresence && liveWorkspaces.length === 0 && (

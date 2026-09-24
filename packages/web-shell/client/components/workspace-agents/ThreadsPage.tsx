@@ -34,6 +34,7 @@ import {
   groupThreads,
   needsAttention,
   programLabel,
+  statusReasonLabel,
   summarizePreview,
   type AgentProgramView,
   type RoutingPreviewTarget,
@@ -180,6 +181,17 @@ export interface NewThread {
   message?: string;
 }
 
+const AGENT_STATUSES = new Set([
+  'online',
+  'idle',
+  'working',
+  'blocked',
+  'offline',
+  'error',
+  'finishing',
+  'stopping',
+]);
+
 function ThreadRow({
   thread,
   onOpen,
@@ -187,6 +199,7 @@ function ThreadRow({
   thread: ThreadSummaryView;
   onOpen: (threadId: string) => void;
 }) {
+  const { t } = useI18n();
   return (
     <button
       type="button"
@@ -198,10 +211,12 @@ function ThreadRow({
       onClick={() => onOpen(thread.id)}
     >
       <span className={styles.rowTitle}>{thread.title}</span>
-      {/* The status sentence comes from the server's resolver. The UI must not
-          derive a second, shorter vocabulary: the shorter one would win
-          because it is the one on screen, and the two would drift. */}
-      <span className={styles.rowReason}>{thread.reason}</span>
+      {/* The status sentence comes from the server's resolver. The UI only
+          translates it one for one; it must not derive a second, shorter
+          vocabulary, which would win because it is the one on screen. */}
+      <span className={styles.rowReason}>
+        {statusReasonLabel(thread.reason, t)}
+      </span>
     </button>
   );
 }
@@ -215,6 +230,7 @@ function Group({
   onOpenThread: (threadId: string) => void;
   hidden?: boolean;
 }) {
+  const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(group.collapsedByDefault);
   const collapsible = group.collapsedByDefault;
   return (
@@ -230,14 +246,7 @@ function Group({
         aria-expanded={collapsible ? !collapsed : undefined}
         disabled={!collapsible}
       >
-        {
-          {
-            needs_you: '待你处理',
-            running: '执行中',
-            idle: '待安排',
-            done: '已结束',
-          }[group.key]
-        }
+        {t(`collab.group.${group.key}`)}
         <span className={styles.groupCount}>{group.threads.length}</span>
       </button>
       {!collapsed &&
@@ -290,17 +299,8 @@ export function ThreadsPage({
   const [addingRuntime, setAddingRuntime] = useState(false);
   const [sharing, setSharing] = useState<{ id: string; name: string }>();
   const [taskAssignee, setTaskAssignee] = useState('');
-  const statusLabels: Record<string, string> = {
-    online: '在线',
-    offline: '离线',
-    idle: '空闲',
-    working: '执行中',
-    blocked: '等待处理',
-    error: '异常',
-    finishing: '收尾中',
-    stopping: '停止中',
-  };
-  const statusLabel = (status: string) => statusLabels[status] ?? status;
+  const statusLabel = (status: string) =>
+    AGENT_STATUSES.has(status) ? t(`collab.agentStatus.${status}`) : status;
   const hostLabel = (entry: WorkspaceAgentRuntimeView) =>
     entry.kind === 'local' ? t('collab.agent.thisComputer') : entry.label;
   // "Program · Runtime": what the agent runs as, then where.
@@ -478,9 +478,8 @@ export function ThreadsPage({
                 </p>
               )}
               <label className="text-xs text-muted-foreground">
-                所属项目
+                {t('collab.form.project')}
                 <select
-                  aria-label="任务所属项目"
                   className={styles.field}
                   value={workspaceCwd ?? ''}
                   disabled={pending}
@@ -506,55 +505,56 @@ export function ThreadsPage({
               </label>
               <p className="text-xs text-muted-foreground">
                 <span className="block break-all">{workspaceCwd}</span>
-                与侧边栏的项目工作区相同，决定任务归属和可协作的智能体。默认当前项目；运行机器及执行目录由智能体的运行设置决定。
+                {t('collab.form.projectHint')}
               </p>
               <input
                 className="w-full border-0 bg-transparent text-xl font-medium outline-none"
                 name="title"
-                aria-label="任务标题"
-                placeholder="需要完成什么？"
+                aria-label={t('collab.form.titleLabel')}
+                placeholder={t('collab.form.title')}
                 required
               />
               <textarea
                 className={styles.field}
                 name="body"
-                aria-label="任务描述"
+                aria-label={t('collab.form.bodyLabel')}
                 rows={6}
-                placeholder="告诉团队任务背景、要求和限制"
+                placeholder={t('collab.form.body')}
                 required
               />
               <textarea
                 className={styles.field}
                 name="acceptanceCriteria"
-                aria-label="验收标准"
-                placeholder="验收标准：满足哪些条件才算完成？"
+                aria-label={t('collab.form.criteriaLabel')}
+                placeholder={t('collab.form.criteria')}
               />
               <select
                 className={styles.field}
                 name="priority"
-                aria-label="任务优先级"
+                aria-label={t('collab.form.priority')}
                 defaultValue="normal"
               >
-                <option value="urgent">紧急</option>
-                <option value="high">高优先级</option>
-                <option value="normal">普通优先级</option>
-                <option value="low">低优先级</option>
+                {(['urgent', 'high', 'normal', 'low'] as const).map((level) => (
+                  <option key={level} value={level}>
+                    {t(`collab.priority.${level}`)}
+                  </option>
+                ))}
               </select>
               <p className="text-xs text-muted-foreground">
-                优先级只影响排队取单顺序，不会中断正在执行的任务。
+                {t('collab.form.priorityHint')}
               </p>
               <select
                 className={styles.field}
                 name="assignee"
                 key={workspaceCwd}
-                aria-label="负责智能体"
+                aria-label={t('collab.form.assignee')}
                 defaultValue={taskAssignee}
                 onChange={(event) => {
                   setTaskAssignee(event.target.value);
                   onPreviewThread?.(event.target.value || undefined);
                 }}
               >
-                <option value="">暂不指定（只保存，不执行）</option>
+                <option value="">{t('collab.form.noAssignee')}</option>
                 {agents
                   .filter((agent) => agent.enabled && !agent.retiredAt)
                   .map((agent) => (
@@ -565,8 +565,7 @@ export function ThreadsPage({
               </select>
               {!taskAssignee && (
                 <p className="text-xs text-muted-foreground">
-                  当前任务不会自动执行。创建后可指定智能体，或在共享对话中
-                  @智能体 发起执行。
+                  {t('collab.form.noAssigneeHint')}
                 </p>
               )}
               {createPreview ? (
@@ -576,24 +575,22 @@ export function ThreadsPage({
                 >
                   <strong>
                     {taskAssignee
-                      ? summarizePreview(createPreview)
-                      : '只保存任务，暂不启动智能体。'}
+                      ? summarizePreview(createPreview, t)
+                      : t('collab.form.saveOnly')}
                   </strong>
                   {createPreview
                     .filter((target) => !target.willWake)
                     .map((target) => {
-                      const explained =
-                        target.reason === 'no_target'
-                          ? {
-                              what: '尚未指定负责智能体',
-                              fix: '选择负责人后才会安排执行',
-                            }
-                          : explainSkip(target.reason ?? '', target.agentName);
+                      const explained = explainSkip(
+                        target.reason ?? '',
+                        target.agentName,
+                        t,
+                      );
                       return (
                         <p
                           key={`${target.agentName}:${target.reason ?? 'unknown'}`}
                         >
-                          {explained.what}. {explained.fix}
+                          {explained}
                         </p>
                       );
                     })}
@@ -609,10 +606,12 @@ export function ThreadsPage({
                     onPreviewThread?.(undefined);
                   }}
                 >
-                  取消
+                  {t('collab.form.cancel')}
                 </Button>
                 <Button type="submit" size="sm" disabled={pending}>
-                  {pending ? '创建中…' : '创建任务'}
+                  {pending
+                    ? t('collab.form.creating')
+                    : t('collab.form.create')}
                 </Button>
               </div>
             </form>
@@ -679,7 +678,9 @@ export function ThreadsPage({
                   </span>
                 )}
                 <span className={styles.agentWaiting}>
-                  {agent.waiting ? `${agent.waiting} 项等待中` : '—'}
+                  {agent.waiting
+                    ? t('collab.agent.waiting', { count: agent.waiting })
+                    : '—'}
                 </span>
                 {agent.retiredAt ? null : (
                   <>
@@ -763,44 +764,44 @@ export function ThreadsPage({
                     onSubmit={submitConfig(agent.id)}
                   >
                     <label className={styles.configLabel}>
-                      职责描述
+                      {t('collab.config.description')}
                       <input
                         className={styles.field}
                         name="description"
                         defaultValue={agent.description ?? ''}
-                        placeholder="例如：检查代码并向负责人汇报问题"
+                        placeholder={t('collab.config.descriptionHint')}
                       />
                     </label>
                     <label className={styles.configLabel}>
-                      工作指令
+                      {t('collab.config.instructions')}
                       <textarea
                         className={styles.field}
                         name="instructions"
                         rows={4}
                         defaultValue={agent.instructions ?? ''}
-                        placeholder="说明工作方式和输出要求；指令不能扩大工具权限"
+                        placeholder={t('collab.config.instructionsHint')}
                       />
                     </label>
                     <label className={styles.configLabel}>
-                      角色模板
+                      {t('collab.config.agentType')}
                       <input
                         className={styles.field}
                         name="agentType"
                         defaultValue={agent.agentType ?? ''}
-                        placeholder="使用工作区默认配置"
+                        placeholder={t('collab.config.workspaceDefault')}
                       />
                     </label>
                     <label className={styles.configLabel}>
-                      模型
+                      {t('collab.config.model')}
                       <input
                         className={styles.field}
                         name="model"
                         defaultValue={agent.model ?? ''}
-                        placeholder="使用工作区默认配置"
+                        placeholder={t('collab.config.workspaceDefault')}
                       />
                     </label>
                     <label className={styles.configLabel}>
-                      同时执行的任务数
+                      {t('collab.config.maxRuns')}
                       <input
                         className={styles.field}
                         name="maxConcurrentRuns"
@@ -814,7 +815,7 @@ export function ThreadsPage({
                       (entry) => entry.kind === 'external',
                     ) ? (
                       <fieldset className={styles.configLabel}>
-                        <legend>执行主机</legend>
+                        <legend>{t('collab.config.runtimes')}</legend>
                         {runtimeEntries
                           .filter((entry) => entry.kind === 'external')
                           .map((entry) => (
@@ -833,12 +834,12 @@ export function ThreadsPage({
                             </label>
                           ))}
                         <span className={styles.configNote}>
-                          不选择外部主机时，由本机 Qwen Code 执行。
+                          {t('collab.config.runtimesHint')}
                         </span>
                       </fieldset>
                     ) : null}
                     <p className={styles.configNote}>
-                      清空字段后使用角色模板的默认配置。
+                      {t('collab.config.note')}
                     </p>
                     <div className={styles.formActions}>
                       <Button
@@ -847,10 +848,10 @@ export function ThreadsPage({
                         size="sm"
                         onClick={() => setConfiguring(undefined)}
                       >
-                        取消
+                        {t('collab.form.cancel')}
                       </Button>
                       <Button type="submit" size="sm" disabled={pending}>
-                        保存配置
+                        {t('collab.config.save')}
                       </Button>
                     </div>
                   </form>
@@ -858,7 +859,7 @@ export function ThreadsPage({
                 {openAgentId === agent.id ? (
                   <section className={styles.agentWorkspace}>
                     <div className={styles.agentWorkspaceHeader}>
-                      <strong>已分配任务</strong>
+                      <strong>{t('collab.agent.assigned')}</strong>
                       <span>
                         {hostLabel(agent.runtime)} · {statusLabel(agent.status)}
                       </span>
@@ -878,8 +879,7 @@ export function ThreadsPage({
                         ))
                     ) : (
                       <p className={styles.emptyRoster}>
-                        尚未分配任务。点击「分配任务」，或在共享对话中
-                        @此智能体。
+                        {t('collab.agent.noneAssigned')}
                       </p>
                     )}
                   </section>
@@ -889,15 +889,17 @@ export function ThreadsPage({
           )}
           {capabilities ? (
             <div className={styles.ceiling}>
-              <h3 className={styles.ceilingTitle}>当前协作权限</h3>
+              <h3 className={styles.ceilingTitle}>
+                {t('collab.ceiling.title')}
+              </h3>
               <p className={styles.ceilingText}>
                 {capabilities.readOnly
-                  ? '当前 demo 以只读检查、派单和结果汇总为主，不开放修改文件的能力。职责指令不能提高工具权限；外部执行器还受自身权限设置约束。'
-                  : '当前未启用只读限制。'}
+                  ? t('collab.ceiling.readOnly')
+                  : t('collab.ceiling.open')}
               </p>
               <details>
                 <summary className="cursor-pointer text-xs text-muted-foreground">
-                  查看工具范围
+                  {t('collab.ceiling.tools')}
                 </summary>
                 <p className={styles.ceilingTools}>
                   {capabilities.allowed.join(', ')}
@@ -910,8 +912,8 @@ export function ThreadsPage({
         {groups.length === 0 ? (
           <div className={styles.emptyState} hidden={view !== 'tasks'}>
             {/* An empty screen is an invitation, not a shrug. */}
-            <p className={styles.emptyLead}>还没有任务。</p>
-            <p>创建任务并指定智能体，系统会根据主机状态安排执行。</p>
+            <p className={styles.emptyLead}>{t('collab.empty.lead')}</p>
+            <p>{t('collab.empty.hint')}</p>
           </div>
         ) : (
           groups.map((group) => (
@@ -950,36 +952,49 @@ export function ThreadsPage({
                 </div>
                 {runtimeEntry.workspaceCwd ? (
                   <div>
-                    <dt>工作目录</dt>
+                    <dt>{t('collab.runtime.folder')}</dt>
                     <dd>
                       <code>{runtimeEntry.workspaceCwd}</code>
                     </dd>
                   </div>
                 ) : null}
                 <div>
-                  <dt>关联智能体</dt>
+                  <dt>{t('collab.runtime.agents')}</dt>
                   <dd>{runtimeEntry.agentCount ?? 0}</dd>
                 </div>
                 <div>
-                  <dt>执行中任务</dt>
+                  <dt>{t('collab.runtime.running')}</dt>
                   <dd>{runtimeEntry.runningTaskCount ?? 0}</dd>
                 </div>
                 <div>
-                  <dt>排队任务</dt>
+                  <dt>{t('collab.runtime.queued')}</dt>
                   <dd>{runtimeEntry.queuedTaskCount ?? 0}</dd>
                 </div>
               </dl>
               <details className="mt-4 text-xs text-muted-foreground">
-                <summary className="cursor-pointer">技术详情</summary>
-                <p>主机标识：{runtimeEntry.id}</p>
+                <summary className="cursor-pointer">
+                  {t('collab.runtime.technical')}
+                </summary>
+                <p>{t('collab.runtime.id', { id: runtimeEntry.id })}</p>
                 {runtimeEntry.hostSessionId && (
-                  <p>宿主会话：{runtimeEntry.hostSessionId}</p>
+                  <p>
+                    {t('collab.runtime.hostSession', {
+                      id: runtimeEntry.hostSessionId,
+                    })}
+                  </p>
                 )}
-                <p>会话数：{runtimeEntry.sessionCount ?? 0}</p>
+                <p>
+                  {t('collab.runtime.sessions', {
+                    count: runtimeEntry.sessionCount ?? 0,
+                  })}
+                </p>
                 {runtimeEntry.lastSeenAt && (
                   <p>
-                    最近心跳：
-                    {new Date(runtimeEntry.lastSeenAt).toLocaleTimeString()}
+                    {t('collab.runtime.lastSeen', {
+                      time: new Date(
+                        runtimeEntry.lastSeenAt,
+                      ).toLocaleTimeString(),
+                    })}
                   </p>
                 )}
               </details>

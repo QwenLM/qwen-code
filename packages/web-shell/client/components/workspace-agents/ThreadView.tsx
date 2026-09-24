@@ -12,9 +12,13 @@ import { Markdown } from '../messages/Markdown';
 import { useI18n } from '../../i18n';
 import {
   buildRunRows,
+  CONVERSATION_CONTEXT_PREFIX,
   explainSkip,
   formatBudget,
+  formatElapsed,
+  statusReasonLabel,
   summarizePreview,
+  triggerLabel,
   type RoutingPreviewTarget,
   type RunRow,
   type RunView,
@@ -99,6 +103,8 @@ export interface ThreadViewProps {
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
   onMarkDone?: () => void;
+  /** Back to the chat form of this conversation. */
+  onOpenConversation?: () => void;
   onAssign?: (assignee?: string) => void;
   replyPending?: boolean;
 }
@@ -142,8 +148,6 @@ export function RunRowView({
   // Liveness is judged by the agent's own activity, not by when the last
   // snapshot arrived: a long tool call writes nothing and is still working.
   const quiet = progress && now - progress.activityAt > 15000;
-  const secondsSince = (at: number) =>
-    Math.max(0, Math.floor((now - at) / 1000));
   const state =
     row.run.status === 'queued'
       ? agent?.status === 'offline' || agent?.runtime?.status === 'offline'
@@ -192,14 +196,14 @@ export function RunRowView({
           {row.run.startedAt && (
             <div>
               {t('collab.runRow.elapsed', {
-                seconds: secondsSince(row.run.startedAt),
+                elapsed: formatElapsed(now - row.run.startedAt, t),
               })}
             </div>
           )}
           {progress ? (
             <div>
               {t('collab.runRow.lastActivity', {
-                seconds: secondsSince(progress.activityAt),
+                elapsed: formatElapsed(now - progress.activityAt, t),
               })}
             </div>
           ) : (
@@ -241,7 +245,7 @@ export function RunRowView({
         </details>
       )}
       <span className={styles.runTrigger}>
-        {row.run.trigger}
+        {triggerLabel(row.run.trigger, t)}
         {sessionId && onOpenAgentSession ? (
           <>
             {' · '}
@@ -281,7 +285,8 @@ function RoutingPreview({
 }: {
   targets: readonly RoutingPreviewTarget[];
 }) {
-  const lead = summarizePreview(targets);
+  const { t } = useI18n();
+  const lead = summarizePreview(targets, t);
   const nobody = !targets.some((target) => target.willWake);
   return (
     <div className={styles.preview}>
@@ -297,7 +302,11 @@ function RoutingPreview({
       {targets
         .filter((target) => !target.willWake)
         .map((target) => {
-          const explained = explainSkip(target.reason ?? '', target.agentName);
+          const explained = explainSkip(
+            target.reason ?? '',
+            target.agentName,
+            t,
+          );
           return (
             <p
               key={`${target.agentName}:${target.reason ?? 'unknown'}`}
@@ -306,9 +315,7 @@ function RoutingPreview({
               }`}
             >
               <span className={styles.previewName}>@{target.agentName}</span>
-              <span>
-                {explained.what}. {explained.fix}
-              </span>
+              <span>{explained}</span>
             </p>
           );
         })}
@@ -337,15 +344,20 @@ export function ThreadView({
   onOpenAgentSession,
   onCancelRun,
   onMarkDone,
+  onOpenConversation,
   onAssign,
   replyPending,
 }: ThreadViewProps) {
+  const { t } = useI18n();
   const { live, past } = useMemo(
-    () => buildRunRows(thread.runs),
-    [thread.runs],
+    () => buildRunRows(thread.runs, t),
+    [thread.runs, t],
   );
   const [showPast, setShowPast] = useState(false);
-  const budget = useMemo(() => formatBudget(thread.budget), [thread.budget]);
+  const budget = useMemo(
+    () => formatBudget(thread.budget, t),
+    [thread.budget, t],
+  );
   const attention =
     thread.status === 'blocked' || thread.status === 'in_review';
   const active = live.find((row) => row.run.status !== 'queued') ?? live[0];
@@ -361,7 +373,7 @@ export function ThreadView({
           size="icon"
           className={styles.backButton}
           onClick={onBack}
-          aria-label="Back to tasks"
+          aria-label={t('collab.thread.back')}
         >
           <ArrowLeftIcon />
         </Button>
@@ -382,9 +394,9 @@ export function ThreadView({
             value={thread.assigneeName ?? ''}
             onChange={(event) => onAssign(event.target.value || undefined)}
             disabled={thread.status === 'done' || replyPending}
-            aria-label="Task assignee"
+            aria-label={t('collab.form.assignee')}
           >
-            <option value="">No assignee</option>
+            <option value="">{t('collab.detail.noAssignee')}</option>
             {thread.assigneeName &&
             (!currentAssignee?.enabled || currentAssignee?.retiredAt) ? (
               // The thread keeps naming whoever it was assigned to, and says
@@ -392,10 +404,10 @@ export function ThreadView({
               <option value={thread.assigneeName}>
                 {thread.assigneeName}{' '}
                 {currentAssignee?.retiredAt
-                  ? '(retired)'
+                  ? t('collab.detail.assigneeRetired')
                   : currentAssignee
-                    ? '(disabled)'
-                    : '(removed)'}
+                    ? t('collab.detail.assigneeDisabled')
+                    : t('collab.detail.assigneeRemoved')}
               </option>
             ) : null}
             {agents
@@ -417,11 +429,7 @@ export function ThreadView({
                 : styles.priorityChip
             }
           >
-            {thread.priority === 'urgent'
-              ? 'Urgent'
-              : thread.priority === 'high'
-                ? 'High priority'
-                : 'Low priority'}
+            {t(`collab.priority.${thread.priority}`)}
           </span>
         ) : null}
         {active ? (
@@ -430,14 +438,25 @@ export function ThreadView({
             {active.run.agentName} {active.state}
           </span>
         ) : null}
-        {thread.status !== 'done' && onMarkDone ? (
+        {onOpenConversation ? (
           <Button
             variant="outline"
             size="sm"
             className={styles.doneButton}
+            onClick={onOpenConversation}
+          >
+            {t('collab.detail.openConversation')}
+          </Button>
+        ) : null}
+        {thread.status !== 'done' && onMarkDone ? (
+          <Button
+            variant="outline"
+            size="sm"
+            // The first action pushes the group right; one is enough.
+            className={onOpenConversation ? undefined : styles.doneButton}
             onClick={onMarkDone}
           >
-            Mark done
+            {t('collab.markDone')}
           </Button>
         ) : null}
       </header>
@@ -452,10 +471,20 @@ export function ThreadView({
             }
             aria-live="polite"
           >
-            {thread.reason}
+            {statusReasonLabel(thread.reason, t)}
           </p>
 
-          {thread.body ? (
+          {thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX) ? (
+            // Folded as in the chat: it is background, not the request.
+            <details className={styles.threadBody}>
+              <summary className="cursor-pointer text-muted-foreground">
+                {t('collab.thread.context')}
+              </summary>
+              <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                {thread.body.slice(CONVERSATION_CONTEXT_PREFIX.length)}
+              </div>
+            </details>
+          ) : thread.body ? (
             <div className={styles.threadBody}>
               <Markdown content={thread.body} />
             </div>
@@ -463,7 +492,9 @@ export function ThreadView({
 
           {thread.acceptanceCriteria ? (
             <section className={styles.criteria}>
-              <h2 className={styles.criteriaTitle}>Done when</h2>
+              <h2 className={styles.criteriaTitle}>
+                {t('collab.detail.doneWhen')}
+              </h2>
               <div className={styles.criteriaText}>
                 <Markdown content={thread.acceptanceCriteria} />
               </div>
@@ -472,7 +503,9 @@ export function ThreadView({
 
           {thread.children && thread.children.length > 0 ? (
             <section className={styles.children}>
-              <h2 className={styles.sectionTitle}>Subtasks</h2>
+              <h2 className={styles.sectionTitle}>
+                {t('collab.detail.subtasks')}
+              </h2>
               {thread.children.map((child) => (
                 <button
                   key={child.id}
@@ -482,7 +515,7 @@ export function ThreadView({
                   disabled={!onOpenThread}
                 >
                   <strong>{child.title}</strong>
-                  <span>{child.reason}</span>
+                  <span>{statusReasonLabel(child.reason, t)}</span>
                 </button>
               ))}
             </section>
@@ -501,7 +534,7 @@ export function ThreadView({
                 <span className={styles.sequence}>{post.sequence}</span>
                 <span className={styles.author}>
                   {post.authorName}
-                  {post.authorDeleted ? ' (removed)' : ''}
+                  {post.authorDeleted ? t('collab.detail.authorRemoved') : ''}
                 </span>
                 <span className={styles.time}>{formatTime(post.at)}</span>
                 <div className={styles.postText}>
@@ -518,18 +551,19 @@ export function ThreadView({
                       ? explainSkip(
                           outcome.reason ?? '',
                           outcome.agentName ?? '',
+                          t,
                         )
                       : undefined;
                   const result = skipped
-                    ? `${skipped.what}. ${skipped.fix}`
+                    ? skipped
                     : outcome.kind === 'dispatch'
-                      ? 'Booked for execution'
+                      ? t('collab.detail.outcome.dispatch')
                       : outcome.into === 'running'
-                        ? 'Added to a running task; not a read receipt'
-                        : 'Added to queued work';
+                        ? t('collab.detail.outcome.running')
+                        : t('collab.detail.outcome.queued');
                   return (
                     <p className={styles.postOutcome} key={index}>
-                      Routing:{' '}
+                      {t('collab.detail.routing')}{' '}
                       {outcome.agentName ? `@${outcome.agentName} · ` : ''}
                       {result}
                     </p>
@@ -544,8 +578,8 @@ export function ThreadView({
               className={styles.composerInput}
               value={draft}
               onChange={(event) => onDraftChange(event.target.value)}
-              placeholder="Reply to this task"
-              aria-label="Reply to this task"
+              placeholder={t('collab.detail.reply')}
+              aria-label={t('collab.detail.reply')}
             />
             {preview && draft.trim() ? (
               <RoutingPreview targets={preview} />
@@ -556,7 +590,7 @@ export function ThreadView({
                 onClick={onReply}
                 disabled={!draft.trim() || replyPending}
               >
-                Post reply
+                {t('collab.detail.send')}
               </Button>
             </div>
           </div>
@@ -564,11 +598,9 @@ export function ThreadView({
 
         <aside className={styles.sidebar}>
           <section>
-            <h2 className={styles.sectionTitle}>Runs</h2>
+            <h2 className={styles.sectionTitle}>{t('collab.detail.runs')}</h2>
             {live.length === 0 && past.length === 0 ? (
-              <p className={styles.budgetLine}>
-                Nothing has run on this task yet.
-              </p>
+              <p className={styles.budgetLine}>{t('collab.detail.noRuns')}</p>
             ) : null}
             {live.map((row) => (
               <RunRowView
@@ -598,15 +630,15 @@ export function ThreadView({
                   aria-expanded={showPast}
                 >
                   {showPast
-                    ? 'Hide past runs'
-                    : `Show past runs (${past.length})`}
+                    ? t('collab.detail.hidePast')
+                    : t('collab.detail.showPast', { count: past.length })}
                 </button>
               </>
             ) : null}
           </section>
 
           <section>
-            <h2 className={styles.sectionTitle}>Budget</h2>
+            <h2 className={styles.sectionTitle}>{t('collab.detail.budget')}</h2>
             <p className={styles.budgetLine}>{budget.turns}</p>
             <p className={styles.budgetLine}>{budget.tokens}</p>
             <p className={styles.budgetLine}>{budget.scope}</p>
