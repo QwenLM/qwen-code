@@ -3041,6 +3041,14 @@ const x: string = 1;`);
       expect(rendered).toContain('const x: string = 1;');
     });
 
+    it('preserves the author line number after a leading comment', () => {
+      const rendered = renderFor(
+        "// header\nexport const meta = { name: 'n', description: 'd' };\nconst x: string = 1;",
+      );
+      expect(rendered.split('\n')[0]).toBe('line 3');
+      expect(rendered).toContain('const x: string = 1;');
+    });
+
     it.each([
       ['CRLF', '\r\n'],
       ['lone CR', '\r'],
