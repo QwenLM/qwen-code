@@ -265,6 +265,22 @@ describe('addTableRules', () => {
     expect(tableRows(service(true).turndown(html))[2]).toEqual(['x', 'y']);
   });
 
+  it('reads a negative span as one', () => {
+    // A negative colspan reached `' |'.repeat()`, which throws on a negative
+    // count and cost the page its whole conversion.
+    const html =
+      '<table><tr><th>A</th><th>B</th></tr>' +
+      '<tr><td colspan="-3" rowspan="-2">x</td><td>y</td></tr>' +
+      '<tr><td>1</td><td>2</td></tr></table>';
+
+    expect(tableRows(service(true).turndown(html))).toEqual([
+      ['A', 'B'],
+      ['---', '---'],
+      ['x', 'y'],
+      ['1', '2'],
+    ]);
+  });
+
   it('counts the header columns by their spans', () => {
     const html =
       '<table><tr><th colspan="2">Size</th><th>Price</th></tr>' +
