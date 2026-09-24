@@ -21,6 +21,10 @@ class ManagedRuntimeAttestationConformanceTest {
             "managed-runtime-attestation-v2.fixtures.json");
     private static final Path SCHEMA = CONTRACT_DIR.resolve(
             "managed-runtime-attestation-v2.schema.json");
+    private static final Path TOOL_FIXTURES = CONTRACT_DIR.resolve(
+            "managed-runtime-tool-v2.fixtures.json");
+    private static final Path TOOL_SCHEMA = CONTRACT_DIR.resolve(
+            "managed-runtime-tool-v2.schema.json");
 
     @Test
     void consumesTheSharedRouteAndLimitContract() throws IOException {
@@ -80,6 +84,97 @@ class ManagedRuntimeAttestationConformanceTest {
                 .required("unevaluatedProperties").booleanValue());
     }
 
+    @Test
+    void consumesTheSharedToolRouteContract() throws IOException {
+        JsonNode suite = read(TOOL_FIXTURES);
+        assertEquals(1, suite.required("contractVersion").intValue());
+        JsonNode routes = suite.required("routes");
+        assertEquals(3, routes.size());
+        Set<String> keys = new HashSet<>();
+        for (JsonNode route : routes) {
+            String key = route.required("key").textValue();
+            assertTrue(keys.add(key));
+            assertEquals("POST", route.required("method").textValue());
+            assertEquals("/internal/managed-runtime/v2/" + key,
+                    route.required("path").textValue());
+            assertEquals(2, route.required("protocolVersion").intValue());
+            assertEquals("no-store",
+                    route.required("cacheControl").textValue());
+        }
+        assertEquals(Set.of("execute", "status", "cancel"), keys);
+        JsonNode identity = suite.required("identity");
+        assertEquals(Set.of("token", "leaseId", "epoch"),
+                fieldNames(identity));
+    }
+
+    @Test
+    void consumesEveryToolOutcomeClassification() throws IOException {
+        JsonNode suites = read(TOOL_FIXTURES).required("suites");
+        assertEquals(3, suites.size());
+        Set<String> classifications = new HashSet<>();
+        for (JsonNode suite : suites) {
+            Set<String> ids = new HashSet<>();
+            for (JsonNode fixture : suite.required("cases")) {
+                String id = fixture.required("id").textValue();
+                assertTrue(ids.add(id), () -> "duplicate fixture id: " + id);
+                int status = fixture.required("expected").required("status")
+                        .intValue();
+                String classification = fixture.required("expected")
+                        .required("classification").textValue();
+                assertEquals(classify(status), classification, id);
+                classifications.add(classification);
+            }
+        }
+        assertEquals(Set.of("ok", "credentials", "protocol", "identity",
+                "incompatible"), classifications);
+    }
+
+    @Test
+    void pinsClosedToolRequestAndResponseShapes() throws IOException {
+        JsonNode suites = read(TOOL_FIXTURES).required("suites");
+        for (JsonNode suite : suites) {
+            String route = suite.required("route").textValue();
+            JsonNode body = suite.required("canonicalRequest")
+                    .required("body");
+            Set<String> reference = fieldNames(
+                    body.required("reference"));
+            assertEquals(Set.of("sessionId", "promptId", "callId",
+                    "argsDigest"), reference, route);
+            switch (route) {
+                case "execute" -> assertEquals(
+                        Set.of("protocolVersion", "reference", "toolName",
+                                "input"), fieldNames(body));
+                case "status" -> assertEquals(
+                        Set.of("protocolVersion", "reference",
+                                "afterSequence"), fieldNames(body));
+                case "cancel" -> assertEquals(
+                        Set.of("protocolVersion", "reference"),
+                        fieldNames(body));
+                default -> throw new AssertionError("unknown route " + route);
+            }
+        }
+        JsonNode settled = findSuiteCase(suites, "status",
+                "settled-with-result");
+        assertEquals(Set.of("protocolVersion", "state", "result",
+                "lastSequence"),
+                fieldNames(settled.required("expected").required("body")));
+        JsonNode unknown = findSuiteCase(suites, "status", "unknown-is-ok");
+        assertEquals(Set.of("protocolVersion", "state"),
+                fieldNames(unknown.required("expected").required("body")));
+        JsonNode result = settled.required("expected").required("body")
+                .required("result");
+        assertEquals(Set.of("executionStatus", "responseParts"),
+                fieldNames(result));
+
+        JsonNode definitions = read(TOOL_SCHEMA).required("$defs");
+        assertFalse(definitions.required("toolRequestBody")
+                .required("unevaluatedProperties").booleanValue());
+        assertFalse(definitions.required("toolResponseBody")
+                .required("unevaluatedProperties").booleanValue());
+        assertFalse(definitions.required("reference")
+                .required("additionalProperties").booleanValue());
+    }
+
     private static JsonNode read(Path path) throws IOException {
         assertTrue(Files.isRegularFile(path), () -> "missing shared contract: " + path);
         return JSON.readTree(path.toFile());
@@ -109,6 +204,16 @@ class ManagedRuntimeAttestationConformanceTest {
             }
         }
         throw new AssertionError("missing fixture: " + id);
+    }
+
+    private static JsonNode findSuiteCase(JsonNode suites, String route,
+            String id) {
+        for (JsonNode suite : suites) {
+            if (route.equals(suite.required("route").textValue())) {
+                return findCase(suite.required("cases"), id);
+            }
+        }
+        throw new AssertionError("missing suite: " + route);
     }
 
     private static Set<String> fieldNames(JsonNode value) {

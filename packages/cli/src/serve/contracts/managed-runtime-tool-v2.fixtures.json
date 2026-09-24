@@ -1,0 +1,318 @@
+{
+  "contractVersion": 1,
+  "routes": [
+    {
+      "key": "execute",
+      "method": "POST",
+      "path": "/internal/managed-runtime/v2/execute",
+      "protocolVersion": 2,
+      "requestBodyLimitBytes": 262144,
+      "responseBodyLimitBytes": 1048576,
+      "cacheControl": "no-store"
+    },
+    {
+      "key": "status",
+      "method": "POST",
+      "path": "/internal/managed-runtime/v2/status",
+      "protocolVersion": 2,
+      "requestBodyLimitBytes": 16384,
+      "responseBodyLimitBytes": 1048576,
+      "cacheControl": "no-store"
+    },
+    {
+      "key": "cancel",
+      "method": "POST",
+      "path": "/internal/managed-runtime/v2/cancel",
+      "protocolVersion": 2,
+      "requestBodyLimitBytes": 16384,
+      "responseBodyLimitBytes": 1048576,
+      "cacheControl": "no-store"
+    }
+  ],
+  "identity": {
+    "token": "fixture-token",
+    "leaseId": "lease-01",
+    "epoch": 4
+  },
+  "suites": [
+    {
+      "route": "execute",
+      "canonicalRequest": {
+        "headers": {
+          "authorization": "Bearer fixture-token",
+          "cache-control": "no-store",
+          "content-type": "application/json",
+          "x-qwen-managed-lease-id": "lease-01",
+          "x-qwen-managed-lease-epoch": "4"
+        },
+        "body": {
+          "protocolVersion": 2,
+          "reference": {
+            "sessionId": "runtime-session-01",
+            "promptId": "prompt-01",
+            "callId": "call-01",
+            "argsDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          "toolName": "read_file",
+          "input": { "path": "/workspace/README.md" }
+        }
+      },
+      "cases": [
+        {
+          "id": "success",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": {
+              "protocolVersion": 2,
+              "state": "settled",
+              "result": {
+                "executionStatus": "success",
+                "responseParts": [{ "type": "text", "text": "file contents" }]
+              }
+            }
+          }
+        },
+        {
+          "id": "unauthorized",
+          "request": { "omitHeader": "authorization" },
+          "expected": {
+            "status": 401,
+            "classification": "credentials",
+            "code": "managed_runtime_unauthorized"
+          }
+        },
+        {
+          "id": "missing-no-store",
+          "request": { "omitHeader": "cache-control" },
+          "expected": {
+            "status": 400,
+            "classification": "protocol",
+            "code": "managed_runtime_attestation_invalid"
+          }
+        },
+        {
+          "id": "lease-mismatch",
+          "request": {
+            "replaceHeader": {
+              "name": "x-qwen-managed-lease-id",
+              "value": "lease-02"
+            }
+          },
+          "expected": {
+            "status": 409,
+            "classification": "identity",
+            "code": "managed_runtime_identity_conflict"
+          }
+        },
+        {
+          "id": "extra-body-field",
+          "request": {
+            "replaceBody": { "name": "unexpected", "value": true }
+          },
+          "expected": {
+            "status": 400,
+            "classification": "protocol",
+            "code": "managed_runtime_attestation_invalid"
+          }
+        },
+        {
+          "id": "missing-reference",
+          "request": {
+            "replaceBody": { "name": "reference", "value": null }
+          },
+          "expected": {
+            "status": 400,
+            "classification": "protocol",
+            "code": "managed_runtime_attestation_invalid"
+          }
+        },
+        {
+          "id": "trailing-path",
+          "request": { "pathSuffix": "/" },
+          "expected": { "status": 404, "classification": "incompatible" }
+        },
+        {
+          "id": "wrong-method",
+          "request": { "method": "GET" },
+          "expected": { "status": 404, "classification": "incompatible" }
+        },
+        {
+          "id": "oversized-input",
+          "request": { "paddingBytes": 262144 },
+          "expected": {
+            "status": 413,
+            "classification": "protocol",
+            "code": "managed_runtime_attestation_too_large"
+          }
+        },
+        {
+          "id": "invalid-json",
+          "request": { "rawBody": "{not-json" },
+          "expected": {
+            "status": 400,
+            "classification": "protocol",
+            "code": "managed_runtime_attestation_invalid"
+          }
+        }
+      ]
+    },
+    {
+      "route": "status",
+      "canonicalRequest": {
+        "headers": {
+          "authorization": "Bearer fixture-token",
+          "cache-control": "no-store",
+          "content-type": "application/json",
+          "x-qwen-managed-lease-id": "lease-01",
+          "x-qwen-managed-lease-epoch": "4"
+        },
+        "body": {
+          "protocolVersion": 2,
+          "reference": {
+            "sessionId": "runtime-session-01",
+            "promptId": "prompt-01",
+            "callId": "call-01",
+            "argsDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          "afterSequence": 0
+        }
+      },
+      "cases": [
+        {
+          "id": "unknown-is-ok",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": { "protocolVersion": 2, "state": "unknown" }
+          }
+        },
+        {
+          "id": "executing",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": {
+              "protocolVersion": 2,
+              "state": "executing",
+              "lastSequence": 2
+            }
+          }
+        },
+        {
+          "id": "settled-with-result",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": {
+              "protocolVersion": 2,
+              "state": "settled",
+              "result": {
+                "executionStatus": "success",
+                "responseParts": [{ "type": "text", "text": "file contents" }]
+              },
+              "lastSequence": 3
+            }
+          }
+        },
+        {
+          "id": "unauthorized",
+          "request": { "omitHeader": "authorization" },
+          "expected": {
+            "status": 401,
+            "classification": "credentials",
+            "code": "managed_runtime_unauthorized"
+          }
+        },
+        {
+          "id": "extra-body-field",
+          "request": {
+            "replaceBody": { "name": "execute", "value": true }
+          },
+          "expected": {
+            "status": 400,
+            "classification": "protocol",
+            "code": "managed_runtime_attestation_invalid"
+          }
+        }
+      ]
+    },
+    {
+      "route": "cancel",
+      "canonicalRequest": {
+        "headers": {
+          "authorization": "Bearer fixture-token",
+          "cache-control": "no-store",
+          "content-type": "application/json",
+          "x-qwen-managed-lease-id": "lease-01",
+          "x-qwen-managed-lease-epoch": "4"
+        },
+        "body": {
+          "protocolVersion": 2,
+          "reference": {
+            "sessionId": "runtime-session-01",
+            "promptId": "prompt-01",
+            "callId": "call-01",
+            "argsDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        }
+      },
+      "cases": [
+        {
+          "id": "in-flight-cancel-requested",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": { "protocolVersion": 2, "state": "cancel_requested" }
+          }
+        },
+        {
+          "id": "prepared-settles-cancelled",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": {
+              "protocolVersion": 2,
+              "state": "settled",
+              "result": {
+                "executionStatus": "cancelled",
+                "responseParts": []
+              }
+            }
+          }
+        },
+        {
+          "id": "unknown-is-ok",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": { "protocolVersion": 2, "state": "unknown" }
+          }
+        },
+        {
+          "id": "unauthorized",
+          "request": { "omitHeader": "authorization" },
+          "expected": {
+            "status": 401,
+            "classification": "credentials",
+            "code": "managed_runtime_unauthorized"
+          }
+        },
+        {
+          "id": "lease-epoch-mismatch",
+          "request": {
+            "replaceHeader": {
+              "name": "x-qwen-managed-lease-epoch",
+              "value": "5"
+            }
+          },
+          "expected": {
+            "status": 409,
+            "classification": "identity",
+            "code": "managed_runtime_identity_conflict"
+          }
+        }
+      ]
+    }
+  ]
+}

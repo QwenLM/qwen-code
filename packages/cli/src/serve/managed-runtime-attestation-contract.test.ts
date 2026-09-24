@@ -81,6 +81,47 @@ const schema = JSON.parse(
   ),
 ) as Record<string, unknown>;
 
+interface ToolFixtureRoute {
+  readonly key: 'execute' | 'status' | 'cancel';
+  readonly method: string;
+  readonly path: string;
+  readonly protocolVersion: number;
+  readonly requestBodyLimitBytes: number;
+  readonly responseBodyLimitBytes: number;
+  readonly cacheControl: string;
+}
+
+interface ToolFixtureSuite {
+  readonly contractVersion: number;
+  readonly routes: readonly ToolFixtureRoute[];
+  readonly identity: {
+    readonly token: string;
+    readonly leaseId: string;
+    readonly epoch: number;
+  };
+  readonly suites: ReadonlyArray<{
+    readonly route: 'execute' | 'status' | 'cancel';
+    readonly canonicalRequest: {
+      readonly headers: Readonly<Record<string, string>>;
+      readonly body: Readonly<Record<string, unknown>>;
+    };
+    readonly cases: readonly FixtureCase[];
+  }>;
+}
+
+const toolFixtures = JSON.parse(
+  fs.readFileSync(
+    path.join(contractDirectory, 'managed-runtime-tool-v2.fixtures.json'),
+    'utf8',
+  ),
+) as ToolFixtureSuite;
+const toolSchema = JSON.parse(
+  fs.readFileSync(
+    path.join(contractDirectory, 'managed-runtime-tool-v2.schema.json'),
+    'utf8',
+  ),
+) as Record<string, unknown>;
+
 const success = fixtures.cases.find((fixture) => fixture.id === 'success');
 if (
   !success?.request.headers ||
@@ -179,7 +220,10 @@ describe('Managed Runtime attestation contract', () => {
   });
 
   it('uses one manifest for route admission and registration', () => {
-    expect(OWNED_MANAGED_RUNTIME_ROUTES).toEqual([fixtures.route]);
+    expect(OWNED_MANAGED_RUNTIME_ROUTES).toEqual([
+      fixtures.route,
+      ...toolFixtures.routes,
+    ]);
     expect(Object.isFrozen(OWNED_MANAGED_RUNTIME_ROUTES)).toBe(true);
     expect(Object.isFrozen(OWNED_MANAGED_RUNTIME_ROUTES[0])).toBe(true);
     expect(MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES).toBe(16 * 1024);
@@ -326,5 +370,103 @@ describe('Managed Runtime attestation contract', () => {
     expect(definitions['requestBody']?.['unevaluatedProperties']).toBe(false);
     expect(definitions['responseBody']?.['unevaluatedProperties']).toBe(false);
     expect(definitions['route']?.['additionalProperties']).toBe(false);
+  });
+});
+
+describe('Managed Runtime tool contract', () => {
+  it('validates the shared tool fixtures against the shared schema', () => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+
+    expect(validate(toolFixtures)).toBe(true);
+    expect(validate.errors).toBeNull();
+  });
+
+  it('keeps tool request and response objects closed in the schema', () => {
+    const definitions = toolSchema['$defs'] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(definitions['toolRequestBody']?.['unevaluatedProperties']).toBe(
+      false,
+    );
+    expect(definitions['toolResponseBody']?.['unevaluatedProperties']).toBe(
+      false,
+    );
+    expect(definitions['route']?.['additionalProperties']).toBe(false);
+  });
+
+  it('pins every tool fixture case to a classified outcome', () => {
+    const classifications = new Set<string>();
+    for (const suite of toolFixtures.suites) {
+      const route = toolFixtures.routes.find(
+        (entry) => entry.key === suite.route,
+      );
+      expect(route).toBeDefined();
+      const ids = new Set<string>();
+      for (const fixture of suite.cases) {
+        expect(ids.has(fixture.id)).toBe(false);
+        ids.add(fixture.id);
+        expect(classify(fixture.expected.status)).toBe(
+          fixture.expected.classification,
+        );
+        classifications.add(fixture.expected.classification);
+      }
+    }
+    expect(classifications).toEqual(
+      new Set(['ok', 'credentials', 'protocol', 'identity', 'incompatible']),
+    );
+  });
+
+  it('answers unknown rather than 404 for a missing execution record', () => {
+    for (const suite of toolFixtures.suites) {
+      if (suite.route === 'execute') continue;
+      const unknownCase = suite.cases.find(
+        (fixture) => fixture.id === 'unknown-is-ok',
+      );
+      expect(unknownCase?.expected.status).toBe(200);
+      expect(unknownCase?.expected.body).toEqual({
+        protocolVersion: 2,
+        state: 'unknown',
+      });
+    }
+  });
+
+  it('admits the tool routes through the owned-route gate', async () => {
+    const app = express();
+    for (const route of toolFixtures.routes) {
+      app.post(route.path, (_req, res) => {
+        res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+      });
+    }
+    const server = createServer(ownedManagedRuntimeRouteGate(app));
+    openServers.add(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Expected a TCP test server address.');
+    }
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    for (const route of toolFixtures.routes) {
+      const admitted = await fetch(`${origin}${route.path}`, {
+        method: route.method,
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(admitted.status).toBe(200);
+
+      const wrongMethod = await fetch(`${origin}${route.path}`, {
+        method: 'GET',
+      });
+      expect(wrongMethod.status).toBe(404);
+    }
+    const unlisted = await fetch(
+      `${origin}/internal/managed-runtime/v2/prepare`,
+      { method: 'POST' },
+    );
+    expect(unlisted.status).toBe(404);
   });
 });
