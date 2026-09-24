@@ -1037,7 +1037,7 @@ public final class DaemonSessionClient implements AutoCloseable {
         }
     }
 
-    private static DaemonEvent parseEvent(SseReader.Frame frame) {
+    static DaemonEvent parseEvent(SseReader.Frame frame) {
         Map<String, Object> envelope = JsonSupport.parseObject(frame.getData(),
                 "SSE data");
         int version = JsonSupport.requiredInt(envelope, "v", "SSE envelope");
@@ -1068,7 +1068,7 @@ public final class DaemonSessionClient implements AutoCloseable {
                 metadata == null ? Collections.emptyMap() : metadata);
     }
 
-    private static void validateSseHeaders(HttpHeaders headers) {
+    static void validateSseHeaders(HttpHeaders headers) {
         String contentType = headers.firstValue("Content-Type").orElse("");
         String mediaType = contentType.split(";", 2)[0].trim();
         if (!"text/event-stream".equalsIgnoreCase(mediaType)) {
