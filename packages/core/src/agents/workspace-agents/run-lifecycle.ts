@@ -461,6 +461,54 @@ export async function applyAggregateStatus(
 }
 
 /**
+ * Tells the parent that a child thread answered in plain text.
+ *
+ * A plain answer leaves no close obligation, so the child never reaches
+ * `in_review` and a parent waiting on it would never hear back. Reported only
+ * once the child is quiet: an agent still working there reports through its
+ * own close or its own answer.
+ */
+export function reportChildReply(
+  thread: Thread,
+  reply: ThreadMessage,
+  runId: string,
+  now = Date.now(),
+): Thread {
+  if (
+    !thread.parentThreadId ||
+    thread.runs.some(
+      (run) =>
+        run.status === 'queued' ||
+        run.status === 'running' ||
+        run.status === 'finishing' ||
+        run.status === 'cancelling',
+    ) ||
+    thread.outbox.some(
+      (event) =>
+        event.kind === 'parent_report' &&
+        (event.status === 'pending' ||
+          event.payload['summaryMessageId'] === reply.id),
+    )
+  ) {
+    return thread;
+  }
+  return enqueue(
+    thread,
+    {
+      kind: 'parent_report',
+      causedByRunId: runId,
+      payload: {
+        event: 'child_replied',
+        threadId: thread.id,
+        parentThreadId: thread.parentThreadId,
+        summaryMessageId: reply.id,
+      },
+    },
+    now,
+  );
+}
+
+/**
  * Records a run's terminal state and recomputes the thread from it.
  *
  * A run that already reached a terminal state is left alone so a late

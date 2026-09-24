@@ -353,11 +353,17 @@ export function ThreadChat({
           ),
         ...thread.runs
           // Once the run's answer is a post, the post is the record; the live
-          // preview is only for text still being written.
+          // preview is only for text still being written. A status post the
+          // run made along the way is not its answer.
           .filter(
             (run) =>
               run.progress?.outputText &&
-              !thread.posts.some((post) => post.sourceRunId === run.id),
+              !thread.posts.some(
+                (post) =>
+                  post.sourceRunId === run.id &&
+                  (run.status !== 'running' ||
+                    post.text.trim() === run.progress?.outputText?.trim()),
+              ),
           )
           .map(
             (run): Message => ({

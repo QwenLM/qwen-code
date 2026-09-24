@@ -1118,7 +1118,8 @@ export function registerWorkspaceAgentRoutes(
    * Creates a thread, and starts it when it names an assignee.
    *
    * Assignment is a structured first post through ordinary admission, so it
-   * cannot bypass budgets or the queue limit.
+   * cannot bypass budgets or the queue limit. `message`, when sent, is that
+   * post, so the assignee starts from the person's own words.
    */
   app.post(
     `${prefix}/threads`,
@@ -1134,6 +1135,7 @@ export function registerWorkspaceAgentRoutes(
           acceptanceCriteria?: unknown;
           priority?: unknown;
           assignee?: unknown;
+          message?: unknown;
         };
         const title = String(payload.title ?? '').trim();
         if (!title) {
@@ -1184,6 +1186,9 @@ export function registerWorkspaceAgentRoutes(
               title,
               ...extra,
               assignee,
+              ...(typeof payload.message === 'string'
+                ? { message: payload.message }
+                : {}),
             })
           : {
               thread: await createThread(root, {

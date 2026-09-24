@@ -46,6 +46,70 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 浏览器可访问的地址或已有端口转发；预览不会自动把浏览器的 `localhost`
 转成远程 daemon 地址，也不会转发 daemon 凭据。
 
+## 宿主接管产物与代码高亮
+
+`onRightPanelOpen` 同步返回 `false` 时继续 Web Shell 原生打开逻辑；返回
+`true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
+未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
+该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+
+`filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
+产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。
+它不删除产物记录、不改变会话产物同步结果，也不隐藏文件变更卡片。
+
+```tsx
+<WebShell
+  {...connectionProps}
+  onRightPanelOpen={(request) => {
+    if (request.kind !== 'artifact') return false;
+    openHostPreview(request);
+    return true;
+  }}
+  filterArtifact={(artifact) => artifact.id !== hiddenArtifactId}
+/>
+```
+
+预览组件可从独立入口复用高亮服务，无需导入聊天 UI 或样式：
+
+```ts
+import { highlightCode } from '@qwen-code/web-shell/code-highlighter';
+
+const html = await highlightCode({
+  code: 'SELECT id FROM orders',
+  language: 'sql',
+  theme: 'dark', // 或 'light'
+});
+```
+
+返回高亮 HTML；未知语言、纯文本、超出已有大小限制或高亮失败返回 `null`，
+宿主应回退为转义的纯文本。服务复用同一模块实例的 Shiki、语言加载和缓存，
+不暴露可变的高亮器实例。独立 JavaScript realm 或重复打包的模块不共享实例。
+样式和 HTML 的安全渲染由宿主负责。
+
+## 实时语音中的屏幕共享
+
+无需启动原生 Live Host。在 Web Shell 设置中启用 Live Voice 并配置支持图像输入的
+实时模型，点击 Live Voice 后会直接接入新的语音会话，再点击「共享屏幕」。
+浏览器需要支持屏幕共享，
+并通过 HTTPS 或 localhost 等安全上下文访问；共享范围由浏览器选择器决定。
+
+共享后画面自动作为当前语音对话的持续上下文，无需填写目标或额外开始观察。
+可直接问「这个是什么意思」「下一步怎么做」。画面与麦克风进入同一条模型连接，
+画面到达本身不会请求模型回复，也不会启动单独的目标监控模型。
+画面中的文字仅作观察证据；用户要求执行操作时仍由执行 Agent 处理。
+
+默认每秒采样一帧，包括内容未变的画面；单帧最多 190 KiB，网络拥塞时丢弃过期帧，
+不会累积截图队列。每张图像紧随新的音频帧发送；麦克风静音或音频暂停期间仅保留最新画面，恢复音频后继续。
+这是近实时画面上下文，不是逐帧视频分析。模型需要支持所选实时接口的图像输入，
+图像输入会产生对应的模型用量。截图不会由 Live Feed 保存为图片文件。
+
+停止共享会立即停止后续图像输入，语音可以继续。挂断会关闭面板并释放浏览器麦克风；
+再次点击 Live Voice 会创建新会话。关闭页面或断开连接也会
+停止共享。请保持页面和通话开启；浏览器后台节流或休眠可能中断采样，连续 15 秒
+没有收到画面会停止 Live Feed 并提示重新共享。旧 daemon 继续支持按需截图，
+界面会明确提示不支持实时画面。停止共享后的历史画面仍可能属于对话上下文，
+不能当作当前屏幕。默认不会自动解说或主动提醒。
+
 ## 环境要求
 
 - React：`^18.0.0 || ^19.0.0`
@@ -420,7 +484,10 @@ daemon 参数的完整含义和配置方式见
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
 | `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
 | `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+| `showToolCalls`            | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                        |
 | `modelManagement`          | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
+
+移动访问二维码入口由 `header.showMobileAccess?: boolean` 控制，默认隐藏，适用于主聊天和分屏页头。独立入口 `main.tsx` 显式设为 `true`，保留本地 Qwen Code 用户的入口。
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
 详情的打开操作：

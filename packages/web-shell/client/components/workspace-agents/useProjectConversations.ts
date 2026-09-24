@@ -4,6 +4,8 @@ import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { createThreadsHttpApi } from './ThreadsRoute';
 
 export const COLLABORATION_SOURCE = 'workspace_collaboration';
+/** Live streams the sidebar may hold; the chat needs connections too. */
+const MAX_STREAMS = 2;
 export function useProjectConversations(cwds: readonly string[]) {
   const workspace = useWorkspace();
   const key = JSON.stringify([...new Set(cwds)].sort());
@@ -72,9 +74,13 @@ export function useProjectConversations(cwds: readonly string[]) {
     };
     void refresh();
     // Refetch when a workspace's store changes; poll only while a stream is down.
-    const down = new Set<string>();
-    let poll: ReturnType<typeof setInterval> | undefined;
-    const stops = (JSON.parse(key) as string[]).map((cwd) =>
+    // Each stream holds one of the browser's six HTTP/1.1 connections to the
+    // daemon, so workspaces past the first few are polled instead.
+    const cwds = JSON.parse(key) as string[];
+    const down = new Set(cwds.slice(MAX_STREAMS));
+    let poll: ReturnType<typeof setInterval> | undefined =
+      down.size > 0 ? setInterval(() => void refresh(), 5000) : undefined;
+    const stops = cwds.slice(0, MAX_STREAMS).map((cwd) =>
       createThreadsHttpApi(workspace.baseUrl, workspace.token, cwd).subscribe!(
         (event) => {
           if (event.type === 'changed') void refresh();

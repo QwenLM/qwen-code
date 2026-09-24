@@ -89,9 +89,6 @@ export function useAgentChatEntry({
   const agentNames = useRef<string[]>([]);
   const [pending, setPending] = useState(false);
   const busy = useRef(false);
-  const retry = useRef<
-    { api: typeof api; text: string; id: string } | undefined
-  >(undefined);
   // The composer receives these straight as props, so both identities have to
   // survive re-renders: `atProviders` feeds a memoized ChatEditor comparison
   // and `submit` a memoized onSubmit prop.
@@ -224,22 +221,15 @@ export function useAgentChatEntry({
           }
           if (images?.length || files?.length)
             throw new Error(t('collab.mention.noAttachments'));
-          let id =
-            retry.current?.api === api && retry.current.text === text
-              ? retry.current.id
-              : undefined;
-          if (!id) {
-            const context = getContext?.() ?? '';
-            const created = await api.createThread({
-              title: text.trim().slice(0, 80),
-              body: context ? `${CONVERSATION_CONTEXT_PREFIX}${context}` : '',
-              assignee: lead.name,
-            });
-            id = created.id;
-            retry.current = { api, text, id };
-          }
-          await api.postReply(id, text);
-          retry.current = undefined;
+          // One request: the message is the assignment, so the lead starts
+          // from it instead of receiving it mid-turn.
+          const context = getContext?.() ?? '';
+          const { id } = await api.createThread({
+            title: text.trim().slice(0, 80),
+            body: context ? `${CONVERSATION_CONTEXT_PREFIX}${context}` : '',
+            assignee: lead.name,
+            message: text,
+          });
           commit?.();
           onOpen(id, cwd);
         } catch (error) {

@@ -21,9 +21,12 @@ public interface ToolExecutionRepository {
             ToolExecutionRecord replacement, String owner,
             long dispatchGeneration);
 
-    /** Taking over an expired EXECUTING or CANCEL_REQUESTED claim yields
-     * UNKNOWN, not a claim; an expired DISPATCHING claim is re-granted at the
-     * next generation. */
+    /** Taking over an expired EXECUTING or CANCEL_REQUESTED claim marks the
+     * record UNKNOWN and returns null rather than a claim; an expired
+     * DISPATCHING claim is re-granted at the next generation. A live claim on
+     * a record that is neither SETTLED nor UNKNOWN is never written: its
+     * owner gets the stored record back and any other caller gets null. For
+     * a SETTLED or UNKNOWN record the call returns null. */
     ToolExecutionRecord claimDispatch(String executionCallId, String owner,
             Duration leaseDuration);
 

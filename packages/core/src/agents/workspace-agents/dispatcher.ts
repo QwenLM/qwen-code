@@ -34,6 +34,7 @@ import {
 import {
   applyAggregateStatus,
   finishRunInTransaction,
+  reportChildReply,
 } from './run-lifecycle.js';
 import {
   bindRunSession,
@@ -496,17 +497,24 @@ async function postPlainReply(
     !text ||
     run.status !== 'completed' ||
     run.closeKind !== undefined ||
-    thread.messages.some((message) => message.sourceRunId === run.id)
+    // A status post earlier in the run is not its answer; only the same text
+    // already posted is. A replay is caught by the origin id below.
+    thread.messages.some(
+      (message) =>
+        message.sourceRunId === run.id && message.text.trim() === text,
+    )
   ) {
     return;
   }
-  await postMessageInTransaction(transaction, thread.id, {
+  const posted = await postMessageInTransaction(transaction, thread.id, {
     from: run.agentId,
     authorKind: 'agent',
     text,
     sourceRunId: run.id,
     originEventId: `reply_${run.id}_${run.attempts}`,
   });
+  const reported = reportChildReply(posted.thread, posted.message, run.id);
+  if (reported !== posted.thread) await transaction.writeThread(reported);
 }
 
 async function reconcileInterruptedRuns(
@@ -609,12 +617,15 @@ async function reconcileInterruptedRuns(
         continue;
       }
 
-      const hasUndrainedInput = run.acceptedMessageIds.some(
-        (id) => !run.consumedMessageIds.includes(id),
-      );
+      // A turn that ended before reading a later message still did its work:
+      // it completes and the unread message goes to a successor run. Only a
+      // turn that never read its own input is replayed.
+      const readNothing =
+        run.consumedMessageIds.length === 0 &&
+        run.acceptedMessageIds.length > 0;
       if (
         run.status === 'finishing' ||
-        (state.kind === 'completed' && !hasUndrainedInput)
+        (state.kind === 'completed' && !readNothing)
       ) {
         // Charge before the run goes terminal: once it is completed the
         // baseline it was started with has nowhere left to live, and an
@@ -628,6 +639,13 @@ async function reconcileInterruptedRuns(
             now,
           });
           await postPlainReply(transaction, finished, run.id);
+          await rebookUndeliveredTriggersInTransaction(
+            transaction,
+            thread.id,
+            run.id,
+            run.attempts,
+            now,
+          );
         });
         records.push({ ...base, kind: 'recovered_terminal' });
         continue;
@@ -644,6 +662,7 @@ async function reconcileInterruptedRuns(
         }
         continue;
       }
+      await chargeRunUsage(projectRoot, port, agent, thread.id, run);
       await withAgentStoreTransaction(projectRoot, (transaction) =>
         finishRunInTransaction(transaction, {
           threadId: thread.id,
@@ -1002,6 +1021,10 @@ function parentReportText(thread: Thread, event: ThreadEvent): string {
       return `${label} was cancelled.`;
     case 'child_done':
       return `${label} was marked done by a person.`;
+    case 'child_replied':
+      // Not quoted: an @name in the answer would wake that agent instead of
+      // the parent's assignee.
+      return `${label} replied. Read it with thread_read.`;
     default:
       return `${label} is ready for review.`;
   }
