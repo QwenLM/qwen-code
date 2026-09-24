@@ -7,7 +7,6 @@
 import type { Content, Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import {
-  IMAGE_MARKER_METADATA,
   InMemoryImagePayloadStore,
   buildReattachParts,
   countAllInlineImages,
@@ -30,16 +29,6 @@ function toolImageTurn(data: string): Content {
       },
     ],
   };
-}
-
-// The eviction marker a tool-nested image was replaced with.
-function nestedMarkerText(content: Content): string {
-  const nested = content.parts?.[0]?.functionResponse?.parts as
-    | Part[]
-    | undefined;
-  const text = nested?.[0]?.text;
-  if (!text) throw new Error('expected an evicted tool-nested image');
-  return text;
 }
 
 function imageParts(contents: Content[]): Part[] {
@@ -343,29 +332,6 @@ describe('replaceImagePayloadsInPlace', () => {
       2,
     );
   });
-
-  it('stamps marker provenance on top-level parts only', () => {
-    const store = new InMemoryImagePayloadStore();
-    const topLevel: Part = {
-      inlineData: { mimeType: 'image/png', data: 'top-level' },
-    };
-    const contents: Content[] = [
-      { role: 'user', parts: [topLevel] },
-      toolImageTurn('nested'),
-    ];
-
-    replaceImagePayloadsInPlace(contents, store);
-
-    const id = store.put({
-      inlineData: { mimeType: 'image/png', data: 'top-level' },
-    }).id;
-    expect(topLevel.partMetadata?.[IMAGE_MARKER_METADATA]).toBe(id);
-    // Tool-nested markers stay unstamped: they are tool captures, which the
-    // classifier never grants the prompt label, so a stamp there could not
-    // change any outcome.
-    const nested = contents[1]!.parts![0]!.functionResponse!.parts as Part[];
-    expect(nested[0]!.partMetadata).toBeUndefined();
-  });
 });
 
 describe('buildReattachParts', () => {
@@ -478,26 +444,7 @@ describe('buildReattachParts', () => {
     expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
   });
 
-  // Pairs every replayed image with the label in front of it, keyed by the
-  // image's own content id so a mis-paired label cannot pass.
-  function labeledImages(
-    parts: Part[],
-    store: InMemoryImagePayloadStore,
-  ): Array<{ data: string | undefined; label: string | undefined }> {
-    return parts.flatMap((part, index) => {
-      if (!part.inlineData) return [];
-      const id = store.put(part).id;
-      const label = parts[index - 1]?.text;
-      return [
-        {
-          data: part.inlineData.data,
-          label: label?.startsWith(`Image #${id}: `) ? label : undefined,
-        },
-      ];
-    });
-  }
-
-  it('labels each replayed image so an older one is not read as current (#12544)', () => {
+  it('labels every replayed image with its own id and no turn claim (#12544)', () => {
     const store = new InMemoryImagePayloadStore();
     const contents = [
       toolImageTurn('a'),
@@ -509,375 +456,21 @@ describe('buildReattachParts', () => {
 
     const parts = buildReattachParts([], 3, contents, store);
 
-    // Every stale class carries the caveat, and the note no longer claims
-    // the images above it are user-sent attachments (#12544).
-    expect(parts[0]?.text).toContain(
-      'Each image below is labeled with its origin:',
+    expect(parts[0]?.text).toContain('Each one is labeled with its id below.');
+    const images = parts.flatMap((part, index) =>
+      part.inlineData
+        ? [{ data: part.inlineData.data, label: parts[index - 1]?.text }]
+        : [],
     );
-    expect(parts[0]?.text).toContain(
-      'are frozen snapshots that may be OUTDATED, do not treat them as current UI state.',
-    );
-    expect(parts[0]?.text).toContain(
-      'Images shown above this note are not the ones replayed below.',
-    );
-    const earlier = (label: string | undefined) =>
-      label?.endsWith(
-        ': from an earlier user turn, NOT part of the current one',
-      );
-    const images = labeledImages(parts, store);
     expect(images.map((image) => image.data)).toEqual(['a', 'b', 'c']);
-    expect(images.every((image) => earlier(image.label))).toBe(true);
-  });
-
-  it('labels a screenshot from the prompt as current on a tool-call continuation', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [
-      toolImageTurn('old'),
-      {
-        role: 'user',
-        parts: [
-          { text: 'what does this show?' },
-          { inlineData: { mimeType: 'image/png', data: 'new-shot' } },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-read',
-              name: 'read_file',
-              response: { output: 'read' },
-            },
-          },
-        ],
-      },
-    ];
-    // Eviction on the continuation request no longer skips the prompt.
-    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
-
-    const images = labeledImages(
-      buildReattachParts([], 2, contents, store),
-      store,
-    );
-
-    expect(images).toEqual([
-      {
-        data: 'old',
-        label: expect.stringMatching(/: from an earlier user turn, NOT part/),
-      },
-      {
-        data: 'new-shot',
-        label: expect.stringMatching(/: part of the current user turn$/),
-      },
-    ]);
-  });
-
-  it('labels an in-turn tool snapshot as captured earlier, not as current (#12544)', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents = [toolImageTurn('current')];
-    replaceImagePayloadsInPlace(contents, store);
-
-    const images = labeledImages(
-      buildReattachParts([], 0, contents, store),
-      store,
-    );
-
-    // A snapshot a tool took during this turn is a frozen frame as well, so
-    // the unqualified current label is reserved for prompt attachments.
-    expect(images).toEqual([
-      {
-        data: 'current',
-        label: expect.stringMatching(
-          /^Image #[a-f0-9]{12}: captured earlier in the current user turn; may predate later changes$/,
-        ),
-      },
-    ]);
-  });
-
-  it('keeps the unqualified current label for the prompt attachment only', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [
-      {
-        role: 'user',
-        parts: [
-          { text: 'fix the layout' },
-          { inlineData: { mimeType: 'image/png', data: 'prompt-shot' } },
-        ],
-      },
-      toolImageTurn('old'),
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-edit', name: 'edit' } }],
-      },
-      toolImageTurn('new'),
-    ];
-    // The tool result of the running call stays inline, as on a live request.
-    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
-
-    const images = labeledImages(
-      buildReattachParts([], 3, contents, store),
-      store,
-    );
-
-    expect(images).toEqual([
-      {
-        data: 'prompt-shot',
-        label: expect.stringMatching(/: part of the current user turn$/),
-      },
-      {
-        data: 'old',
-        label: expect.stringMatching(
-          /^Image #[a-f0-9]{12}: captured earlier in the current user turn; may predate later changes$/,
-        ),
-      },
-    ]);
-  });
-
-  it('labels re-attached identical bytes as the prompt attachment (#12544)', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [
-      // An earlier turn sent these exact bytes, so the id is already in the
-      // history as an earlier-turn marker (ids are content hashes).
-      {
-        role: 'user',
-        parts: [{ inlineData: { mimeType: 'image/png', data: 'dup' } }],
-      },
-      { role: 'model', parts: [{ text: 'ok' }] },
-      {
-        role: 'user',
-        parts: [
-          { text: 'same error, still broken' },
-          { inlineData: { mimeType: 'image/png', data: 'dup' } },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-read',
-              name: 'read_file',
-              response: { output: 'read' },
-            },
-          },
-        ],
-      },
-    ];
-    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
-
-    const images = labeledImages(
-      buildReattachParts([], 3, contents, store),
-      store,
-    );
-
-    // The stamp eviction wrote into the prompt's own part outranks the stale
-    // label the earlier turn's marker gave the same content hash.
-    expect(images).toEqual([
-      {
-        data: 'dup',
-        label: expect.stringMatching(/: part of the current user turn$/),
-      },
-    ]);
-  });
-
-  it('keeps the prompt as the turn start when a reminder rides in the tool result', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [
-      {
-        role: 'user',
-        parts: [
-          { text: 'why is the layout broken?' },
-          { inlineData: { mimeType: 'image/png', data: 'prompt-shot' } },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
-      },
-      // `client.ts` splices the active todo reminder into the tool-result
-      // content, so a continuation's last content carries a text part.
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-read',
-              name: 'read_file',
-              response: { output: 'read' },
-            },
-          },
-          {
-            text: '<system-reminder>\nThe current task still has unfinished todo items:\n- [in_progress] fix the layout\n</system-reminder>',
-          },
-        ],
-      },
-    ];
-    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
-
-    const images = labeledImages(
-      buildReattachParts([], 2, contents, store),
-      store,
-    );
-
-    expect(images).toEqual([
-      {
-        data: 'prompt-shot',
-        label: expect.stringMatching(/: part of the current user turn$/),
-      },
-    ]);
-  });
-
-  it('does not let a marker echoed by tool output vouch for a stale image', () => {
-    const store = new InMemoryImagePayloadStore();
-    const turn1 = toolImageTurn('stale');
-    replaceImagePayloadsInPlace([turn1], store);
-    const marker = nestedMarkerText(turn1);
-    const contents: Content[] = [
-      turn1,
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
-      },
-      // A tool result whose text quotes the marker verbatim: a transcript
-      // read back, a fetched page, or model prose folded into the turn.
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-read',
-              name: 'read_file',
-              response: { output: marker },
-            },
-          },
-          { text: marker },
-        ],
-      },
-    ];
-
-    const images = labeledImages(
-      buildReattachParts([], 2, contents, store),
-      store,
-    );
-
-    expect(images).toEqual([
-      {
-        data: 'stale',
-        label: expect.stringMatching(
-          /: from an earlier user turn, NOT part of the current one$/,
-        ),
-      },
-    ]);
-  });
-
-  it('does not let a prompt quoting an earlier marker relabel it as current', () => {
-    const store = new InMemoryImagePayloadStore();
-    const turn1 = toolImageTurn('stale');
-    replaceImagePayloadsInPlace([turn1], store);
-    const marker = nestedMarkerText(turn1);
-    const contents: Content[] = [
-      turn1,
-      { role: 'model', parts: [{ text: 'ok' }] },
-      { role: 'user', parts: [{ text: `compare ${marker} with this` }] },
-    ];
-
-    const images = labeledImages(
-      buildReattachParts([], 2, contents, store),
-      store,
-    );
-
-    expect(images).toEqual([
-      {
-        data: 'stale',
-        label: expect.stringMatching(
-          /: from an earlier user turn, NOT part of the current one$/,
-        ),
-      },
-    ]);
-  });
-
-  it('does not label an image kept by a post-compaction summary as current', () => {
-    const store = new InMemoryImagePayloadStore();
-    const turn1 = toolImageTurn('restored');
-    replaceImagePayloadsInPlace([turn1], store);
-    const marker = nestedMarkerText(turn1);
-    // Post-compaction history is a plain-text user content whose image
-    // restoration block retains the marker text of earlier turns.
-    const contents: Content[] = [
-      {
-        role: 'user',
-        parts: [
-          {
-            text: `Context summary. Preserved from before context was compacted: ${marker}`,
-          },
-        ],
-      },
-    ];
-
-    const images = labeledImages(
-      buildReattachParts([], 1, contents, store),
-      store,
-    );
-
-    expect(images).toEqual([
-      {
-        data: 'restored',
-        label: expect.stringMatching(
-          /^Image #[a-f0-9]{12}: captured earlier in the current user turn; may predate later changes$/,
-        ),
-      },
-    ]);
-  });
-
-  it('labels an earlier snapshot as earlier when the prompt merged with a tool result', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [
-      { role: 'user', parts: [{ text: 'turn 1 question' }] },
-      toolImageTurn('old'),
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-shot', name: 'screenshot' } }],
-      },
-      // `appendCuratedContent` fuses the new prompt onto the tool result when
-      // the model group between them is dropped as invalid or degraded.
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-shot',
-              name: 'screenshot',
-              response: { output: 'shot' },
-            },
-          },
-          { text: 'what changed?' },
-        ],
-      },
-    ];
-    replaceImagePayloadsInPlace(contents, store);
-
-    const images = labeledImages(
-      buildReattachParts([], 2, contents, store),
-      store,
-    );
-
-    expect(images).toEqual([
-      {
-        data: 'old',
-        label: expect.stringMatching(
-          /: from an earlier user turn, NOT part of the current one$/,
-        ),
-      },
-    ]);
+    for (const image of images) {
+      const id = store.put({
+        inlineData: { mimeType: 'image/png', data: image.data },
+      }).id;
+      expect(image.label).toBe(
+        `Image #${id}: replayed snapshot from earlier in this session, may be OUTDATED`,
+      );
+    }
   });
 
   it('does not reattach an image already inline in a tool response', () => {

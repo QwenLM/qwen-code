@@ -7,10 +7,6 @@
 import type { Content, ContentListUnion } from '@google/genai';
 import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
-import {
-  SYSTEM_REMINDER_CLOSE,
-  SYSTEM_REMINDER_OPEN,
-} from '../core/environmentContext.js';
 import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
@@ -57,7 +53,7 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
 
 export function countAllInlineImages(contents: Content[]): number {
   let count = 0;
-  for (const _image of inlineImageParts(contents)) count++;
+  for (const _part of inlineImageParts(contents)) count++;
   return count;
 }
 
@@ -75,19 +71,11 @@ export function replaceImagePayloadsInPlace(
   skipContent?: Content,
 ): StoredImagePayload[] {
   const replaced: StoredImagePayload[] = [];
-  for (const { part, toolNested } of inlineImageParts(contents, skipContent)) {
+  for (const part of inlineImageParts(contents, skipContent)) {
     const stored = store.put(part);
     replaced.push(stored);
     part.text = imageReferenceText(stored);
     delete part.inlineData;
-    // Vouch for the marker this eviction wrote, so a marker-shaped string
-    // echoed by tool output or model prose cannot claim the same currency.
-    if (!toolNested) {
-      part.partMetadata = {
-        ...part.partMetadata,
-        [IMAGE_MARKER_METADATA]: stored.id,
-      };
-    }
   }
   return replaced;
 }
@@ -103,20 +91,12 @@ export function buildReattachParts(
   referencedContents: Content[] = [],
   store?: ImagePayloadStore,
 ): Part[] {
-  // One sweep feeds every id set below; the per-request cost of this function
-  // is dominated by the marker regex over long histories.
-  const markers = collectImageMarkers(referencedContents);
-  const referencedIds = new Set(markers.map((marker) => marker.id));
+  const referencedIds = collectReferencedImageIds(referencedContents);
   if (replaced.length === 0 && (!store || referencedIds.size === 0)) return [];
   const inlineIds = collectInlineImageIds(referencedContents);
   const last = referencedContents.at(-1);
-  const lastIndex = referencedContents.length - 1;
-  const lastReferencedIds = new Set(
-    last?.role === 'user'
-      ? markers
-          .filter((marker) => marker.contentIndex === lastIndex)
-          .map((marker) => marker.id)
-      : [],
+  const lastReferencedIds = collectReferencedImageIds(
+    last?.role === 'user' ? [last] : [],
   );
   const candidates: CollectedImage[] = replaced
     .filter(
@@ -148,36 +128,14 @@ export function buildReattachParts(
     }
   }
   if (recent.length === 0) return [];
-  const origins = classifyMarkerOrigins(referencedContents, markers);
   return [
     {
       text: reattachContextText(recent.map((img) => img.id)),
       partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
-    ...recent.flatMap((image) =>
-      labeledReattachParts(image, origins.get(image.id) ?? 'earlier'),
-    ),
+    ...recent.flatMap(labeledReattachParts),
   ];
 }
-
-/**
- * `partMetadata` key stamped on the marker part that eviction wrote for a
- * top-level image, recording the stored id. A replayed image is only labeled
- * as an attachment of the current prompt when its own marker carries this
- * stamp: marker-shaped text also appears in tool output, in model prose
- * folded into a recovery turn, and in post-compaction summaries, and none of
- * those writers may vouch for an older image's currency.
- *
- * Client-side bookkeeping only, like {@link REATTACH_BOUNDARY_METADATA}:
- * `LlmContentGenerator.stripPartFields` deletes `partMetadata` before the
- * request is built — at every level, nested `functionResponse.parts`
- * included — and the OpenAI-compatible converters never serialize it.
- * Tool-nested parts are deliberately left unstamped for semantics, not for
- * wire safety: nested markers are tool captures, which
- * {@link classifyMarkerOrigins} never grants the prompt label, so a stamp
- * there could not change any outcome.
- */
-export const IMAGE_MARKER_METADATA = 'qwen-code:image-marker';
 
 /**
  * `partMetadata` key stamped on the leading text marker of the volatile
@@ -276,20 +234,12 @@ export function prepareImagePayloadsForRequest(
   if (reattachById.size === 0) {
     return transformed;
   }
-  // This path writes no IMAGE_MARKER_METADATA stamp, so nothing it replays
-  // can be labeled as an attachment of the current prompt.
-  const origins = classifyMarkerOrigins(
-    transformed,
-    collectImageMarkers(transformed),
-  );
 
   const reattachParts: Part[] = [
     {
       text: reattachContextText([...reattachById.keys()]),
     },
-    ...[...reattachById.values()].flatMap((image) =>
-      labeledReattachParts(image, origins.get(image.id) ?? 'earlier'),
-    ),
+    ...[...reattachById.values()].flatMap(labeledReattachParts),
   ];
 
   const last = transformed.at(-1);
@@ -306,7 +256,7 @@ function transformPart(
   store: ImagePayloadStore,
   collected: CollectedImage[],
 ): Part {
-  if (isInlineImagePart(part)) {
+  if (part.inlineData?.mimeType?.startsWith('image/') && part.inlineData.data) {
     const stored = store.put(part);
     collected.push({ stored });
     return { text: imageReferenceText(stored) };
@@ -331,167 +281,52 @@ function transformPart(
 
 function collectInlineImageIds(contents: Content[]): Set<string> {
   const ids = new Set<string>();
-  for (const { part } of inlineImageParts(contents)) {
+  for (const part of inlineImageParts(contents)) {
     ids.add(imagePartToStoredPayload(part).id);
   }
   return ids;
 }
 
-function isInlineImagePart(part: Part): boolean {
-  return Boolean(
-    part.inlineData?.mimeType?.startsWith('image/') && part.inlineData.data,
-  );
-}
-
 function* inlineImageParts(
   contents: Content[],
   skipContent?: Content,
-): Generator<{ part: Part; toolNested: boolean }> {
+): Generator<Part> {
   for (const content of contents) {
     if (content === skipContent) continue;
     for (const part of content.parts ?? []) {
-      if (isInlineImagePart(part)) {
-        yield { part, toolNested: false };
+      if (
+        part.inlineData?.mimeType?.startsWith('image/') &&
+        part.inlineData.data
+      ) {
+        yield part;
       }
       for (const inner of getFunctionResponseParts(part) ?? []) {
-        if (isInlineImagePart(inner)) {
-          yield { part: inner, toolNested: true };
+        if (
+          inner.inlineData?.mimeType?.startsWith('image/') &&
+          inner.inlineData.data
+        ) {
+          yield inner;
         }
       }
     }
   }
 }
 
-/** One eviction marker found in `contents`, with where it was found. */
-interface ImageMarker {
-  id: string;
-  contentIndex: number;
-  /** The marker text sat inside a tool response's nested parts. */
-  toolNested: boolean;
-  /** Eviction itself wrote this marker (see IMAGE_MARKER_METADATA). */
-  stamped: boolean;
-}
-
-function collectImageMarkers(contents: Content[]): ImageMarker[] {
-  const markers: ImageMarker[] = [];
-  const collect = (
-    parts: Part[] | undefined,
-    contentIndex: number,
-    toolNested: boolean,
-  ): void => {
+function collectReferencedImageIds(contents: Content[]): Set<string> {
+  const ids = new Set<string>();
+  const collect = (parts: Part[] | undefined): void => {
     for (const part of parts ?? []) {
       for (const match of part.text?.matchAll(IMAGE_REFERENCE_PATTERN) ?? []) {
-        const id = match[1]?.toLowerCase();
-        if (!id) continue;
-        markers.push({
-          id,
-          contentIndex,
-          toolNested,
-          stamped: part.partMetadata?.[IMAGE_MARKER_METADATA] === id,
-        });
+        const id = match[1];
+        if (id) ids.add(id.toLowerCase());
       }
-      collect(getFunctionResponseParts(part), contentIndex, true);
+      collect(getFunctionResponseParts(part));
     }
   };
-  contents.forEach((content, contentIndex) => {
-    collect(content.parts, contentIndex, false);
-  });
-  return markers;
-}
-
-function collectReferencedImageIds(contents: Content[]): Set<string> {
-  return new Set(collectImageMarkers(contents).map((marker) => marker.id));
-}
-
-/** Where a replayed image came from, as the label states it. */
-type ReattachOrigin = 'prompt' | 'turn' | 'earlier';
-
-// Ordered stalest first: absent provenance an id is labeled by the weakest
-// claim about it, so a marker-shaped echo can never upgrade an older image to
-// "current". The prompt's own stamped marker is the one claim that overrides.
-// Ids are content hashes, so re-attaching identical bytes in a later turn
-// reuses an id an earlier turn already labeled stale — and only the stamp
-// eviction writes into the prompt's part says those bytes are the attachment
-// being answered now.
-const ORIGIN_PRECEDENCE: readonly ReattachOrigin[] = [
-  'earlier',
-  'turn',
-  'prompt',
-];
-
-const ORIGIN_LABEL: Record<ReattachOrigin, string> = {
-  prompt: 'part of the current user turn',
-  turn: 'captured earlier in the current user turn; may predate later changes',
-  earlier: 'from an earlier user turn, NOT part of the current one',
-};
-
-function classifyMarkerOrigins(
-  contents: Content[],
-  markers: readonly ImageMarker[],
-): Map<string, ReattachOrigin> {
-  const turnStart = currentTurnStartIndex(contents);
-  const origins = new Map<string, ReattachOrigin>();
-  if (turnStart < 0) return origins;
-  for (const marker of markers) {
-    if (marker.contentIndex < turnStart) {
-      origins.set(marker.id, 'earlier');
-      continue;
-    }
-    // Only a marker eviction stamped into the prompt's own part says the user
-    // attached that image to the prompt being answered now.
-    const promptClaim =
-      marker.contentIndex === turnStart && marker.stamped && !marker.toolNested;
-    const origin: ReattachOrigin = promptClaim ? 'prompt' : 'turn';
-    const known = origins.get(marker.id);
-    if (
-      known === undefined ||
-      // A provenance-vouched prompt attachment outranks a stale label an
-      // earlier turn's marker wrote for the same content hash.
-      promptClaim ||
-      ORIGIN_PRECEDENCE.indexOf(origin) < ORIGIN_PRECEDENCE.indexOf(known)
-    ) {
-      origins.set(marker.id, origin);
-    }
+  for (const content of contents) {
+    collect(content.parts);
   }
-  return origins;
-}
-
-// Index of the content that starts the current user turn, or -1 when the
-// history holds no user turn at all. A prompt merged with a preceding tool
-// result (consecutive user contents are fused by `appendCuratedContent`) still
-// starts the turn, so any part the user could have sent counts; a content made
-// only of tool responses belongs to the turn but does not start it. On a
-// tool-call continuation the last content is such a tool result, and a
-// screenshot the user sent with the prompt still belongs to this turn and may
-// have been evicted into a marker since.
-function currentTurnStartIndex(contents: Content[]): number {
-  for (let index = contents.length - 1; index >= 0; index--) {
-    const content = contents[index];
-    if (content?.role === 'user' && content.parts?.some(isUserSentPart)) {
-      return index;
-    }
-  }
-  // No prompt in view: fall back to the last content, as before.
-  return contents.at(-1)?.role === 'user' ? contents.length - 1 : -1;
-}
-
-// Whether a part can start a user turn. The request path splices structural
-// `<system-reminder>` scaffolding into tool-result contents — the active todo
-// reminder (`client.ts`, before `createUserContent`) and the memory-recall
-// prompt appended on the same branch — so "has a text part" alone would read a
-// routine tool result as the prompt and label the prompt's own evicted
-// attachment as an earlier turn's. Rejected per part, as `isApiUserPrompt`
-// rejects reminder-only contents: a genuine prompt keeps its own text or image
-// part next to a reminder, and still starts the turn.
-function isUserSentPart(part: Part): boolean {
-  if (part.functionResponse) return false;
-  const text = part.text;
-  if (typeof text !== 'string') return true;
-  const trimmed = text.trim();
-  return !(
-    trimmed.startsWith(SYSTEM_REMINDER_OPEN) &&
-    trimmed.endsWith(SYSTEM_REMINDER_CLOSE)
-  );
+  return ids;
 }
 
 function recentUniqueImages(
@@ -536,28 +371,23 @@ function imageReferenceText(stored: StoredImagePayload): string {
 
 function reattachContextText(ids: readonly string[]): string {
   return (
-    'Images read earlier in this session, replayed for reference: ' +
+    'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
     ids.map((id) => `Image #${id}`).join(', ') +
-    '. Each image below is labeled with its origin: only one labeled' +
-    ' "part of the current user turn" was attached to the prompt being answered now;' +
-    ' those labeled "captured earlier in the current user turn" or' +
-    ' "from an earlier user turn" are frozen snapshots that may be OUTDATED,' +
-    ' do not treat them as current UI state.' +
-    ' Images shown above this note are not the ones replayed below.'
+    '. Each one is labeled with its id below.'
   );
 }
 
 // A lone id list above N unlabeled images cannot be mapped back to them, so
 // a one-image turn followed by several replays reads as "the old images are
-// the new ones" (#12544). Label every replayed image on its own. A snapshot
-// captured during this turn is a frozen frame too, so only an attachment of
-// the prompt itself is labeled without a staleness caveat.
-function labeledReattachParts(
-  stored: StoredImagePayload,
-  origin: ReattachOrigin,
-): Part[] {
+// the new ones" (#12544). Label every replayed image with its id. The label
+// deliberately makes no claim about which turn an image belongs to: this
+// module cannot tell where the current turn starts, and a wrong claim in
+// either direction misleads the model more than the header's caveat does.
+function labeledReattachParts(stored: StoredImagePayload): Part[] {
   return [
-    { text: `Image #${stored.id}: ${ORIGIN_LABEL[origin]}` },
+    {
+      text: `Image #${stored.id}: replayed snapshot from earlier in this session, may be OUTDATED`,
+    },
     storedImageToPart(stored),
   ];
 }
