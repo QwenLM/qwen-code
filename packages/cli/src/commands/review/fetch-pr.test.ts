@@ -4776,6 +4776,8 @@ function resumePlanFields(diffBytes: string): Record<string, unknown> {
   ) as unknown as Record<string, unknown>;
 }
 
+const RESUME_MODEL = 'resume-model@1a2b3c4d';
+
 describe('fetch-pr --resume', () => {
   const OUT = '/tmp/fetch-report.json';
   const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
@@ -4801,6 +4803,7 @@ describe('fetch-pr --resume', () => {
       prDescriptionHasHan: false,
       isCrossRepository: false,
       diffStat: { files: 1, additions: 1, deletions: 0 },
+      reviewModelId: RESUME_MODEL,
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -4892,6 +4895,9 @@ describe('fetch-pr --resume', () => {
     // BOTH ids before any step runs.
     vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
     vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+    // The identity the interrupted attempt recorded (`prevReport`), running
+    // again — the precondition every continuation below assumes.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', RESUME_MODEL);
   });
 
   async function run(extraArgs: Record<string, unknown> = {}) {
@@ -5377,6 +5383,28 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
+  it('refuses a continuation under another identity, and the fresh report names the running one (R26-1)', async () => {
+    // The continuation would republish the interrupted attempt's report and
+    // cache candidate verbatim, both certifying RESUME_MODEL over a review
+    // another model performed.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', 'other-model@9f8e7d6c');
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toEqual({
+      resumed: false,
+      resumeRefused: 'model-mismatch',
+    });
+    const written = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === OUT,
+    );
+    expect(written).toBeDefined();
+    expect(
+      (JSON.parse(String(written![1])) as Record<string, unknown>)[
+        'reviewModelId'
+      ],
+    ).toBe('other-model@9f8e7d6c');
+  });
+
   it('resumes at the recorded effort when none is passed, and says so', async () => {
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport({ effort: 'medium' });
@@ -5541,6 +5569,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       prDescriptionHasHan: false,
       isCrossRepository: false,
       diffStat: { files: 1, additions: 1, deletions: 0 },
+      reviewModelId: RESUME_MODEL,
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -5624,6 +5653,9 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     // BOTH ids before any step runs.
     vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
     vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+    // The identity the interrupted attempt recorded (`prevReport`), running
+    // again — the precondition every continuation below assumes.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', RESUME_MODEL);
   });
 
   async function run(extra: Record<string, unknown> = {}) {

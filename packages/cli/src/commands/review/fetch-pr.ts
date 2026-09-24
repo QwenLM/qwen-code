@@ -805,6 +805,7 @@ function tryResume(
     liveHeadSha,
     resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
+    runningModelId: roundModelIdFrom(process.env),
   });
   if (!ruling.ok) {
     return {
@@ -2001,10 +2002,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     let cacheCandidatePath: string | undefined;
     if (diffPath !== null && mergeBaseSha && roundModelId === '') {
       // An anchor certified by nobody: the gate reads an empty identity as
-      // a mismatch and `cache-commit` refuses it, so announcing this
-      // candidate would send Step 8 into a refusal with no branch — the
-      // round's findings ledger lost with it — where the absent field
-      // routes it to the hand-written fallback, which omits `lastModelId`.
+      // a mismatch, so the candidate has nothing to certify. Withheld here —
+      // unlike the local capture, which omits the key and lets `cache-commit`
+      // promote the ledger alone — because a posting PR round's ledger
+      // rides its marker, and for every PR round the absent field routes
+      // Step 8 to the hand-written fallback, which persists the ledger and
+      // omits `lastModelId`.
       writeStderrLine(
         'WARNING: the runtime published no model identity; the cache ' +
           'candidate is withheld (an anchor certified by nobody is refused ' +
@@ -2473,7 +2476,7 @@ export const fetchPrCommand: CommandModule = {
         type: 'boolean',
         default: false,
         describe:
-          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
+          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved, same model identity): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', EFFORT_OPTION)
       .option('deadline', deadlineOption({ resumes: true }))
