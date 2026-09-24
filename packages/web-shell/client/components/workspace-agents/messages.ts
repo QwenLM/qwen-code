@@ -41,7 +41,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.run.stop': 'Stop',
   'collab.runtime.addTitle': 'Add a runtime',
   'collab.runtime.addDescription':
-    'Let another computer run agents for this workspace. It can offer Qwen Code and, if installed, Codex.',
+    'Let another computer run agents for this workspace. It offers Qwen Code, plus Codex and Claude Code where installed.',
   'collab.runtime.methodCommand': 'Run one command there',
   'collab.runtime.methodExisting': 'I have its address and token',
   'collab.runtime.address':
@@ -284,7 +284,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.run.stop': '停止',
   'collab.runtime.addTitle': '添加 Runtime',
   'collab.runtime.addDescription':
-    '让另一台电脑为这个工作区运行 Agent。它可以提供 Qwen Code，装了的话还有 Codex。',
+    '让另一台电脑为这个工作区运行 Agent。它可以提供 Qwen Code，装了的话还有 Codex 和 Claude Code。',
   'collab.runtime.methodCommand': '在那台电脑上运行一行命令',
   'collab.runtime.methodExisting': '我已有地址和令牌',
   'collab.runtime.address': '这台电脑的地址（从那台电脑看过来）',
