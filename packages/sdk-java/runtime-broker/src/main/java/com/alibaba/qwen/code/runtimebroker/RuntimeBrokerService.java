@@ -220,7 +220,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                             == ToolExecutionRecord.State
                                                     .CANCEL_REQUESTED
                                     && !requested.hasLiveDispatchAt(
-                                            clock.instant()))) {
+                                            clock.instant())
+                                    && !dispatches.containsKey(executionId))) {
+                        // Fence only a claim nothing here is serving; an
+                        // invocation still running in this process gets the
+                        // physical cancel below.
                         beginDispatch(context, requested);
                         ToolExecutionRecord latest = executionRepository
                                 .findByExecutionCallId(executionId);
@@ -821,6 +825,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw unavailable("runtime_execution_cancel_failed",
                     "Runtime cancellation returned an invalid result",
                     exception);
+        } catch (RuntimeBrokerException exception) {
+            ToolExecutionRecord latest = executionRepository
+                    .findByExecutionCallId(requested.getExecutionCallId());
+            if (!"runtime_execution_state_conflict".equals(
+                    exception.getCode()) || latest == null
+                    || latest.hasLiveDispatchAt(clock.instant())) {
+                throw exception;
+            }
+            // The Runtime settled the call after this claim lapsed; fence it
+            // for reconciliation instead of reporting a state conflict.
+            executionRepository.claimDispatch(
+                    requested.getExecutionCallId(), brokerOwnerId,
+                    dispatchLeaseDuration);
         }
     }
 

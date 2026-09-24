@@ -632,6 +632,63 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationAfterALapseStillReachesTheRunningInvocation() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofMinutes(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+
+            // Renewal ticks every 20 s of wall time, so the lease lapses
+            // while this process still serves the invocation.
+            clock.advance(Duration.ofMinutes(2));
+            join(fixture.service.cancelExecution("harness", "runtime",
+                    created.getExecutionCallId()));
+
+            assertEquals(1, fixture.transport.cancelCalls.get());
+            result.complete(Map.of("executionStatus", "success"));
+        }
+    }
+
+    @Test
+    void settledCancellationAfterALapseIsFencedInsteadOfConflicting() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofMinutes(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            CompletableFuture<Map<String, Object>> acknowledgement =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            fixture.transport.cancelResult = acknowledgement;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+
+            clock.advance(Duration.ofMinutes(2));
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    join(cancelled).getState());
+            result.complete(Map.of("executionStatus", "cancelled"));
+        }
+    }
+
+    @Test
     void invalidExecutionInputsUseTheCodedErrorChannel() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
