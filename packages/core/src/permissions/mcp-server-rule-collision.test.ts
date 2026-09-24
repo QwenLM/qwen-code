@@ -808,10 +808,7 @@ describe('legacy-spelled deny coverage (round-2 review)', () => {
           }),
         ).toBe('deny');
         expect(
-          await pm.getToolRegistrationStatus(
-            tool.name,
-            tool.permissionAliases,
-          ),
+          await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
         ).toBe('disabled');
       }
     },
@@ -826,8 +823,8 @@ describe('legacy-spelled deny coverage (round-2 review)', () => {
     expect(safe.permissionAliases).toEqual([]);
     expect(matchesMcpPattern('mcp__foo.bar', safe.name)).toBe(false);
     expect(matchesMcpPattern('mcp__foo.bar__*', safe.name)).toBe(false);
-    expect(matchesMcpPattern('mcp__foo.bar', safe.name, 'mcp__foo_bar__x')).toBe(
-      false,
-    );
+    expect(
+      matchesMcpPattern('mcp__foo.bar', safe.name, 'mcp__foo_bar__x'),
+    ).toBe(false);
   });
 });
