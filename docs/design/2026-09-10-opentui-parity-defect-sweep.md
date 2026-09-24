@@ -2172,10 +2172,11 @@ different columns, and nearly every frame that shows the notice shows it differe
 Dropping the notice and the path fragments it wraps into from both legs leaves
 seventy-three identical and fifty-eight divergent, two of them the sampled checkpoints
 — the spinner's phrase rotation and the mid-stream indicator. Counting those two
-apart, the rest carry 258 rows only ink draws and 288 only this port draws. That split
-is the one Coverage boundary withdraws: it does not reproduce from these frames. The
-census below counts from it, and stands as that pass's own reading of the families
-rather than as a live tally.
+apart, the rest carry 258 rows only ink draws and 288 only this port draws. The
+seventy-three/fifty-eight split those counts were taken over is the one Coverage
+boundary withdraws: it does not reproduce from these frames, and the row counts
+fall with it. The census below counts from it, and stands as that pass's own
+reading of the families rather than as a live tally.
 
 Those fifty-six fall in eleven families by primary cause, four of them new to that
 pass. Nine are non-deterministic and no fix can close them: the two sampled
