@@ -1175,6 +1175,8 @@ test('a note between legacy identity bullets survives without refreshing the hea
       '- Run: https://github.com/QwenLM/qwen-code/actions/runs/301',
     ),
   );
+  assert.ok(merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  assert.ok(merged.includes('[run 301]'));
   assert.ok(merged.includes('[run 302]'));
 });
 
@@ -1210,6 +1212,44 @@ test('a per-commit merge preserves prior failed jobs when the latest run has non
   assert.ok(merged.includes('windows-latest'));
   assert.ok(merged.includes('- Run ID: 303'));
   assert.ok(!merged.match(/^- Failed jobs:$/m));
+});
+
+test('a malformed per-commit head keeps failed-job prose stable across merges', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  let merged = [
+    `<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`,
+    'Human context before the failed-job history.',
+    '',
+    '## Previous failed jobs (last reported for run 301)',
+    '',
+    '  - old job',
+    '',
+    'Keep this note after the machine-owned section.',
+    '',
+    '## Recurrences',
+    '',
+    OCCURRENCE_MARKER,
+  ].join('\n');
+  for (const runId of ['302', '303', '304']) {
+    merged = renderIssueBody({
+      analysis,
+      occurrence: {
+        ...OCCURRENCE,
+        runId,
+        runUrl: `https://github.com/QwenLM/qwen-code/actions/runs/${runId}`,
+      },
+      existingBody: merged,
+    });
+    assert.ok(
+      merged.includes('Keep this note after the machine-owned section.'),
+    );
+    assert.ok(merged.includes('`Test (windows-latest, Node 22.x)`'));
+  }
+  assert.equal((merged.match(/## Previous failed jobs/g) ?? []).length, 1);
 });
 
 test('machine header promotion ignores human identity-looking bullets above it', () => {

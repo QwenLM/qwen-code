@@ -253,7 +253,10 @@ describe('main CI failure issue workflow', () => {
       'echo "Issue #${candidate} did not carry ${marker}; continuing search."',
     );
     expect(plan).toContain(
-      'if ! gh issue view "${candidate}" --repo "${REPO}" --json body --jq \'.body\' > "${candidate_body}"; then echo "::warning::Could not read issue #${candidate} while checking ${marker}" continue fi',
+      'if ! gh issue view "${candidate}" --repo "${REPO}" --json body --jq \'.body\' > "${candidate_body}"; then echo "::error::Could not read issue #${candidate} while checking ${marker}" rm -f "${candidate_list}" exit 1 fi',
+    );
+    expect(plan).not.toContain(
+      'echo "::warning::Could not read issue #${candidate} while checking ${marker}"',
     );
     expect(plan).toContain('break 2');
     const verify = plan.indexOf(

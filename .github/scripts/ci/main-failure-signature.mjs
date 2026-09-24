@@ -286,39 +286,70 @@ const PER_COMMIT_FOOTER =
 
 function parsePerCommitHeaderBlock(block) {
   const lines = block.trim().split('\n');
-  let cursor = 0;
-  const workflow = lines[cursor++]?.match(/^- Workflow: (.+)$/)?.[1];
-  if (!workflow) return null;
+  const findField = (pattern) => {
+    const index = lines.findIndex((line) => pattern.test(line));
+    return {
+      index,
+      value: index === -1 ? undefined : lines[index].match(pattern)[1],
+    };
+  };
+  const workflowField = findField(/^- Workflow: (.+)$/);
+  const runField = findField(/^- Run: (\S+)$/);
+  const runIdField = findField(/^- Run ID: (\S+)$/);
+  const shaField = findField(/^- Commit: (\S+)$/);
+  const workflow = workflowField.value;
+  const runUrl = runField.value;
+  const runId = runIdField.value;
+  const sha = shaField.value;
+  if (!workflow && !runUrl && !runId && !sha) return null;
 
   const failedJobLines = [];
   let failedJobRunId;
-  const failedJobsHeading = lines[cursor]?.match(
-    /^- Failed jobs(?: \(last reported for run (\S+)\))?:$/,
+  const failedJobsIndex = lines.findIndex((line) =>
+    /^- Failed jobs(?: \(last reported for run (\S+)\))?:$/.test(line),
   );
-  if (failedJobsHeading) {
-    failedJobRunId = failedJobsHeading[1];
-    cursor += 1;
-    while (lines[cursor]?.startsWith('  - ')) {
-      failedJobLines.push(lines[cursor]);
-      cursor += 1;
+  if (failedJobsIndex !== -1) {
+    failedJobRunId = lines[failedJobsIndex].match(
+      /^- Failed jobs(?: \(last reported for run (\S+)\))?:$/,
+    )[1];
+    for (
+      let index = failedJobsIndex + 1;
+      lines[index]?.startsWith('  - ');
+      index += 1
+    ) {
+      failedJobLines.push(lines[index]);
     }
   }
-
-  const runUrl = lines[cursor++]?.match(/^- Run: (\S+)$/)?.[1];
-  const runId = lines[cursor++]?.match(/^- Run ID: (\S+)$/)?.[1];
-  const sha = lines[cursor++]?.match(/^- Commit: (\S+)$/)?.[1];
-  if (!runUrl || !runId || !sha) return null;
+  const cursorAfterJobs =
+    workflowField.index === -1
+      ? -1
+      : workflowField.index +
+        1 +
+        (failedJobsIndex === workflowField.index + 1
+          ? 1 + failedJobLines.length
+          : 0);
+  const wellFormed =
+    workflowField.index === 0 &&
+    runField.index === cursorAfterJobs &&
+    runIdField.index === runField.index + 1 &&
+    shaField.index === runIdField.index + 1;
+  const remainder = wellFormed
+    ? shaField.index === -1
+      ? []
+      : lines.slice(shaField.index + 1)
+    : lines;
   return {
     workflow,
     runUrl,
     runId,
     sha,
+    wellFormed,
     failedJobLines,
     failedJobRunId,
     // Lines after the required identity fields are human-authored prose. They
     // are carried out of the machine block by replacePerCommitHeader so a
     // maintainer note cannot make an otherwise valid stub unadoptable.
-    remainder: lines.slice(cursor),
+    remainder,
   };
 }
 
@@ -384,7 +415,7 @@ function renderPerCommitHeader({
 
 function replacePerCommitHeader(head, headerBlock, remainder = []) {
   const header = extractPerCommitHeader(head);
-  if (!header) return head;
+  if (!header?.wellFormed) return head;
   const replacement = [
     PER_COMMIT_HEADER_START,
     headerBlock,
@@ -449,9 +480,10 @@ function appendPreviousFailedJobs(head, failedJobs, runId) {
     '',
     ...failedJobLines(failedJobs),
   ].join('\n');
-  const existing = /\n*## Previous failed jobs(?:[^\n]*)\n+(?:  - [^\n]*\n?)+/;
+  const existing =
+    /\n*## Previous failed jobs[^\n]*\n+(?: {2}- [^\n]*)(?:\n {2}- [^\n]*)*/;
   return existing.test(head)
-    ? head.replace(existing, `\n${section}`)
+    ? head.replace(existing, () => `\n\n${section}`)
     : `${head.trimEnd()}\n\n${section}`;
 }
 
@@ -630,10 +662,10 @@ export function renderIssueBody({
     const hasAnyBridge = new RegExp(
       `<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->`,
     ).test(prose);
-    const canAdoptBridge =
-      adoptsStubShape &&
-      !hasAnyBridge &&
-      existingHeader?.workflow === analysis.workflow;
+    const headerCanBridge =
+      existingHeader?.workflow === analysis.workflow &&
+      Boolean(existingHeader?.runId && existingHeader?.sha);
+    const canAdoptBridge = adoptsStubShape && !hasAnyBridge && headerCanBridge;
     const mergedHead = [
       ...shaMarkers.map((marker) => `<!-- ${marker} -->`),
       ...(canAdoptBridge ? [`<!-- ${workflowMarker} -->`] : []),

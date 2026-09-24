@@ -160,8 +160,9 @@ jobs:
                 --repo "${REPO}" \
                 --json body \
                 --jq '.body' > "${candidate_body}"; then
-                echo "::warning::Could not read issue #${candidate} while checking ${marker}"
-                continue
+                echo "::error::Could not read issue #${candidate} while checking ${marker}"
+                rm -f "${candidate_list}"
+                exit 1
               fi
               if grep -qF "<!-- ${marker} -->" "${candidate_body}"; then
                 existing_issue="${candidate}"
