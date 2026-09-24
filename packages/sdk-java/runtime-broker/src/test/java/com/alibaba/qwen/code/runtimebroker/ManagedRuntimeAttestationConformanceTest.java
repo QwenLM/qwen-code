@@ -167,10 +167,13 @@ class ManagedRuntimeAttestationConformanceTest {
                 fieldNames(result));
 
         JsonNode definitions = read(TOOL_SCHEMA).required("$defs");
-        assertFalse(definitions.required("toolRequestBody")
-                .required("unevaluatedProperties").booleanValue());
+        for (String name : new String[] {"executeRequestBody",
+                "statusRequestBody", "cancelRequestBody"}) {
+            assertFalse(definitions.required(name)
+                    .required("additionalProperties").booleanValue(), name);
+        }
         assertFalse(definitions.required("toolResponseBody")
-                .required("unevaluatedProperties").booleanValue());
+                .required("additionalProperties").booleanValue());
         assertFalse(definitions.required("reference")
                 .required("additionalProperties").booleanValue());
     }

@@ -42,14 +42,8 @@
           "pattern": "^/internal/managed-runtime/v2/(execute|status|cancel)$"
         },
         "protocolVersion": { "const": 2 },
-        "requestBodyLimitBytes": {
-          "type": "integer",
-          "minimum": 1024
-        },
-        "responseBodyLimitBytes": {
-          "type": "integer",
-          "minimum": 1024
-        },
+        "requestBodyLimitBytes": { "type": "integer", "minimum": 1024 },
+        "responseBodyLimitBytes": { "type": "integer", "minimum": 1024 },
         "cacheControl": { "const": "no-store" }
       }
     },
@@ -94,21 +88,39 @@
         }
       }
     },
-    "toolRequestBody": {
+    "executeRequestBody": {
       "type": "object",
-      "unevaluatedProperties": false,
-      "required": ["protocolVersion", "reference"],
+      "additionalProperties": false,
+      "required": ["protocolVersion", "reference", "toolName", "input"],
       "properties": {
         "protocolVersion": { "const": 2 },
         "reference": { "$ref": "#/$defs/reference" },
         "toolName": { "type": "string", "minLength": 1 },
-        "input": { "type": "object" },
+        "input": { "type": "object" }
+      }
+    },
+    "statusRequestBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "reference"],
+      "properties": {
+        "protocolVersion": { "const": 2 },
+        "reference": { "$ref": "#/$defs/reference" },
         "afterSequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "cancelRequestBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "reference"],
+      "properties": {
+        "protocolVersion": { "const": 2 },
+        "reference": { "$ref": "#/$defs/reference" }
       }
     },
     "toolResponseBody": {
       "type": "object",
-      "unevaluatedProperties": false,
+      "additionalProperties": false,
       "required": ["protocolVersion", "state"],
       "properties": {
         "protocolVersion": { "const": 2 },
@@ -123,7 +135,23 @@
         },
         "result": { "$ref": "#/$defs/result" },
         "lastSequence": { "type": "integer", "minimum": 0 }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": { "state": { "not": { "const": "settled" } } },
+            "required": ["state"]
+          },
+          "then": {
+            "not": {
+              "type": "object",
+              "properties": { "result": true },
+              "required": ["result"]
+            }
+          }
+        }
+      ]
     },
     "headers": {
       "type": "object",
@@ -157,7 +185,7 @@
           "additionalProperties": false,
           "properties": {
             "headers": { "type": "object" },
-            "body": { "$ref": "#/$defs/toolRequestBody" },
+            "body": { "type": "object" },
             "omitHeader": { "type": "string" },
             "replaceHeader": {
               "type": "object",
@@ -201,8 +229,31 @@
             },
             "code": { "type": "string", "minLength": 1 },
             "body": { "$ref": "#/$defs/toolResponseBody" }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "type": "object",
+                "properties": { "classification": { "const": "ok" } },
+                "required": ["classification"]
+              },
+              "then": {
+                "type": "object",
+                "properties": { "body": true },
+                "required": ["body"]
+              }
+            }
+          ]
         }
+      }
+    },
+    "canonicalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["headers", "body"],
+      "properties": {
+        "headers": { "$ref": "#/$defs/headers" },
+        "body": { "type": "object" }
       }
     },
     "suite": {
@@ -211,21 +262,135 @@
       "required": ["route", "canonicalRequest", "cases"],
       "properties": {
         "route": { "enum": ["execute", "status", "cancel"] },
-        "canonicalRequest": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["headers", "body"],
-          "properties": {
-            "headers": { "$ref": "#/$defs/headers" },
-            "body": { "$ref": "#/$defs/toolRequestBody" }
-          }
-        },
+        "canonicalRequest": { "$ref": "#/$defs/canonicalRequest" },
         "cases": {
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/case" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": { "route": { "const": "execute" } },
+            "required": ["route"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "canonicalRequest": {
+                "type": "object",
+                "properties": {
+                  "body": { "$ref": "#/$defs/executeRequestBody" }
+                }
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "object",
+                      "properties": {
+                        "body": { "$ref": "#/$defs/executeRequestBody" }
+                      }
+                    },
+                    "expected": {
+                      "type": "object",
+                      "properties": {
+                        "body": {
+                          "not": {
+                            "type": "object",
+                            "properties": { "lastSequence": true },
+                            "required": ["lastSequence"]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": { "route": { "const": "status" } },
+            "required": ["route"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "canonicalRequest": {
+                "type": "object",
+                "properties": {
+                  "body": { "$ref": "#/$defs/statusRequestBody" }
+                }
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "object",
+                      "properties": {
+                        "body": { "$ref": "#/$defs/statusRequestBody" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": { "route": { "const": "cancel" } },
+            "required": ["route"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "canonicalRequest": {
+                "type": "object",
+                "properties": {
+                  "body": { "$ref": "#/$defs/cancelRequestBody" }
+                }
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "object",
+                      "properties": {
+                        "body": { "$ref": "#/$defs/cancelRequestBody" }
+                      }
+                    },
+                    "expected": {
+                      "type": "object",
+                      "properties": {
+                        "body": {
+                          "not": {
+                            "type": "object",
+                            "properties": { "lastSequence": true },
+                            "required": ["lastSequence"]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

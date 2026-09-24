@@ -27,27 +27,34 @@ already demands:
 
 ## 2. Scope
 
-In scope: the route manifest entries, the shared schema, and the shared
-conformance fixtures for the three operations, consumed by both the raw-HTTP
-TypeScript gate test and the Java fixture consumer.
+In scope: contract declarations in the route manifest, the shared schema, and
+the shared conformance fixtures for the three operations, consumed by both the
+TypeScript contract tests and the Java fixture consumer. The declarations fix
+the future wire contract; they do not make an unimplemented route reachable.
 
-Out of scope: the worker handlers that serve these routes (they land with the
-execute extraction that mounts them, per the manifest rule that a route joins
-with its real handler in the same change), the Java `HttpRuntimeTransport`
-implementation of `execute`/`status`/`cancel`, and a `not_started_proven`
-outcome, which needs the durable receipt store.
+Out of scope: the worker handlers that serve these routes, admission through
+the raw HTTP gate, the Java `HttpRuntimeTransport` implementation of
+`execute`/`status`/`cancel`, and a `not_started_proven` outcome, which needs the
+durable receipt store. Each handler and its gate admission land together in a
+follow-up change.
 
 ## 3. Design
 
 ### 3.1 Routes
 
-All three operations join `OWNED_MANAGED_RUNTIME_ROUTES` with the attestation
-discipline: `POST` on an exact path, protocol version 2, closed JSON bodies,
-`no-store` on both directions, bearer authentication before parsing, and the
-lease id and epoch headers. `execute` accepts up to 256 KiB of request so a
-tool call's `input` fits; every operation answers at most 1 MiB. Larger tool
-outputs travel through the artifact delivery track, never through these
-envelopes.
+All three operations are declared in `OWNED_MANAGED_RUNTIME_ROUTES` with the
+attestation discipline: `POST` on an exact path, protocol version 2, closed
+JSON bodies, `no-store` on both directions, bearer authentication before
+parsing, and the lease id and epoch headers. `execute` accepts up to 256 KiB of
+request so a tool call's `input` fits; every operation answers at most 1 MiB.
+Larger tool outputs travel through the artifact delivery track, never through
+these envelopes.
+
+The declaration list is not the raw gate allowlist. Until the real tool
+handlers are mounted, `ownedManagedRuntimeRouteGate` admits only the exact
+attestation route and returns 404 for `execute`, `status`, and `cancel`, even
+if an Express handler is mounted behind it. A future handler change must
+expand gate admission in the same change.
 
 ### 3.2 Requests
 
@@ -84,19 +91,30 @@ routes, one identity, and per-route canonical requests with cases covering the
 success shapes and the negative discipline. `unknown-is-ok` cases pin the
 evidence rule for `status` and `cancel`. The Java consumer pins the route
 contract, every outcome classification, and the closed request/response field
-sets; the TypeScript side validates the fixtures against the schema, pins the
-manifest to the fixtures, and proves the owned-route gate admits exactly these
-paths.
+sets.
+
+The shared schema enforces each route's exact request fields, for both the
+canonical request and any per-case body override. It also requires every `ok`
+case to carry a response body, forbids `result` unless the state is `settled`,
+and permits `lastSequence` only on `status`. TypeScript mutation tests remove
+required fields or add route-invalid fields to prove these constraints are
+load-bearing, and pin the declared manifest to the fixture routes. The raw HTTP
+test separately proves that the gate rejects all three declared tool routes
+until their handlers land.
 
 ## 4. Validation
 
-`npx vitest run src/serve/managed-runtime-attestation-contract.test.ts` in
-`packages/cli` (54 tests) and `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`
-in `packages/sdk-java/runtime-broker` (6 tests) both pass.
+Run `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts` in
+`packages/cli` and
+`mvn test -Dtest=ManagedRuntimeAttestationConformanceTest` in
+`packages/sdk-java/runtime-broker`. The TypeScript suite validates the shared
+fixtures, the schema mutation cases, and raw-gate rejection of unimplemented
+tool routes. The Java suite consumes the same contract files.
 
 ## 5. Follow-up work
 
-- Mount the real worker handlers for the three routes (execute extraction).
+- Mount the real worker handlers for the three routes and expand raw-gate
+  admission in the same change (execute extraction).
 - Implement `execute`, `status`, and `cancel` in `HttpRuntimeTransport`.
 - The `UNKNOWN` execution reconciler consumes `status` (tracked on #12380).
 - Whether a cancel of an execution the Runtime reports as still running sends

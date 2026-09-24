@@ -16,15 +16,17 @@ owned Managed Runtime worker 目前只提供 attestation。在工具执行路径
 
 ## 2. 范围
 
-范围内：三个操作的路由清单条目、共享 schema 与共享 conformance fixtures，由 TypeScript 的 raw-HTTP 门测试与 Java fixture 消费方共同验证。
+范围内：三个操作在路由清单中的契约声明、共享 schema 与共享 conformance fixtures，由 TypeScript 契约测试与 Java fixture 消费方共同验证。这些声明固定未来的线路契约，但不会让尚未实现的路由变得可访问。
 
-范围外：真正服务这些路由的 worker 处理器（按路由清单规则，它们随挂载真实处理器的 execute 提取一起落地）、`HttpRuntimeTransport` 的 `execute`/`status`/`cancel` 实现，以及 `not_started_proven` 结果（需要持久回执存储）。
+范围外：真正服务这些路由的 worker 处理器、raw HTTP gate 放行、`HttpRuntimeTransport` 的 `execute`/`status`/`cancel` 实现，以及 `not_started_proven` 结果（需要持久回执存储）。每个处理器与对应的 gate 放行必须在后续同一变更中落地。
 
 ## 3. 设计
 
 ### 3.1 路由
 
-三个操作都加入 `OWNED_MANAGED_RUNTIME_ROUTES`，沿用 attestation 的纪律：`POST` 精确路径、协议版本 2、封闭 JSON 请求体、双向 `no-store`、先鉴权后解析，以及 lease id 与 epoch 请求头。`execute` 的请求上限为 256 KiB，使工具调用的 `input` 放得下；每个操作的响应上限均为 1 MiB。更大的工具输出走产物交付通道，绝不进入这些信封。
+三个操作都在 `OWNED_MANAGED_RUNTIME_ROUTES` 中声明，沿用 attestation 的纪律：`POST` 精确路径、协议版本 2、封闭 JSON 请求体、双向 `no-store`、先鉴权后解析，以及 lease id 与 epoch 请求头。`execute` 的请求上限为 256 KiB，使工具调用的 `input` 放得下；每个操作的响应上限均为 1 MiB。更大的工具输出走产物交付通道，绝不进入这些信封。
+
+声明清单不是 raw gate allowlist。在真实工具处理器挂载之前，`ownedManagedRuntimeRouteGate` 只放行精确的 attestation 路由，并对 `execute`、`status`、`cancel` 返回 404，即使其后方挂载了 Express 处理器也不例外。未来增加处理器时，必须在同一变更中扩展 gate admission。
 
 ### 3.2 请求
 
@@ -48,15 +50,17 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 ### 3.4 Conformance fixtures
 
-`managed-runtime-tool-v2.fixtures.json` 与 attestation 套件同构：三条路由、一份身份，以及每个路由的 canonical 请求与覆盖成功形态和负面纪律的用例。`status` 与 `cancel` 的 `unknown-is-ok` 用例固定证据规则。Java 消费方固定路由契约、每个结局分类与封闭请求/响应字段集；TypeScript 侧用 schema 校验 fixtures、把 manifest 钉在 fixtures 上，并证明 owned-route 门恰好放行这些路径。
+`managed-runtime-tool-v2.fixtures.json` 与 attestation 套件同构：三条路由、一份身份，以及每个路由的 canonical 请求与覆盖成功形态和负面纪律的用例。`status` 与 `cancel` 的 `unknown-is-ok` 用例固定证据规则。Java 消费方固定路由契约、每个结局分类与封闭请求/响应字段集。
+
+共享 schema 强制每个路由使用精确的请求字段集，canonical 请求与逐用例的 body 覆写都受此约束。它还要求每个 `ok` 用例都携带响应 body，禁止非 `settled` 状态携带 `result`，并只允许 `status` 使用 `lastSequence`。TypeScript 变异测试通过删除必填字段或加入路由不允许的字段，证明这些约束确实生效，并把声明 manifest 钉在 fixture 路由上。raw HTTP 测试另行证明，在处理器落地之前，gate 会拒绝全部三条已声明的工具路由。
 
 ## 4. 验证
 
-在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts`（54 个测试），在 `packages/sdk-java/runtime-broker` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`（6 个测试），均通过。
+在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts`，并在 `packages/sdk-java/runtime-broker` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`。TypeScript suite 校验共享 fixtures、schema 变异用例，以及 raw gate 对未实现工具路由的拒绝；Java suite 消费同一批契约文件。
 
 ## 5. 后续工作
 
-- 为三个路由挂载真实的 worker 处理器（execute 提取）。
+- 为三个路由挂载真实的 worker 处理器，并在同一变更中扩展 raw gate admission（execute 提取）。
 - 在 `HttpRuntimeTransport` 实现 `execute`、`status`、`cancel`。
 - `UNKNOWN` 执行对账器消费 `status`（在 #12380 跟踪）。
 - 对 Runtime 报告仍在运行的执行是否发送物理取消，有意推迟。
