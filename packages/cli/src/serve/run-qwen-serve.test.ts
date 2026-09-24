@@ -15399,6 +15399,80 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('reports a dropped boot name to every workspace that listed it, before the runtime mounts', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-boot-fanout-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const first = path.join(tmpDir, 'first');
+    const second = path.join(tmpDir, 'second');
+    writeWorkspaceSettings(primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    // Neither configures `ghost`, and both asked for it.
+    writeWorkspaceSettings(first, { serve: { channels: ['ghost'] } });
+    writeWorkspaceSettings(second, { serve: { channels: ['ghost'] } });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, first, second],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        // The boot record is written in the listening handler, before the
+        // runtime app exists; `/daemon/status` never waits for that app, so
+        // the bootstrap response is the only one that can carry it.
+        deferRuntimeUntilFirstHealth: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      const status = (await (
+        await fetch(`${handle.url}/daemon/status`, {
+          headers: { Authorization: 'Bearer secret' },
+        })
+      ).json()) as {
+        issues: Array<{ code: string; message: string }>;
+      };
+      expect(
+        status.issues
+          .filter((issue) => issue.code === 'channel_restore_failed')
+          .map((issue) => issue.message),
+      ).toEqual([
+        expect.stringContaining(
+          `serve.channels for workspace ${canonicalizeWorkspace(first)} were not restored: ghost (`,
+        ),
+        expect.stringContaining(
+          `serve.channels for workspace ${canonicalizeWorkspace(second)} were not restored: ghost (`,
+        ),
+      ]);
+      expect(
+        status.issues.some((issue) => issue.code === 'daemon_runtime_starting'),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('hosts a shared channel definition in the workspace that asked for it', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-shared-startup-')),
@@ -16119,14 +16193,102 @@ describe('runQwenServe channel worker supervisor', () => {
         'feishu (feishu gateway did not answer the upgrade)',
       );
 
-      // An operator decision supersedes the restore's outcome.
+      // Nothing is hosted, so this `DELETE` stops nothing and decides
+      // nothing: the same result object leaves `channelHostingStoppedByOperator`
+      // false, and losing the report here is exactly the misleading `stopped`
+      // the record exists to prevent.
       const stopped = await fetch(`${handle.url}/workspace/channel`, {
         method: 'DELETE',
         headers: daemon.headers,
       });
       expect(stopped.status).toBe(200);
+      expect(await feishuRuntime()).toEqual({
+        state: 'error',
+        lastError: 'feishu gateway did not answer the upgrade',
+      });
+      expect(await restoreIssues()).toHaveLength(1);
+
+      // An operator acting on the channel itself does supersede it.
+      const acknowledged = await fetch(`${channelsUrl}/feishu/stop`, {
+        method: 'POST',
+        headers: daemon.headers,
+      });
+      expect(acknowledged.status).toBe(200);
       expect(await feishuRuntime()).toEqual({ state: 'stopped' });
       expect(await restoreIssues()).toEqual([]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('reports a configured channel the daemon could not start at boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-boot-failure-')),
+    );
+    writeWorkspaceSettings(tmpDir, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const worker = makeWorker({ enabled: true, state: 'failed', channels: [] });
+    const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      worker.start.mockRejectedValue(
+        new ChannelWorkerStartupError('Channel worker failed to start.', {
+          workspaceCwd: opts.workspace,
+          startupFailures: [
+            {
+              channel: 'telegram',
+              phase: 'connect',
+              code: 'auth_failed',
+              message: 'telegram adapter rejected connect: token expired',
+            },
+          ],
+        }),
+      );
+      return worker;
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    const headers = { Authorization: 'Bearer secret' };
+
+    try {
+      await handle.runtimeReady;
+      // The settings-derived branch keeps the daemon serving without the
+      // channels it was configured to host — the shape a single-workspace
+      // daemon fails in, and the one the log alone used to carry.
+      const status = (await (
+        await fetch(`${handle.url}/daemon/status`, { headers })
+      ).json()) as { issues: Array<{ code: string; message: string }> };
+      expect(
+        status.issues.filter(
+          (issue) => issue.code === 'channel_restore_failed',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          message: `serve.channels for workspace ${canonicalizeWorkspace(tmpDir)} were not restored: telegram (telegram adapter rejected connect: token expired).`,
+        }),
+      ]);
+      const channels = (await (
+        await fetch(`${handle.url}/workspace/channels`, { headers })
+      ).json()) as {
+        instances: Record<string, { runtime: Record<string, unknown> }>;
+      };
+      expect(channels.instances['telegram']?.runtime).toEqual({
+        state: 'error',
+        lastError: 'telegram adapter rejected connect: token expired',
+      });
     } finally {
       await handle.close();
     }

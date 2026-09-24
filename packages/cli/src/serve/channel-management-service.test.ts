@@ -579,15 +579,12 @@ describe('createChannelManagementService', () => {
       {
         workspaceCwd: WORKSPACE,
         channel: 'bot',
-        source: 'late',
-        code: 'connect_timeout',
         message: 'gateway did not answer',
       },
       // Another workspace's same-name channel is not this one.
       {
         workspaceCwd: '/ws/other',
         channel: 'bot',
-        source: 'late',
         message: 'unrelated',
       },
     ]);
@@ -605,7 +602,6 @@ describe('createChannelManagementService', () => {
       {
         workspaceCwd: WORKSPACE,
         channel: 'bot',
-        source: 'boot',
         message: 'stale',
       },
     ]);
@@ -648,7 +644,6 @@ describe('createChannelManagementService', () => {
         {
           workspaceCwd: WORKSPACE,
           channel: 'bot',
-          source: 'late',
           message: 'x',
         },
       ]);
@@ -663,7 +658,7 @@ describe('createChannelManagementService', () => {
   it('keeps a restore failure when only the startup flag changes', async () => {
     const restoreFailures = createChannelRestoreFailures();
     restoreFailures.record([
-      { workspaceCwd: WORKSPACE, channel: 'bot', source: 'late', message: 'x' },
+      { workspaceCwd: WORKSPACE, channel: 'bot', message: 'x' },
     ]);
     const { service } = setup({ restoreFailures });
 
@@ -839,7 +834,6 @@ describe('createChannelManagementService', () => {
       {
         workspaceCwd: WORKSPACE,
         channel: 'bot',
-        source: 'late',
         message: 'gateway did not answer',
       },
     ]);
@@ -863,7 +857,6 @@ describe('createChannelManagementService', () => {
       {
         workspaceCwd: WORKSPACE,
         channel: 'bot',
-        source: 'late',
         message: 'gateway did not answer',
       },
     ]);

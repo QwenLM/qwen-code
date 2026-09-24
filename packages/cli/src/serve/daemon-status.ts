@@ -44,6 +44,10 @@ import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { ChannelRestoreFailure } from './channel-restore-failures.js';
+import {
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+} from './channel-worker-startup-ipc.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
@@ -1368,7 +1372,9 @@ function pushRuntimeIssues(
 // A channel that failed to restore has no worker, so nothing above sees it.
 // One issue per workspace, naming each channel with its own error; the same
 // error is the channel's `runtime.lastError` in the workspace channel list.
-function pushChannelRestoreIssues(
+// Exported because the bootstrap status route builds its own response, and
+// boot records are written before the runtime app that serves the other one.
+export function pushChannelRestoreIssues(
   issues: DaemonStatusIssue[],
   failures: readonly ChannelRestoreFailure[],
 ): void {
@@ -1379,12 +1385,26 @@ function pushChannelRestoreIssues(
     byWorkspace.set(failure.workspaceCwd, list);
   }
   for (const [workspaceCwd, list] of byWorkspace) {
+    // Bounded the way the sibling surface bounds the same class of data: a
+    // `serve.channels` list is not length-limited, and this message is
+    // returned on every status poll.
+    const shown = list.slice(0, MAX_CHANNEL_STARTUP_FAILURES);
+    const omitted = list.length - shown.length;
     issues.push({
       code: 'channel_restore_failed',
       severity: 'warning',
       message:
         `serve.channels for workspace ${workspaceCwd} were not restored: ` +
-        `${list.map((failure) => `${failure.channel} (${failure.message})`).join('; ')}.`,
+        `${shown
+          .map(
+            (failure) =>
+              `${failure.channel.slice(
+                0,
+                MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+              )} (${failure.message})`,
+          )
+          .join('; ')}` +
+        `${omitted > 0 ? `; and ${omitted} more` : ''}.`,
     });
   }
 }
