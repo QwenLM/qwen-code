@@ -825,6 +825,20 @@ function testUpdaterMirrorConfiguration() {
     main,
     /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
   );
+  assert.match(main, /"QWEN_DESKTOP_DISABLE_UPDATES"/);
+  // The adapter must actually read the env var: without this pin, rewiring
+  // updates_disabled() to any other source keeps every other gate green.
+  assert.match(
+    main,
+    /fn updates_disabled\(\) -> bool \{\s*updates_disabled_value\(\s*std::env::var_os\(DISABLE_UPDATES_ENV\)\s*\.as_deref\(\)\s*,?\s*\)\s*\}/,
+    'updates_disabled() must read DISABLE_UPDATES_ENV so the opt-out env var reaches the parser.',
+  );
+  // The gate must run before the task is spawned: moving it inside the task,
+  // after check_for_update, would still phone home to the update feed.
+  assert.match(
+    main,
+    /fn check_updates_silently\(app: AppHandle\) \{\s*if cfg!\(debug_assertions\) \|\| updates_disabled\(\) \{\s*return;\s*\}\s*tauri::async_runtime::spawn\(/,
+  );
   assert.equal((main.match(/check_for_update\(&app\)/g) ?? []).length, 2);
 }
 
