@@ -42,14 +42,37 @@ export const superfastCommand: SlashCommand = {
     if (sub === 'on' || sub === 'off') {
       const enabled = sub === 'on';
       settings.setValue(SettingScope.User, 'superfast.enabled', enabled);
+      const effective = settings.merged?.superfast?.enabled;
+      if (effective !== enabled) {
+        const scope =
+          settings.system?.settings?.superfast?.enabled !== undefined
+            ? 'system'
+            : settings.workspace?.settings?.superfast?.enabled !== undefined
+              ? 'workspace'
+              : 'a higher scope';
+        return {
+          type: 'message',
+          messageType: 'warning',
+          content: t(
+            'Superfast {{requested}} was saved to your user settings, but a {{scope}}-scope setting overrides it, so the effective value is still {{effective}}.',
+            {
+              requested: enabled ? 'enabling' : 'disabling',
+              scope,
+              effective: effective ? 'on' : 'off',
+            },
+          ),
+        };
+      }
       return {
         type: 'message',
         messageType: 'info',
         content: enabled
           ? t(
-              'Superfast enabled. The decision gate will classify each turn and fail open if the model is unavailable.',
+              'Superfast enabled. Restart Qwen Code for the decision gate to start classifying turns. It runs in shadow mode and fails open if the model is unavailable.',
             )
-          : t('Superfast disabled. The harness runs normally.'),
+          : t(
+              'Superfast disabled. Restart Qwen Code for the change to take effect; the harness runs normally.',
+            ),
       };
     }
 

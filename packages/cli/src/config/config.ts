@@ -985,7 +985,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
       result._[0] === 'update' ||
-      result._[0] === 'sandbox')
+      result._[0] === 'sandbox' ||
+      result._[0] === 'von-install')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
