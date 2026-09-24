@@ -190,8 +190,7 @@ export function OpenTuiStatsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
-      flexShrink={0}
+      flexShrink={1}
     >
       {/* Tab bar */}
       <box flexDirection="row">
@@ -442,8 +441,7 @@ export function OpenTuiSkillsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
-      flexShrink={0}
+      flexShrink={1}
     >
       <box flexDirection="row" justifyContent="space-between">
         <text fg={C.accent} attributes={1}>

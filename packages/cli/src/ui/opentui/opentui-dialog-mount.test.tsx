@@ -474,6 +474,17 @@ describe('OpenTuiDialogMount routing', () => {
     expect(helpOverlay().scroll).toBe(0);
   });
 
+  it('budgets the help overlay from the region, not the raw terminal height', () => {
+    // The overlay renders inside the popup region, whose budget already accounts
+    // for the banner, the status bar and the composer — none of them occupied
+    // while it is open. Deriving the body from the raw terminal height instead
+    // leaves those rows unused inside the region and windows the command list
+    // short of ink's fixed 18.
+    mocks.state.helpLineCount = 23;
+    mount({ dialog: 'help' }, { availableTerminalHeight: 19 });
+    expect(helpOverlay().bodyRows).toBe(13);
+  });
+
   it('closes the help overlay on escape', () => {
     const onClose = vi.fn();
     render(

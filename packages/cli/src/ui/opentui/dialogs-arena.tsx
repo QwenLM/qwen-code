@@ -113,8 +113,7 @@ function ArenaFrame({
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
-      flexShrink={0}
+      flexShrink={1}
     >
       <box flexDirection="row">
         <text fg={C.text} attributes={1}>

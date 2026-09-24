@@ -297,7 +297,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   };
   const [helpScroll, setHelpScroll] = useState(0);
   const dialogWidth = dialogAreaWidth(dimensions.width);
-  const helpBodyRows = computeHelpBodyRows(dimensions.height);
+  const helpBodyRows = computeHelpBodyRows(
+    props.availableTerminalHeight ?? dimensions.height,
+  );
   const helpWindowRows = helpCommandWindowRows(helpBodyRows);
   // Only the two command tabs have a scrollable window, and its bound is that
   // tab's line count. Clamping here rather than leaving it to the render keeps

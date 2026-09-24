@@ -698,8 +698,9 @@ describe('OpenTuiSessionPicker inside the popup region', () => {
     // 0 and its reconciler only re-applies props whose value changed, so after
     // a resize the shrink is lost unless the host node is rebuilt — which is
     // what folding the size into the branch key forces. A reused node here
-    // means the picker goes back to losing rows to the region's clip until it
-    // is reopened.
+    // means the picker goes back to holding its full height inside a shorter
+    // region, squeezing the transcript beside it into one garbled row, until
+    // it is reopened.
     const { container, rerender } = renderPicker([session(1), session(2)]);
     const beforeResize = container.firstElementChild;
 

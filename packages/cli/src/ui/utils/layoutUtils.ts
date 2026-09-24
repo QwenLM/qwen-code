@@ -46,6 +46,13 @@ export const MAIN_CONTENT_HEIGHT_RESERVATION = 2;
  * it budgets a dialog — the `staticExtraHeight` half of that budget. Exported
  * so the OpenTUI popup region derives the same number rather than carrying a
  * second copy that could drift.
+ *
+ * Three read sites, only two of them dialogs: ink's dialog manager, the
+ * OpenTUI popup region, and AppContainer's `mainContentHeightReservation`.
+ * The third is legacy-mode only — VP mode reserves nothing there — but it
+ * feeds `availableTerminalHeight`, and through it the shell tool's terminal
+ * height and the stream's viewport rows, so raising this constant to give a
+ * popup one more row also shortens every embedded shell result by one.
  */
 export const STATIC_EXTRA_HEIGHT = 3;
 

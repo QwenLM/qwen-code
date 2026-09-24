@@ -69,8 +69,7 @@ const Shell = ({
     paddingRight={2}
     paddingTop={1}
     paddingBottom={1}
-    marginTop={1}
-    flexShrink={0}
+    flexShrink={1}
   >
     <box flexDirection="row" justifyContent="space-between">
       <text fg={C.accent} attributes={1}>

@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { useTerminalDimensions } from '@opentui/react';
 import {
   APPROVAL_MODES,
   ApprovalMode,
@@ -47,18 +48,35 @@ import {
   DEFAULT_MAX_ITEMS_TO_SHOW,
   DialogFrame,
   DialogSelect,
+  dialogContentWidth,
   FooterHint,
   useDialogFrameKeys,
   useDialogSelect,
   type UseDialogSelectResult,
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import type { DialogListItem } from './dialogs-core.js';
 import { C } from './theme.js';
 import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 interface LabeledItem<T> extends DialogListItem<T> {
   label: string;
+}
+
+/**
+ * Columns a list row leaves its label: the dialog's content width minus the
+ * row's own `›` indicator box (2) and, when numbered, the `N.` box plus its
+ * trailing space. ink gives every label `wrap="truncate"`, so a label wider
+ * than this is clipped rather than wrapped — a wrapped row is two physical
+ * rows and the budget below counts it as one.
+ */
+function rowLabelWidth(terminalWidth: number, showNumbers: boolean): number {
+  return Math.max(0, dialogContentWidth(terminalWidth) - (showNumbers ? 5 : 2));
 }
 
 /**
@@ -73,6 +91,8 @@ function LabeledRows<T>(props: {
   showScrollArrows?: boolean;
 }) {
   const { list, focused } = props;
+  const { width } = useTerminalDimensions();
+  const labelWidth = rowLabelWidth(width, focused);
   return (
     <DialogSelect
       items={list.items}
@@ -90,7 +110,7 @@ function LabeledRows<T>(props: {
         )
       }
       renderLabel={(item, { titleColor }) => (
-        <text fg={titleColor}>{item.label}</text>
+        <text fg={titleColor}>{truncateToWidth(item.label, labelWidth)}</text>
       )}
     />
   );
@@ -104,13 +124,23 @@ function DialogTitle(props: {
   subtitle?: string;
   marginBottom?: number;
 }) {
+  const { width } = useTerminalDimensions();
+  // ink puts the whole run — prefix, title and dim subtitle — inside one
+  // `wrap="truncate"` Text, so the subtitle only gets the columns the title
+  // left and neither wraps onto a second row the budget does not pay for.
+  const contentWidth = dialogContentWidth(width);
+  const titleRun = `> ${props.title} `;
+  const titleWidth = getCachedStringWidth(titleRun);
   return (
     <box flexDirection="row" marginBottom={props.marginBottom ?? 1}>
       <text fg={C.text} attributes={1}>
-        {'> '}
-        {props.title}{' '}
+        {clipToWidth(titleRun, contentWidth)}
       </text>
-      {props.subtitle ? <text fg={C.dim}>{props.subtitle}</text> : null}
+      {props.subtitle && titleWidth < contentWidth ? (
+        <text fg={C.dim}>
+          {truncateToWidth(props.subtitle, contentWidth - titleWidth)}
+        </text>
+      ) : null}
     </box>
   );
 }
@@ -120,22 +150,63 @@ function DialogTitle(props: {
 const MIN_HEIGHT_WITH_MODE_SPACER = 9;
 const MIN_HEIGHT_WITH_FOOTER_HINT = 10;
 const MIN_HEIGHT_WITH_WARNING_FOOTER_HINT = 12;
-// Frame border + padding (4) plus the title row (1); the spacer, warning and
-// footer rows are budgeted separately.
+// ink budgets a flat three rows for the workspace warning. The text only
+// fills two of them once the terminal is wide enough, so the flat count
+// over-pays there; it stays as the floor because paying fewer rows than ink
+// would show a list row ink does not.
+const WORKSPACE_PRIORITY_WARNING_ROWS = 3;
+// Frame border + padding (4) plus the title row (1); the spacer, warning,
+// refusal and footer rows are budgeted separately.
 const MODE_LIST_CHROME_ROWS = 5;
 const FOOTER_HINT_ROWS = 2;
-// Warning margin plus up to two wrapped text rows at the normal dialog width.
-const WORKSPACE_PRIORITY_WARNING_ROWS = 3;
+
+/**
+ * Rows a run paints once the terminal word-wraps it at `width` columns. The
+ * warning and the trust-gate refusal both stay wrapped (ink wraps the warning
+ * too), so the budget has to pay for the rows they actually occupy: the
+ * refusal had no term in it at all, and the warning's flat count only covers a
+ * terminal wide enough for the text to fit inside it.
+ */
+function wrappedRows(text: string, width: number): number {
+  if (width <= 0) {
+    return 1;
+  }
+  let rows = 1;
+  let used = 0;
+  for (const word of text.split(' ')) {
+    const wordWidth = getCachedStringWidth(word);
+    if (used > 0 && used + 1 + wordWidth > width) {
+      rows += 1;
+      used = 0;
+    }
+    used += used > 0 ? 1 + wordWidth : wordWidth;
+    // A single word wider than the row is broken across rows.
+    while (used > width) {
+      rows += 1;
+      used -= width;
+    }
+  }
+  return rows;
+}
+
+/** One margin row plus the wrapped text rows of a notice below the list. */
+function noticeRows(text: string | null, contentWidth: number): number {
+  return text ? 1 + wrappedRows(text, contentWidth) : 0;
+}
 
 /**
  * ink ApprovalModeDialog's derivation, ported line for line: which chrome
  * rows the budget still pays for, and how many mode rows fit in what is left.
  * `constrainedHeight` is the popup region's row budget (undefined when the
- * caller has none, which ink treats as "show everything").
+ * caller has none, which ink treats as "show everything"). `warningRows` and
+ * `errorRows` are the notices this port shows below the list. ink only has the
+ * warning, and budgets it at a flat three rows; the call site passes the
+ * larger of that flat count and the rows the text actually wraps into.
  */
 function modeListBudget(
   constrainedHeight: number | undefined,
-  workspacePriorityWarning: boolean,
+  warningRows: number,
+  errorRows: number,
   itemCount: number,
 ): {
   showModeSpacer: boolean;
@@ -154,13 +225,11 @@ function modeListBudget(
   const showModeSpacer = constrainedHeight >= MIN_HEIGHT_WITH_MODE_SPACER;
   const preferredShowFooterHint =
     constrainedHeight >=
-    (workspacePriorityWarning
+    (warningRows > 0
       ? MIN_HEIGHT_WITH_WARNING_FOOTER_HINT
       : MIN_HEIGHT_WITH_FOOTER_HINT);
   const chromeWithoutFooter =
-    MODE_LIST_CHROME_ROWS +
-    (showModeSpacer ? 1 : 0) +
-    (workspacePriorityWarning ? WORKSPACE_PRIORITY_WARNING_ROWS : 0);
+    MODE_LIST_CHROME_ROWS + (showModeSpacer ? 1 : 0) + warningRows + errorRows;
   const rowsWithPreferredFooter = Math.max(
     1,
     constrainedHeight -
@@ -172,7 +241,7 @@ function modeListBudget(
     constrainedHeight - chromeWithoutFooter,
   );
   const footerWouldHideScrollArrows =
-    !workspacePriorityWarning &&
+    warningRows === 0 &&
     preferredShowFooterHint &&
     rowsWithPreferredFooter <= 2 &&
     rowsWithoutFooter > 2 &&
@@ -234,14 +303,29 @@ export function OpenTuiApprovalModeDialog(props: {
   const showWorkspacePriorityWarning =
     selectedScope === SettingScope.User &&
     otherScopeModifiedMessage.toLowerCase().includes('workspace');
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  const warningText = showWorkspacePriorityWarning
+    ? `⚠ ${t(
+        'Workspace approval mode exists and takes priority. User-level change will have no effect.',
+      )}`
+    : null;
 
   // ink derives the window from the height its dialog manager hands over;
   // without it the list never windows (the default is 10 rows for 5 items)
   // and on a short terminal the unsized rows shrink to zero and overpaint
   // each other while the keys still commit a mode the user cannot read.
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const warningRows = warningText
+    ? Math.max(
+        WORKSPACE_PRIORITY_WARNING_ROWS,
+        noticeRows(warningText, contentWidth),
+      )
+    : 0;
   const budget = modeListBudget(
-    clampDialogHeight(props.availableTerminalHeight),
-    showWorkspacePriorityWarning,
+    regionHeight,
+    warningRows,
+    noticeRows(error, contentWidth),
     modeItems.length,
   );
   const modeList = useDialogSelect<LabeledItem<ApprovalMode>>({
@@ -291,6 +375,14 @@ export function OpenTuiApprovalModeDialog(props: {
       label: t(item.label),
     }),
   );
+  // Deliberate divergence: ink's ScopeSelector keeps an unconditional spacer
+  // and an unwindowed list, and its frame absorbs the overrun with
+  // `overflow="hidden"`. Here the same rows overpaint each other at region
+  // heights 4 to 6 (measured), and Enter commits a scope the user cannot read.
+  const scopeBudget = modeListBudget(regionHeight, 0, 0, scopeItems.length);
+  // The footer hint lives outside both branches, in the frame whose rows the
+  // step on screen paid for.
+  const activeBudget = view === 'mode' ? budget : scopeBudget;
   const scopeList = useDialogSelect<LabeledItem<SettingScope>>({
     items: scopeItems,
     initialIndex: Math.max(
@@ -299,6 +391,7 @@ export function OpenTuiApprovalModeDialog(props: {
     ),
     focused: view === 'scope',
     numbers: view === 'scope',
+    maxItemsToShow: scopeBudget.maxItemsToShow,
     // ink's handleScopeSelect only records the scope and steps back: the mode
     // row's Enter is what persists.
     onSelect: (scope) => {
@@ -328,13 +421,9 @@ export function OpenTuiApprovalModeDialog(props: {
             maxItemsToShow={budget.maxItemsToShow}
             showScrollArrows={budget.showScrollArrows}
           />
-          {showWorkspacePriorityWarning ? (
+          {warningText ? (
             <box marginTop={1}>
-              <text fg={C.yellow}>
-                {`⚠ ${t(
-                  'Workspace approval mode exists and takes priority. User-level change will have no effect.',
-                )}`}
-              </text>
+              <text fg={C.yellow}>{warningText}</text>
             </box>
           ) : null}
           {error ? (
@@ -345,17 +434,26 @@ export function OpenTuiApprovalModeDialog(props: {
         </box>
       ) : (
         <box flexDirection="column">
-          <DialogTitle title={t('Apply To')} />
-          <LabeledRows list={scopeList} focused={view === 'scope'} />
+          <DialogTitle
+            title={t('Apply To')}
+            marginBottom={scopeBudget.showModeSpacer ? 1 : 0}
+          />
+          <LabeledRows
+            list={scopeList}
+            focused={view === 'scope'}
+            maxItemsToShow={scopeBudget.maxItemsToShow}
+            showScrollArrows={scopeBudget.showScrollArrows}
+          />
         </box>
       )}
-      {budget.showFooterHint ? (
+      {activeBudget.showFooterHint ? (
         <FooterHint
-          text={
+          text={truncateToWidth(
             view === 'mode'
               ? t('(Use Enter to select, Tab to configure scope)')
-              : t('(Use Enter to apply scope, Tab to go back)')
-          }
+              : t('(Use Enter to apply scope, Tab to go back)'),
+            contentWidth,
+          )}
         />
       ) : null}
     </DialogFrame>

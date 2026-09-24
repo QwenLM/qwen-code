@@ -27,8 +27,11 @@ describe('layoutUtils', () => {
   });
 
   it('gives both renderers the same popup budget from one constant', () => {
-    // The OpenTUI shell's dialog region and ink's AppContainer both subtract
-    // this value; a second copy of the literal would let the two legs drift.
+    // The shared value and the formula only. Each leg's consumption is witnessed
+    // where it happens: opentui-app-shell.test.tsx asserts the popup region
+    // renders at getDialogMaxHeight(rows, STATIC_EXTRA_HEIGHT), and
+    // AppContainer.test.tsx asserts ink's uiState carries this same constant
+    // into DialogManager's dialogMaxHeight.
     expect(STATIC_EXTRA_HEIGHT).toBe(3);
     expect(getDialogMaxHeight(40, STATIC_EXTRA_HEIGHT)).toBe(35);
   });

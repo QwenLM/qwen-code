@@ -78,9 +78,11 @@ export function Shell({
 }) {
   return (
     // ink's dialogs open flush with the region's top row (no top margin) and
-    // shrink when the region is shorter than the content — a fixed,
-    // unshrinkable box loses its bottom rows to the region's clip at
-    // <= 24-row terminals (Decision 67's rule applied to this frame too).
+    // shrink when the region is shorter than the content. A fixed,
+    // unshrinkable box is not pressed down: it keeps its full height and
+    // paints past the region's bottom edge rather than being cut by it, so a
+    // taller region budget is not what removes the overpainted row (Decision
+    // 67's rule applied to this frame too).
     <box
       flexDirection="column"
       borderStyle={borderStyle}

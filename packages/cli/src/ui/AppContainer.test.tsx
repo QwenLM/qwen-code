@@ -138,6 +138,7 @@ import {
   isContextFilesAnnouncement,
 } from './utils/commandUtils.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './utils/findings-coalescing.js';
+import { STATIC_EXTRA_HEIGHT } from './utils/layoutUtils.js';
 import { ICON } from './constants.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
@@ -6036,6 +6037,23 @@ describe('AppContainer State Management', () => {
         resizePtySpy.mock.calls[resizePtySpy.mock.calls.length - 1];
       // Check the height argument specifically
       expect(lastCall[2]).toBe(1);
+    });
+
+    it('hands ink the shared STATIC_EXTRA_HEIGHT for its dialog budget', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // The OpenTUI popup region derives its budget from the same constant, so a
+      // local literal here would move ink's dialogMaxHeight by a row and leave
+      // that derivation on the old number — with every assertion on the constant
+      // and the formula still green, because neither of them changed.
+      expect(capturedUIState.staticExtraHeight).toBe(STATIC_EXTRA_HEIGHT);
     });
 
     it('loads a collapsed summary into history on cold-boot resume when collapseOnResume is enabled', async () => {

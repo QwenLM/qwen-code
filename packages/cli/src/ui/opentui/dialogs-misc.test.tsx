@@ -80,9 +80,11 @@ describe('Shell (ink dialog chrome)', () => {
   it('opens flush with the region and lets the region press it down', () => {
     // ink's dialogs carry no top margin and ink's Box defaults flexShrink to
     // 1. A top margin plus a refusal to shrink puts the box one row below
-    // ink's and, once 1 + box height exceeds the region, costs the bottom
-    // border and the rows on it — at 80x24 /auth loses its Terms/privacy
-    // link. Measured against ink at 20/22/24/26/40 rows.
+    // ink's and, once 1 + box height exceeds the region, the box keeps its
+    // full height and paints past the region's bottom edge rather than being
+    // cut by it — at 80x24 /auth draws its bottom border off the terminal and
+    // loses its Terms/privacy link. Measured against ink at 20/22/24/26/40
+    // rows.
     const frame = Shell({ title: 'Auth' }) as unknown as {
       props: Record<string, unknown>;
     };

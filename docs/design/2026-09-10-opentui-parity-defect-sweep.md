@@ -2177,7 +2177,7 @@ is the one Coverage boundary withdraws: it does not reproduce from these frames.
 census below counts from it, and stands as that pass's own reading of the families
 rather than as a live tally.
 
-Those fifty-six fall in eleven families by primary cause, four of them new to this
+Those fifty-six fall in eleven families by primary cause, four of them new to that
 pass. Nine are non-deterministic and no fix can close them: the two sampled
 checkpoints, the two single-frame spinner phrases, the three stamp frames where the
 clock moved on its own, and the elapsed milliseconds on the two sub-agent frames.
@@ -2365,7 +2365,7 @@ One case walks the mode list down a row, takes the scope step to Workspace and c
 
 ## Decision 66 — the popup slot is ink's fixed, clipped region, and only ink's stretching dialogs fill it
 
-ink does not overlay a popup on the composer: it swaps the composer out for a region of exactly `rows − staticExtraHeight − MAIN_CONTENT_HEIGHT_RESERVATION` rows, top-aligned and clipped, and every dialog is laid out inside that. The two constants are ink's — the first is the `3` its container passes for the rows the popup cannot use, the second the `2` its layout reserves for the main content — so the budget a forty-row terminal gives is thirty-five rows. The height and the clip are ink's default state, not its only one: both are gated on its `constrainHeight`, its show-more-lines key lifts them, and its dialog manager then hands the dialogs no height at all. This port has no lift — the region stays fixed in every state — and the difference is recorded under the coverage boundary.
+ink does not overlay a popup on the composer: it swaps the composer out for a region of exactly `rows − staticExtraHeight − MAIN_CONTENT_HEIGHT_RESERVATION` rows, top-aligned and clipped, and every dialog is laid out inside that. The two constants are ink's — the first is the `3` its container passes for the rows the popup cannot use, the second the `2` its layout reserves for the main content — so the budget a forty-row terminal gives is thirty-five rows. The height and the clip are ink's default state, not its only one: both are gated on its `constrainHeight`, its show-more-lines key lifts them, and its dialog manager then hands the dialogs no height at all. This port has no lift — the region stays fixed in every state — and the difference is recorded under Follow-ups.
 
 Here the slot was content-height. Two things followed, and they looked unrelated. A dialog ink stretches to fill the region stayed short and sat low, because the transcript kept the free rows above the slot and a content-height box lands after them; the approval-mode dialog drew thirteen rows where ink draws thirty-five, with its footer hint just under the list rather than at the bottom of the viewport. And a picker taller than the region pushed the composer off the screen instead of being clipped by it.
 
@@ -2400,6 +2400,39 @@ The row is on a real terminal too, because a shipped command does overflow the c
 Decision 64 generalised the cursor mirror and moved the wizard's focus onto it. The step that picks between the Chat Completions and Responses wire APIs keeps a cursor of its own and was not among the call sites — it reached this tree from main after that pass — so its Enter still read the cursor off the render that armed the handler. An arrow and an Enter inside one stdin read saved the wire API the arrow had not reached.
 
 It now takes the numeric half of the same mirror, and its Enter reads the ref. One case walks the wizard to that step, sends the arrow and the Enter inside a single handler invocation, and asserts the saved plan carries the Responses wire API; against the pre-fix code it saves Chat Completions.
+
+## Decision 70 — the row budget pays for the rows a notice actually paints, and the Tab step sheds what ink's clip would have hidden
+
+Decision 66 gave the approval-mode dialog ink's region height and ink's derivation for what fits inside it. Three things that derivation assumed were still wrong on this side, and a fourth step never got the derivation at all.
+
+The row width. ink gives the mode labels, the title run and the footer hint `wrap="truncate"`, and its row constants count one physical row for each. This port rendered all three with the renderer's default word wrap and no width clip, so on a narrow terminal each took more rows than its constant budgets and the list slid out of the frame. Decision 68 already established that this renderer has no truncate wrap, so the clipping moves into the arithmetic the same way: a label gets the content width minus its row's two-column indicator and, when the list is numbered, the `N.` column and its space; the title run `> Title ` is clipped to the content width and the dim subtitle then gets whatever that run left, which is how ink's single truncated Text composes the two; the footer hint gets the content width. The warning is not clipped, because ink wraps it.
+
+The row count of a wrapped notice. ink budgets its workspace warning at a flat three rows. At a hundred columns the text — ninety-one columns of it inside a ninety-two-column content width — fits one wrapped row, so the flat count over-pays by one; at forty columns it needs three rows, so the flat count under-pays by one and the list paints over the last of them. The count is now derived: one margin row plus the rows the text occupies once word-wrapped at the content width, with a word wider than the row broken across rows. ink's flat three stays as the floor, because paying fewer rows than ink would put a mode row on screen that ink does not show, and the derivation only ever adds to it.
+
+The trust-gate refusal. This port draws a refusal below the same list when the folder is untrusted or a write throws; ink has no counterpart in this dialog, so the budget carried no term for it, and the errorless budget has no slack at exactly the heights where the gate fires. The refusal takes the same derivation. Its term stays out of the `MIN_HEIGHT_*` thresholds, which are ink's.
+
+The Tab step. It shares the frame and the region with the mode step but had no budget of its own, so it kept the spacer row the mode step had just shed and an unwindowed list. **This is a deliberate divergence.** ink's `ScopeSelector` keeps both and gets away with it because ink's frame carries `overflow="hidden"` and absorbs the overrun; at region heights four to six the same rows here overpaint each other, and Enter commits a scope the user could not read. The step now runs the same derivation and sheds the spacer and windows its list, where ink keeps them. The rows ink loses to its clip are rows nobody could read either way, but the divergence is recorded rather than matched, because matching it would mean giving this frame a clip it does not have.
+
+Six cases pin the arithmetic, and each was run against the mutation that undoes it: dropping the label clip, the subtitle clip or the hint clip fails exactly the case that measures that run; replacing the warning's derivation with ink's flat three fails only the narrow-terminal case; charging the refusal nothing fails the trust-gate case; dropping either half of the Tab step's pass-through fails the Tab case; and taking the floor away fails the case that pins it. Two tables then walk the budget across six region heights without the warning and four with it, asserting the spacer, the footer hint, the arrows and the number of rendered rows at each, which is what pins both the spacer and the warning footer-hint thresholds and the guard that keeps the hint on screen when dropping it would only buy room for arrows. No new frames this round: the harness reads strings and declared layout props, and what changed is row arithmetic at widths the matrix's hundred-column arm does not reach.
+
+## Decision 71 — the help overlay budgets from the region, and the frame rule reaches the frames beside it
+
+The popup slot is a fixed height that already accounts for the banner, the status
+bar and the composer, so the ten rows the help overlay reserved for that same
+chrome were reserved twice: the overlay left five blank rows inside the slot at
+every terminal height, and windowed its command list at sixteen rows on a
+forty-row terminal where ink shows a fixed eighteen. It now reads the region
+budget the mount is already handed and subtracts only its own chrome, so the list
+reaches ink's eighteen and the slot keeps no unused rows. The cap stays — the
+window never exceeds the eighteen rows ink hard-codes — and below a region of
+fourteen rows the overlay still cannot fit, which Follow-ups records.
+
+The same pass applies Decision 67's rule to the four sibling frames that still
+carried the pair the shared dialog chrome dropped: a box that asks for a size has
+to ask to shrink as well, and a box that opens one row below the region's top has
+to stop doing so. Those are the memory, statusline, stats and skills frames and
+the arena's, whose bottom borders were measured painting past the region and now
+land inside it. The two sized bodies inside them are not covered by this change.
 
 ## Coverage boundary
 
@@ -2721,9 +2754,13 @@ What was verified, and how far the verification reaches:
   The diagnostics are not lost, but they are unreachable here because this
   renderer never binds the library's console toggle. Whether to expose that
   console is an open question.
-- The help dialog's reserved-row constant does not describe the rows actually
-  observed on screen, and the window height this renderer shows below a 42-row
-  terminal is bounded rather than matched.
+- The help overlay's body budget comes from the popup region rather than the raw
+  terminal height, so its command list windows at ink's fixed eighteen rows on a
+  forty-row terminal instead of sixteen and leaves no unused rows in the slot.
+  Below a region of fourteen rows the body still budgets fewer rows than the
+  commands tab's own chrome needs, and the window's one-row floor then leaves the
+  intro and the hint clipped under a live header and footer. ink has no
+  counterpart to compare against: it never derives that window from the height.
 - The two reserves that size the conversation around an expanded confirmation
   are hand-derived from a row inventory. The long-confirmation scenario shows
   the shipped value green and zero timing out, but a value four rows smaller
@@ -3040,12 +3077,16 @@ What was verified, and how far the verification reaches:
 - ink's popup region is gated on its `constrainHeight`: the show-more-lines
   key lifts both the fixed height and the clip, and its dialog manager then
   hands the dialogs no budget at all. This port maps that key only inside the
-  tool-confirmation bodies, so the region stays fixed and clipped in every
-  state, and a tail the clip cuts — an unwindowed list such as `/mcp` on a
-  short terminal, footer hint included — has no reveal path. Recorded rather
-  than matched: this renderer owns the whole viewport and cannot let content
-  grow past it, so the fix is windowing those lists from the region budget,
-  the way the theme, settings and model dialogs already do.
+  tool-confirmation bodies, so the region keeps one fixed height in every
+  state. The clip that goes with that height is not the same guarantee: it
+  reaches content that shrinks with the region, while a child that holds its
+  own size paints past the region's bottom edge rather than being cut, and its
+  border lands off the terminal's last row or over the row below when one
+  exists. Either way a tail the region cannot show — an unwindowed list such as
+  `/mcp` on a short terminal, footer hint included — has no reveal path.
+  Recorded rather than matched: this renderer owns the whole viewport and
+  cannot let content grow past it, so the fix is windowing those lists from the
+  region budget, the way the theme and model dialogs already do.
 - The MCP approval, shell gate and action confirmation still render outside
   the dialog region, sized to their content and unclipped, where ink draws its
   ShellConfirmationDialog and ConsentPrompt inside the same region, stretched
@@ -3120,3 +3161,28 @@ What was verified, and how far the verification reaches:
   24-hour bracketed time inline, with an identical locale call. Pointing ink at the
   shared one would edit the very file the frame evidence was captured against, so
   the second copy stays and the two are only kept equal by hand.
+- Two sized bodies inside the dialog frames still hold their own height: the diff
+  dialog's fourteen-row scroll region and the subagents dialog's twelve-row one.
+  Their frames now shrink with the region, and a frame that shrinks around a body
+  that does not overpaints its own bottom border — measured at a region of
+  seventeen rows and below, where the last body row lands on the border. Windowing
+  those two heights from the region budget is the fix, and the height has to be
+  folded into the body's key the way the session picker folds its own, because the
+  renderer clears the shrink on an explicitly sized node and never re-applies a
+  prop whose value did not change.
+- The four sibling frames that now follow that rule — memory, statusline, stats,
+  skills and the arena's — carry no props-level witness. Two are frame components
+  a test could call the way the shared dialog chrome's test does; the other two are
+  the root box of a dialog body, so pinning them means rendering the dialog, and no
+  test file renders them today.
+- Decision 68's shrink emulation still sits inline in the completion row's map
+  body, so the twenty-three measured combinations cannot live in the repo as a
+  test, and two of the four numbers the arithmetic reads — the non-shared column
+  budget and the dropdown's side margins — can move with the suite green. Lifting
+  it into an exported pure function beside the truncation helpers and table-driving
+  the combinations against it is the fix.
+- Nothing executable verifies that the renderer resolves the shrink the session
+  picker's remount depends on: its three tests read declared props through the
+  element mock. A real-reconciler case cannot run under the unit suite, where the
+  native layer throws, so the vehicle is a bun script under the package's scripts
+  directory, wired into the component-parity runner.

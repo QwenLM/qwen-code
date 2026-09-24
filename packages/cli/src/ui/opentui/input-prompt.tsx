@@ -66,6 +66,7 @@ import {
   clipToWidth,
   cpLen,
   getCachedStringWidth,
+  stripUnsafeCharacters,
   toCodePoints,
   truncateToWidth,
 } from '../utils/textUtils.js';
@@ -1312,11 +1313,16 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             // the columns the label column leaves after the label. @opentui has
             // no truncate wrap mode, so an over-long hint wrapped onto a second
             // row and doubled the row height instead.
+            // ink measures these with `string-width`, which reads an ANSI
+            // sequence as zero-width in a whole string, and its terminal then
+            // paints the colour. This renderer has no content-level ANSI
+            // handling, so the same bytes would be charged against the budget
+            // as five columns and cut mid-sequence; strip them instead.
             const hintText = suggestion.argumentHint
-              ? ` ${suggestion.argumentHint}`
+              ? ` ${stripUnsafeCharacters(suggestion.argumentHint)}`
               : '';
             const badgeText = suggestion.sourceBadge
-              ? ` ${suggestion.sourceBadge}`
+              ? ` ${stripUnsafeCharacters(suggestion.sourceBadge)}`
               : '';
             // A row with no shared column has no description gutter to pay, so
             // its budget is `descriptionWidth`'s arithmetic minus that 2.
@@ -1397,7 +1403,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                   <box paddingLeft={2} flexGrow={1}>
                     <text fg={color}>
                       {truncateToWidth(
-                        normalizeDescription(suggestion.description),
+                        normalizeDescription(
+                          stripUnsafeCharacters(suggestion.description),
+                        ),
                         descriptionWidth,
                       )}
                     </text>

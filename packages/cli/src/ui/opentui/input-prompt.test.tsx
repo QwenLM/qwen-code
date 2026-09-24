@@ -1696,6 +1696,22 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
     expect(text).not.toContain('[Skil');
   });
 
+  it("does not charge a row's escape bytes against its column budget", async () => {
+    // ink measures the whole run with `string-width`, which reads an ANSI
+    // sequence as zero-width, and its terminal then paints the colour. This
+    // renderer has no content-level ANSI handling, so the same bytes charged
+    // against the hint's share would leave less visible text than ink draws,
+    // and a cut landing inside the sequence would emit an unterminated CSI.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: `\u001b[31mDiagnose a hung session\u001b[0m`,
+      argumentHint: `\u001b[31m${'h'.repeat(60)}\u001b[0m`,
+    });
+    expect(text).toContain(` ${'h'.repeat(32)}…`);
+    expect(text).toContain('Diagnose a hung session');
+    expect(text).not.toContain('\u001b');
+  });
+
   // The wrap alignment measured on a real terminal only holds while these stay
   // three separate flex children: concatenated into one text run, a long hint
   // word-wraps the whole run and the row grows to three lines instead of ink's
