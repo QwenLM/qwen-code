@@ -32223,11 +32223,22 @@ describe('App session callbacks', () => {
       expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
         '90.0%',
       );
-      expect(panel.querySelector('[role="alert"]')?.textContent).toContain(
+      const errorMessage =
         outcome === 'failed'
           ? 'Compression failed. You can try again.'
-          : 'Compression completed, but usage could not be refreshed.',
+          : 'Compression completed, but usage could not be refreshed. Use Refresh to retry.';
+      expect(panel.querySelector('[data-tone="error"]')?.textContent).toBe(
+        errorMessage,
       );
+      expect(panel.querySelector('[role="alert"]')).toBeNull();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(
+        Array.from(document.querySelectorAll('[role="alert"]'))
+          .map((alert) => alert.textContent)
+          .filter(Boolean),
+      ).toEqual([errorMessage]);
       expect(
         mockSessionActions.sendPrompt.mock.calls.map(([prompt]) => prompt),
       ).toEqual(['/compress', '/compress']);
@@ -32238,14 +32249,16 @@ describe('App session callbacks', () => {
       mockSessionActions.sendPrompt.mockReturnValueOnce(retry.promise);
       await act(async () => compress.click());
       expect(panel.querySelector('[role="alert"]')).toBeNull();
-      expect(panel.querySelector('[role="status"]')?.textContent).toBe(
+      expect(panel.querySelector('[data-tone="error"]')).toBeNull();
+      expect(panel.querySelector('[data-tone="status"]')?.textContent).toBe(
         'Compressing…',
       );
       await act(async () => retry.resolve({ stopReason: 'cancelled' }));
-      expect(panel.querySelector('[role="status"]')?.textContent).toBe(
+      expect(panel.querySelector('[data-tone="status"]')?.textContent).toBe(
         'Cancellation requested. Refresh to check current usage.',
       );
       expect(panel.querySelector('[role="alert"]')).toBeNull();
+      expect(panel.querySelector('[data-tone="error"]')).toBeNull();
       expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
         '90.0%',
       );
@@ -41288,7 +41301,11 @@ describe('App /goal command', () => {
       });
 
       expect(document.querySelector('textarea')).not.toBeNull();
-      expect(document.querySelector('[role="alert"]')).toBeNull();
+      expect(
+        Array.from(document.querySelectorAll('[role="alert"]'))
+          .map((alert) => alert.textContent?.trim())
+          .filter(Boolean),
+      ).toEqual([]);
       // The stale resolution must not install session A's goal over B's: the
       // strip and the dialog would then describe the wrong session's goal.
       expect(container.textContent).toContain('session B objective');
