@@ -244,6 +244,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private effortClampWarned = false;
   private budgetDropWarned = false;
   private temperatureDropWarned = false;
+  private blockBindingUnsupported = false;
   // Stream watchdog tuning, resolved once (config field > env > default) so
   // the env read + any invalid-value warning happen per generator, not per
   // streaming request. Same guards the OpenAI pipeline applies — the two
@@ -323,6 +324,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
     let response: Message;
+    let anthropicRequest: MessageCreateParamsWithThinking | undefined;
     // Wrap the caller's signal in a per-request child for the same reason as
     // generateContentStream: the Anthropic SDK leaks an abort listener onto
     // whatever signal it is handed, so keep that on a short-lived signal rather
@@ -332,7 +334,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ? createChildAbortController(parentSignal)
       : undefined;
     try {
-      const anthropicRequest = await this.buildRequest(request);
+      anthropicRequest = await this.buildRequest(request);
       runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
       const telemetryAttempt = reportAnthropicRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
@@ -342,6 +344,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       })) as Message;
       reportAnthropicResponse(telemetryAttempt, response);
     } catch (error) {
+      if (
+        anthropicRequest &&
+        this.disableUnsupportedBlockBinding(error, anthropicRequest)
+      ) {
+        return this.generateContent(request);
+      }
       throw redactProxyError(error);
     } finally {
       perRequestAc?.abort();
@@ -384,6 +392,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
       )) as AsyncIterable<RawMessageStreamEvent>;
     } catch (error) {
       perRequestAc.abort();
+      if (this.disableUnsupportedBlockBinding(error, anthropicRequest)) {
+        return this.generateContentStream(request);
+      }
       throw redactProxyError(error);
     }
 
@@ -423,9 +434,23 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Abort the child once the stream is fully drained or abandoned; this
     // releases the SDK request and detaches the child's listener from the
     // caller's signal.
+    const disableUnsupportedBlockBinding = (error: unknown) =>
+      this.disableUnsupportedBlockBinding(error, anthropicRequest);
+    const retryWithoutBlockBinding = () => this.generateContentStream(request);
     async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
+      let yielded = false;
       try {
-        yield* inner;
+        for await (const chunk of inner) {
+          yielded = true;
+          yield chunk;
+        }
+      } catch (error) {
+        if (!yielded && disableUnsupportedBlockBinding(error)) {
+          perRequestAc.abort();
+          yield* await retryWithoutBlockBinding();
+        } else {
+          throw error;
+        }
       } finally {
         perRequestAc.abort();
       }
@@ -542,6 +567,38 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
+  }
+
+  private disableUnsupportedBlockBinding(
+    error: unknown,
+    request: MessageCreateParamsWithThinking,
+  ): boolean {
+    if (
+      !request.thinking ||
+      request.thinking.type !== 'adaptive' ||
+      !request.thinking.block_binding ||
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+    ) {
+      return false;
+    }
+    const status = getErrorStatus(error);
+    if (status !== undefined && status !== 400) return false;
+    const message = error instanceof Error ? error.message : '';
+    if (
+      !/block_binding/i.test(message) ||
+      !/(extra inputs are not permitted|unknown field|unrecognized field|unsupported field)/i.test(
+        message,
+      )
+    ) {
+      return false;
+    }
+    if (!this.blockBindingUnsupported) {
+      this.blockBindingUnsupported = true;
+      debugLogger.warn(
+        'Anthropic-compatible endpoint rejected thinking.block_binding; retrying without it.',
+      );
+    }
+    return true;
   }
 
   /**
@@ -801,10 +858,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // thinking before any tool_use, making forced tool_choice essential.
     const toolChoice = this.resolveToolChoice(request, tools);
 
+    const modelVersion = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model,
+    );
     if (
+      !this.blockBindingUnsupported &&
       thinking?.type === 'adaptive' &&
-      /^claude-opus-5-5(?:-|$)/i.test(this.contentGeneratorConfig.model)
+      modelVersion?.major === 5 &&
+      ((modelVersion.family === 'opus' && modelVersion.minor >= 5) ||
+        (modelVersion.family === 'fable' && modelVersion.minor >= 1))
     ) {
+      // https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
       thinking = {
         ...thinking,
         block_binding: { prefix_mismatch_behavior: 'drop_block' },
