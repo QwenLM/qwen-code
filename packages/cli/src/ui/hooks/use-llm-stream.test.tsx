@@ -18368,6 +18368,7 @@ describe('useLlmStream', () => {
       const { result } = hook;
 
       let mainRequest!: Promise<void>;
+      let btwRequest: Promise<void> | undefined;
       await act(async () => {
         mainRequest = result.current.submitQuery('First query');
       });
@@ -18378,18 +18379,24 @@ describe('useLlmStream', () => {
           expect(result.current.streamingState).toBe(StreamingState.Responding);
         });
 
+        const logCallsBeforeBtw = mockLogMessage.mock.calls.length;
         mockLogMessage.mockImplementationOnce(
           () =>
             new Promise<void>((resolve) => {
               releaseLog = resolve;
             }),
         );
-        let btwRequest!: Promise<void>;
         await act(async () => {
           btwRequest = result.current.submitQuery(btwQuery);
           await Promise.resolve();
         });
-        await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(2));
+        await waitFor(() =>
+          expect(mockLogMessage).toHaveBeenNthCalledWith(
+            logCallsBeforeBtw + 1,
+            MessageSenderType.USER,
+            btwQuery,
+          ),
+        );
         expect(result.current.streamingState).toBe(StreamingState.Responding);
         expect(result.current.localCommandDispatchIsIdle).toBe(false);
 
@@ -18414,8 +18421,12 @@ describe('useLlmStream', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
         await act(async () => {
+          releaseLog?.();
           resolveFirstCall();
-          await mainRequest;
+          await Promise.allSettled([
+            mainRequest,
+            ...(btwRequest ? [btwRequest] : []),
+          ]);
         });
       }
     });
