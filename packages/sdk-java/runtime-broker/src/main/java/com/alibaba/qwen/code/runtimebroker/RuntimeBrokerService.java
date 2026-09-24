@@ -728,6 +728,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 "Managed Runtime resource identity "
                                         + "conflicts.");
                     }
+                    if (!renewal.persistResourceHandle(handle)) {
+                        throw unavailable("runtime_provision_fenced",
+                                "Runtime provisioning claim expired");
+                    }
                     return provisionAndAttest(request, seed)
                             .thenApply(lease -> new DurableProvision(lease,
                                     handle));
@@ -742,7 +746,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                         brokerFailure
                                         && !brokerFailure.isRetryable()) {
                                     blockRecovery(currentClaim);
-                                } else {
+                                } else if (currentClaim
+                                        .getResourceHandle() == null) {
                                     failBinding(currentClaim);
                                 }
                             }
@@ -826,14 +831,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (existing != null) {
             return existing;
         }
-        startReconciliation(record).whenComplete((context, error) -> {
-            bindingOperations.remove(record.getBindingId(), created);
-            if (error == null) {
-                created.complete(context);
-            } else {
-                created.completeExceptionally(unwrap(error));
-            }
-        });
+        safeStage(() -> startReconciliation(record)).whenComplete(
+                (context, error) -> {
+                    bindingOperations.remove(record.getBindingId(), created);
+                    if (error == null) {
+                        created.complete(context);
+                    } else {
+                        created.completeExceptionally(unwrap(error));
+                    }
+                });
         return created;
     }
 
@@ -1964,6 +1970,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
         synchronized RuntimeBindingRecord stopAndGet() {
             close();
             return !closed.get() && valid.get() ? current.get() : null;
+        }
+
+        synchronized boolean persistResourceHandle(
+                RuntimeResourceHandle handle) {
+            if (closed.get() || !valid.get()) {
+                return false;
+            }
+            RuntimeBindingRecord expected = current.get();
+            RuntimeBindingRecord updated = bindingRepository.compareAndSet(
+                    expected, expected.withResourceHandle(handle,
+                            clock.instant()));
+            if (updated == null) {
+                valid.set(false);
+                close();
+                return false;
+            }
+            current.set(updated);
+            return true;
         }
 
         private synchronized void renew() {

@@ -11,10 +11,12 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -350,6 +352,70 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void retryableProvisionFailureKeepsTheEnsuredResource()
+            throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        DurableProvisioner provisioner = new DurableProvisioner();
+        provisioner.provisionFailure = new RuntimeBrokerException(503,
+                "runtime_provision_failed", "transient", true);
+        try (RuntimeBrokerService service = service(provisioner,
+                new TestTransport(), bindings,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-one")) {
+            assertThrows(Exception.class, () -> service.warm("harness")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+
+            RuntimeBindingRecord pending = bindings.findActive(
+                    request(provisioner));
+            assertEquals(RuntimeBindingRecord.State.PROVISIONING,
+                    pending.getState());
+            assertEquals(HANDLE, pending.getResourceHandle());
+            String bindingId = pending.getBindingId();
+            long generation = pending.getGeneration();
+
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+
+            RuntimeBindingRecord ready = bindings.findActive(
+                    request(provisioner));
+            assertEquals(bindingId, ready.getBindingId());
+            assertEquals(generation, ready.getGeneration());
+            assertEquals(HANDLE, provisioner.lastKnownHandle);
+        }
+    }
+
+    @Test
+    void synchronousReconcileFailureDoesNotPoisonSingleFlight()
+            throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        RuntimeBindingRepository failingOnce =
+                new ClaimFailureRepository(bindings);
+        DurableProvisioner restored = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(restored,
+                new TestTransport(), failingOnce,
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "broker-two")) {
+            assertThrows(Exception.class, () -> service.warm("harness")
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            assertEquals(1, restored.reconciliations.get());
+        }
+    }
+
+    @Test
     void lateEnsureResultCannotOverwriteANewOperationOwner()
             throws Exception {
         MutableClock clock = new MutableClock();
@@ -539,6 +605,70 @@ class DurableRuntimeRecoveryTest {
         boolean evaluate() throws Exception;
     }
 
+    private static final class ClaimFailureRepository
+            implements RuntimeBindingRepository {
+        private final RuntimeBindingRepository delegate;
+        private final AtomicBoolean fail = new AtomicBoolean(true);
+
+        ClaimFailureRepository(RuntimeBindingRepository delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public RuntimeBindingRecord findOrCreate(
+                RuntimeProvisionRequest request) {
+            return delegate.findOrCreate(request);
+        }
+
+        @Override
+        public RuntimeBindingRecord findActive(
+                RuntimeProvisionRequest request) {
+            return delegate.findActive(request);
+        }
+
+        @Override
+        public List<RuntimeBindingRecord> findActiveByIsolationKey(
+                RuntimeScope scope, String isolationKey) {
+            return delegate.findActiveByIsolationKey(scope, isolationKey);
+        }
+
+        @Override
+        public RuntimeBindingRecord findById(String bindingId) {
+            return delegate.findById(bindingId);
+        }
+
+        @Override
+        public RuntimeBindingRecord compareAndSet(
+                RuntimeBindingRecord expected,
+                RuntimeBindingRecord replacement) {
+            return delegate.compareAndSet(expected, replacement);
+        }
+
+        @Override
+        public RuntimeBindingRecord claimOperation(String bindingId,
+                String owner, Duration leaseDuration) {
+            if (fail.compareAndSet(true, false)) {
+                throw new IllegalStateException("transient database failure");
+            }
+            return delegate.claimOperation(bindingId, owner, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord renewOperation(String bindingId,
+                String owner, long operationGeneration,
+                Duration leaseDuration) {
+            return delegate.renewOperation(bindingId, owner,
+                    operationGeneration, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord releaseOperation(String bindingId,
+                String owner, long operationGeneration) {
+            return delegate.releaseOperation(bindingId, owner,
+                    operationGeneration);
+        }
+    }
+
     private static final class DurableProvisioner
             implements RuntimeProvisioner {
         private final AtomicInteger ensures = new AtomicInteger();
@@ -548,8 +678,10 @@ class DurableRuntimeRecoveryTest {
                 RuntimeObservation.Outcome.READY;
         private RuntimeResourceHandle conflictHandle = HANDLE;
         private RuntimeException ensureFailure;
+        private RuntimeException provisionFailure;
         private CompletableFuture<RuntimeResourceHandle> ensureGate;
         private CompletableFuture<RuntimeObservation> reconcileGate;
+        private RuntimeResourceHandle lastKnownHandle;
         private RuntimeLease provisionedLease;
         private RuntimeLease releasedLease;
         private boolean notFoundOnce;
@@ -570,6 +702,7 @@ class DurableRuntimeRecoveryTest {
                 RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
                 RuntimeResourceHandle knownHandle) {
             ensures.incrementAndGet();
+            lastKnownHandle = knownHandle;
             if (ensureFailure != null) {
                 return CompletableFuture.failedFuture(ensureFailure);
             }
@@ -582,6 +715,11 @@ class DurableRuntimeRecoveryTest {
         @Override
         public CompletionStage<RuntimeLease> provision(
                 RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+            if (provisionFailure != null) {
+                RuntimeException failure = provisionFailure;
+                provisionFailure = null;
+                return CompletableFuture.failedFuture(failure);
+            }
             provisionedLease = new RuntimeLease(seed.getProvisionalRuntimeId(),
                     URI.create("http://127.0.0.1:4190"), seed.getToken(),
                     seed.getLeaseId(), seed.getEpoch());
