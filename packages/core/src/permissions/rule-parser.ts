@@ -1411,7 +1411,7 @@ export interface CompoundCommandSegment {
   terminator: string;
 }
 
-function splitCompoundCommandSegmentsRaw(
+export function splitCompoundCommandSegmentsRaw(
   command: string,
 ): CompoundCommandSegment[] {
   const segments: CompoundCommandSegment[] = [];

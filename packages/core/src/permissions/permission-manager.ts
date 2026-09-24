@@ -10,6 +10,7 @@ import {
   matchesRule,
   resolveToolName,
   splitCompoundCommand,
+  splitCompoundCommandSegmentsRaw,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
 } from './rule-parser.js';
@@ -336,19 +337,6 @@ export class PermissionManager {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
         bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
-        if (bashDecision !== 'deny') {
-          // Heredoc projection can strip an interpreter body out of the
-          // segments, so deny/ask rules also see the raw compound text:
-          // a stripped payload must not escape a deny that the same command
-          // in single-segment shape would hit. Escalation only; an allow
-          // found in the raw text never lowers the segment verdict.
-          const rawDecision = this.evaluateSingle(ctx);
-          if (rawDecision === 'deny') {
-            bashDecision = 'deny';
-          } else if (rawDecision === 'ask' && bashDecision === 'allow') {
-            bashDecision = 'ask';
-          }
-        }
       } else {
         bashDecision = this.evaluateSingle(ctx);
         // For shell commands, resolve 'default' to actual permission via AST
@@ -363,6 +351,13 @@ export class PermissionManager {
             ctx.cwd ?? this.config.getCwd?.(),
           );
         }
+      }
+      if (SHELL_TOOL_NAMES.has(toolName)) {
+        bashDecision = this.escalateFromRawCandidates(
+          ctx,
+          command,
+          bashDecision,
+        );
       }
     } else {
       bashDecision = this.evaluateSingle(ctx);
@@ -1002,6 +997,40 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * Deny/ask rules see the command as raw per-operator/per-line candidates,
+   * never the joined multi-line text: the matcher's contract is a single
+   * simple command, and on joined text anchored rules cannot match, a '#'
+   * comment blinds everything after it, and `.*` over-matches across
+   * operators. The candidates keep heredoc body lines, so a payload bash
+   * would feed an interpreter still meets the deny rule the pre-projection
+   * per-line evaluation hit. Escalation only: a non-match never lowers the
+   * verdict.
+   */
+  private escalateFromRawCandidates(
+    ctx: PermissionCheckContext,
+    command: string,
+    decision: PermissionDecision,
+  ): PermissionDecision {
+    if (decision === 'deny') {
+      return decision;
+    }
+    let upgraded = decision;
+    for (const segment of splitCompoundCommandSegmentsRaw(command)) {
+      const candidate = this.evaluateSingle({
+        ...ctx,
+        command: segment.command,
+      });
+      if (candidate === 'deny') {
+        return 'deny';
+      }
+      if (candidate === 'ask' && upgraded === 'allow') {
+        upgraded = 'ask';
+      }
+    }
+    return upgraded;
+  }
+
+  /**
    * Determine the permission decision for a specific shell command string.
    *
    * @param command - The shell command to evaluate.
@@ -1220,10 +1249,14 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
-      if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+      // Ask rules must see the same raw candidates deny rules escalate on:
+      // the projection strips heredoc bodies out of the segments, and an ask
+      // an explicit rule matches there must not stay invisible to the
+      // auto-approval gate that reads this method.
+      const rawCandidates = splitCompoundCommandSegmentsRaw(command);
+      if (rawCandidates.length > 1) {
+        return rawCandidates.some((segment) =>
+          this.hasMatchingAskRule({ ...ctx, command: segment.command }),
         );
       }
     }

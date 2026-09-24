@@ -2327,6 +2327,65 @@ describe('PermissionManager', () => {
       },
     );
 
+    it('a comment before the payload line cannot blind the deny rule', async () => {
+      // shell-quote's comment token truncates the rest of a joined string, so
+      // deny rules must see per-line candidates, not the joined text.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(python *)', 'Bash(echo *)'],
+          permissionsDeny: ['Bash(*rm -rf*)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command:
+            "echo done # greeting\npython - <<'PY'\nimport os\nos.system('rm -rf /important')\nPY",
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rules never over-match across operator boundaries', async () => {
+      // `kubectl delete pod foo && kubectl get pods --all-namespaces` matches
+      // chunk 1 of the deny rule in one segment and chunk 2 in the other; the
+      // compound stays ask, not a hard deny no rule earns alone.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(kubectl get *)'],
+          permissionsDeny: ['Bash(kubectl delete * --all*)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command:
+            'kubectl delete pod foo && kubectl get pods --all-namespaces',
+        }),
+      ).toBe('ask');
+    });
+
+    it('an anchored deny rule does not over-claim an interpreter payload', async () => {
+      // Bash(rm *) anchors at the command start, so it honestly does not see
+      // `os.system('rm -rf ...')` in a python body; the allowed receiver still
+      // allows. Substring deny rules are the ones that cover payloads.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(python *)', 'Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command:
+            "python - <<'PY'\nimport os\nos.system('rm -rf /important')\nPY\necho done",
+        }),
+      ).toBe('allow');
+    });
+
     // Regression coverage for issue #4093: command substitution must never
     // produce a hard 'deny' from resolveDefaultPermission. Before the fix
     // the L4 default branch returned 'deny' for any command containing
@@ -3757,6 +3816,24 @@ describe('PermissionManager', () => {
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }
+    });
+
+    it('matches an explicit ask rule against a stripped heredoc payload', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cat *)', 'Bash(echo *)'],
+          permissionsAsk: ['Bash(*rm -rf*)'],
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasMatchingAskRule({
+          toolName: 'run_shell_command',
+          command:
+            "cat <<'EOF'\nrm -rf /important is what this doc warns about\nEOF\necho done",
+        }),
+      ).toBe(true);
     });
   });
 });
