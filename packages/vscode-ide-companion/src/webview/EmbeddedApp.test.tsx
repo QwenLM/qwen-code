@@ -1814,17 +1814,22 @@ describe('EmbeddedApp message edit rewind', () => {
 
     vi.useFakeTimers();
     try {
-      const submission = await expect(
-        prepareSubmit({
-          sessionId: 'session-1',
-          prompt: 'edited text',
-          inputAnnotations: [],
-        }),
-      ).rejects.toThrow('Could not confirm the rewind.');
+      let rejection: unknown;
+      const submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }).catch((error) => {
+        rejection = error;
+      });
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2100);
         await submission;
       });
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toContain(
+        'Could not confirm the rewind.',
+      );
     } finally {
       vi.useRealTimers();
     }
