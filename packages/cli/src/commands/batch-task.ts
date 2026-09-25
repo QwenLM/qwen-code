@@ -367,6 +367,7 @@ export class BatchTaskStore {
     // Unique per acquisition, so release can tell our lock from a successor's.
     const token = `${process.pid}\n${host}\n${crypto.randomUUID()}\n`;
     const deadline = Date.now() + (options.waitMs ?? 0);
+    const recovery = `${lock}.recover`;
     let tookOver = false;
     for (;;) {
       try {
@@ -387,19 +388,24 @@ export class BatchTaskStore {
       const wellFormed = /^\d+$/.test(pidText ?? '') && pid > 0;
       const elsewhere = Boolean(holderHost) && holderHost !== host;
       if (!tookOver && wellFormed && !elsewhere && !isPidAlive(pid)) {
-        tookOver = true;
-        // Compare-then-unlink by path could delete a live successor's lock
-        // that replaced the stale one between the two calls. A rename is
-        // atomic: whoever moves the file wins the takeover, and the loser
-        // re-reads the winner's lock on the next pass.
-        const tombstone = `${lock}.stale-${crypto.randomUUID()}`;
+        let recoveryFd: number | undefined;
         try {
-          fs.renameSync(lock, tombstone);
-          fs.rmSync(tombstone, { force: true });
-        } catch {
-          // The stale lock was released or taken over first; re-check.
+          recoveryFd = fs.openSync(recovery, 'wx');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         }
-        continue;
+        if (recoveryFd !== undefined) {
+          tookOver = true;
+          try {
+            // Serialize stale removers and re-read under that guard: a
+            // successor may have acquired the lock since our first read.
+            if (readLock(lock) === content) fs.rmSync(lock);
+          } finally {
+            fs.closeSync(recoveryFd);
+            fs.rmSync(recovery, { force: true });
+          }
+          continue;
+        }
       }
       if (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 200));
@@ -411,7 +417,7 @@ export class BatchTaskStore {
       throw new Error(
         `task "${id}" is in use by another \`qwen batch\` process${who}. ` +
           `An open qwen session collects batch tasks automatically and holds the lock only briefly — try again in a few seconds. ` +
-          `If no such process is running, delete ${lock} and retry.`,
+          `If no such process is running, delete ${lock} and ${recovery}, then retry.`,
       );
     }
     try {

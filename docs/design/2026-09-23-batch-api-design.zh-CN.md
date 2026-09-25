@@ -74,7 +74,7 @@ batch.ts：endpoint / 鉴权解析，CLI 命令注册
 - **账本不靠猜就能回答"远端可能存在哪些对象"。** 上传前先落盘提交意图，create 前先落盘上传得到的 file id。create 的响应丢失，或进程在 create 途中死掉，都把 attempt 记为 `submit-unknown`；`collect` 按 `input_file_id` 到服务端的 batch 列表里对账，**绝不盲目重交**，因为判断错了就要付两次钱。
 - **记录跟着用户，不跟仓库。** 任务记录放在 `~/.qwen/batch`（可用 `QWEN_BATCH_HOME` 覆盖），权限 0700/0600，记录中保存项目根目录，在任何目录下都能操作。只有 agent 写的 plan 文件留在项目里，且被 git 忽略。
 - **任务绑定 endpoint。** `run` 冻结 base URL 和 API key 的短哈希（不保存 key 本身）；之后 `collect` / `retry` / `cancel` 发现配置变了就拒绝执行，因为换了账号或地域就看不到原来的 batch。
-- **同一任务同一时刻只有一个命令在跑。** 每个任务一个锁文件，记录 pid 和主机名。只有确定释放了才接管：锁写在本机、且那个 pid 已经不存在。另一台主机的锁永远不接管。
+- **同一任务同一时刻只有一个命令在跑。** 每个任务一个锁文件，记录 pid 和主机名。只有确定释放了才接管：锁写在本机、且那个 pid 已经不存在。另一台主机的锁永远不接管。旧锁恢复通过独占的 `lock.recover` 文件串行执行，删除前再次核对持有者。如果恢复本身崩溃，下一次旧锁恢复会拒绝执行；错误信息列出两个待清理文件，确认没有命令运行后才能删除。
 - **custom_id = `<itemId>#<attempt>`**，重试之后结果仍能准确对回条目。每个条目记下拥有它的 attempt，只有这个 attempt 的结果行能改变它：旧 attempt 的失败不会把条目重新打开、导致再付一次钱。
 - **交付不覆盖已有文件。** 目标文件已存在且内容不同就判为冲突（held）；内容相同算作已交付，因此重复 collect 是幂等的。写入前重新计算源文件哈希，提交后被改过的源文件会让结果 held。
 - **Batch 沿用用户的实时设置。** `run` 把配置里的 `samplingParams` 和 `extra_body` 按实时路径的方式（原样发送、`extra_body` 最后合并）冻结进任务，每次重试都复用。关闭 reasoning 时按实时路径的 Qwen 写法冻结（分档模型用 `reasoning_effort: "none"`，其余用 `enable_thinking: false`），其他模型家族只报告不发送；输出上限写在冻结参数已使用的字段上（`max_completion_tokens` / `max_new_tokens`，否则 `max_tokens`）。

@@ -609,6 +609,7 @@ describe('collectTask', () => {
     const job2 = h.jobs.get('batch-2');
     if (!job2) throw new Error('expected batch-2');
     job2.status = 'completed';
+    job2.request_counts = { total: 1, completed: 1, failed: 0 };
     job2.output_file_id = 'file-out-2';
     h.files.set('file-out-2', `${outputLine('a#2', '# A\n\nAlpha.')}\n`);
     await collectTask(h.deps, taskId);
@@ -643,6 +644,7 @@ describe('collectTask', () => {
     const job2 = h.jobs.get('batch-2');
     if (!job2) throw new Error('expected batch-2');
     job2.status = 'completed';
+    job2.request_counts = { total: 1, completed: 1, failed: 0 };
     job2.output_file_id = 'file-out-2';
     h.files.set('file-out-2', `${outputLine('a#2', '# A\n\nAlpha.')}\n`);
     await retryTask(h.deps, taskId);
@@ -694,7 +696,7 @@ describe('collectTask', () => {
     expect(h.api.createBatch).toHaveBeenCalledTimes(1);
   });
 
-  it('fails an item whose line is missing after a reconcile', async () => {
+  it('keeps a reconciled item submitted while its result is missing', async () => {
     const h = (harness = setup());
     h.files.set('file-out-1', `${outputLine('a#1', '# A\n\nAlpha.')}\n`);
     h.api.createBatch.mockImplementationOnce(
@@ -711,11 +713,12 @@ describe('collectTask', () => {
     );
     await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(/reconcile/);
     const taskId = taskIdOf(h);
-    await collectTask(h.deps, taskId);
+    await expect(collectTask(h.deps, taskId)).rejects.toThrow(
+      /account for 1 of 2/,
+    );
     const task = h.store.load(taskId);
     // b was never marked submitted before the fix and stayed pending forever.
-    expect(task.items[1]).toMatchObject({ state: 'failed' });
-    expect(task.items[1].lastError).toMatch(/no result line/);
+    expect(task.items[1]).toMatchObject({ state: 'submitted', lastAttempt: 1 });
   });
 
   it('skips a malformed result line instead of blocking the whole task', async () => {
@@ -724,11 +727,13 @@ describe('collectTask', () => {
       output: `${outputLine('a#1', '# A\n\nAlpha.')}\n{"custom_id":"b#1",\n`,
     });
     const taskId = taskIdOf(h);
-    await collectTask(h.deps, taskId);
+    await expect(collectTask(h.deps, taskId)).rejects.toThrow(
+      /account for 1 of 2/,
+    );
     const task = h.store.load(taskId);
     expect(task.items.map((item) => item.state)).toEqual([
       'delivered',
-      'failed',
+      'submitted',
     ]);
     expect(h.err.join('\n')).toMatch(/skipping output line 2/);
   });
@@ -1281,7 +1286,7 @@ describe('review fixes', () => {
     });
     const taskId = taskIdOf(h);
     await expect(collectTask(h.deps, taskId)).rejects.toThrow(
-      /none of the result lines matched/,
+      /account for 0 of 2/,
     );
     const task = h.store.load(taskId);
     expect(task.items.map((item) => item.state)).toEqual([
@@ -1461,22 +1466,39 @@ describe('review fixes', () => {
     expect(h.err.join('\n')).toMatch(/cannot re-fetch batch-1/);
   });
 
-  it('keeps the remote files when the local copy accounts for fewer results than the provider reports', async () => {
+  it('re-downloads incomplete results without failing or resubmitting missing items', async () => {
     const h = (harness = setup());
-    // The settled batch reports two finished requests, but the downloaded
-    // output holds only one item's line (e.g. a truncated download).
     await runAndSettle(h, {
       output: `${outputLine('a#1', '# A\n\nAlpha.')}\n`,
     });
     const taskId = taskIdOf(h);
-    await collectTask(h.deps, taskId);
+    await expect(collectTask(h.deps, taskId)).rejects.toThrow(
+      /account for 1 of 2/,
+    );
     const task = h.store.load(taskId);
-    expect(task.items[1].state).toBe('failed');
-    // Deleting the originals would destroy the only full record while a
-    // retry double-charges the finished request — they must be kept.
+    expect(task.items.map((item) => item.state)).toEqual([
+      'delivered',
+      'submitted',
+    ]);
     expect(h.api.deleteFile).not.toHaveBeenCalled();
     expect(task.attempts[0].collected).toBeFalsy();
-    expect(h.err.join('\n')).toMatch(/remote files are kept/);
+    expect(task.attempts[0].outputPath).toBeUndefined();
+    expect(task.attempts[0].finalStatus).toBeUndefined();
+
+    const outputId = h.jobs.get(task.attempts[0].batchId!)!.output_file_id!;
+    h.files.set(
+      outputId,
+      `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    );
+    const summary = await collectTask(h.deps, taskId);
+    expect(summary.delivered.map((item) => item.id)).toEqual(['b']);
+    expect(summary.settled).toBe(1);
+    expect(h.api.downloadFile).toHaveBeenCalledTimes(2);
+    expect(h.api.createBatch).toHaveBeenCalledTimes(1);
+    expect(h.store.load(taskId).attempts[0]).toMatchObject({
+      collected: true,
+      usage: { requests: 2, promptTokens: 200, completionTokens: 100 },
+    });
   });
 
   it('does not move the source baseline when a retry dies before its create lands', async () => {

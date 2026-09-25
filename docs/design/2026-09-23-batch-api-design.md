@@ -114,7 +114,10 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
 - **One command per task at a time.** A per-task lock file records pid and
   host. It is taken over only when its release is certain: written on this
   host by a pid that no longer exists. A lock from another host is never
-  taken over.
+  taken over. Stale recovery is serialized by an exclusive `lock.recover`
+  guard and rechecks the owner before removal. If recovery itself crashes,
+  the next stale recovery fails closed; the error names both files to remove
+  after confirming no command is running.
 - **custom_id = `<itemId>#<attempt>`**, so results map back across retries.
   Each item records the attempt that owns it, and only that attempt's result
   lines may change it: an older attempt's failure never re-opens the item for

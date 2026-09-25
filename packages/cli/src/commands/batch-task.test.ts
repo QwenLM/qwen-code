@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -332,7 +332,7 @@ describe('BatchTaskStore', () => {
     expect(fs.existsSync(lock)).toBe(false);
   });
 
-  it('takes over a stale lock without leaving a tombstone, and never touches a live one', async () => {
+  it('does not remove a successor acquired after its stale-lock read', async () => {
     const task = store.create(
       validatePlan(validPlan, 'plan.json'),
       root,
@@ -341,14 +341,37 @@ describe('BatchTaskStore', () => {
     const dir = path.dirname(store.fileOf(task.id));
     const lock = path.join(dir, 'lock');
     fs.writeFileSync(lock, `2147483646\n${os.hostname()}\nstale\n`);
-    await store.withLock(task.id, async () => {
-      // The takeover moved the stale file aside before deleting it; while
-      // the winner holds its own lock, another acquisition must refuse.
-      await expect(
-        store.withLock(task.id, async () => undefined),
-      ).rejects.toThrow(/in use by another/);
+    const read = fs.readFileSync;
+    let successor: Promise<void> | undefined;
+    let release: (() => void) | undefined;
+    let intercepted = false;
+    const entered = vi.fn();
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation((...args) => {
+      const content = read(...args);
+      if (args[0] === lock && !intercepted) {
+        intercepted = true;
+        successor = store.withLock(task.id, async () => {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        });
+      }
+      return content;
     });
-    expect(fs.existsSync(lock)).toBe(false);
+    try {
+      await expect(
+        store.withLock(task.id, async () => {
+          entered();
+        }),
+      ).rejects.toThrow(/in use by another/);
+      expect(release).toBeDefined();
+      expect(entered).not.toHaveBeenCalled();
+      expect(fs.existsSync(lock)).toBe(true);
+    } finally {
+      spy.mockRestore();
+      release?.();
+      await successor;
+    }
     expect(fs.readdirSync(dir)).toEqual(['task.json']);
   });
 

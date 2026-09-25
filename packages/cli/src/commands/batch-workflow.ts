@@ -947,25 +947,22 @@ async function collectLocked(
         item.lastError = `provider reported failure: ${JSON.stringify(line.error ?? line).slice(0, 300)}`;
       }
     }
-    // The provider reports finished requests, yet not one line of the result
-    // files maps to this attempt: we could not read what was produced (a
-    // corrupt download, a format we do not parse). Failing every item would
-    // invite a paid retry and cleanup would delete the only good copy, so
-    // keep the remote files, drop the local copies for a fresh download and
-    // stop here.
+    // An incomplete harvest must be downloaded again before missing items
+    // can fail or remote originals can be deleted. This also covers zero
+    // matching lines, without a separate recovery path.
     if (
       job &&
       (attempt.outputPath || attempt.errorPath) &&
-      seen.size === 0 &&
-      (job.request_counts?.completed ?? 0) > 0
+      seen.size < (job.request_counts?.completed ?? 0)
     ) {
       attempt.outputPath = undefined;
       attempt.errorPath = undefined;
+      attempt.usage = usage;
+      refreshTaskStatus(task);
       store.save(task);
       throw new Error(
-        `none of the result lines matched this attempt although the provider reports ` +
-          `${job.request_counts?.completed} finished request(s); remote files were kept and ` +
-          `nothing was marked failed — collect again, or inspect the batch in the provider console`,
+        `result files account for ${seen.size} of ${job.request_counts?.completed} finished request(s); ` +
+          `remote files were kept and missing items were not marked failed — collect again to download fresh copies`,
       );
     }
     for (const itemId of attempt.itemIds) {
@@ -988,48 +985,31 @@ async function collectLocked(
 
     if (job) {
       if (firstHarvest) settledNow += 1;
-      // Deleting the remote copies is safe only when the local harvest
-      // accounted for everything the provider reports as finished: a
-      // truncated download or an unparsed format leaves lines unaccounted,
-      // and deleting the originals would destroy the only full record while
-      // a retry double-charges the finished requests. Keep them instead.
-      const unaccounted = attempt.itemIds.filter((id) => !seen.has(id));
-      if (
-        unaccounted.length > 0 &&
-        (job.request_counts?.completed ?? 0) > seen.size
-      ) {
-        deps.err(
-          `[batch] warning: the local result files account for ${seen.size} of the ${job.request_counts?.completed} request(s) the provider reports finished ` +
-            `(no line for ${unaccounted.join(', ')}); the remote files are kept — ` +
-            `inspect the batch in the provider console before retrying the missing item(s).`,
-        );
-      } else {
-        // Results are safely local now; uploaded files otherwise live on
-        // the provider until somebody deletes them. A failed deletion leaves
-        // the attempt uncollected, so the next collect re-fetches the
-        // settled batch and retries instead of leaking the files; it never
-        // fails the collect.
-        let failed = 0;
-        for (const fileId of [
-          job.input_file_id,
-          job.output_file_id,
-          job.error_file_id,
-        ]) {
-          if (!fileId) continue;
-          try {
-            await api.deleteFile(deps.ep, fileId);
-          } catch (error) {
-            // Already gone (deleted by an earlier pass, or expired): done.
-            if ((error as BatchApiError).status === 404) continue;
-            failed += 1;
-            deps.err(
-              `[batch] warning: could not delete remote file ${fileId}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
+      // Results are safely local now; uploaded files otherwise live on
+      // the provider until somebody deletes them. A failed deletion leaves
+      // the attempt uncollected, so the next collect re-fetches the
+      // settled batch and retries instead of leaking the files; it never
+      // fails the collect.
+      let failed = 0;
+      for (const fileId of [
+        job.input_file_id,
+        job.output_file_id,
+        job.error_file_id,
+      ]) {
+        if (!fileId) continue;
+        try {
+          await api.deleteFile(deps.ep, fileId);
+        } catch (error) {
+          // Already gone (deleted by an earlier pass, or expired): done.
+          if ((error as BatchApiError).status === 404) continue;
+          failed += 1;
+          deps.err(
+            `[batch] warning: could not delete remote file ${fileId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-        attempt.collected = failed === 0;
-        store.save(task);
       }
+      attempt.collected = failed === 0;
+      store.save(task);
     }
   };
   for (const attempt of openAttempts) {
