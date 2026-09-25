@@ -8,7 +8,7 @@
 import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ConfigParameters } from '../config/config.js';
-import { Config, ApprovalMode } from '../config/config.js';
+import { Config, ApprovalMode, MCPServerConfig } from '../config/config.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
@@ -22,6 +22,8 @@ import type { MediaPolicyToolDescriptor } from './tools.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
+import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import {
   getAllMCPServerStatuses,
   MCPServerStatus,
@@ -1938,6 +1940,1130 @@ describe('ToolRegistry', () => {
 
       // The good tool should still have been loaded despite the failure.
       expect(await toolRegistry.ensureTool('good-tool')).toBe(goodTool);
+    });
+  });
+
+  describe('discoverToolsForServer failure restore (R1-3)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      for (const name of getAllMCPServerStatuses().keys()) {
+        removeMCPServerStatus(name);
+      }
+    });
+
+    it('restores the previously registered tools/prompts/resources when rediscovery fails', async () => {
+      // R1-3: the purge runs before the await, so a FAILED rediscovery
+      // previously left the server with nothing for the rest of the
+      // session — exactly the moment the cancel-recovery path fires.
+      // The old registrations must come back so `ensureTool` and the
+      // registries keep resolving them.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      expect(toolRegistry.getTool(mcpTool.name)).toBe(mcpTool);
+
+      // The global beforeEach mocks the registries with stubs; this test
+      // needs the real ones so restoration is observable.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      resourceRegistry.registerResource({
+        serverName: 'flaky-server',
+        uri: 'file:///review.md',
+        name: 'review.md',
+        description: 'd',
+        mimeType: 'text/markdown',
+      });
+
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockRejectedValue(new Error('reconnect failed'));
+      // Production always resolves the server's config when reconnecting —
+      // the registry's shared restore gate (R4-2 round 5) consults it on
+      // BOTH legs, so the reject leg needs the same stub its resolve-leg
+      // sibling carries.
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      await expect(
+        toolRegistry.discoverToolsForServer('flaky-server'),
+      ).rejects.toThrow('reconnect failed');
+
+      // The pre-failure registrations must be restorable — the next call
+      // has a tool to run instead of a permanently emptied server.
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+      expect(
+        promptRegistry.getPromptsByServer('flaky-server').map((p) => p.name),
+      ).toEqual(['review']);
+      expect(
+        resourceRegistry.getResourcesByServer('flaky-server').map((r) => r.uri),
+      ).toEqual(['file:///review.md']);
+    });
+
+    it('restores the snapshot when the rediscovery resolves without registering (R1-3 production shape)', async () => {
+      // The legacy manager path never rejects for a dead connection —
+      // `discoverMcpToolsForServerInternal` catches connect errors, logs,
+      // and deliberately does not rethrow, and the policy early-returns
+      // (untrusted / disabled / pending-approval / budget-refused /
+      // stopped) also resolve without registering. The restore must fire
+      // on the observed OUTCOME (server had tools, came back with none),
+      // not only on a rejection.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      resourceRegistry.registerResource({
+        serverName: 'flaky-server',
+        uri: 'file:///review.md',
+        name: 'review.md',
+        description: 'd',
+        mimeType: 'text/markdown',
+      });
+
+      // The production failure shape: resolve while registering nothing.
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+      // Production always resolves the server's config when reconnecting —
+      // the registry's policy gate (R1-3 round 4) consults it.
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      // Resolves — no throw — yet the server must not end up empty.
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+      expect(
+        promptRegistry.getPromptsByServer('flaky-server').map((p) => p.name),
+      ).toEqual(['review']);
+      expect(
+        resourceRegistry.getResourcesByServer('flaky-server').map((r) => r.uri),
+      ).toEqual(['file:///review.md']);
+    });
+
+    it('restores a prompt-only server snapshot (R3-3)', async () => {
+      // A server exposing prompts/resources but NO tools: the restore gate
+      // used to key on `previousTools.length > 0`, so a failed reconnect
+      // purged its prompts/resources and never gave them back — nothing
+      // else re-registers them. Each registry must gate on its own
+      // emptiness.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      resourceRegistry.registerResource({
+        serverName: 'flaky-server',
+        uri: 'file:///review.md',
+        name: 'review.md',
+        description: 'd',
+        mimeType: 'text/markdown',
+      });
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      // The legacy manager resolves without registering anything (the
+      // connect failed; the internal catch swallows).
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(
+        promptRegistry.getPromptsByServer('flaky-server').map((p) => p.name),
+      ).toEqual(['review']);
+      expect(
+        resourceRegistry.getResourcesByServer('flaky-server').map((r) => r.uri),
+      ).toEqual(['file:///review.md']);
+    });
+
+    it('does not restore prompts over a partial rediscovery that registered them (R3-5)', async () => {
+      // `registerPrompt` renames on collision instead of overwriting, so
+      // restoring the snapshot into a registry the pass itself re-filled
+      // leaves a `<server>_<prompt>` ghost bound to the dead client. The
+      // prompt restore must fire only when the pass left the registry
+      // empty.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'summarize',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(async () => {
+        // A partially successful rediscovery: tools/list failed (zero
+        // tools registered) but prompts/list re-registered the prompt —
+        // exactly the R3-5 production shape.
+        promptRegistry.registerPrompt({
+          serverName: 'flaky-server',
+          name: 'summarize',
+          description: 'fresh',
+          arguments: [],
+          invoke: vi.fn(),
+        } as any);
+      });
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      const names = promptRegistry
+        .getPromptsByServer('flaky-server')
+        .map((p) => p.name);
+      expect(names).toEqual(['summarize']);
+      expect(names).not.toContain('flaky-server_summarize');
+      expect(promptRegistry.getAllPrompts().map((p) => p.name)).toEqual([
+        'summarize',
+      ]);
+    });
+
+    it('does not restore tools the operator excluded since the snapshot (R1-3 round 4)', async () => {
+      // includeTools/excludeTools apply only at discovery; the restore
+      // re-applying an outdated snapshot re-exposes tools the operator
+      // just excluded, and every later reconnect would restore them
+      // again. The restore must re-check the operator's CURRENT filter.
+      const excludedTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(excludedTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig(
+          'node',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          ['other'],
+        ),
+      });
+
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      // The snapshot tool 'search' is not in includeTools — it must not
+      // come back. (Red pre-fix: restored and resolvable.)
+      expect(await toolRegistry.ensureTool(excludedTool.name)).toBeUndefined();
+      const survivingExcluded = toolRegistry
+        .getAllTools()
+        .filter(
+          (t) =>
+            t instanceof DiscoveredMCPTool && t.serverName === 'flaky-server',
+        );
+      expect(survivingExcluded).toHaveLength(0);
+    });
+
+    it('does not restore after the server was torn down mid-pass (R3-7)', async () => {
+      // A discovery pass parked on the manager while the operator
+      // disconnects the server: the pass's snapshot restore would undo
+      // the teardown — re-exposing a server bound to a client that no
+      // longer exists. The teardown bump suppresses the restore, and the
+      // in-flight entry is dropped so a post-teardown reconnect starts a
+      // fresh pass (R2-1 round 4).
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      const releaseAll: Array<() => void> = [];
+      let entered = 0;
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            entered += 1;
+            releaseAll.push(() => resolve(undefined));
+          }),
+      );
+      const releasePass = () => releaseAll.forEach((release) => release());
+
+      const pendingPass = toolRegistry.discoverToolsForServer('flaky-server');
+      await vi.waitFor(() => expect(entered).toBe(1));
+      // Teardown lands while the pass is parked on the manager...
+      await toolRegistry.disconnectServer('flaky-server');
+      // ...and a reconnect issued AFTER the teardown must not dedup onto
+      // the still-parked pre-teardown pass — the teardown invalidated the
+      // in-flight entry, so a FRESH manager pass starts (R2-1 round 4).
+      // Without the invalidation this call returns pass A's promise and
+      // the manager is entered only once.
+      const secondPass = toolRegistry.discoverToolsForServer('flaky-server');
+      await vi.waitFor(() => expect(entered).toBe(2));
+      releasePass();
+      await Promise.all([pendingPass, secondPass]);
+
+      // No tool for the server survives: the teardown is not undone.
+      const surviving = toolRegistry
+        .getAllTools()
+        .filter(
+          (t) =>
+            t instanceof DiscoveredMCPTool && t.serverName === 'flaky-server',
+        );
+      expect(surviving).toHaveLength(0);
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBeUndefined();
+    });
+
+    it('does not restore the snapshot over a successful rediscovery', async () => {
+      // The restore must fire ONLY when the server came back empty.
+      // Re-registering the pre-purge snapshot over a FRESH successful
+      // rediscovery would collide in `registerTool` (which renames MCP
+      // tools instead of overwriting) and accumulate dead-client
+      // duplicates per reconnect.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      const staleTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(staleTool);
+
+      const freshTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'fresh description',
+        {},
+      );
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(async () => {
+        // The real path registers tools through the client's discover
+        // while the registry-level purge has already happened.
+        toolRegistry.registerTool(freshTool);
+      });
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      // The fresh tool won; the stale snapshot entry was purged before
+      // the fresh registration and NOT re-added afterwards. The count
+      // pins "exactly one tool for the server" — the observable symptom
+      // of restoring the snapshot over a successful rediscovery is a
+      // second (renamed, fully-qualified) duplicate.
+      expect(toolRegistry.getTool(freshTool.name)).toBe(freshTool);
+      const serverTools = toolRegistry
+        .getAllTools()
+        .filter(
+          (t) =>
+            t instanceof DiscoveredMCPTool && t.serverName === 'flaky-server',
+        );
+      expect(serverTools).toHaveLength(1);
+    });
+
+    it('a concurrent second discoverToolsForServer neither purges nor loses the first pass registrations (R2-1)', async () => {
+      // The purge runs synchronously before the await. Without a
+      // per-server in-flight guard, call B snapshots-and-deletes the
+      // tools call A's discovery just registered, then dedups onto A's
+      // promise (manager `serverDiscoveryPromises`) which RESOLVES — so
+      // no restore runs and a CONNECTED server ends the session with
+      // zero registrations. Call B must await A's outcome untouched.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+
+      let resolveA: () => void = () => {};
+      let entered = 0;
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            entered += 1;
+            if (entered === 1) {
+              resolveA = () => resolve(undefined);
+            } else {
+              resolve(undefined);
+            }
+          }),
+      );
+
+      const callA = toolRegistry.discoverToolsForServer('flaky-server');
+      // A's discovery is now in flight and has re-registered the tool
+      // (simulating `client.discover()`): simulate by re-registering the
+      // same tool the way the real discovery would.
+      const reRegistered = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+        undefined,
+        mcpTool.name,
+      );
+      toolRegistry.registerTool(reRegistered);
+
+      const callB = toolRegistry.discoverToolsForServer('flaky-server');
+      // B dedups onto A: only one discovery ever started.
+      expect(entered).toBe(1);
+
+      resolveA();
+      await Promise.all([callA, callB]);
+
+      // The mid-flight registration survived B.
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBeDefined();
+      expect(toolRegistry.getTool(reRegistered.name)).toBeDefined();
+    });
+
+    it('a late-settling pass does not unhook its successor dedup entry (R7-1 round 7)', async () => {
+      // Pass A parks; the operator teardown deliberately evicts A's
+      // dedup entry (`markMcpServerTornDown`) so pass B installs its
+      // OWN; A settling must not delete the entry BY NAME — that would
+      // unhook B, and the next pass C would start concurrently with B
+      // (purging B's freshly registered tools after snapshotting them),
+      // violating the one-pass-at-a-time contract R2-1 established.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+      const resolvers: Array<() => void> = [];
+      let entered = 0;
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            entered += 1;
+            resolvers.push(() => resolve(undefined));
+          }),
+      );
+
+      // A enters and parks.
+      const callA = toolRegistry.discoverToolsForServer('flaky-server');
+      expect(entered).toBe(1);
+      // The teardown evicts A's entry by design (generation bump pins
+      // A's restore too), so B installs its own entry and parks.
+      toolRegistry.markMcpServerTornDown('flaky-server');
+      const callB = toolRegistry.discoverToolsForServer('flaky-server');
+      expect(entered).toBe(2);
+      // B's discovery registers a fresh tool mid-flight (the shape a
+      // reconnecting `client.discover()` produces).
+      const bTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'query',
+        'description',
+        {},
+        undefined,
+        'flaky-server_query',
+      );
+      toolRegistry.registerTool(bTool);
+
+      // A settles: with the identity check its finally leaves B's
+      // entry alone; pre-fix (delete-by-name) it unhooks B.
+      resolvers[0]!();
+      await callA;
+
+      // C must dedup onto B's still-hooked entry. Pre-fix C enters
+      // `discoverToolsForServerInner` — purging bTool while B's
+      // discovery is still in flight — and `entered` becomes 3.
+      const callC = toolRegistry.discoverToolsForServer('flaky-server');
+      expect(entered).toBe(2);
+
+      resolvers[1]!();
+      await Promise.all([callB, callC]);
+      expect(await toolRegistry.ensureTool(bTool.name)).toBe(bTool);
+    });
+
+    it('restores the snapshot when the manager purges mid-pass and resolves without registering (R3-7 round 5)', async () => {
+      // The generation bump must live ONLY in operator teardown
+      // (`markMcpServerTornDown`). The manager's OWN in-pass
+      // `purgeServerRegistries` reaches the registry through the pure
+      // `removeMcpToolsByServer` on every legacy reconnect of a tracked
+      // server; with the bump inside the purge, tornDownWhilePending was
+      // true on every such reconnect and the resolve-path restore never
+      // ran on a live path. This test performs the REAL in-pass purge
+      // (not a spy) and asserts the snapshot still comes back.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      resourceRegistry.registerResource({
+        serverName: 'flaky-server',
+        uri: 'file:///review.md',
+        name: 'review.md',
+        description: 'd',
+        mimeType: 'text/markdown',
+      });
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(async () => {
+        // The real in-pass shape: discoverMcpToolsForServerInternal's
+        // existing-client branch purges the registries, then the
+        // reconnect fails and the internal catch logs without
+        // rethrowing.
+        toolRegistry.removeMcpToolsByServer('flaky-server');
+        promptRegistry.removePromptsByServer('flaky-server');
+        resourceRegistry.removeResourcesByServer('flaky-server');
+      });
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+      expect(
+        promptRegistry.getPromptsByServer('flaky-server').map((p) => p.name),
+      ).toEqual(['review']);
+      expect(
+        resourceRegistry.getResourcesByServer('flaky-server').map((r) => r.uri),
+      ).toEqual(['file:///review.md']);
+    });
+
+    it('restores only the subset the operator filter still admits, per tool (R1-3 round 5)', async () => {
+      // The filter must be PER-TOOL and match `isEnabled` exactly:
+      // exact-match exclude, parenthesized include forms, `undefined`
+      // = allow all, `[]` = allow none. The round-4 all-or-nothing
+      // gate with server-name glob semantics starved a filter-passing
+      // server of every tool.
+      const searchTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      const fetchTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'fetch',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(searchTool);
+      toolRegistry.registerTool(fetchTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig(
+          'node',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          ['fetch'],
+        ),
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      // 'fetch' is excluded by name, 'search' passes and comes back.
+      expect(await toolRegistry.ensureTool(searchTool.name)).toBe(searchTool);
+      expect(await toolRegistry.ensureTool(fetchTool.name)).toBeUndefined();
+    });
+
+    it('restores a server whose includeTools is JSON null (R1-3 round 6)', async () => {
+      // Settings JSON carries `"includeTools": null` uncoerced. Every
+      // runtime filter treats a null allow-list as ABSENT (allow all):
+      // discovery's `isEnabled` (`!includeTools`), the pool's
+      // `compileNameFilter` (`includeTools != null`). The round-5
+      // re-derivation tested absence with `=== undefined`, read `null`
+      // as an empty allow-list, and restored NOTHING for a tools-only
+      // server — the cancelled/failed rediscovery this PR exists to
+      // fix left it with zero registrations for the session. Asking
+      // `isEnabled` directly cannot drift on any axis.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig(
+          'node',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          null as unknown as string[],
+        ),
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('restores nothing when includeTools is an empty list (R1-3 round 5)', async () => {
+      // `includeTools: []` is allow-NONE (mcp-session-config.ts: an
+      // absent list means allow all, an empty one allow none). The
+      // round-4 gate early-returned true for `[]` — reading the
+      // strongest deny as allow-all and re-admitting every tool.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig(
+          'node',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          [],
+        ),
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBeUndefined();
+    });
+
+    it('restores the parenthesized include form a tool registers under (R1-3 round 5)', async () => {
+      // The documented form `includeTools: ['search(query)']`
+      // (mcp-session-metadata-hot-reload.md) registers `search`; the
+      // restore must admit it via the exact-or-parenthesized-suffix
+      // predicate, not the server-name glob matcher that called it
+      // 'search(query)' and restored nothing.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig(
+          'node',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          ['search(query)'],
+        ),
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('suppresses the restore for a server the budget just refused (R4-1 round 5)', async () => {
+      // A budget-refused server resolves without registering and the
+      // manager records the refusal (`wasRefused`); the snapshot must
+      // NOT come back — the tools would stay in the model's
+      // declarations bound to a client that does not exist.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+      // The manager's own refusal log, as `wasRefused` reads it. The
+      // companion "dead server still restores" tests never set this.
+      const manager = (
+        toolRegistry as unknown as {
+          mcpClientManager: McpClientManager;
+        }
+      ).mcpClientManager;
+      vi.spyOn(manager, 'wasRefused').mockReturnValue(true);
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBeUndefined();
+      const surviving = toolRegistry
+        .getAllTools()
+        .filter(
+          (t) =>
+            t instanceof DiscoveredMCPTool && t.serverName === 'flaky-server',
+        );
+      expect(surviving).toHaveLength(0);
+    });
+
+    it('restores the mcpServerCommand-derived synthetic server (R4-1 round 5)', async () => {
+      // `mcp.serverCommand` derives a synthetic server named `mcp` that
+      // `getMcpServers()` alone cannot resolve — the gate must use the
+      // manager's recipe (`populateMcpServerCommand`) or every reconnect
+      // of that server reads as policy-removed and never restores.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'mcp',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      // Settings carry ONLY the server command — getMcpServers() is
+      // empty; the synthetic `mcp` server exists in effective space.
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({});
+      vi.spyOn(config, 'getMcpServerCommand').mockReturnValue('qwen mcp serve');
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('mcp');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('reject-leg restore does not replay reveal state across a mid-pass /clear (R5-48 round 6)', async () => {
+      // A deferred tool registered AND revealed (ToolSearch surfaced
+      // it). A pass parks on the manager; while parked the session
+      // runs `/clear` (clearRevealedDeferredTools). The manager then
+      // rejects and the restore replays the pre-pass reveal snapshot
+      // — re-adding `revealedDeferred` for the tool and undoing the
+      // reset. `getFunctionDeclarations` would emit the schema in the
+      // session the user just cleared.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      toolRegistry.revealDeferredTool(mcpTool.name);
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(true);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      let rejectPass: (error: Error) => void = () => {};
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPass = reject;
+          }),
+      );
+
+      const pendingPass = toolRegistry.discoverToolsForServer('flaky-server');
+      await vi.waitFor(() => expect(rejectPass).toBeDefined());
+      // `/clear` lands mid-pass...
+      toolRegistry.clearRevealedDeferredTools();
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(false);
+      // ...then the manager rejects.
+      rejectPass(new Error('reconnect failed'));
+      await expect(pendingPass).rejects.toThrow('reconnect failed');
+
+      // The restore must NOT re-reveal the cleared tool, while the
+      // tool itself still comes back (its registrations are the best
+      // available state for the next connection).
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(false);
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('reject-leg restore keeps reveal state that was NOT reset mid-pass (R5-48 round 6)', async () => {
+      // The epoch gate must be scoped: reveal state that survived the
+      // pass (no `/clear` landed) replays as before — a revealed tool
+      // stays revealed across a failed rediscovery so the model keeps
+      // calling it.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      toolRegistry.revealDeferredTool(mcpTool.name);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      let rejectPass: (error: Error) => void = () => {};
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPass = reject;
+          }),
+      );
+
+      const pendingPass = toolRegistry.discoverToolsForServer('flaky-server');
+      await vi.waitFor(() => expect(rejectPass).toBeDefined());
+      rejectPass(new Error('reconnect failed'));
+      await expect(pendingPass).rejects.toThrow('reconnect failed');
+
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(true);
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('reject-leg restore obeys a mid-pass teardown: nothing survives (R4-2 round 5)', async () => {
+      // The reject leg used to re-apply the snapshot unconditionally.
+      // A pass parked on the manager while the operator disconnects
+      // the server must end with all three registries empty even
+      // though the manager then REJECTS.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      resourceRegistry.registerResource({
+        serverName: 'flaky-server',
+        uri: 'file:///review.md',
+        name: 'review.md',
+        description: 'd',
+        mimeType: 'text/markdown',
+      });
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      let rejectPass: (error: Error) => void = () => {};
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPass = reject;
+          }),
+      );
+
+      const pendingPass = toolRegistry.discoverToolsForServer('flaky-server');
+      await vi.waitFor(() => expect(rejectPass).toBeDefined());
+      // Operator teardown lands mid-pass...
+      await toolRegistry.disconnectServer('flaky-server');
+      // ...then the manager rejects.
+      rejectPass(new Error('reconnect failed'));
+      await expect(pendingPass).rejects.toThrow('reconnect failed');
+
+      // The teardown is not undone on the reject leg either.
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBeUndefined();
+      expect(promptRegistry.getPromptsByServer('flaky-server')).toHaveLength(0);
+      expect(
+        resourceRegistry.getResourcesByServer('flaky-server'),
+      ).toHaveLength(0);
+    });
+
+    it('reject-leg restore leaves no ghost prompt over a partial registration (R4-2 round 5)', async () => {
+      // The stub registers a same-named prompt BEFORE rejecting — the
+      // restore must not run the snapshot over it
+      // (rename-on-collision would mint a `flaky-server_review` ghost
+      // bound to the dead client).
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      const promptRegistry = new PromptRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(async () => {
+        promptRegistry.registerPrompt({
+          serverName: 'flaky-server',
+          name: 'review',
+          description: 'fresh',
+          arguments: [],
+          invoke: vi.fn(),
+        } as any);
+        throw new Error('reconnect failed');
+      });
+
+      await expect(
+        toolRegistry.discoverToolsForServer('flaky-server'),
+      ).rejects.toThrow('reconnect failed');
+
+      const names = promptRegistry
+        .getPromptsByServer('flaky-server')
+        .map((p) => p.name);
+      expect(names).toEqual(['review']);
+      expect(names).not.toContain('flaky-server_review');
+    });
+
+    it('does not restore copied-in tools for a server whose per-agent discovery failed (R4-3 round 5)', async () => {
+      // A subagent registry's `docs` tools are the PARENT's instances
+      // (copyDiscoveredToolsFrom) carrying the parent's client. When
+      // the agent's own override discovery resolves having registered
+      // nothing, restoring them would silently undo the frontmatter
+      // override and route calls to the session-level server.
+      const parentTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'docs',
+        'search',
+        'description',
+        {},
+      );
+      const parentRegistry = new ToolRegistry(config);
+      parentRegistry.registerTool(parentTool);
+      toolRegistry.copyDiscoveredToolsFrom(parentRegistry);
+      expect(toolRegistry.getTool(parentTool.name)).toBe(parentTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        docs: new MCPServerConfig('node'),
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('docs');
+
+      // Fail closed: no docs tool survives in the agent's registry.
+      expect(await toolRegistry.ensureTool(parentTool.name)).toBeUndefined();
+      const surviving = toolRegistry
+        .getAllTools()
+        .filter(
+          (t) => t instanceof DiscoveredMCPTool && t.serverName === 'docs',
+        );
+      expect(surviving).toHaveLength(0);
     });
   });
 

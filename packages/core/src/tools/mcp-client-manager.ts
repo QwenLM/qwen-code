@@ -502,6 +502,34 @@ export class McpClientManager {
    * mid-outer-pass).
    */
   private bulkPassDepth = 0;
+
+  /**
+   * Server names the operator has deliberately torn down via this
+   * manager (`disconnectServer` / config removal / runtime-server
+   * replacement / removal). A rediscovery that installs a replacement
+   * client for a torn-down name must not let it escape: whoever
+   * observes the replacement first — the discovery path or the parked
+   * operator disconnect — disconnects it (R1-15 round 5). Cleared when
+   * a pass actually CONNECTS a client for the name, which is the
+   * moment the operator's intent is satisfied by a later, deliberate
+   * re-add (e.g. `addRuntimeMcpServer` after `removeRuntimeMcpServer`).
+   */
+  private operatorTornDownServers = new Set<string>();
+  /**
+   * Monotonic per-name teardown epoch. Every operator-teardown entry
+   * point bumps it; the trailing cleanup in those same calls deletes
+   * the plain tombstone above, so the Set alone cannot refuse a
+   * rediscovery that was already parked upstream when the teardown
+   * completed — it would sail through the cleared gate and resurrect
+   * the server the operator just removed (R6-1 round 6). A discovery
+   * pass captures the epoch before its first await and the gate treats
+   * a mismatch as "torn down while this pass was in flight", which
+   * outlives the teardown call itself. Never deleted by the teardown
+   * calls themselves — only a successful connect (`discover` or the
+   * runtime add) or `stop()` clears it, so an in-flight pre-teardown
+   * pass stays refused even after the teardown returns.
+   */
+  private operatorTeardownEpochs = new Map<string, number>();
   /**
    * optional callback set at construction time OR via
    * `setOnBudgetEvent` after construction. When non-`null` and
@@ -558,6 +586,17 @@ export class McpClientManager {
    * after `releaseAllPooledConnections` cleared it.
    */
   private stopTimedOut = false;
+
+  /**
+   * Set synchronously at the top of `stop()` and cleared only by the bulk
+   * `discoverAllMcpTools` fresh start that immediately follows its own
+   * `stop()` call: post-stop, this manager is being torn down, so any
+   * discovery that lands late must not register a fresh client the
+   * teardown snapshot never saw. The legacy single-server path checks it
+   * right before `this.clients.set(...)` — the analogue of the pool
+   * path's `stopTimedOut` gate, but lifetime-scoped rather than per-pass.
+   */
+  private stopped = false;
 
   constructor(
     config: Config,
@@ -712,6 +751,50 @@ export class McpClientManager {
       this.clients.get(serverName)?.getStatus() ??
       MCPServerStatus.DISCONNECTED
     );
+  }
+
+  /** Presence-aware status: `undefined` when this manager tracks NO
+   * client for the name. `getServerStatus` deliberately defaults
+   * unknown names to DISCONNECTED — `attemptReconnect` relies on that
+   * to report "did not come back" — but "no client" is not EVIDENCE
+   * that a transport died, and consumers that need death evidence
+   * (abort recovery) must use this read instead (R4-4 round 5). */
+  getMcpClientStatus(serverName: string): MCPServerStatus | undefined {
+    return (
+      this.pooledConnections.get(serverName)?.client.getStatus() ??
+      this.clients.get(serverName)?.getStatus()
+    );
+  }
+
+  /** True when the most recent discovery pass REFUSED this server for
+   * policy (budget), rather than failing to connect. The refusal is
+   * resolved-without-registering exactly like a dead server, so the
+   * registry's restore gate must consult this record to tell them
+   * apart (R4-1 round 5). In pool mode the pool's budget owns the
+   * refusal record — the manager-local list only has writers on the
+   * legacy path — so consult both. Between bulk passes the pool list
+   * holds the previous pass's set, which is exactly the "most recent
+   * pass" this method promises. */
+  wasRefused(serverName: string): boolean {
+    if (this.lastRefusedServerNames.includes(serverName)) return true;
+    return (
+      this.pool?.getBudget()?.getRefusedServerNames().includes(serverName) ??
+      false
+    );
+  }
+
+  /** True after `stop()` until the next bulk fresh start. */
+  isStopped(): boolean {
+    return this.stopped;
+  }
+
+  /** True when non-SDK discovery routes through the shared
+   * `McpTransportPool`. The abort-recovery path in `mcp-tool.ts` reads
+   * this to detect pool-baked tools whose cliConfig is the daemon's
+   * bootstrap Config (an instance the pool was not necessarily wired
+   * onto). */
+  isPooled(): boolean {
+    return this.pool !== undefined;
   }
 
   /** Resolved budget mode (env-var or constructor-supplied). */
@@ -1071,6 +1154,10 @@ export class McpClientManager {
       return this.discoverAllMcpToolsViaPool(cliConfig);
     }
     await this.stop();
+    // `stop()` sets `stopped` for teardown (R1-6 gate). This call is the
+    // documented fresh start that follows it — same lifecycle as the
+    // `reservedSlots`/`clients` clears `stop()` performs for this path.
+    this.stopped = false;
 
     const servers = this.getEffectiveMcpServers();
 
@@ -1274,6 +1361,13 @@ export class McpClientManager {
     serverName: string,
     cliConfig: Config,
   ): Promise<void> {
+    // Capture the teardown epoch before the first await: the gates below
+    // compare against it, so a teardown that begins AND COMPLETES while
+    // this pass is parked still refuses the pass — the plain tombstone
+    // the gates also read is cleared by the teardown's own trailing
+    // cleanup and cannot cover that interleaving (R6-1 round 6).
+    const teardownEpochAtEntry =
+      this.operatorTeardownEpochs.get(serverName) ?? 0;
     const servers = this.getEffectiveMcpServers();
     const serverConfig = servers[serverName];
     if (!serverConfig) {
@@ -1376,7 +1470,15 @@ export class McpClientManager {
           `Error stopping client '${serverName}': ${getErrorMessage(error)}`,
         );
       } finally {
-        this.clients.delete(serverName);
+        // Identity-check the eviction (R7-1 round 7), matching the
+        // pattern at `disconnectServer`'s own finally: while this pass
+        // sat on the disconnect await, a runtime add (or another pass)
+        // can install a LIVE replacement under the same name —
+        // deleting unconditionally would drop a connected client no
+        // teardown path holds a reference to.
+        if (this.clients.get(serverName) === existingClient) {
+          this.clients.delete(serverName);
+        }
         // Purge the OLD config's tools/prompts before rediscovery. `discover()`
         // only adds/overwrites by name and never purges, and `disconnect()`
         // doesn't touch the registries — so when this path reconnects a server
@@ -1408,12 +1510,88 @@ export class McpClientManager {
       sdkCallback,
     );
 
+    // `stop()` may have run while the awaits above held this function
+    // (existing-client disconnect, budget reservation). Its snapshot of
+    // `this.clients` is already gone; registering now would orphan a
+    // connected client no teardown path will ever see. Drop the just-built
+    // client instead. Mirrors the pool path's `stopTimedOut` gate, which
+    // exists for exactly this interleaving on `pool.acquire`.
+    if (this.stopped) {
+      try {
+        await client.disconnect();
+      } catch {
+        // best-effort transport cleanup; nothing is registered to lose
+      }
+      // A never-connected `McpClient.disconnect()` still publishes a
+      // global DISCONNECTED status entry for the name (R7-3 round 7);
+      // the gate must not leave a status record for a client the
+      // manager never tracked.
+      removeMCPServerStatus(serverName);
+      if (weReservedSlot) {
+        this.releaseSlotName(serverName);
+      }
+      this.freshReservations.delete(serverName);
+      return;
+    }
+
+    // A replacement appearing AFTER teardown began must not escape it
+    // (R1-15 round 5): the operator's `disconnectServer` await spans a
+    // full transport teardown, and a concurrent rediscovery can install
+    // this fresh client inside that window. Without this leg the parked
+    // disconnect's identity check sees a LIVE replacement, keeps it,
+    // and the server stays tracked and CONNECTED after the operator
+    // removed it. The parked disconnect's own finally handles the same
+    // name; this leg covers the window where the operator's call has
+    // already passed its finally checks. Deliberately checked BEFORE
+    // `this.clients.set` so the map never advertises the doomed client.
+    // The epoch comparison extends the refusal past the teardown's own
+    // return: a pass parked upstream when the teardown ran finds the
+    // plain tombstone already cleared, but the bumped epoch still names
+    // it as pre-teardown and rejects the resurrection (R6-1 round 6).
+    if (
+      this.operatorTornDownServers.has(serverName) ||
+      (this.operatorTeardownEpochs.get(serverName) ?? 0) !==
+        teardownEpochAtEntry
+    ) {
+      try {
+        await client.disconnect();
+      } catch {
+        // best-effort transport cleanup; nothing is registered to lose
+      }
+      // Same never-connected status hazard as the `stopped` gate
+      // above (R7-3 round 7): the client here was constructed for
+      // THIS pass and never tracked, so its disconnect must not
+      // publish a global status entry either.
+      removeMCPServerStatus(serverName);
+      // `weReservedSlot` ownership-gates the release (R5-17 round 6):
+      // a pass whose reservation came back `'already_held'` shares a
+      // slot a surviving connection holds — releasing it here would
+      // unreserve that connection. The marker delete keeps the timeout
+      // handler's fresh-release read accurate on gated exits (R6-2
+      // round 6).
+      if (weReservedSlot) {
+        this.releaseSlotName(serverName);
+      }
+      this.freshReservations.delete(serverName);
+      return;
+    }
+
     this.clients.set(serverName, client);
     this.eventEmitter?.emit('mcp-client-update', this.clients);
 
     try {
       await client.connect();
       await client.discover(cliConfig);
+      // Connected against the operator's intent bookkeeping: a later
+      // deliberate re-add path (e.g. addRuntimeMcpServer after a
+      // removal) clears the tombstone when its own connection lands.
+      this.operatorTornDownServers.delete(serverName);
+      // The epoch entry is deliberately RETAINED (R7-2 round 7):
+      // deleting it would reset the gate's comparison baseline to 0
+      // and admit a pass that captured a pre-teardown epoch and is
+      // still parked — resurrecting the OLD config the teardown
+      // removed. Retention is safe: every pass captures its own
+      // baseline at entry, and `stop()` clears the map wholesale.
       // Record the connected-config key of the config this client is now
       // connected with, so the incremental reconcile can detect a later
       // in-place config change and reconnect (mirrors the pool path's
@@ -1623,6 +1801,11 @@ export class McpClientManager {
       }
       const acquirePromises = Object.entries(servers).map(
         async ([name, config]) => {
+          // Snapshot the teardown epoch at pass entry (R7-4 round 7):
+          // the late-set gate after `pool.acquire` compares against
+          // this, so an operator removal landing during the acquire is
+          // distinguishable from a pre-pass baseline.
+          const epochAtEntry = this.operatorTeardownEpochs.get(name) ?? 0;
           if (cliConfig.isMcpServerDisabled(name)) {
             debugLogger.debug(
               `Skipping disabled MCP server (pool mode): ${name}`,
@@ -1727,6 +1910,28 @@ export class McpClientManager {
               }
               return;
             }
+            // An operator teardown that landed while this acquire was
+            // in flight wins over the late install (R7-4 round 7):
+            // `removeRuntimeMcpServer` / `disconnectServer` /
+            // `removeServer` all bump the epoch and set the tombstone
+            // BEFORE their awaits, so reading them here catches a
+            // removal racing this pass. Without this check the pooled
+            // path — which never flows through the standalone
+            // discovery gates — installs a live connection for a name
+            // the operator already removed, and the caller's
+            // `{removed: true}` lies.
+            if (
+              this.operatorTornDownServers.has(name) ||
+              (this.operatorTeardownEpochs.get(name) ?? 0) !== epochAtEntry
+            ) {
+              try {
+                conn.release();
+              } catch {
+                /* best effort — the removal's own cleanup follows */
+              }
+              this.dropRefusalEntry(name);
+              return;
+            }
             this.pooledConnections.set(name, conn);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for
@@ -1790,6 +1995,14 @@ export class McpClientManager {
    * This is the cleanup method to be called on application exit.
    */
   async stop(): Promise<void> {
+    // Flag BEFORE any await: a discovery that resolves during this stop()
+    // must observe it and drop the client it just built instead of
+    // re-populating `this.clients` after the snapshot below. Synchronous
+    // set is what bounds the legacy path's post-stop window — the drain
+    // below only guards the pool pass (`discoveryInFlight`), and
+    // `serverDiscoveryPromises` is cleared unawaited.
+    this.stopped = true;
+
     // Stop all health checks first
     this.stopAllHealthChecks();
 
@@ -1908,6 +2121,9 @@ export class McpClientManager {
     this.lastRefusedTransports.clear();
     this.pendingRefusalNames.clear();
     this.warnArmed = true;
+    // Full shutdown satisfies every pending operator teardown.
+    this.operatorTornDownServers.clear();
+    this.operatorTeardownEpochs.clear();
   }
 
   /**
@@ -1915,8 +2131,21 @@ export class McpClientManager {
    * @param serverName The name of the server to disconnect.
    */
   async disconnectServer(serverName: string): Promise<void> {
-    // Stop health check for this server
+    // Stop health check for this server. Runs BEFORE the tombstone so
+    // a replacement discovery pass that lands mid-await cannot re-arm
+    // it after this call's own stop (the discovery `finally` only arms
+    // for names still in `clients`; the tombstone leg below removes
+    // any replacement before that finally can observe it — but the
+    // timer stop must also run on the keep-free side, hence it lives
+    // here unconditionally rather than inside one branch).
     this.stopHealthCheck(serverName);
+    // Record the operator's teardown intent BEFORE the await: a
+    // rediscovery that installs a replacement client inside the
+    // disconnect window must not let it escape (R1-15 round 5). Both
+    // sides cooperate — the discovery path checks the tombstone before
+    // `clients.set`, and the finally below disconnects a replacement
+    // that slipped in anyway.
+    this.markOperatorTeardown(serverName);
 
     // release this server's pool reference if
     // we acquired one. Pool starts drain timer at refs=0; entry will
@@ -1937,25 +2166,79 @@ export class McpClientManager {
           `Error disconnecting client '${serverName}': ${getErrorMessage(error)}`,
         );
       } finally {
-        this.clients.delete(serverName);
-        this.connectedConfigKeys.delete(serverName);
-        this.consecutiveFailures.delete(serverName);
-        this.isReconnecting.delete(serverName);
-        this.serverDiscoveryPromises.delete(serverName);
-        this.eventEmitter?.emit('mcp-client-update', this.clients);
+        // Identity-check the delete: the await above spans a full transport
+        // teardown (~2s for stdio with a request in flight), and a
+        // concurrent rediscovery can install a NEW client for the same name
+        // in that window. Deleting by name would evict that replacement —
+        // a connected client with a live child that no one holds a
+        // reference to (`stop()` snapshots `this.clients`, so it is never
+        // reaped). The identity check is the DEFAULT (a caller-side
+        // rediscovery's live replacement is not this call's to kill); the
+        // tombstone leg below overrides it when this call itself carries
+        // operator teardown intent.
+        if (this.operatorTornDownServers.has(serverName)) {
+          // Operator teardown: ANY replacement installed inside the
+          // window — live or failed — is disconnected here and its
+          // records dropped (R1-15 round 5; previously a CONNECTED
+          // replacement escaped, stranding the name as tracked +
+          // budget slot held + health timer armed). Transport closes
+          // through `disconnect()`, never a bare map drop (the
+          // orphaned-child invariant above).
+          const doomed = this.clients.get(serverName);
+          if (doomed !== undefined && doomed !== client) {
+            try {
+              await doomed.disconnect();
+            } catch {
+              // best-effort: records are dropped below regardless
+            }
+          }
+          this.stopHealthCheck(serverName);
+          this.clients.delete(serverName);
+          this.connectedConfigKeys.delete(serverName);
+          this.consecutiveFailures.delete(serverName);
+          this.isReconnecting.delete(serverName);
+          this.serverDiscoveryPromises.delete(serverName);
+          this.eventEmitter?.emit('mcp-client-update', this.clients);
+        } else {
+          const replacement = this.clients.get(serverName);
+          const liveReplacement =
+            replacement !== undefined &&
+            replacement !== client &&
+            replacement.getStatus() === MCPServerStatus.CONNECTED;
+          if (!liveReplacement) {
+            if (replacement !== undefined && replacement !== client) {
+              try {
+                await replacement.disconnect();
+              } catch {
+                // Best-effort: the replacement never came up or is already
+                // dead; its records are dropped below regardless.
+              }
+              // The replacement's discovery path may have armed a health
+              // check after this method's own top-of-call stopHealthCheck.
+              this.stopHealthCheck(serverName);
+            }
+            this.clients.delete(serverName);
+            this.connectedConfigKeys.delete(serverName);
+            this.consecutiveFailures.delete(serverName);
+            this.isReconnecting.delete(serverName);
+            this.serverDiscoveryPromises.delete(serverName);
+            this.eventEmitter?.emit('mcp-client-update', this.clients);
+          }
+        }
       }
     }
-    // explicit operator-driven disconnect releases the budget
-    // slot AND drops the entry from the per-pass refusal log. Outside
-    // the `if (client)` guard because a budget-refused server has NO
-    // `McpClient` instance — but operator intent ("stop tracking this
-    // server") still demands the records be cleared so a subsequent
-    // snapshot doesn't keep tagging it as `budget_exhausted`. The
-    // internal reconnect path (`discoverMcpToolsForServerInternal`)
-    // calls `existingClient.disconnect()` directly, NOT this public
-    // method, so reconnect still doesn't release the slot.
-    this.releaseSlotName(serverName);
-    this.dropRefusalEntry(serverName);
+    if (!this.clients.has(serverName)) {
+      this.releaseSlotName(serverName);
+      this.dropRefusalEntry(serverName);
+      this.operatorTornDownServers.delete(serverName);
+      // The epoch entry deliberately survives the plain tombstone's
+      // clear: a pass parked upstream of the gates when this call ran
+      // is still pre-teardown, and must stay refused after this call
+      // returns (R6-1 round 6). It is never deleted here — a deliberate
+      // reconnect passes the gate as-is because its entry-time capture
+      // equals the surviving value only when no teardown intervened,
+      // and `stop()` clears the map wholesale.
+    }
   }
 
   getDiscoveryState(): MCPDiscoveryState {
@@ -2468,7 +2751,20 @@ export class McpClientManager {
         // disconnect window. No-op if the server hadn't reached `discover()`
         // yet, so it's safe to always call. A server that registered prompts /
         // resources but stalled `tools/list` past the timeout would otherwise
-        // leak them bound to the closed transport.
+        // leak them bound to the closed transport. The anti-resurrection
+        // intent is carried WITHOUT the persistent tombstone (R5-1 round 7):
+        // the epoch bump refuses any pass that entered before this timeout
+        // (a pre-timeout parked pass resumes to `epoch !== captured`), and
+        // the registry-side generation bump suppresses its snapshot
+        // restore — but a later DELIBERATE retry (`/mcp reconnect`, health
+        // monitor, settings reconcile) enters with the current epoch and
+        // must be allowed to reconnect. The plain tombstone variant had no
+        // clearer on this path, blacklisting the name for the process.
+        this.operatorTeardownEpochs.set(
+          serverName,
+          (this.operatorTeardownEpochs.get(serverName) ?? 0) + 1,
+        );
+        this.toolRegistry.markMcpServerTornDown(serverName);
         this.purgeServerRegistries(serverName);
         // Prevent the discovery `finally` block's `startHealthCheck` from
         // resurrecting this server: without removing the client entry,
@@ -2601,9 +2897,34 @@ export class McpClientManager {
   }
 
   /**
+   * Record operator teardown intent on the registry side: bumps the
+   * per-server generation so a discovery pass pending across this
+   * teardown never restores its snapshot, and invalidates the
+   * registry's in-flight dedup so a post-teardown reconnect starts a
+   * fresh pass. Manager-side tombstone (`operatorTornDownServers`) and
+   * registry-side generation are two halves of the same intent; only
+   * genuine operator teardown paths call this — the in-pass
+   * `purgeServerRegistries` before a rediscovery deliberately does not
+   * (R3-7 round 5).
+   */
+  private markOperatorTeardown(serverName: string): void {
+    this.operatorTornDownServers.add(serverName);
+    this.operatorTeardownEpochs.set(
+      serverName,
+      (this.operatorTeardownEpochs.get(serverName) ?? 0) + 1,
+    );
+    this.toolRegistry.markMcpServerTornDown(serverName);
+  }
+
+  /**
    * Removes a server and its tools
    */
   private async removeServer(serverName: string): Promise<void> {
+    // Config-driven removal is operator teardown intent: a concurrent
+    // rediscovery's replacement must not survive it (R1-15 round 5),
+    // and a pending registry pass must not restore its snapshot
+    // (R3-7 round 5).
+    this.markOperatorTeardown(serverName);
     const client = this.clients.get(serverName);
     if (client) {
       try {
@@ -2631,6 +2952,7 @@ export class McpClientManager {
     // `disabledReason: 'budget'`. Operator action wins over the
     // last-pass startup refusal record.
     this.dropRefusalEntry(serverName);
+    this.operatorTornDownServers.delete(serverName);
 
     // Remove tools, prompts and resources for this server. Unlike
     // `ToolRegistry.disconnectServer`, this config-driven removal path never
@@ -3064,6 +3386,15 @@ export class McpClientManager {
     // Release existing connection for this name (if replacing with
     // different fingerprint)
     const replaced = this.pooledConnections.has(name) || this.clients.has(name);
+    if (replaced) {
+      // Replacement is operator teardown intent for the outgoing
+      // connection: a rediscovery racing this replace must not let a
+      // fresh client for the old config survive (R1-15 round 5).
+      // Cleared below once the replacement itself connects. The epoch
+      // bump rides along so a pass parked upstream of the gate stays
+      // refused for the replace's duration (R6-1 round 6).
+      this.markOperatorTeardown(name);
+    }
     if (existingConn) {
       try {
         existingConn.release();
@@ -3135,8 +3466,25 @@ export class McpClientManager {
           name,
           this.singleSessionConnectedKeyOf(name, config),
         );
+        // The new runtime connection is live: the replace-phase
+        // tombstone (if any) no longer applies to it. The epoch entry
+        // is retained for the same reason as the discovery success
+        // path (R7-2 round 7): deleting it would reset the gate
+        // baseline and admit a pass parked since before the replace,
+        // resurrecting the OLD config.
+        this.operatorTornDownServers.delete(name);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
         toolCount = this.toolRegistry.getToolsByServer(name).length;
+        // A boot refusal of this name no longer describes reality: the
+        // name now HOLDS its slot with a live connection, and the
+        // refusal record would keep reporting it as policy-removed
+        // (`wasRefused`) — suppressing restores and tagging the
+        // snapshot `disabledReason: 'budget'` for a CONNECTED server
+        // (R4-1 round 6). addRuntimeMcpServer's standalone success
+        // path was the one connect path that never dropped the entry.
+        // The budget-side record is untouched: `budget.release`/its
+        // own pass resets own it.
+        this.dropRefusalEntry(name);
       }
     } catch (err) {
       // Spawn failed — roll back Config overlay + budget reservation
@@ -3212,6 +3560,13 @@ export class McpClientManager {
     const settingsServers = this.cliConfig.getSettingsMcpServers() ?? {};
     const wasShadowingSettings = name in settingsServers;
 
+    // Operator removal: a rediscovery racing this removal must not let
+    // a fresh client for the name survive (R1-15 round 5). Bumps the
+    // teardown epoch too, so a pass parked upstream of the gate is
+    // refused even after this call's trailing cleanup clears the plain
+    // tombstone (R6-1 round 6).
+    this.markOperatorTeardown(name);
+
     // Release pool connection (identity-check prevents race with concurrent add)
     const poolConn = this.pooledConnections.get(name);
     if (poolConn) {
@@ -3246,6 +3601,12 @@ export class McpClientManager {
     this.isReconnecting.delete(name);
     this.connectedConfigKeys.delete(name);
     this.dropRefusalEntry(name);
+    this.operatorTornDownServers.delete(name);
+    // Epoch entry intentionally retained (same rationale as
+    // `disconnectServer`'s trailing block): a pass parked upstream of
+    // the discovery gates when this removal ran stays refused after
+    // this call returns (R6-1 round 6). Only a later successful
+    // connect or `stop()` clears it.
 
     // Release budget slot
     const budget = this.pool?.getBudget();
