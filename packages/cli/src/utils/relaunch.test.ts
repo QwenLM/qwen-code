@@ -244,8 +244,8 @@ describe('relaunchAppInChildProcess', () => {
   });
 
   it('still replaces the process when the environment changed since boot', async () => {
-    // e.g. `.env` supplied DASHSCOPE_PROXY_BASE_URL, which a provider module
-    // reads at import, or NODE_EXTRA_CA_CERTS, which only Node's boot reads.
+    // e.g. `.env` supplied NODE_EXTRA_CA_CERTS, which only Node's boot reads,
+    // or a value that some module captured when it was imported.
     process.argv = ['/usr/bin/node', '/app/cli.js', '-p', 'hi'];
     const execveSpy = vi.fn(() => undefined as never);
     process.execve = execveSpy;
