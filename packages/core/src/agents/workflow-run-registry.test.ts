@@ -3157,14 +3157,25 @@ describe('workflow completion result projection', () => {
   });
 
   it.each([
-    undefined,
-    '/tmp/runtime/projects/probe/workflows/wf_reporting/journal.jsonl',
+    { isBackgrounded: false, journalPath: undefined },
+    { isBackgrounded: true, journalPath: undefined },
+    {
+      isBackgrounded: false,
+      journalPath:
+        '/tmp/runtime/projects/probe/workflows/wf_reporting/journal.jsonl',
+    },
+    {
+      isBackgrounded: true,
+      journalPath:
+        '/tmp/runtime/projects/probe/workflows/wf_reporting/journal.jsonl',
+    },
   ])(
-    'includes the absolute registered snapshot path (journal=%s)',
-    (journalPath) => {
+    'qualifies the absolute snapshot path (background=$isBackgrounded, journal=$journalPath)',
+    ({ isBackgrounded, journalPath }) => {
       const snapshotPath =
         '/tmp/runtime/projects/probe/workflows/wf_reporting.json';
       const { model } = completionFor('x'.repeat(30_000), {
+        isBackgrounded,
         snapshotPath,
         ...(journalPath ? { journalPath } : {}),
       });
@@ -3172,6 +3183,15 @@ describe('workflow completion result projection', () => {
         /<result-truncated>([\s\S]*?)<\/result-truncated>/,
       )?.[1];
       expect(notice?.includes(snapshotPath)).toBe(true);
+      expect(notice).toContain('if persistence succeeds');
+      expect(notice).toContain('plain JSON');
+      expect(notice).toContain(
+        'Error, Map, and Set contents are not preserved',
+      );
+      expect(notice).toContain(
+        'reported-failure previews may also be truncated',
+      );
+      expect(notice).not.toContain('Full result snapshot');
     },
   );
 
@@ -3215,6 +3235,7 @@ describe('workflow completion result projection', () => {
     expect(resultBody).not.toMatch(/&[^;]*$/);
     expect(model.includes('<result-truncated>')).toBe(true);
     expect(model).toContain('Inspect workflow run wf_reporting');
+    expect(model).not.toContain('for the full result');
     expect(model).not.toMatch(/wf_reporting\.json\b/);
   });
 });

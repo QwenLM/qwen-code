@@ -723,8 +723,8 @@ export class WorkflowRunRegistry {
       modelParts.push(`<result>${modelResult}</result>`);
       if (truncated) {
         const snapshotHint = entry.snapshotPath
-          ? `Full result snapshot after finalization (if persistence succeeds): ${stripAnsiAndControl(entry.snapshotPath)}.`
-          : `Inspect workflow run ${entry.runId} after it settles for the full result.`;
+          ? `Aggregate result snapshot after finalization (if persistence succeeds): ${stripAnsiAndControl(entry.snapshotPath)}. Snapshots use plain JSON; Error, Map, and Set contents are not preserved. Result and reported-failure previews may also be truncated.`
+          : `Inspect workflow run ${entry.runId} after it settles.`;
         modelParts.push(
           `<result-truncated>Preview truncated. ${escapeXml(snapshotHint)}</result-truncated>`,
         );

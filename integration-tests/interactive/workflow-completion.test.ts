@@ -264,6 +264,12 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           messages.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
         ).toBeLessThanOrEqual(25_000);
         expect(messages).toContain('<result-truncated>');
+        expect(messages).toContain(
+          'Error, Map, and Set contents are not preserved',
+        );
+        expect(messages).toContain(
+          'reported-failure previews may also be truncated',
+        );
         expect(messages).toMatch(/[/\\]workflows[/\\]+wf_[a-f0-9]+\.json/);
         expect(messages).toContain(
           '<reported-failures>Reported failed: [\\"fr\\"]</reported-failures>',
@@ -308,6 +314,9 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       }
       if (testCase.largeResult) {
         expect(followUp).toContain('<result-truncated>');
+        expect(followUp).toContain(
+          'Error, Map, and Set contents are not preserved',
+        );
         expect(followUp).toContain(
           '<reported-failures>Reported failed: [\\"fr\\"]</reported-failures>',
         );
