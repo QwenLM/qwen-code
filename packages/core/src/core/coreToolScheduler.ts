@@ -1400,19 +1400,25 @@ interface CoreToolSchedulerOptions {
    *
    * The skill-activation reminder must not announce a skill to a model that
    * cannot invoke one, and the registry cannot answer that: `SKILL` is
-   * registered unconditionally, including for subagents, while a subagent
+   * registered whenever the Config holds a SkillManager — registration is
+   * withheld only from a subagent whose tool policy left it no manager
+   * (`forSubAgent` with `getSkillManager()` null, #12424) — while a subagent
    * running an explicit `tools` list may never have it declared — nor is
    * being declared sufficient, since a fork can keep a declaration it is
    * forbidden to execute. An owner that filters either passes its own
    * predicate here.
    *
-   * It is NOT the predicate behind the startup `<available_skills>` snapshot,
-   * and the two are independent rather than ordered. The snapshot is decided
-   * before any declarations exist, so it answers from configuration; this
-   * answers from the declarations that were sent. Either can say yes where
-   * the other says no — `tools: ['*'], disallowedTools: ['skill']` announces
-   * at startup and is refused here, while a string list carrying an inline
-   * `skill` declaration is the reverse. Do not reason from one to the other.
+   * It is NOT the predicate behind the startup `<available_skills>` snapshot.
+   * The snapshot is decided before any declarations exist, so it answers
+   * from configuration, via the same declaration-level predicate
+   * (`toolConfigAllowsSkill`) the SkillManager decision uses — a
+   * `disallowedTools` entry or an explicit list without `skill` now closes
+   * both. This answers from the declarations that were sent, and the two
+   * still diverge where the prepared declaration set differs from the
+   * configuration it came from: an inline `skill` declaration is invisible
+   * to the snapshot but declared here, while a `skill` the permission layer
+   * kept out of the registry is named in the configuration yet never
+   * declared.
    *
    * Omitted, the scheduler falls back to the registry, which is correct for
    * an owner that declares whatever it registers.
