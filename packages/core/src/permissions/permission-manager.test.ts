@@ -905,19 +905,29 @@ describe('splitCompoundCommandSegments', () => {
   });
 
   it('reports the terminator across a quote the two readings disagree on', async () => {
-    // shell-semantics reads `&` as backgrounded, so the `cd` must not move the
-    // cwd the write is attributed to — `&&` must, and the merge loop is what
-    // decides which operator a boundary carries.
+    // Only the bash reading finds these operators, so they are reported with
+    // `terminatorAmbiguous` and shell-semantics keeps both cwds rather than
+    // reading `&` as backgrounded on their word alone.
     expect(
       splitCompoundCommandSegments("cd 'a\\' & echo {} > settings.json"),
     ).toEqual([
-      { command: "cd 'a\\'", terminator: '&' },
+      { command: "cd 'a\\'", terminator: '&', terminatorAmbiguous: true },
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
     expect(
       splitCompoundCommandSegments("cd 'a\\' && echo {} > settings.json"),
     ).toEqual([
-      { command: "cd 'a\\'", terminator: '&&' },
+      { command: "cd 'a\\'", terminator: '&&', terminatorAmbiguous: true },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+  });
+
+  it('leaves a terminator both readings find unambiguous', async () => {
+    // The backslash sends the split through both readings; they agree here.
+    expect(
+      splitCompoundCommandSegments('cd a\\ b & echo {} > settings.json'),
+    ).toEqual([
+      { command: 'cd a\\ b', terminator: '&' },
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });
@@ -2531,6 +2541,38 @@ describe('PermissionManager', () => {
         }),
       ).toBe('allow');
     });
+
+    // bash reads `'x\''` + `';echo '` as one word, so ` & ` backgrounds the
+    // second `cd` and the write lands in .qwen; the controls are the same
+    // command with the quoting that makes the operator plain (#12246). A
+    // `cd`'s own redirect runs in the cwd it starts from, and a one-reading
+    // boundary in front of it must not hide that write.
+    it.each([
+      [`cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`, 'deny'],
+      ['cd .qwen ; cd x & echo {} > settings.json', 'deny'],
+      ['cd .qwen ; echo {} > settings.json', 'deny'],
+      [`echo 'a\\' ; cd sub > .qwen/settings.json`, 'deny'],
+      // The split cuts through the wrapper body, so the inner `cd` is lost;
+      // the write escalates rather than resolving to /repo/settings.json.
+      [`echo 'a\\' ; bash -lc 'cd .qwen && echo {} > settings.json'`, 'ask'],
+      [`bash -lc 'cd .qwen && echo {} > settings.json'`, 'deny'],
+    ])(
+      'keeps the protected write covered across a one-reading boundary: %s',
+      async (command, expected) => {
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(cd *)', 'Bash(echo *)', 'Bash(bash *)'],
+            permissionsDeny: ['Write(.qwen/settings.json)'],
+            cwd: '/repo',
+            projectRoot: '/repo',
+          }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe(expected);
+      },
+    );
 
     it('semicolon compound: deny in second → deny', async () => {
       pm = new PermissionManager(
