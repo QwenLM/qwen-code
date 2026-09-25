@@ -193,10 +193,12 @@ describe('scripts/cli-entry.js production entry', () => {
     try {
       await import('../cli-entry.js?verbatim-cmd-relaunch');
       // First spawn is the managed-update child (exit 44), second is the
-      // relaunch through the standalone shim.
+      // relaunch through the standalone shim. The interpreter mirrors the
+      // production `process.env['ComSpec'] ?? 'cmd.exe'` so the assertion
+      // also holds on a real Windows host, where ComSpec is always set.
       expect(spawnSyncMock).toHaveBeenCalledTimes(2);
       expect(spawnSyncMock).toHaveBeenLastCalledWith(
-        'cmd.exe',
+        process.env['ComSpec'] ?? 'cmd.exe',
         ['/d', '/s', '/c', `""${launcher}""`],
         expect.objectContaining({
           stdio: 'inherit',
