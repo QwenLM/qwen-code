@@ -14,6 +14,7 @@ import { pipeline } from 'node:stream/promises';
 import type { Stats } from 'node:fs';
 import type { Response as UndiciResponse } from 'undici';
 import * as tar from 'tar';
+import semver from 'semver';
 import type { ReadEntry } from 'tar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { loadUndici } from '../utils/load-undici.js';
@@ -41,8 +42,8 @@ const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
 type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
-function normalizeVersion(version: string): string {
-  if (!SEMVER_RE.test(version)) {
+export function normalizeVersion(version: string): string {
+  if (!SEMVER_RE.test(version) || !semver.valid(version)) {
     throw new Error(`Invalid version format: ${version}`);
   }
   return version.startsWith('v') ? version : `v${version}`;
@@ -468,7 +469,11 @@ function spawnAndCapture(
  * Verifies the new installation can actually run by invoking --version.
  * Prevents replacing a working install with a broken binary.
  */
-async function smokeTest(newInstallDir: string, target: string): Promise<void> {
+async function smokeTest(
+  newInstallDir: string,
+  target: string,
+  expectedVersion: string,
+): Promise<void> {
   const resolvedInstallDir = path.resolve(newInstallDir);
   const nodeBin = target.startsWith('win')
     ? path.join(resolvedInstallDir, 'node', 'node.exe')
@@ -497,6 +502,11 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
   if (!SEMVER_RE.test(version)) {
     throw new Error(
       `Smoke test failed: unexpected version output "${version}"`,
+    );
+  }
+  if (normalizeVersion(version) !== normalizeVersion(expectedVersion)) {
+    throw new Error(
+      `Smoke test failed: expected version ${expectedVersion}, got ${version}`,
     );
   }
   debugLogger.info(`Smoke test passed: ${version}`);
@@ -1090,7 +1100,7 @@ export async function performStandaloneUpdate(
     }
 
     debugLogger.info('Running smoke test...');
-    await smokeTest(newInstallDir, target);
+    await smokeTest(newInstallDir, target, newVersion);
 
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
