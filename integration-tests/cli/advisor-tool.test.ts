@@ -97,7 +97,7 @@ function configureEnv(testDir: string, baseUrl: string): void {
   vi.stubEnv('no_proxy', noProxy);
 }
 
-async function setupRig(baseUrl: string): Promise<TestRig> {
+async function setupRig(baseUrl: string, advisorMaxUses = 0): Promise<TestRig> {
   const nextRig = new TestRig();
   await nextRig.setup('native advisor tool', {
     settings: {
@@ -119,6 +119,7 @@ async function setupRig(baseUrl: string): Promise<TestRig> {
       },
       security: { auth: { selectedType: 'openai' } },
       advisorModel: 'advisor-model',
+      advisorMaxUses,
       ui: { enableFollowupSuggestions: false },
     },
   });
@@ -168,12 +169,7 @@ describe('native Advisor tool', () => {
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['model'] === 'advisor-model') {
         return {
-          content: JSON.stringify({
-            verdict: 'The approach is sound.',
-            risks: 'None found.',
-            missingEvidence: 'None found.',
-            recommendation: 'Finish the task.',
-          }),
+          content: 'The approach is sound. Finish the task.',
         };
       }
       if (body['stream'] !== true) {
@@ -257,7 +253,7 @@ describe('native Advisor tool', () => {
       ),
     ).toBe(true);
     expect(advisorRequests).toHaveLength(1);
-    expect(toolNames(advisorRequests[0]!)).toEqual(['respond_in_schema']);
+    expect(toolNames(advisorRequests[0]!)).toEqual([]);
 
     const advisorText = requestText(advisorRequests[0]!);
     const evidenceText = messages(advisorRequests[0]!)
@@ -285,13 +281,13 @@ describe('native Advisor tool', () => {
   it('lets the executor continue after an Advisor failure', async () => {
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['model'] === 'advisor-model') {
-        return { content: 'invalid advisor output' };
+        return { errorContent: 'ADVISOR_PROVIDER_FAILURE' };
       }
       if (body['stream'] !== true) {
         return { content: '{"selected_memories":[]}' };
       }
       const text = requestText(body);
-      if (text.includes('Advisor returned invalid structured output.')) {
+      if (text.includes('ADVISOR_PROVIDER_FAILURE')) {
         return { content: 'Executor continued without Advisor.' };
       }
       return {
@@ -308,6 +304,91 @@ describe('native Advisor tool', () => {
       server.requests.filter(
         (request) => request.body['model'] === 'advisor-model',
       ),
+    ).toHaveLength(1);
+  });
+
+  it('lets an ordinary subagent consult with its own conversation', async () => {
+    server = await startFakeOpenAIServer(({ body }) => {
+      if (body['model'] === 'advisor-model')
+        return { content: 'Child advice: check the independent evidence.' };
+      if (body['stream'] !== true)
+        return { content: '{"selected_memories":[]}' };
+      const text = requestText(body);
+      if (text.includes('CHILD_FINISHED'))
+        return { content: 'PARENT_FINISHED' };
+      if (text.includes('Child advice:')) return { content: 'CHILD_FINISHED' };
+      const child = messages(body).some(
+        (m) =>
+          m['role'] === 'system' &&
+          contentText(m['content']).includes('CONSULTANT_ONLY_SYSTEM'),
+      );
+      if (child)
+        return {
+          content: 'Child orientation complete.',
+          toolCalls: [fakeToolCall('advisor', {}, 'child-consult')],
+        };
+      return {
+        content: 'Delegating.',
+        toolCalls: [
+          fakeToolCall(
+            'agent',
+            {
+              subagent_type: 'consultant',
+              run_in_background: false,
+              description: 'Independent check',
+              prompt: 'CHILD_ONLY_TASK: inspect the reasoning and finish.',
+            },
+            'launch-child',
+          ),
+        ],
+      };
+    }, fakeServerHostOptions());
+    rig = await setupRig(server.baseUrl);
+    rig.mkdir('.qwen/agents');
+    rig.createFile(
+      '.qwen/agents/consultant.md',
+      '---\nname: consultant\ndescription: Independent reasoning consultant\ntools: advisor\n---\nCONSULTANT_ONLY_SYSTEM: examine your task independently.',
+    );
+    const output = await runPrompt(
+      'PARENT_ONLY_TASK: delegate an independent check.',
+    );
+    expect(output).toContain('PARENT_FINISHED');
+    const calls = server.requests.filter(
+      (r) => r.body['model'] === 'advisor-model',
+    );
+    expect(calls).toHaveLength(1);
+    expect(toolNames(calls[0]!.body)).toEqual([]);
+    const evidence = requestText(calls[0]!.body);
+    expect(evidence).toContain('CONSULTANT_ONLY_SYSTEM');
+    expect(evidence).toContain('CHILD_ONLY_TASK');
+    expect(evidence).toContain('Child orientation complete.');
+    expect(evidence).not.toContain('PARENT_ONLY_TASK');
+  });
+
+  it('continues after the session limit without a second Advisor request', async () => {
+    server = await startFakeOpenAIServer(({ body }) => {
+      if (body['model'] === 'advisor-model')
+        return { content: 'First independent advice.' };
+      if (body['stream'] !== true)
+        return { content: '{"selected_memories":[]}' };
+      if (requestText(body).includes('usage limit reached'))
+        return { content: 'Continued after the limit.' };
+      return {
+        content: 'Consulting.',
+        toolCalls: [
+          fakeToolCall(
+            'advisor',
+            {},
+            `consult-${server?.requests.length ?? 0}`,
+          ),
+        ],
+      };
+    }, fakeServerHostOptions());
+    rig = await setupRig(server.baseUrl, 1);
+    const output = await runPrompt('Exercise the session limit.');
+    expect(output).toContain('Continued after the limit.');
+    expect(
+      server.requests.filter((r) => r.body['model'] === 'advisor-model'),
     ).toHaveLength(1);
   });
 

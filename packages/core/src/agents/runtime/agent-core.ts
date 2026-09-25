@@ -16,6 +16,7 @@
  * and how to interpret the results.
  */
 
+import { runWithAgentChat } from './agent-context.js';
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
@@ -373,6 +374,7 @@ Important Rules:
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private executionChat?: LlmChat;
   private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
@@ -824,6 +826,7 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
+    this.executionChat = chat;
     const inner = () =>
       this._runReasoningLoopInner(
         chat,
@@ -898,7 +901,10 @@ export class AgentCore {
             ...(this.taskName ? { taskName: this.taskName } : {}),
           },
           () => {
-            const runWithView = () => this.withRuntimeView(fn, inheritedView);
+            const runWithView = () =>
+              runWithAgentChat(this.executionChat, () =>
+                this.withRuntimeView(fn, inheritedView),
+              );
             // Publish this agent's effective positive allowlist and its
             // disallowedTools blocklist so a fork it launches cannot widen
             // either policy. Both helpers always re-set their field, so an

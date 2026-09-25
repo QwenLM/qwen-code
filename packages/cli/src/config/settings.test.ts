@@ -3664,9 +3664,15 @@ describe('Settings Loading and Merging', () => {
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH)
-            return JSON.stringify({ advisorModel: 'user-advisor' });
+            return JSON.stringify({
+              advisorModel: 'user-advisor',
+              advisorMaxUses: 2,
+            });
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify({ advisorModel: 'workspace-advisor' });
+            return JSON.stringify({
+              advisorModel: 'workspace-advisor',
+              advisorMaxUses: 0,
+            });
           return '{}';
         },
       );
@@ -3674,6 +3680,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
       expect(settings.merged.advisorModel).toBe('user-advisor');
+      expect(settings.merged.advisorMaxUses).toBe(2);
       expect(
         getSettingsWarnings(settings).some((warning) =>
           warning.includes('advisorModel'),

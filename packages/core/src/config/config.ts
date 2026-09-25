@@ -1448,6 +1448,7 @@ export interface ConfigParameters {
    * and "off" disable Advisor and do not fall back to the primary model.
    */
   advisorModel?: string;
+  advisorMaxUses?: number;
   /**
    * Built-in WebSearch settings. `enabled: false` disables the tool; when the
    * setting is omitted, the tool may derive a backend from the active provider
@@ -3036,6 +3037,8 @@ export class Config {
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
   private advisorModel?: string;
+  private readonly advisorMaxUses: number;
+  private advisorUsage = { calls: 0 };
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -3633,6 +3636,12 @@ export class Config {
         : undefined;
     this.fastModel = params.fastModel || undefined;
     this.advisorModel = normalizeAdvisorModel(params.advisorModel);
+    this.advisorMaxUses = params.advisorMaxUses ?? 0;
+    if (!Number.isSafeInteger(this.advisorMaxUses) || this.advisorMaxUses < 0) {
+      throw new Error(
+        'advisorMaxUses must be a non-negative integer (0 means unlimited).',
+      );
+    }
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -5503,6 +5512,7 @@ export class Config {
       logSessionEnd(this);
     }
     this.sessionId = nextSessionId;
+    if (isSessionTransition) this.advisorUsage = { calls: 0 };
     // Unconditional: startNewSession is only called on the canonical Config
     // instance (the one that already claimed via sessionEnvClaimed), so this
     // correctly updates the env var to reflect the new active session.
@@ -6113,6 +6123,24 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  getAdvisorMaxUses(): number {
+    return this.advisorMaxUses;
+  }
+
+  getAdvisorUseCount(): number {
+    return this.advisorUsage.calls;
+  }
+
+  tryConsumeAdvisorUse(): boolean {
+    if (
+      this.advisorMaxUses > 0 &&
+      this.advisorUsage.calls >= this.advisorMaxUses
+    )
+      return false;
+    this.advisorUsage.calls += 1;
+    return true;
   }
 
   getAdvisorModel(): string | undefined {
@@ -11232,14 +11260,8 @@ export class Config {
 
   private async syncAdvisorToolRegistration(
     registry: ToolRegistry,
-    options?: { forSubAgent?: boolean },
   ): Promise<void> {
-    if (
-      !this.getAdvisorModel() ||
-      this.getBareMode() ||
-      this.isSafeMode() ||
-      options?.forSubAgent
-    ) {
+    if (!this.getAdvisorModel() || this.getBareMode() || this.isSafeMode()) {
       registry.unregisterTool(ToolNames.ADVISOR);
       return;
     }
@@ -11536,7 +11558,7 @@ export class Config {
     await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
-    await this.syncAdvisorToolRegistration(registry, options);
+    await this.syncAdvisorToolRegistration(registry);
     await registerLazy(ToolNames.TOOL_CALL, async () => {
       const { ToolCallTool } = await import('../tools/tool-call.js');
       return new ToolCallTool(registry);

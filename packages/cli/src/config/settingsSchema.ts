@@ -1554,6 +1554,18 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  advisorMaxUses: {
+    type: 'integer',
+    label: 'Advisor Session Call Limit',
+    category: 'Model',
+    requiresRestart: true,
+    default: 0,
+    minimum: 0,
+    description:
+      'Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.',
+    showInDialog: true,
+  },
+
   advisorModel: {
     type: 'string',
     label: 'Advisor Model',

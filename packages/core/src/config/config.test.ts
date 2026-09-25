@@ -6978,6 +6978,45 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('shares the Advisor limit across derived configs and does not reset on toggle', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      const child = Object.create(config) as Config;
+      expect(child.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      await config.setAdvisorModel('off');
+      await config.setAdvisorModel('advisor-model');
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      expect(config.getAdvisorUseCount()).toBe(1);
+    });
+
+    it('registers configured Advisor for ordinary subagent registries', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+      });
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it.each([-1, 1.5, NaN, Infinity])(
+      'rejects invalid Advisor limit %s',
+      (advisorMaxUses) => {
+        expect(() => new Config({ ...baseParams, advisorMaxUses })).toThrow(
+          'advisorMaxUses',
+        );
+      },
+    );
+
     it('defers Advisor when tools.eager omits it', async () => {
       const config = new Config({
         ...baseParams,
