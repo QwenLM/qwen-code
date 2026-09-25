@@ -1819,12 +1819,19 @@ export class WebViewProvider {
         const canonicalWorkspaceCwd = existsSync(workspaceCwd)
           ? realpathSync.native(workspaceCwd)
           : workspaceCwd;
+        // The other opened folders become additional trusted roots so the
+        // daemon's shell guard allows mutating Git across the whole
+        // multi-root window, not just the folder this shell is bound to.
+        const additionalWorkspaces = (vscode.workspace.workspaceFolders ?? [])
+          .map((folder) => folder.uri.fsPath)
+          .filter((fsPath) => fsPath !== workspaceCwd);
         const runtime = await this.daemonProcess.start(
           resolveQwenCliEntryPath(
             this.extensionUri,
             this.context.extensionMode,
           ),
           canonicalWorkspaceCwd,
+          additionalWorkspaces,
         );
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
