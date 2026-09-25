@@ -1408,9 +1408,8 @@ describe('BackgroundAgentResumeService', () => {
           },
         });
       if (session?.eagerHideSkillUnderCodeMode) {
-        (
-          config as unknown as { getToolMode: () => unknown }
-        ).getToolMode = () => ToolMode.CodeModeOnly;
+        (config as unknown as { getToolMode: () => unknown }).getToolMode =
+          () => ToolMode.CodeModeOnly;
         (
           permissionManager as unknown as {
             getToolRegistrationStatus: (name: string) => Promise<string>;

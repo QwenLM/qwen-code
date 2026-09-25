@@ -4236,9 +4236,9 @@ bad`);
 
         const greatGrandchild = await launch({}, grandchild);
         expect(greatGrandchild.getSkillManager()).toBe(sessionManager);
-        expect(
-          greatGrandchild.getToolRegistry().getAllToolNames(),
-        ).toContain(ToolNames.SKILL);
+        expect(greatGrandchild.getToolRegistry().getAllToolNames()).toContain(
+          ToolNames.SKILL,
+        );
       });
 
       // The `exec` carve-out in toolConfigAllowsSkill only fires when the
@@ -4254,9 +4254,7 @@ bad`);
         vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
           sessionManager,
         );
-        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
-          manager,
-        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(manager);
         vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
           mockToolRegistry,
         );
@@ -4282,9 +4280,7 @@ bad`);
         vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
           sessionManager,
         );
-        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
-          manager,
-        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(manager);
         vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
           mockToolRegistry,
         );
@@ -4335,9 +4331,7 @@ bad`);
         vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
           sessionManager,
         );
-        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
-          manager,
-        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(manager);
         vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
           mockToolRegistry,
         );
@@ -4369,9 +4363,7 @@ bad`);
         vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
           sessionManager,
         );
-        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
-          manager,
-        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(manager);
         vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
           mockToolRegistry,
         );
