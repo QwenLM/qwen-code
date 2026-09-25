@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ChannelFactory } from '@qwen-code/acp-bridge';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { BridgeExecutionSelection } from '@qwen-code/acp-bridge/bridgeOptions';
 import { isScheduledTaskRunSource } from '@qwen-code/acp-bridge/sessionSource';
 import {
@@ -195,6 +196,16 @@ async function selectRestoreEngine(input: {
   });
   const state = await service.readExecutionEngine(input.sessionId);
   if (!state) {
+    // A Session that was never created has no transcript in either state.
+    // Load answers that with 404, never an ownership failure: the Hosted
+    // Harness connector probes load before create and creates only on an
+    // explicit not-found.
+    if (
+      (await service.getMaintainableSessionLocation(input.sessionId)) ===
+      undefined
+    ) {
+      throw new SessionNotFoundError(input.sessionId);
+    }
     throw new SessionExecutionEngineError(
       input.sessionId,
       'ownership was not verified',

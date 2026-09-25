@@ -9,6 +9,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { BridgeExecutionSelection } from '@qwen-code/acp-bridge/bridgeOptions';
 import {
   channelFactoryForwardsChildEnv,
@@ -469,10 +470,40 @@ describe('daemon execution engines', () => {
     await expect(pair.select(restore('load'))).rejects.toBeInstanceOf(
       SessionExecutionEngineError,
     );
+  });
 
-    await expect(
-      pair.select(restore('load', '550e8400-e29b-41d4-a716-446655440299')),
-    ).rejects.toBeInstanceOf(SessionExecutionEngineError);
+  it('answers a Session that was never created as not found', async () => {
+    // The Hosted Harness connector probes load before create and creates
+    // only on 404, so a missing Session must never read as an ownership
+    // failure.
+    const missing = '550e8400-e29b-41d4-a716-446655440299';
+    for (const pair of [engines(), engines(true, true)]) {
+      await expect(
+        pair.select(restore('load', missing)),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await expect(
+        pair.select(restore('resume', missing)),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+    }
+  });
+
+  it('keeps a Session that exists only in the archive an ownership failure', async () => {
+    await writeTranscript([
+      record('owner', {
+        type: 'system',
+        subtype: 'session_execution_engine',
+        message: undefined,
+        systemPayload: { version: 1, engine: 'managed' },
+      }),
+      record('user-1'),
+    ]);
+    const service = new SessionService(workspace, { runtimeBaseDir });
+    const archived = await service.archiveSessions([sessionId]);
+    expect(archived.archived).toEqual([sessionId]);
+
+    const restoring = engines().select(restore('load'));
+    await expect(restoring).rejects.toBeInstanceOf(SessionExecutionEngineError);
+    await expect(restoring).rejects.toThrow(/ownership was not verified/);
   });
 
   it('does not construct a host while selecting', async () => {
