@@ -110,7 +110,8 @@ export function getNestedProperty(
 
 /**
  * Get the effective value for a setting, considering inheritance from higher scopes
- * Always returns a value (never undefined) - falls back to default if not set anywhere
+ * Returns the value if set, falling back to the default from the schema.
+ * Returns undefined when the key is unknown to the schema or has no default.
  */
 export function getEffectiveValue(
   key: string,
@@ -286,6 +287,14 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   readonly section: keyof Settings;
   readonly key: string;
 }>;
+
+/**
+ * The root-level half of the restriction above: top-level settings that have
+ * no section to name in the `{ section, key }` shape. Its consumers — the
+ * Workspace strip, the "ignored" warning, and the daemon route that refuses
+ * the write — read it beside `WORKSPACE_RESTRICTED_SETTINGS`.
+ */
+export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = ['advisorModel'] as const;
 
 /**
  * Settings a Workspace may only make stricter.

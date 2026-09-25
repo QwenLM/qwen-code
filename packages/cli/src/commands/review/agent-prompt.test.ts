@@ -47,6 +47,7 @@ import {
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import yargs from 'yargs';
 import {
   DEADLINE_ENV,
   RESERVE_ENV,
@@ -8693,6 +8694,43 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       expect(wasDeliveredVerbatim(printed, recorded.get(keys[0])!)).toBe(true);
       expect(readFileSync(briefPath(plan, keys[0]), 'utf8')).toContain(
         '**You write nothing.**',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reaches the fix-audit build through the CLI boundary, --hunks included', async () => {
+    // Every other case here calls the handler with a hand-built argv, so the
+    // handler's own `argv['hunks']` read is pinned, but the yargs OPTION is
+    // not: declared with the wrong type (a boolean turns the path into
+    // `true`), the build refuses and Step 6B reports "Fix audit: not run" on
+    // every run while the handler-level cases stay green. Only real argv
+    // through the command definition reaches that.
+    const { plan, findings, hunks, dir } = setup({});
+    try {
+      await yargs([
+        'agent-prompt',
+        '--plan',
+        plan,
+        '--role',
+        'fix-audit',
+        '--findings',
+        findings,
+        '--hunks',
+        hunks,
+      ])
+        .command(agentPromptCommand)
+        .exitProcess(false)
+        .parseAsync();
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
+        printed,
+      );
+      expect(m).not.toBeNull();
+      expect(readFileSync(m![1], 'utf8')).toContain(
+        '+  if (hops < MAX_SUBAGENT_DEPTH_LIMIT) {',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
