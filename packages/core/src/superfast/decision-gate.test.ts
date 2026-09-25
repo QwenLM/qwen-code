@@ -5,6 +5,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { loadUndici } from '../utils/runtimeFetchOptions.js';
 import {
   DEFAULT_GATE_SETTINGS,
   classifyTurn,
@@ -249,5 +252,91 @@ describe('probeBackend', () => {
   it('returns false when the endpoint is unreachable', async () => {
     fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
     await expect(probeBackend(settingsWith())).resolves.toBe(false);
+  });
+});
+
+describe('querySystemOne proxy bypass (real network, no fetch stub)', () => {
+  const PROXY_ENV = [
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+    'NO_PROXY',
+    'no_proxy',
+  ] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+  let server: http.Server | undefined;
+  let endpoint = '';
+
+  beforeEach(async () => {
+    for (const key of PROXY_ENV) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    // A real loopback backend that answers the health probe.
+    server = http.createServer((req, res) => {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ answers: { ok: { noul: 0.9 } } }));
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server!.listen(0, '127.0.0.1', () => resolve()),
+    );
+    const port = (server!.address() as AddressInfo).port;
+    endpoint = `http://127.0.0.1:${port}/v1/systemone`;
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = undefined;
+    }
+    for (const key of PROXY_ENV) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+    const { setGlobalDispatcher } = await loadUndici();
+    setGlobalDispatcher(new (await loadUndici()).Agent());
+  });
+
+  it('reaches a loopback backend even when a system proxy is installed', async () => {
+    // Simulate a machine that exports a proxy and has NO_PROXY unset: the
+    // process-wide proxy dispatcher would tunnel the loopback request through the
+    // proxy (which is not running here) and the gate would never reach the local
+    // backend. The gate must bypass the proxy for loopback.
+    process.env['HTTPS_PROXY'] = 'http://127.0.0.1:1';
+    process.env['HTTP_PROXY'] = 'http://127.0.0.1:1';
+    const { EnvHttpProxyAgent, setGlobalDispatcher } = await loadUndici();
+    setGlobalDispatcher(
+      new EnvHttpProxyAgent({
+        httpProxy: 'http://127.0.0.1:1',
+        httpsProxy: 'http://127.0.0.1:1',
+      }),
+    );
+
+    await expect(probeBackend(settingsWith({ endpoint }))).resolves.toBe(true);
+  });
+
+  it('a raw global fetch through the same proxy would NOT reach loopback (control)', async () => {
+    // Control arm proving the bug is real: without the gate's bypass, the global
+    // proxy dispatcher cannot reach the loopback backend.
+    process.env['HTTPS_PROXY'] = 'http://127.0.0.1:1';
+    const { EnvHttpProxyAgent, setGlobalDispatcher } = await loadUndici();
+    setGlobalDispatcher(
+      new EnvHttpProxyAgent({
+        httpProxy: 'http://127.0.0.1:1',
+        httpsProxy: 'http://127.0.0.1:1',
+      }),
+    );
+
+    await expect(
+      fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'x', state: 'health', questions: {} }),
+      }),
+    ).rejects.toBeTruthy();
   });
 });
