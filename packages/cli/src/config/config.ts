@@ -104,6 +104,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -901,6 +902,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    .command(batchCommand)
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
@@ -944,16 +946,20 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
+      result._[0] === 'batch' ||
       result._[0] === 'update' ||
       result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
-    // execution and exit. Returning here would let the main interactive
-    // flow run, which would prompt for stdin input despite the user
-    // having already invoked a subcommand.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
+    // execution and exit. Returning here would let the main interactive flow
+    // run, which would prompt for stdin input despite the user having already
+    // invoked a subcommand. `batch` must be here for a second reason: the main
+    // flow below relaunches the process for a larger heap, and a second parse
+    // would run the subcommand handler again — submitting (and billing) a
+    // duplicate batch job whose id the user never sees.
     process.exit(process.exitCode ?? 0);
   }
 
