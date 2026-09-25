@@ -653,7 +653,27 @@ async function waitForSettled(
   const sleep = deps.sleep ?? realSleep;
   let delay = 10_000;
   for (;;) {
-    const job = await api.getBatch(deps.ep, batchId);
+    let job: BatchJob;
+    try {
+      job = await api.getBatch(deps.ep, batchId);
+    } catch (error) {
+      // Hours of polling will meet a 429/5xx or a dropped connection; only a
+      // definite client error (bad key, unknown batch) ends the wait early.
+      const status = (error as BatchApiError | undefined)?.status;
+      const definite =
+        typeof status === 'number' &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 408 &&
+        status !== 429;
+      if (definite || Date.now() >= deadline) throw error;
+      deps.err(
+        `[batch] warning: polling ${batchId} failed (${error instanceof Error ? error.message : String(error)}); retrying`,
+      );
+      await sleep(Math.min(delay, deadline - Date.now()));
+      delay = Math.min(delay * 2, 60_000);
+      continue;
+    }
     if (SETTLED_STATUSES.has(job.status)) return job;
     if (Date.now() >= deadline) {
       throw new Error(

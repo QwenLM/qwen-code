@@ -264,9 +264,12 @@ export function parseCustomId(
 export function batchHomeDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return (
-    env['QWEN_BATCH_HOME'] ?? path.join(Storage.getGlobalQwenDir(), 'batch')
-  );
+  // An empty value (`QWEN_BATCH_HOME=` in an env file) means unset, not
+  // "the current directory".
+  const configured = env['QWEN_BATCH_HOME']?.trim();
+  return configured
+    ? path.resolve(configured)
+    : path.join(Storage.getGlobalQwenDir(), 'batch');
 }
 
 /** Task records hold full copies of the sources and the generated outputs. */

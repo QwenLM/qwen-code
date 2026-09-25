@@ -125,11 +125,12 @@ export function freezeRequest(
   })) {
     if (value !== undefined && value !== null) params[key] = value;
   }
+  // Realtime applies `reasoning: false` after merging extra_body (pipeline
+  // disable path), so a preset's `extra_body.enable_thinking: true` does not
+  // keep thinking on there; it must not here either.
   if (
     config?.reasoning === false &&
     !config.thinkingMandatory &&
-    params['enable_thinking'] === undefined &&
-    params['reasoning_effort'] === undefined &&
     !setThinking(params, model, false)
   ) {
     notes.push(

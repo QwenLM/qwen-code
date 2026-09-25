@@ -799,6 +799,56 @@ describe('collectTask', () => {
     // capped at the remaining 5s instead of overshooting the deadline.
     expect(h.sleeps).toEqual([10_000, 5_000]);
   });
+
+  /** Settle `batch-1` on the third poll, refusing the second with `status`. */
+  const pollsWithOneFailure = (h: Harness, status: number) => {
+    const job = h.jobs.get('batch-1');
+    if (!job) throw new Error('expected batch-1');
+    let polls = 0;
+    h.api.getBatch.mockImplementation(async () => {
+      polls += 1;
+      if (polls === 2) {
+        throw Object.assign(new Error(`HTTP ${status}`), { status });
+      }
+      if (polls >= 3) {
+        job.status = 'completed';
+        job.output_file_id = 'file-out-1';
+        h.files.set(
+          'file-out-1',
+          `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+        );
+      }
+      return job;
+    });
+  };
+
+  it.each([503, 429, 408])(
+    'keeps waiting through a transient HTTP %i while polling a status',
+    async (status) => {
+      const h = (harness = setup());
+      await runPlan(h.deps, h.planPath);
+      pollsWithOneFailure(h, status);
+      // A wait can run for hours; one blip must not strand the batch.
+      await collectTask(h.deps, taskIdOf(h), { wait: true });
+      expect(h.err.join('\n')).toMatch(/warning: polling batch-1 failed/);
+      expect(
+        fs.readFileSync(path.join(h.root, 'docs', 'en', 'a.md'), 'utf8'),
+      ).toBe('# A\n\nAlpha.');
+    },
+  );
+
+  it('stops waiting at once on a definite client error', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    h.api.getBatch.mockRejectedValue(
+      Object.assign(new Error('HTTP 401'), { status: 401 }),
+    );
+    await expect(
+      collectTask(h.deps, taskIdOf(h), { wait: true }),
+    ).rejects.toThrow(/HTTP 401/);
+    // Retrying cannot fix a bad key, so the --timeout budget is not burned.
+    expect(h.sleeps).toEqual([]);
+  });
 });
 
 describe('retryTask', () => {

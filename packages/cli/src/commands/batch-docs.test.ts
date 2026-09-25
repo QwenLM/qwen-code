@@ -258,6 +258,23 @@ describe('freezeRequest', () => {
     ).toBe(false);
   });
 
+  it('lets a disabled reasoning beat a preset that enables thinking', () => {
+    // The ModelStudio presets carry `extra_body.enable_thinking: true`, and
+    // realtime applies `reasoning: false` only after merging extra_body — so
+    // there the switch ends up off. Freezing the preset verbatim instead
+    // bills thinking tokens the user turned off.
+    const preset = {
+      extra_body: { enable_thinking: true },
+      reasoning: false as const,
+    };
+    expect(freezeRequest(preset, 'qwen-plus').params['enable_thinking']).toBe(
+      false,
+    );
+    const tiered = freezeRequest(preset, 'qwen3.8-max').params;
+    expect(tiered['reasoning_effort']).toBe('none');
+    expect(tiered).not.toHaveProperty('enable_thinking');
+  });
+
   it('never disables thinking on a thinking-mandatory model', () => {
     const frozen = freezeRequest({
       reasoning: false,

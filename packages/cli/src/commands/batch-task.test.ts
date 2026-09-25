@@ -479,4 +479,14 @@ describe('batchHomeDir', () => {
     );
     expect(batchHomeDir({ QWEN_BATCH_HOME: '/elsewhere' })).toBe('/elsewhere');
   });
+
+  it('treats an empty override as unset, not as the current directory', () => {
+    // `QWEN_BATCH_HOME=` in an env file is an empty string, not a path. Taken
+    // literally it put the task store in the project root, where its
+    // `.gitignore` of `*` hid the user's own files from a commit.
+    const dflt = batchHomeDir({});
+    expect(batchHomeDir({ QWEN_BATCH_HOME: '' })).toBe(dflt);
+    expect(batchHomeDir({ QWEN_BATCH_HOME: '   ' })).toBe(dflt);
+    expect(path.isAbsolute(batchHomeDir({ QWEN_BATCH_HOME: '' }))).toBe(true);
+  });
 });
