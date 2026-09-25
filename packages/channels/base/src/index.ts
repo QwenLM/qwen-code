@@ -82,6 +82,7 @@ export type {
   ChannelLoopStatus,
   ChannelLoopStoreOptions,
 } from './ChannelLoopStore.js';
+export { resolvePrivatePolicy } from './private-policy.js';
 export { PairingStore } from './PairingStore.js';
 export type {
   CreatePairingRequestResult,
@@ -157,6 +158,7 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrivatePolicy,
   GroupSenderPolicy,
   ObservedChannelIdentity,
   ObservedChannelContactObservation,
@@ -172,3 +174,5 @@ export type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
+export { matchMessageRoute } from './message-routes.js';
+export type { MatchedMessageRoute } from './message-routes.js';

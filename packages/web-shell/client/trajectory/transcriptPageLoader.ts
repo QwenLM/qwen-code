@@ -19,6 +19,7 @@ export interface TrajectoryTranscriptClient {
     opts: {
       direction?: 'backward';
       limit?: number;
+      cursor?: string;
     },
   ): Promise<TrajectoryPageResult>;
 }
@@ -34,8 +35,9 @@ const LOADERS = new WeakMap<
  * Identity matters: the loader is the window hook's effect dependency, so a
  * fresh function on every render would refetch the newest page on every render.
  *
- * Reads ask for the newest page, which is the one the reader wants — the newest
- * turn is the one they just watched run. It deliberately goes through the raw
+ * Reads walk backward from the newest page, which is the one the reader wants —
+ * the newest turn is the one they just watched run — following the cursor each
+ * page hands back. It deliberately goes through the raw
  * client rather than
  * `DaemonSessionClient.getTranscriptPage`, which hydrates attachments and would
  * fetch image bytes this table never shows, and it never asks for the
@@ -53,9 +55,12 @@ export function createTrajectoryPageLoader(
   }
   const existing = bySession.get(sessionId);
   if (existing) return existing;
-  const loader: TrajectoryPageLoader = ({ limit }) =>
+  // A cursor already carries its direction, and the daemon refuses one sent
+  // alongside `direction` as an invalid combination — so it is one or the
+  // other, never both.
+  const loader: TrajectoryPageLoader = ({ limit, cursor }) =>
     client.getSessionTranscriptPage(sessionId, {
-      direction: 'backward',
+      ...(cursor !== undefined ? { cursor } : { direction: 'backward' }),
       limit,
     });
   bySession.set(sessionId, loader);

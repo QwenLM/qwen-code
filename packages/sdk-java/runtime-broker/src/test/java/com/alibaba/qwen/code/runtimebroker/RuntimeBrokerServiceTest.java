@@ -1,9 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
@@ -12,6 +15,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -21,7 +25,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerServiceTest {
@@ -239,6 +245,28 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationAcceptsUnknownRuntimeStatus() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.transport.executeResult = new CompletableFuture<>();
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(
+                    Map.of("state", "unknown"));
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+
+            ToolExecutionRecord cancelling = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId()));
+
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                    cancelling.getState());
+        }
+    }
+
+    @Test
     void ambiguousTransportFailureMarksExecutionUnknown() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             fixture.transport.executeResult = CompletableFuture.failedFuture(
@@ -305,18 +333,17 @@ class RuntimeBrokerServiceTest {
                             "idempotency",
                             reference("runtime", "digest")));
             long initialVersion = created.getVersion();
+            Supplier<ToolExecutionRecord> current =
+                    () -> fixture.executionRepository.findByExecutionCallId(
+                            created.getExecutionCallId());
+            Duration step = Duration.ofMillis(40);
 
-            await(() -> fixture.executionRepository
-                    .findByExecutionCallId(created.getExecutionCallId())
-                    .getVersion() > initialVersion);
-            long firstRenewalVersion = fixture.executionRepository
-                    .findByExecutionCallId(created.getExecutionCallId())
-                    .getVersion();
-            clock.advance(Duration.ofMillis(40));
-            await(() -> fixture.executionRepository
-                    .findByExecutionCallId(created.getExecutionCallId())
-                    .getVersion() > firstRenewalVersion);
-            clock.advance(Duration.ofMillis(40));
+            await(() -> current.get().getVersion() > initialVersion,
+                    () -> "dispatch lease was never renewed");
+            advanceAndAwaitRenewal(clock, step,
+                    () -> current.get().getDispatchLeaseUntil(),
+                    "dispatch lease");
+            clock.advance(step);
             result.complete(Map.of("executionStatus", "success"));
 
             assertEquals(ToolExecutionRecord.State.SETTLED,
@@ -338,14 +365,15 @@ class RuntimeBrokerServiceTest {
                     fixture.service.warm("harness");
             RuntimeProvisionRequest request = new RuntimeProvisionRequest(
                     WORKSPACE_SCOPE, null);
-            await(() -> fixture.bindingRepository.findActive(request)
-                    .getVersion() > 1);
-            long firstRenewalVersion = fixture.bindingRepository
-                    .findActive(request).getVersion();
-            clock.advance(Duration.ofMillis(40));
-            await(() -> fixture.bindingRepository.findActive(request)
-                    .getVersion() > firstRenewalVersion);
-            clock.advance(Duration.ofMillis(40));
+            Supplier<RuntimeBindingRecord> current =
+                    () -> fixture.bindingRepository.findActive(request);
+            Duration step = Duration.ofMillis(40);
+            await(() -> current.get().getVersion() > 1,
+                    () -> "operation lease was never renewed");
+            advanceAndAwaitRenewal(clock, step,
+                    () -> current.get().getOperationLeaseUntil(),
+                    "operation lease");
+            clock.advance(step);
             lease.complete(lease(1));
 
             assertEquals(RuntimeBindingRecord.State.READY,
@@ -632,6 +660,698 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationAfterALapseStillReachesTheRunningInvocation() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofHours(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+
+            // Renewal first ticks after a third of the lease in wall time,
+            // so the lease lapses before renewal notices while this process
+            // still serves the invocation.
+            clock.advance(Duration.ofHours(2));
+            join(fixture.service.cancelExecution("harness", "runtime",
+                    created.getExecutionCallId()));
+
+            assertEquals(1, fixture.transport.cancelCalls.get());
+            result.complete(Map.of("executionStatus", "success"));
+        }
+    }
+
+    @Test
+    void cancellationOfAFencedRunningInvocationStillReachesTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofMillis(30))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(
+                    Map.of("state", "unknown"));
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+            clock.advance(Duration.ofMinutes(1));
+            awaitExecution(fixture.executionRepository,
+                    created.getExecutionCallId(),
+                    ToolExecutionRecord.State.UNKNOWN);
+
+            ToolExecutionRecord cancelled = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId()));
+
+            assertEquals(1, fixture.transport.cancelCalls.get());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+            result.complete(Map.of("executionStatus", "success"));
+
+            ToolExecutionRecord repeated = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId()));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    repeated.getState());
+            assertEquals(1, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void lapsedCancellationThatNothingHereRunsIsFenced() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofMinutes(1))) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = reference("runtime", "digest");
+            fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("manual", "key",
+                            session.getBindingId(),
+                            session.getRuntimeGeneration(), "harness",
+                            "runtime", "prompt", "call", "digest",
+                            reference));
+            ToolExecutionRecord claimed = fixture.executionRepository
+                    .claimDispatch("manual", "broker",
+                            Duration.ofMinutes(1));
+            ToolExecutionRecord executing = fixture.executionRepository
+                    .compareAndSet(claimed, claimed.withState(
+                            ToolExecutionRecord.State.EXECUTING, false),
+                            "broker", claimed.getDispatchGeneration());
+            fixture.executionRepository.requestCancel("manual",
+                    executing.getVersion());
+
+            clock.advance(Duration.ofMinutes(2));
+            ToolExecutionRecord cancelled = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            "manual"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+            assertEquals(0, fixture.transport.executeCalls.get());
+
+            ToolExecutionRecord repeated = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            "manual"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    repeated.getState());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void cancellationDuringAFenceDoesNotReachTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
+                new FakeProvisioner(), transport,
+                new InMemoryRuntimeBindingRepository(clock,
+                        () -> "binding"),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
+                clock, () -> "execution")) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            executions.findOrCreate(ToolExecutionRecord.prepared("manual",
+                    "key", session.getBindingId(),
+                    session.getRuntimeGeneration(), "harness", "runtime",
+                    "prompt", "call", "digest",
+                    reference("runtime", "digest")));
+            ToolExecutionRecord claimed = executions.claimDispatch("manual",
+                    "broker", Duration.ofMinutes(1));
+            ToolExecutionRecord executing = executions.compareAndSet(
+                    claimed, claimed.withState(
+                            ToolExecutionRecord.State.EXECUTING, false),
+                    "broker", claimed.getDispatchGeneration());
+            executions.requestCancel("manual", executing.getVersion());
+            clock.advance(Duration.ofMinutes(2));
+            AtomicReference<ToolExecutionRecord> nested =
+                    new AtomicReference<>();
+            executions.beforeClaim = () -> nested.set(join(
+                    service.cancelExecution("harness", "runtime",
+                            "manual")));
+
+            ToolExecutionRecord cancelled = join(service.cancelExecution(
+                    "harness", "runtime", "manual"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    nested.get().getState());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void lapsedInvocationThatCompletesIsFencedAsUnknown() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofHours(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+
+            clock.advance(Duration.ofHours(2));
+            result.complete(Map.of("executionStatus", "success"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.executionRepository.findByExecutionCallId(
+                            created.getExecutionCallId()).getState());
+        }
+    }
+
+    @Test
+    void lapsedInvocationThatFailsIsFencedAsUnknown() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofHours(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+
+            clock.advance(Duration.ofHours(2));
+            result.completeExceptionally(
+                    new IllegalStateException("connection lost"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.executionRepository.findByExecutionCallId(
+                            created.getExecutionCallId()).getState());
+        }
+    }
+
+    @Test
+    void lapsedCancelledInvocationThatCompletesIsFencedAsUnknown() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofHours(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+            clock.advance(Duration.ofHours(2));
+            ToolExecutionRecord cancelled = join(
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                    cancelled.getState());
+
+            result.complete(Map.of("executionStatus", "cancelled"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.executionRepository.findByExecutionCallId(
+                            created.getExecutionCallId()).getState());
+            assertEquals(1, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void settledCancellationJudgesTheLapseByTheRepositoryClock() {
+        MutableClock serviceClock = new MutableClock(START);
+        MutableClock repositoryClock = new MutableClock(START);
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository(repositoryClock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        CompletableFuture<Map<String, Object>> acknowledgement =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        transport.cancelResult = acknowledgement;
+        try (RuntimeBrokerService service = brokerService(serviceClock,
+                executions, transport)) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+
+            // Only the repository sees the lease lapse; this broker's clock
+            // lags behind it.
+            repositoryClock.advance(Duration.ofHours(2));
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    join(cancelled).getState());
+            result.complete(Map.of("executionStatus", "cancelled"));
+        }
+    }
+
+    @Test
+    void settlementConflictJudgesLivenessByTheRepositoryClock() {
+        MutableClock serviceClock = new MutableClock(START);
+        MutableClock repositoryClock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(repositoryClock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        CompletableFuture<Map<String, Object>> acknowledgement =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        transport.cancelResult = acknowledgement;
+        try (RuntimeBrokerService service = brokerService(serviceClock,
+                executions, transport)) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+
+            // This broker's clock runs ahead, but the repository still
+            // holds the claim live, so the conflict is real.
+            serviceClock.advance(Duration.ofHours(2));
+            executions.rejectWrites = true;
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            assertEquals("runtime_execution_state_conflict",
+                    failure(cancelled).getCode());
+            executions.rejectWrites = false;
+            result.complete(Map.of("executionStatus", "cancelled"));
+        }
+    }
+
+    @Test
+    void lapsedInvocationThatCompletesUnderClockSkewIsFencedAsUnknown() {
+        MutableClock serviceClock = new MutableClock(START);
+        MutableClock repositoryClock = new MutableClock(START);
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository(repositoryClock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        try (RuntimeBrokerService service = brokerService(serviceClock,
+                executions, transport)) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+
+            // Only the repository sees the lease lapse.
+            repositoryClock.advance(Duration.ofHours(2));
+            result.complete(Map.of("executionStatus", "success"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    executions.findByExecutionCallId(
+                            created.getExecutionCallId()).getState());
+        }
+    }
+
+    @Test
+    void lapsedCancellationJudgesTheLapseByTheRepositoryClock() {
+        MutableClock serviceClock = new MutableClock(START);
+        MutableClock repositoryClock = new MutableClock(START);
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository(repositoryClock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = brokerService(serviceClock,
+                executions, transport)) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            ToolExecutionRecord executing = seedExecuting(executions,
+                    session, "other", Duration.ofMinutes(1));
+            executions.requestCancel("manual", executing.getVersion());
+
+            // This broker's clock lags; the repository sees the lapse.
+            repositoryClock.advance(Duration.ofHours(2));
+            ToolExecutionRecord cancelled = join(service.cancelExecution(
+                    "harness", "runtime", "manual"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void cancellationOfALiveClaimJudgesLivenessByTheRepositoryClock() {
+        MutableClock serviceClock = new MutableClock(START);
+        MutableClock repositoryClock = new MutableClock(START);
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository(repositoryClock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = brokerService(serviceClock,
+                executions, transport)) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            seedExecuting(executions, session, "other", Duration.ofHours(1));
+
+            // This broker's clock runs ahead, but another broker still holds
+            // the claim live, so the stop has to reach the Runtime.
+            serviceClock.advance(Duration.ofHours(2));
+            ToolExecutionRecord cancelled = join(service.cancelExecution(
+                    "harness", "runtime", "manual"));
+
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                    cancelled.getState());
+            assertEquals(1, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void retriedExecutionJudgesTheLapseByTheRepositoryClock() {
+        MutableClock serviceClock = new MutableClock(START);
+        MutableClock repositoryClock = new MutableClock(START);
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository(repositoryClock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = brokerService(serviceClock,
+                executions, transport)) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            seedExecuting(executions, session, "other",
+                    Duration.ofMinutes(1));
+
+            // This broker's clock lags; the repository sees the lapse.
+            repositoryClock.advance(Duration.ofHours(2));
+            ToolExecutionRecord retried = join(service.createExecution(
+                    "harness", "runtime", "key",
+                    reference("runtime", "digest")));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    retried.getState());
+            assertEquals(0, transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void cancellationDuringARetryFenceDoesNotReachTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = brokerService(clock,
+                executions, transport)) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            seedExecuting(executions, session, "other",
+                    Duration.ofMinutes(1));
+            clock.advance(Duration.ofMinutes(2));
+            AtomicReference<ToolExecutionRecord> nested =
+                    new AtomicReference<>();
+            // A retry fencing through beginDispatch holds a dispatches
+            // entry for a record nothing here is running.
+            executions.beforeClaim = () -> nested.set(join(
+                    service.cancelExecution("harness", "runtime",
+                            "manual")));
+
+            ToolExecutionRecord retried = join(service.createExecution(
+                    "harness", "runtime", "key",
+                    reference("runtime", "digest")));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    nested.get().getState());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    retried.getState());
+            assertEquals(0, transport.cancelCalls.get());
+            assertEquals(0, transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void cancellationOfARecordSettledDuringItsFenceSkipsTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = brokerService(clock,
+                executions, transport)) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            seedExecuting(executions, session, "other", Duration.ofHours(1));
+            // The claim holder settles the record after the cancel request
+            // is recorded but before the fence claims it.
+            executions.beforeClaim = () -> {
+                ToolExecutionRecord current = executions
+                        .findByExecutionCallId("manual");
+                executions.compareAndSet(current, current.withResult(
+                        Map.of("executionStatus", "success"),
+                        current.getLastSequence(), clock.instant()),
+                        "other", current.getDispatchGeneration());
+            };
+
+            ToolExecutionRecord cancelled = join(service.cancelExecution(
+                    "harness", "runtime", "manual"));
+
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    cancelled.getState());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void cancellationReportsAFailedFenceAsRetryable() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = brokerService(clock,
+                executions, transport)) {
+            RuntimeSessionRecord session = join(service.acquire("harness",
+                    "runtime", "bootstrap"));
+            seedExecuting(executions, session, "other", Duration.ofHours(1));
+            executions.beforeClaim = () -> {
+                throw new IllegalStateException("repository unavailable");
+            };
+
+            RuntimeBrokerException error = failure(service.cancelExecution(
+                    "harness", "runtime", "manual"));
+
+            assertEquals("runtime_execution_cancel_failed", error.getCode());
+            assertTrue(error.isRetryable());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void claimThatLapsesBeforeExecutionIsLeftForRetry() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        try (RuntimeBrokerService service = brokerService(clock,
+                executions, transport)) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            executions.afterClaim = () -> clock.advance(Duration.ofHours(2));
+
+            join(service.createExecution("harness", "runtime",
+                    "idempotency", reference("runtime", "digest")));
+
+            // Nothing ran, so the lapsed DISPATCHING claim stays as it was
+            // for a retry instead of being claimed again with no dispatcher.
+            ToolExecutionRecord stalled = executions
+                    .findByExecutionCallId("execution");
+            assertEquals(ToolExecutionRecord.State.DISPATCHING,
+                    stalled.getState());
+            assertEquals(1, stalled.getDispatchGeneration());
+            assertEquals(0, transport.executeCalls.get());
+
+            ToolExecutionRecord retried = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    retried.getState());
+            assertEquals(1, transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void settlementConflictResolvedByAnotherWriterIsNotReported() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        CompletableFuture<Map<String, Object>> acknowledgement =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        transport.cancelResult = acknowledgement;
+        try (RuntimeBrokerService service = brokerService(clock,
+                executions, transport)) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+            executions.rejectWrites = true;
+            // After the cancel's settle gives up, the invocation's own
+            // completion settles the record before the fence claims it.
+            executions.beforeClaim = () -> {
+                executions.rejectWrites = false;
+                ToolExecutionRecord current = executions
+                        .findByExecutionCallId(created.getExecutionCallId());
+                executions.compareAndSet(current, current.withResult(
+                        Map.of("executionStatus", "success"),
+                        current.getLastSequence(), clock.instant()),
+                        "broker", current.getDispatchGeneration());
+            };
+
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            ToolExecutionRecord settled = join(cancelled);
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    settled.getState());
+            assertEquals("success", settled.getExecutionStatus());
+            result.complete(Map.of("executionStatus", "success"));
+        }
+    }
+
+    @Test
+    void settlementConflictUnderALiveClaimIsReported() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        CompletableFuture<Map<String, Object>> acknowledgement =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        transport.cancelResult = acknowledgement;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
+                new FakeProvisioner(), transport,
+                new InMemoryRuntimeBindingRepository(clock,
+                        () -> "binding"),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker", Duration.ofMinutes(1), Duration.ofHours(1),
+                clock, () -> "execution")) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+
+            // The claim is still live, so a settle that cannot land is a
+            // real conflict rather than a lapse to fence.
+            executions.rejectWrites = true;
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            assertEquals("runtime_execution_state_conflict",
+                    failure(cancelled).getCode());
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                    executions.findByExecutionCallId(
+                            created.getExecutionCallId()).getState());
+            executions.rejectWrites = false;
+            result.complete(Map.of("executionStatus", "cancelled"));
+        }
+    }
+
+    @Test
+    void cancellationOfAFinishedInvocationDoesNotReachTheRuntime() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        CompletableFuture<Map<String, Object>> result =
+                new CompletableFuture<>();
+        transport.executeResult = result;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
+                new FakeProvisioner(), transport,
+                new InMemoryRuntimeBindingRepository(clock,
+                        () -> "binding"),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker", Duration.ofMinutes(1), Duration.ofHours(1),
+                clock, () -> "execution")) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord created = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            AtomicReference<ToolExecutionRecord> nested =
+                    new AtomicReference<>();
+            executions.afterUnknown = () -> nested.set(join(
+                    service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId())));
+
+            // The failed invocation is written as UNKNOWN; a cancel that
+            // observes that write must not treat it as still running.
+            result.completeExceptionally(
+                    new IllegalStateException("connection lost"));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    nested.get().getState());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void settledCancellationAfterALapseIsFencedInsteadOfConflicting() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofHours(1))) {
+            CompletableFuture<Map<String, Object>> result =
+                    new CompletableFuture<>();
+            CompletableFuture<Map<String, Object>> acknowledgement =
+                    new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            fixture.transport.cancelResult = acknowledgement;
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord created = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency",
+                            reference("runtime", "digest")));
+            CompletionStage<ToolExecutionRecord> cancelled =
+                    fixture.service.cancelExecution("harness", "runtime",
+                            created.getExecutionCallId());
+
+            clock.advance(Duration.ofHours(2));
+            acknowledgement.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "cancelled")));
+
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    join(cancelled).getState());
+            result.complete(Map.of("executionStatus", "cancelled"));
+        }
+    }
+
+    @Test
     void invalidExecutionInputsUseTheCodedErrorChannel() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
@@ -908,11 +1628,116 @@ class RuntimeBrokerServiceTest {
                 "token-" + index, "lease-" + index, index);
     }
 
+    private static ToolExecutionRecord unknownExecution(Fixture fixture) {
+        fixture.transport.executeResult = CompletableFuture.failedFuture(
+                new IllegalStateException("connection lost"));
+        join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+        ToolExecutionRecord unknown = join(fixture.service.createExecution(
+                "harness", "runtime", "idempotency",
+                reference("runtime", "digest")));
+        assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+        return unknown;
+    }
+
+    private static void seedUnknown(ToolExecutionRepository executions,
+            String executionCallId, String bindingId, long generation) {
+        seedUnknown(executions, executionCallId, bindingId, generation, 0);
+    }
+
+    private static void seedUnknown(ToolExecutionRepository executions,
+            String executionCallId, String bindingId, long generation,
+            long lastSequence) {
+        executions.findOrCreate(ToolExecutionRecord.prepared(executionCallId,
+                executionCallId + "-key", bindingId, generation, "harness",
+                "runtime", "prompt", executionCallId, "digest",
+                Map.of("sessionId", "runtime", "promptId", "prompt",
+                        "callId", executionCallId, "argsDigest", "digest")));
+        ToolExecutionRecord claimed = executions.claimDispatch(
+                executionCallId, "other-broker", Duration.ofMinutes(1));
+        ToolExecutionRecord executing = executions.compareAndSet(claimed,
+                claimed.withState(ToolExecutionRecord.State.EXECUTING, false),
+                "other-broker", claimed.getDispatchGeneration());
+        ToolExecutionRecord unknown = new ToolExecutionRecord(
+                executing.getExecutionCallId(),
+                executing.getIdempotencyKey(), executing.getBindingId(),
+                executing.getRuntimeGeneration(),
+                executing.getHarnessSessionId(),
+                executing.getRuntimeSessionId(), executing.getTurnId(),
+                executing.getToolCallId(), executing.getRequestDigest(),
+                executing.getReference(), ToolExecutionRecord.State.UNKNOWN,
+                null, null, lastSequence, false,
+                executing.getDispatchOwner(),
+                executing.getDispatchLeaseUntil(),
+                executing.getDispatchGeneration(), executing.getVersion(),
+                null);
+        assertEquals(lastSequence, executions.compareAndSet(executing,
+                unknown, "other-broker", executing.getDispatchGeneration())
+                .getLastSequence());
+    }
+
+    private static void seedExecuting(ToolExecutionRepository executions,
+            String executionCallId, String bindingId, long generation) {
+        executions.findOrCreate(ToolExecutionRecord.prepared(executionCallId,
+                executionCallId + "-key", bindingId, generation, "harness",
+                "runtime-settled", "prompt", executionCallId, "digest",
+                Map.of("sessionId", "runtime-settled", "promptId", "prompt",
+                        "callId", executionCallId, "argsDigest", "digest")));
+        ToolExecutionRecord claimed = executions.claimDispatch(
+                executionCallId, "other-broker", Duration.ofMinutes(1));
+        executions.compareAndSet(claimed, claimed.withState(
+                ToolExecutionRecord.State.EXECUTING, false), "other-broker",
+                claimed.getDispatchGeneration());
+    }
+
+    private static RuntimeBrokerService restartedService(Fixture fixture) {
+        return new RuntimeBrokerService(fixture.resolver,
+                fixture.provisioner, fixture.transport,
+                fixture.bindingRepository, fixture.sessionRepository,
+                fixture.executionRepository, "broker-restarted",
+                Duration.ofMinutes(1), Duration.ofMinutes(1));
+    }
+
+    private static void assertUnknownAndNotReplayed(Fixture fixture,
+            ToolExecutionRecord unknown) {
+        ToolExecutionRecord current = fixture.executionRepository
+                .findByExecutionCallId(unknown.getExecutionCallId());
+        assertEquals(ToolExecutionRecord.State.UNKNOWN, current.getState());
+        assertEquals(unknown.getDispatchGeneration(),
+                current.getDispatchGeneration());
+        assertEquals(1, fixture.transport.executeCalls.get());
+    }
+
     private static Map<String, Object> reference(String runtimeSessionId,
             String digest) {
         return Map.of("sessionId", runtimeSessionId,
                 "promptId", "prompt", "callId", "call",
                 "argsDigest", digest);
+    }
+
+    private static ToolExecutionRecord seedExecuting(
+            ToolExecutionRepository executions, RuntimeSessionRecord session,
+            String owner, Duration leaseDuration) {
+        executions.findOrCreate(ToolExecutionRecord.prepared("manual", "key",
+                session.getBindingId(), session.getRuntimeGeneration(),
+                "harness", "runtime", "prompt", "call", "digest",
+                reference("runtime", "digest")));
+        ToolExecutionRecord claimed = executions.claimDispatch("manual",
+                owner, leaseDuration);
+        return executions.compareAndSet(claimed, claimed.withState(
+                ToolExecutionRecord.State.EXECUTING, false), owner,
+                claimed.getDispatchGeneration());
+    }
+
+    private static RuntimeBrokerService brokerService(Clock serviceClock,
+            ToolExecutionRepository executions, FakeTransport transport) {
+        return new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
+                new FakeProvisioner(), transport,
+                new InMemoryRuntimeBindingRepository(serviceClock,
+                        () -> "binding"),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker", Duration.ofMinutes(1), Duration.ofHours(1),
+                serviceClock, () -> "execution");
     }
 
     private static ToolExecutionRecord awaitExecution(
@@ -926,11 +1751,39 @@ class RuntimeBrokerServiceTest {
         return repository.findByExecutionCallId(executionCallId);
     }
 
+    /**
+     * Advances the clock by one step and waits for a renewal made at the
+     * advanced time. A renewal stamps the lease from the current clock, so
+     * while the lease was last stamped at the current reading, every renewal
+     * before the advance repeats the current end and only a renewal made
+     * after the advance moves the end exactly one step later. Call it only
+     * while the lease was last stamped at the current reading, such as before
+     * the clock first moves. Keep the step shorter than the lease, or the
+     * claim lapses at the advance and cannot be renewed. Waiting for a newer
+     * record version instead could be satisfied by a renewal that landed just
+     * before the advance.
+     */
+    private static void advanceAndAwaitRenewal(MutableClock clock,
+            Duration step, Supplier<Instant> leaseEnd, String leaseName) {
+        Instant renewedEnd = leaseEnd.get().plus(step);
+        clock.advance(step);
+        await(() -> leaseEnd.get().equals(renewedEnd),
+                () -> leaseName + " ends at " + leaseEnd.get() + ", not "
+                        + renewedEnd);
+    }
+
     private static void await(BooleanSupplier condition) {
+        await(condition, null);
+    }
+
+    private static void await(BooleanSupplier condition,
+            Supplier<String> detail) {
         long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
         while (!condition.getAsBoolean()) {
             if (System.nanoTime() >= deadline) {
-                throw new AssertionError("condition was not met in time");
+                throw new AssertionError(detail == null
+                        ? "condition was not met in time"
+                        : "condition was not met in time: " + detail.get());
             }
             try {
                 Thread.sleep(5);
@@ -940,6 +1793,1018 @@ class RuntimeBrokerServiceTest {
                         exception);
             }
         }
+    }
+
+    @Test
+    void failedReattestationRetiresTheBindingAndReprovisions() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeBindingRecord ready = join(fixture.service.warm(
+                    "harness"));
+            assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
+
+            fixture.provisioner.confirmResult = CompletableFuture
+                    .failedFuture(new RuntimeBrokerException(503,
+                            "runtime_provision_failed",
+                            "Managed Runtime process is not alive.", true));
+
+            RuntimeBrokerException error = failure(
+                    fixture.service.warm("harness"));
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    fixture.bindingRepository.findById(ready.getBindingId())
+                            .getState());
+
+            fixture.provisioner.confirmResult =
+                    CompletableFuture.completedFuture(null);
+            RuntimeBindingRecord again = join(fixture.service.warm(
+                    "harness"));
+            assertEquals(RuntimeBindingRecord.State.READY, again.getState());
+            assertEquals(2, fixture.provisioner.calls.get());
+            assertNotEquals(ready.getLease().getRuntimeInstanceId(),
+                    again.getLease().getRuntimeInstanceId());
+            assertEquals(1, fixture.provisioner.releaseCalls.get());
+            assertEquals(ready.getLease().getRuntimeInstanceId(),
+                    fixture.provisioner.releasedLease
+                            .getRuntimeInstanceId());
+        }
+    }
+
+    @Test
+    void deadLeaseReleasesTheSessionWithoutCallingTransport() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.provisioner.usable = false;
+
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(1, fixture.provisioner.releaseCalls.get());
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE,
+                            "runtime").getState());
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    fixture.bindingRepository.findById("binding-1")
+                            .getState());
+
+            fixture.provisioner.usable = true;
+            assertEquals("runtime_session_conflict",
+                    failure(fixture.service.acquire("harness", "runtime",
+                            "bootstrap")).getCode());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    join(fixture.service.acquire("harness", "runtime-2",
+                            "bootstrap")).getState());
+        }
+    }
+
+    @Test
+    void deadLeaseReleaseStaysBusyWhileAnExecutionIsUnsettled() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.transport.executeResult = CompletableFuture.failedFuture(
+                    new IllegalStateException("connection lost"));
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            join(fixture.service.createExecution("harness", "runtime",
+                    "idempotency", reference("runtime", "digest")));
+            awaitExecution(fixture.executionRepository, "execution-1",
+                    ToolExecutionRecord.State.UNKNOWN);
+            fixture.provisioner.usable = false;
+
+            RuntimeBrokerException busy = failure(
+                    fixture.service.release("harness", "runtime"));
+
+            assertEquals("runtime_session_busy", busy.getCode());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE,
+                            "runtime").getState());
+        }
+    }
+
+    @Test
+    void deadLeaseSkipsDispatchAndRetiresTheBinding() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.provisioner.usable = false;
+
+            join(fixture.service.createExecution("harness", "runtime",
+                    "idempotency", reference("runtime", "digest")));
+
+            assertEquals(0, fixture.transport.executeCalls.get());
+            awaitExecution(fixture.executionRepository, "execution-1",
+                    ToolExecutionRecord.State.UNKNOWN);
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    fixture.bindingRepository.findById("binding-1")
+                            .getState());
+        }
+    }
+
+    @Test
+    void settledLookupResolvesUnknownWithTheRuntimeResult() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(Map.of("state", "settled", "result",
+                            Map.of("executionStatus", "error",
+                                    "detail", "exit 1")));
+
+            ExecutionReconciliation reconciled = join(
+                    fixture.service.reconcileExecution("harness",
+                            "runtime", unknown.getExecutionCallId()));
+
+            assertEquals(ExecutionReconciliation.Outcome.RESOLVED,
+                    reconciled.getOutcome());
+            assertEquals("settled", reconciled.getRuntimeState());
+            ToolExecutionRecord settled = reconciled.getRecord();
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    settled.getState());
+            assertEquals("error", settled.getExecutionStatus());
+            assertEquals("exit 1", settled.getResult().get("detail"));
+            assertEquals(settled.getVersion(), fixture.executionRepository
+                    .findByExecutionCallId(unknown.getExecutionCallId())
+                    .getVersion());
+            assertEquals(unknown.getReference(),
+                    fixture.transport.lastReference);
+            assertEquals(unknown.getLastSequence(),
+                    fixture.transport.lastAfterSequence);
+            assertEquals(fixture.provisioner.issuedLease,
+                    fixture.transport.lastLease);
+            assertEquals("harness", fixture.transport.lastSession
+                    .getHarnessSessionId());
+            assertEquals("runtime", fixture.transport.lastSession
+                    .getRuntimeSessionId());
+            assertEquals(1, fixture.transport.statusCalls.get());
+            assertEquals(1, fixture.transport.executeCalls.get());
+            assertTrue(join(fixture.service.release("harness",
+                    "runtime")));
+        }
+    }
+
+    @Test
+    void nonTerminalLookupKeepsTheExecutionUnknown() {
+        for (String state : List.of("prepared", "executing",
+                "cancel_requested", "unknown")) {
+            try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+                ToolExecutionRecord unknown = unknownExecution(fixture);
+                fixture.transport.statusResult = CompletableFuture
+                        .completedFuture(Map.of("state", state));
+
+                ExecutionReconciliation reconciled = join(
+                        fixture.service.reconcileExecution("harness",
+                                "runtime", unknown.getExecutionCallId()));
+
+                assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                        reconciled.getOutcome(), state);
+                assertEquals(state, reconciled.getRuntimeState());
+                assertEquals(unknown.getVersion(),
+                        reconciled.getRecord().getVersion(), state);
+                assertUnknownAndNotReplayed(fixture, unknown);
+                assertEquals("runtime_session_busy", failure(
+                        fixture.service.release("harness", "runtime"))
+                        .getCode(), state);
+            }
+        }
+    }
+
+    @Test
+    void invalidLookupResponseKeepsTheExecutionUnknown() {
+        Map<String, Object> resultOnPending = new HashMap<>();
+        resultOnPending.put("state", "executing");
+        resultOnPending.put("result", Map.of("executionStatus", "success"));
+        Map<String, Object> nullField = new HashMap<>();
+        nullField.put("state", "unknown");
+        nullField.put(null, "value");
+        List<Map<String, Object>> responses = List.of(
+                nullField,
+                Map.of(),
+                Map.of("state", 1),
+                Map.of("state", "done"),
+                Map.of("state", "unknown", "reason", "missing"),
+                Map.of("state", "settled"),
+                Map.of("state", "settled", "result", "success"),
+                Map.of("state", "settled", "result", Map.of()),
+                Map.of("state", "settled", "result",
+                        Map.of("executionStatus", "not_executed")),
+                resultOnPending);
+        for (Map<String, Object> response : responses) {
+            try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+                ToolExecutionRecord unknown = unknownExecution(fixture);
+                fixture.transport.statusResult =
+                        CompletableFuture.completedFuture(response);
+
+                RuntimeBrokerException error = failure(
+                        fixture.service.reconcileExecution("harness",
+                                "runtime", unknown.getExecutionCallId()));
+
+                assertEquals("runtime_execution_status_invalid",
+                        error.getCode(), response.toString());
+                assertEquals(502, error.getStatusCode());
+                assertFalse(error.isRetryable());
+                assertUnknownAndNotReplayed(fixture, unknown);
+            }
+        }
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.statusResult =
+                    CompletableFuture.completedFuture(null);
+
+            assertEquals("runtime_execution_status_invalid", failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())).getCode());
+            assertUnknownAndNotReplayed(fixture, unknown);
+        }
+    }
+
+    @Test
+    void lookupFailureKeepsTransportClassificationElseRetries() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.statusResult = CompletableFuture.failedFuture(
+                    new IllegalStateException("connection reset"));
+
+            RuntimeBrokerException lost = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+            assertEquals("runtime_execution_reconcile_failed",
+                    lost.getCode());
+            assertTrue(lost.isRetryable());
+            assertUnknownAndNotReplayed(fixture, unknown);
+
+            fixture.transport.statusResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(503,
+                            "managed_runtime_unavailable", "unavailable",
+                            true));
+            RuntimeBrokerException unavailable = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+            assertEquals("managed_runtime_unavailable",
+                    unavailable.getCode());
+            assertTrue(unavailable.isRetryable());
+
+            for (int status : new int[] {404, 405, 409}) {
+                fixture.transport.statusResult =
+                        CompletableFuture.failedFuture(
+                                new RuntimeBrokerException(status,
+                                        "managed_runtime_incompatible",
+                                        "incompatible", false));
+                RuntimeBrokerException fatal = failure(
+                        fixture.service.reconcileExecution("harness",
+                                "runtime", unknown.getExecutionCallId()));
+                assertEquals(status, fatal.getStatusCode());
+                assertFalse(fatal.isRetryable());
+            }
+
+            fixture.transport.statusError = new IllegalStateException(
+                    "thrown before a stage");
+            assertEquals("runtime_execution_reconcile_failed", failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())).getCode());
+            assertUnknownAndNotReplayed(fixture, unknown);
+            assertEquals(6, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void transportWithoutLookupFailsClosed() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.defaultStatus = true;
+
+            RuntimeBrokerException error = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+
+            assertEquals("runtime_execution_status_unsupported",
+                    error.getCode());
+            assertFalse(error.isRetryable());
+            assertUnknownAndNotReplayed(fixture, unknown);
+        }
+    }
+
+    @Test
+    void executionThatIsNotUnknownIsNeverLookedUp() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord settled = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency", reference("runtime", "digest")));
+            assertTrue(settled.isSettled());
+
+            ExecutionReconciliation reconciled = join(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            settled.getExecutionCallId()));
+
+            assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                    reconciled.getOutcome());
+            assertNull(reconciled.getRuntimeState());
+            assertEquals(settled.getVersion(),
+                    reconciled.getRecord().getVersion());
+            assertEquals(0, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void onlyTheOriginalRuntimeGenerationIsAsked() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord own = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            RuntimeSessionRecord other = join(fixture.service.acquire(
+                    "harness-b", "runtime-b", "bootstrap"));
+            seedUnknown(fixture.executionRepository, "other-binding",
+                    other.getBindingId(), other.getRuntimeGeneration());
+            seedUnknown(fixture.executionRepository, "missing-generation",
+                    own.getBindingId(), own.getRuntimeGeneration() + 1);
+
+            RuntimeBrokerException elsewhere = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            "other-binding"));
+            assertEquals("runtime_execution_conflict", elsewhere.getCode());
+            assertFalse(elsewhere.isRetryable());
+            RuntimeBrokerException gone = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            "missing-generation"));
+            assertEquals("runtime_execution_evidence_unavailable",
+                    gone.getCode());
+            assertFalse(gone.isRetryable());
+            assertEquals(0, fixture.transport.statusCalls.get());
+            assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void deadRuntimeStopsPollingWithoutALookup() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.provisioner.usable = false;
+
+            RuntimeBrokerException first = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+            assertEquals("runtime_execution_evidence_unavailable",
+                    first.getCode());
+            assertFalse(first.isRetryable());
+            assertEquals(RuntimeBindingRecord.State.FAILED,
+                    fixture.bindingRepository.findById("binding-1")
+                            .getState());
+            fixture.provisioner.usable = true;
+            int releases = fixture.provisioner.releaseCalls.get();
+            assertEquals("runtime_execution_evidence_unavailable", failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())).getCode());
+
+            fixture.provisioner.usable = false;
+            assertEquals("runtime_execution_evidence_unavailable", failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())).getCode());
+            // A retired binding is not released again on every poll.
+            assertEquals(releases, fixture.provisioner.releaseCalls.get());
+            assertEquals(0, fixture.transport.statusCalls.get());
+            assertUnknownAndNotReplayed(fixture, unknown);
+        }
+    }
+
+    @Test
+    void sessionNotAcquiredInThisProcessRequiresReconciliation() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            join(fixture.service.acquire("harness", "runtime-settled",
+                    "bootstrap"));
+            fixture.transport.executeResult = CompletableFuture
+                    .completedFuture(Map.of("executionStatus", "success"));
+            ToolExecutionRecord settled = join(
+                    fixture.service.createExecution("harness",
+                            "runtime-settled", "settled-key",
+                            reference("runtime-settled", "digest")));
+            assertTrue(settled.isSettled());
+            RuntimeSessionRecord settledSession = fixture.sessionRepository
+                    .findById(WORKSPACE_SCOPE, "runtime-settled");
+            seedExecuting(fixture.executionRepository, "executing",
+                    settledSession.getBindingId(),
+                    settledSession.getRuntimeGeneration());
+            try (RuntimeBrokerService restarted = restartedService(fixture)) {
+                assertEquals(ExecutionReconciliation.Outcome.IN_FLIGHT,
+                        join(restarted.reconcileExecution("harness",
+                                "runtime-settled", "executing"))
+                                .getOutcome());
+                assertEquals("runtime_reconciliation_required", failure(
+                        restarted.release("harness", "runtime")).getCode());
+                fixture.resolver.result = CompletableFuture.failedFuture(
+                        new IllegalStateException("resolver down"));
+                assertEquals("runtime_scope_resolution_failed", failure(
+                        restarted.reconcileExecution("harness", "runtime",
+                                unknown.getExecutionCallId())).getCode());
+                fixture.resolver.result =
+                        CompletableFuture.completedFuture(SESSION_SCOPE);
+                assertEquals("runtime_session_not_found", failure(
+                        restarted.reconcileExecution("harness", "runtime",
+                                unknown.getExecutionCallId())).getCode());
+                fixture.resolver.result =
+                        CompletableFuture.completedFuture(WORKSPACE_SCOPE);
+                assertEquals("runtime_reconciliation_required", failure(
+                        restarted.reconcileExecution("harness", "runtime",
+                                unknown.getExecutionCallId())).getCode());
+                assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                        join(restarted.reconcileExecution("harness",
+                                "runtime-settled",
+                                settled.getExecutionCallId())).getOutcome());
+                assertEquals("runtime_execution_conflict", failure(
+                        restarted.reconcileExecution("other-harness",
+                                "runtime", unknown.getExecutionCallId()))
+                        .getCode());
+                assertEquals("runtime_execution_conflict", failure(
+                        restarted.reconcileExecution("harness", "missing",
+                                unknown.getExecutionCallId())).getCode());
+                assertEquals("runtime_execution_conflict", failure(
+                        restarted.reconcileExecution("harness",
+                                "runtime-settled",
+                                unknown.getExecutionCallId())).getCode());
+            }
+            RuntimeBindingRecord ready = fixture.bindingRepository
+                    .findById("binding-1");
+            fixture.bindingRepository.compareAndSet(ready, ready.withState(
+                    RuntimeBindingRecord.State.FAILED, null, START));
+            try (RuntimeBrokerService restarted = restartedService(fixture)) {
+                assertEquals("runtime_execution_evidence_unavailable",
+                        failure(restarted.reconcileExecution("harness",
+                                "runtime", unknown.getExecutionCallId()))
+                                .getCode());
+            }
+            assertEquals(0, fixture.transport.statusCalls.get());
+            // One failed call for the UNKNOWN record, one for the settled one.
+            assertEquals(2, fixture.transport.executeCalls.get());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.executionRepository.findByExecutionCallId(
+                            unknown.getExecutionCallId()).getState());
+        }
+    }
+
+    @Test
+    void pollAfterSettlementAndReleaseEndsWithNotUnknown() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(Map.of("state", "settled", "result",
+                            Map.of("executionStatus", "success")));
+            join(fixture.service.reconcileExecution("harness", "runtime",
+                    unknown.getExecutionCallId()));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+
+            ExecutionReconciliation late = join(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+
+            assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                    late.getOutcome());
+            assertEquals("success", late.getRecord().getExecutionStatus());
+            assertEquals(1, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void sessionThatIsNoLongerReadyIsNotAsked() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.executeResult = CompletableFuture
+                    .completedFuture(Map.of("executionStatus", "success"));
+            ToolExecutionRecord settled = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "settled-key", Map.of("sessionId", "runtime",
+                                    "promptId", "prompt", "callId",
+                                    "settled-call", "argsDigest",
+                                    "digest")));
+            assertTrue(settled.isSettled());
+            RuntimeSessionRecord ready = fixture.sessionRepository.findById(
+                    WORKSPACE_SCOPE, "runtime");
+            fixture.sessionRepository.compareAndSet(ready, ready.withState(
+                    RuntimeSessionRecord.State.RELEASING, START));
+
+            assertEquals("runtime_session_not_ready", failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())).getCode());
+            assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                    join(fixture.service.reconcileExecution("harness",
+                            "runtime", settled.getExecutionCallId()))
+                            .getOutcome());
+            assertEquals(0, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void drainingBindingCanStillAnswer() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            RuntimeBindingRecord ready = fixture.bindingRepository
+                    .findById("binding-1");
+            RuntimeBindingRecord claimed = fixture.bindingRepository
+                    .claimOperation("binding-1", "broker",
+                            Duration.ofMinutes(1));
+            assertEquals(RuntimeBindingRecord.State.DRAINING,
+                    fixture.bindingRepository.compareAndSet(claimed,
+                            claimed.withState(
+                                    RuntimeBindingRecord.State.DRAINING,
+                                    ready.getLease(), START)).getState());
+
+            assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                    join(fixture.service.reconcileExecution("harness",
+                            "runtime", unknown.getExecutionCallId()))
+                            .getOutcome());
+            assertEquals(1, fixture.transport.statusCalls.get());
+            assertUnknownAndNotReplayed(fixture, unknown);
+        }
+    }
+
+    @Test
+    void hungLookupTimesOutAndFreesTheSlot() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE,
+                new MutableClock(START), Duration.ofMillis(200),
+                Duration.ofMinutes(1))) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            CompletableFuture<Map<String, Object>> hung =
+                    new CompletableFuture<>();
+            fixture.transport.statusResult = hung;
+
+            // Bounded here too, so a missing service timeout fails the test
+            // instead of hanging it.
+            RuntimeBrokerException timedOut = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())
+                            .toCompletableFuture()
+                            .orTimeout(5, TimeUnit.SECONDS));
+            assertEquals("runtime_execution_reconcile_failed",
+                    timedOut.getCode());
+            assertTrue(timedOut.isRetryable());
+            // An answer after the timeout is dropped; the next poll asks.
+            hung.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "error")));
+            assertUnknownAndNotReplayed(fixture, unknown);
+
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(Map.of("state", "settled", "result",
+                            Map.of("executionStatus", "success")));
+            assertEquals(ExecutionReconciliation.Outcome.RESOLVED,
+                    join(fixture.service.reconcileExecution("harness",
+                            "runtime", unknown.getExecutionCallId()))
+                            .getOutcome());
+            assertEquals(2, fixture.transport.statusCalls.get());
+            assertEquals("success", fixture.executionRepository
+                    .findByExecutionCallId(unknown.getExecutionCallId())
+                    .getExecutionStatus());
+        }
+    }
+
+    @Test
+    void closingTheServiceAbandonsAnInFlightLookup() {
+        Fixture fixture = new Fixture(WORKSPACE_SCOPE);
+        ToolExecutionRecord unknown = unknownExecution(fixture);
+        CompletableFuture<Map<String, Object>> status =
+                new CompletableFuture<>();
+        fixture.transport.statusResult = status;
+        CompletableFuture<ExecutionReconciliation> lookup =
+                fixture.service.reconcileExecution("harness", "runtime",
+                        unknown.getExecutionCallId()).toCompletableFuture();
+
+        fixture.close();
+
+        assertEquals("runtime_execution_reconcile_failed",
+                failure(lookup.orTimeout(5, TimeUnit.SECONDS)).getCode());
+        assertUnknownAndNotReplayed(fixture, unknown);
+        assertThrows(IllegalStateException.class,
+                () -> fixture.service.reconcileExecution("harness",
+                        "runtime", unknown.getExecutionCallId()));
+        // A Runtime answer that still arrives is evidence all the same.
+        status.complete(Map.of("state", "settled", "result",
+                Map.of("executionStatus", "success")));
+        assertEquals(ToolExecutionRecord.State.SETTLED,
+                fixture.executionRepository.findByExecutionCallId(
+                        unknown.getExecutionCallId()).getState());
+    }
+
+    @Test
+    void runtimeNotStartedAnswerIsTheRuntimesOwnEvidence() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(Map.of("state", "settled", "result",
+                            Map.of("executionStatus", "not_started")));
+
+            ExecutionReconciliation reconciled = join(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+
+            assertEquals(ExecutionReconciliation.Outcome.RESOLVED,
+                    reconciled.getOutcome());
+            assertEquals("not_started",
+                    reconciled.getRecord().getExecutionStatus());
+            assertEquals(1, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void recordSettledElsewhereDuringALookupIsNotOverwritten() {
+        for (String state : List.of("settled", "executing")) {
+            try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+                ToolExecutionRecord unknown = unknownExecution(fixture);
+                CompletableFuture<Map<String, Object>> status =
+                        new CompletableFuture<>();
+                fixture.transport.statusResult = status;
+                CompletionStage<ExecutionReconciliation> lookup =
+                        fixture.service.reconcileExecution("harness",
+                                "runtime", unknown.getExecutionCallId());
+
+                fixture.executionRepository.resolveUnknown(unknown,
+                        Map.of("executionStatus", "success"), START);
+                status.complete("settled".equals(state)
+                        ? Map.of("state", state, "result",
+                                Map.of("executionStatus", "error"))
+                        : Map.of("state", state));
+
+                ExecutionReconciliation reconciled = join(lookup);
+                assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                        reconciled.getOutcome(), state);
+                assertEquals("success",
+                        reconciled.getRecord().getExecutionStatus(), state);
+                assertEquals(state, reconciled.getRuntimeState());
+                assertEquals(1, fixture.transport.executeCalls.get());
+            }
+        }
+    }
+
+    @Test
+    void executionStillWithItsDispatchIsReportedInFlight() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.transport.executeResult = new CompletableFuture<>();
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            ToolExecutionRecord executing = join(
+                    fixture.service.createExecution("harness", "runtime",
+                            "idempotency", reference("runtime", "digest")));
+
+            ExecutionReconciliation reconciled = join(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            executing.getExecutionCallId()));
+
+            assertEquals(ExecutionReconciliation.Outcome.IN_FLIGHT,
+                    reconciled.getOutcome());
+            assertEquals(ToolExecutionRecord.State.EXECUTING,
+                    reconciled.getRecord().getState());
+            assertEquals(0, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void lookupCarriesTheRecordedSequence() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            seedUnknown(fixture.executionRepository, "sequenced",
+                    session.getBindingId(), session.getRuntimeGeneration(),
+                    7);
+
+            assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                    join(fixture.service.reconcileExecution("harness",
+                            "runtime", "sequenced")).getOutcome());
+            assertEquals(7, fixture.transport.lastAfterSequence);
+            assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void missingBindingRowCannotAnswer() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            seedUnknown(fixture.executionRepository, "orphan",
+                    "binding-missing", 1);
+
+            RuntimeBrokerException error = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            "orphan"));
+
+            assertEquals("runtime_execution_evidence_unavailable",
+                    error.getCode());
+            assertFalse(error.isRetryable());
+            assertEquals(0, fixture.transport.statusCalls.get());
+            assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void sameSessionIdHeldByAnotherHarnessIsNotARoute() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            try (RuntimeBrokerService restarted = restartedService(fixture)) {
+                // Another scope may reuse the Runtime Session id.
+                fixture.resolver.result =
+                        CompletableFuture.completedFuture(SESSION_SCOPE);
+                join(restarted.acquire("harness-b", "runtime", "bootstrap"));
+                RuntimeSessionRecord other = fixture.sessionRepository
+                        .findById(SESSION_SCOPE, "runtime");
+                fixture.sessionRepository.compareAndSet(other,
+                        other.withState(RuntimeSessionRecord.State.RELEASING,
+                                START));
+                fixture.resolver.result =
+                        CompletableFuture.completedFuture(WORKSPACE_SCOPE);
+
+                RuntimeBrokerException error = failure(
+                        restarted.reconcileExecution("harness", "runtime",
+                                unknown.getExecutionCallId()));
+
+                assertEquals("runtime_reconciliation_required",
+                        error.getCode());
+                assertTrue(error.isRetryable());
+            }
+            assertEquals(0, fixture.transport.statusCalls.get());
+            assertUnknownAndNotReplayed(fixture, unknown);
+        }
+    }
+
+    @Test
+    void sessionStillBeingAcquiredIsNotWaitedOn() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.transport.acquireResult = new CompletableFuture<>();
+            CompletionStage<RuntimeSessionRecord> acquiring =
+                    fixture.service.acquire("harness", "runtime",
+                            "bootstrap");
+            RuntimeBindingRecord binding = fixture.bindingRepository
+                    .findById("binding-1");
+            seedUnknown(fixture.executionRepository, "pending-session",
+                    binding.getBindingId(), binding.getGeneration());
+
+            RuntimeBrokerException error = assertTimeoutPreemptively(
+                    Duration.ofSeconds(5), () -> failure(
+                            fixture.service.reconcileExecution("harness",
+                                    "runtime", "pending-session")));
+
+            assertEquals("runtime_reconciliation_required",
+                    error.getCode());
+            assertFalse(acquiring.toCompletableFuture().isDone());
+            assertEquals(0, fixture.transport.statusCalls.get());
+            assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void leaseRetiredInThisProcessIsNeverAsked() {
+        MutableClock clock = new MutableClock(START);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
+                Duration.ofMinutes(1))) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            // Another owner holds the binding, so retiring the dead lease
+            // here drops the local route but leaves the row READY.
+            clock.advance(Duration.ofMinutes(2));
+            assertEquals("other-broker", fixture.bindingRepository
+                    .claimOperation("binding-1", "other-broker",
+                            Duration.ofMinutes(10))
+                    .getOperationOwner());
+            fixture.provisioner.usable = false;
+            failure(fixture.service.control("harness", "runtime",
+                    Map.of("kind", "manifest")));
+            fixture.provisioner.usable = true;
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    fixture.bindingRepository.findById("binding-1")
+                            .getState());
+
+            RuntimeBrokerException error = failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+
+            // This process released that worker, so it cannot answer even
+            // though the lease still reports usable and the row is READY.
+            assertEquals("runtime_execution_evidence_unavailable",
+                    error.getCode());
+            assertFalse(error.isRetryable());
+            fixture.provisioner.usable = false;
+            int releases = fixture.provisioner.releaseCalls.get();
+            for (int poll = 0; poll < 3; poll++) {
+                assertEquals("runtime_execution_evidence_unavailable",
+                        failure(fixture.service.reconcileExecution("harness",
+                                "runtime", unknown.getExecutionCallId()))
+                                .getCode());
+            }
+            // The worker was released once, when the lease was retired.
+            assertEquals(releases, fixture.provisioner.releaseCalls.get());
+            assertEquals(0, fixture.transport.statusCalls.get());
+            assertUnknownAndNotReplayed(fixture, unknown);
+        }
+    }
+
+    @Test
+    void transportStageThatThrowsDoesNotHoldTheLookupSlot() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            fixture.transport.statusResult =
+                    new CompletableFuture<Map<String, Object>>() {
+                        @Override
+                        public CompletableFuture<Map<String, Object>>
+                                whenComplete(BiConsumer<
+                                        ? super Map<String, Object>,
+                                        ? super Throwable> action) {
+                            throw new UnsupportedOperationException();
+                        }
+                    };
+
+            assertEquals("runtime_execution_reconcile_failed", failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())
+                            .toCompletableFuture()
+                            .orTimeout(5, TimeUnit.SECONDS)).getCode());
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(Map.of("state", "unknown"));
+            assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())
+                            .toCompletableFuture()
+                            .orTimeout(5, TimeUnit.SECONDS).join()
+                            .getOutcome());
+            assertEquals(2, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void repositoryFailuresAreRetryableReconcileFailures() {
+        MutableClock clock = new MutableClock(START);
+        HookedExecutionRepository executions =
+                new HookedExecutionRepository(clock);
+        FakeTransport transport = new FakeTransport();
+        transport.executeResult = CompletableFuture.failedFuture(
+                new IllegalStateException("connection lost"));
+        try (RuntimeBrokerService service = brokerService(clock, executions,
+                transport)) {
+            join(service.acquire("harness", "runtime", "bootstrap"));
+            ToolExecutionRecord unknown = join(service.createExecution(
+                    "harness", "runtime", "idempotency",
+                    reference("runtime", "digest")));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    unknown.getState());
+            transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result",
+                            Map.of("executionStatus", "success")));
+
+            executions.rejectResolve = true;
+            RuntimeBrokerException exhausted = failure(
+                    service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+            assertEquals("runtime_execution_reconcile_failed",
+                    exhausted.getCode());
+            assertTrue(exhausted.isRetryable());
+
+            executions.rejectResolve = false;
+            executions.failResolve = true;
+            RuntimeBrokerException unwritable = failure(
+                    service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+            assertEquals("runtime_execution_reconcile_failed",
+                    unwritable.getCode());
+            assertTrue(unwritable.isRetryable());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, executions
+                    .findByExecutionCallId(unknown.getExecutionCallId())
+                    .getState());
+            executions.failResolve = false;
+
+            executions.failReads = true;
+            RuntimeBrokerException down = failure(
+                    service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId()));
+            assertEquals("runtime_execution_reconcile_failed",
+                    down.getCode());
+            assertTrue(down.isRetryable());
+            assertEquals(2, transport.statusCalls.get());
+
+            executions.failReads = false;
+            executions.rejectResolve = false;
+            assertEquals(ExecutionReconciliation.Outcome.RESOLVED,
+                    join(service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())).getOutcome());
+            assertEquals(1, transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void lookupIsScopedToTheCallersSessions() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            join(fixture.service.acquire("harness", "runtime-b",
+                    "bootstrap"));
+
+            assertEquals("runtime_execution_conflict", failure(
+                    fixture.service.reconcileExecution("other-harness",
+                            "runtime", unknown.getExecutionCallId()))
+                    .getCode());
+            assertEquals("runtime_execution_conflict", failure(
+                    fixture.service.reconcileExecution("harness",
+                            "runtime-b", unknown.getExecutionCallId()))
+                    .getCode());
+            assertEquals("runtime_execution_not_found", failure(
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            "missing")).getCode());
+            assertEquals(0, fixture.transport.statusCalls.get());
+            assertUnknownAndNotReplayed(fixture, unknown);
+        }
+    }
+
+    @Test
+    void concurrentLookupsOfOneExecutionShareOneRuntimeCall() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            CompletableFuture<Map<String, Object>> status =
+                    new CompletableFuture<>();
+            fixture.transport.statusResult = status;
+
+            CompletionStage<ExecutionReconciliation> first =
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId());
+            CompletionStage<ExecutionReconciliation> second =
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId());
+            assertEquals(1, fixture.transport.statusCalls.get());
+
+            status.complete(Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "success")));
+            assertSame(join(first), join(second));
+            assertEquals(ExecutionReconciliation.Outcome.RESOLVED,
+                    join(first).getOutcome());
+
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(Map.of("state", "unknown"));
+            assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                    join(fixture.service.reconcileExecution("harness",
+                            "runtime", unknown.getExecutionCallId()))
+                            .getOutcome());
+            assertEquals(1, fixture.transport.statusCalls.get());
+            assertEquals(1, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void pollChainedOnACompletedLookupAsksAgain() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord unknown = unknownExecution(fixture);
+            CompletableFuture<Map<String, Object>> status =
+                    new CompletableFuture<>();
+            fixture.transport.statusResult = status;
+            CompletableFuture<ExecutionReconciliation> chained =
+                    fixture.service.reconcileExecution("harness", "runtime",
+                            unknown.getExecutionCallId())
+                            .thenCompose(first -> {
+                                fixture.transport.statusResult =
+                                        CompletableFuture.completedFuture(
+                                                Map.of("state", "unknown"));
+                                return fixture.service.reconcileExecution(
+                                        "harness", "runtime",
+                                        unknown.getExecutionCallId());
+                            }).toCompletableFuture();
+
+            status.complete(Map.of("state", "executing"));
+
+            assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                    chained.orTimeout(5, TimeUnit.SECONDS).join()
+                            .getOutcome());
+            assertEquals("unknown", chained.join().getRuntimeState());
+            assertEquals(2, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void cancelRacingALookupIsReReadBeforeSettling() {
+        for (String state : List.of("settled", "executing")) {
+            try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+                ToolExecutionRecord unknown = unknownExecution(fixture);
+                CompletableFuture<Map<String, Object>> status =
+                        new CompletableFuture<>();
+                fixture.transport.statusResult = status;
+                CompletionStage<ExecutionReconciliation> lookup =
+                        fixture.service.reconcileExecution("harness",
+                                "runtime", unknown.getExecutionCallId());
+
+                ToolExecutionRecord cancelled = join(
+                        fixture.service.cancelExecution("harness", "runtime",
+                                unknown.getExecutionCallId()));
+                assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                        cancelled.getState());
+                assertTrue(cancelled.getVersion() > unknown.getVersion());
+                status.complete("settled".equals(state)
+                        ? Map.of("state", state, "result",
+                                Map.of("executionStatus", "cancelled"))
+                        : Map.of("state", state));
+
+                ExecutionReconciliation reconciled = join(lookup);
+                assertEquals("settled".equals(state)
+                        ? ExecutionReconciliation.Outcome.RESOLVED
+                        : ExecutionReconciliation.Outcome.UNRESOLVED,
+                        reconciled.getOutcome(), state);
+                assertTrue(reconciled.getRecord().isCancelRequested(),
+                        state);
+                assertTrue(reconciled.getRecord().getVersion()
+                        >= cancelled.getVersion(), state);
+                assertEquals(0, fixture.transport.cancelCalls.get());
+                assertEquals(1, fixture.transport.executeCalls.get());
+            }
+        }
+    }
+
+    @Test
+    void closingTheServiceClosesTheProvisioner() {
+        Fixture fixture = new Fixture(WORKSPACE_SCOPE);
+        fixture.close();
+        assertTrue(fixture.provisioner.closed);
     }
 
     private static <T> T join(CompletionStage<T> stage) {
@@ -1025,8 +2890,15 @@ class RuntimeBrokerServiceTest {
     private static final class FakeProvisioner
             implements RuntimeProvisioner {
         final AtomicInteger calls = new AtomicInteger();
+        final AtomicInteger confirmCalls = new AtomicInteger();
+        final AtomicInteger releaseCalls = new AtomicInteger();
         volatile CompletableFuture<RuntimeLease> provisionResult;
         volatile RuntimeLease issuedLease;
+        volatile RuntimeLease releasedLease;
+        volatile CompletableFuture<Void> confirmResult =
+                CompletableFuture.completedFuture(null);
+        volatile boolean usable = true;
+        volatile boolean closed;
 
         @Override
         public CompletionStage<RuntimeLease> provision(
@@ -1038,6 +2910,31 @@ class RuntimeBrokerServiceTest {
             issuedLease = lease(call);
             return CompletableFuture.completedFuture(issuedLease);
         }
+
+        @Override
+        public CompletionStage<Void> confirm(RuntimeProvisionRequest request,
+                RuntimeLease lease) {
+            confirmCalls.incrementAndGet();
+            return confirmResult;
+        }
+
+        @Override
+        public CompletionStage<Void> release(RuntimeProvisionRequest request,
+                RuntimeLease lease) {
+            releaseCalls.incrementAndGet();
+            releasedLease = lease;
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public boolean isUsable(RuntimeLease lease) {
+            return usable;
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
     }
 
     private static final class FakeTransport implements RuntimeTransport {
@@ -1045,6 +2942,12 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger executeCalls = new AtomicInteger();
         final AtomicInteger cancelCalls = new AtomicInteger();
         final AtomicInteger releaseCalls = new AtomicInteger();
+        final AtomicInteger statusCalls = new AtomicInteger();
+        volatile long lastAfterSequence = -1;
+        volatile boolean defaultStatus;
+        volatile RuntimeException statusError;
+        volatile CompletableFuture<Map<String, Object>> statusResult =
+                CompletableFuture.completedFuture(Map.of("state", "unknown"));
         volatile RuntimeLease lastLease;
         volatile RuntimeSession lastSession;
         volatile Map<String, Object> lastReference;
@@ -1126,6 +3029,25 @@ class RuntimeBrokerServiceTest {
                         .findByExecutionCallId(observedExecutionId);
             }
             return cancelResult;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> status(
+                RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> reference, long afterSequence) {
+            if (defaultStatus) {
+                return RuntimeTransport.super.status(lease, session,
+                        reference, afterSequence);
+            }
+            statusCalls.incrementAndGet();
+            lastLease = lease;
+            lastSession = session;
+            lastReference = reference;
+            lastAfterSequence = afterSequence;
+            if (statusError != null) {
+                throw statusError;
+            }
+            return statusResult;
         }
 
         @Override
@@ -1220,6 +3142,128 @@ class RuntimeBrokerServiceTest {
         public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
             return delegate.hasActiveByRuntimeSession(runtimeSessionId);
         }
+
+        @Override
+        public boolean hasActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            return delegate.hasActiveByBinding(bindingId,
+                    runtimeGeneration);
+        }
+    }
+
+    private static final class HookedExecutionRepository
+            implements ToolExecutionRepository {
+        private final InMemoryToolExecutionRepository delegate;
+        volatile Runnable beforeClaim;
+        volatile Runnable afterClaim;
+        volatile Runnable afterUnknown;
+        volatile boolean rejectWrites;
+        volatile boolean rejectResolve;
+        volatile boolean failResolve;
+        volatile boolean failReads;
+
+        HookedExecutionRepository(Clock clock) {
+            delegate = new InMemoryToolExecutionRepository(clock);
+        }
+
+        @Override
+        public ToolExecutionRecord findOrCreate(
+                ToolExecutionRecord candidate) {
+            return delegate.findOrCreate(candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord findByExecutionCallId(
+                String executionCallId) {
+            if (failReads) {
+                throw new IllegalStateException("database down");
+            }
+            return delegate.findByExecutionCallId(executionCallId);
+        }
+
+        @Override
+        public ToolExecutionRecord findByIdempotencyKey(
+                String idempotencyKey) {
+            return delegate.findByIdempotencyKey(idempotencyKey);
+        }
+
+        @Override
+        public ToolExecutionRecord compareAndSet(
+                ToolExecutionRecord expected,
+                ToolExecutionRecord replacement, String owner,
+                long dispatchGeneration) {
+            if (rejectWrites) {
+                return null;
+            }
+            ToolExecutionRecord updated = delegate.compareAndSet(expected,
+                    replacement, owner, dispatchGeneration);
+            Runnable hook = afterUnknown;
+            if (hook != null && updated != null && updated.getState()
+                    == ToolExecutionRecord.State.UNKNOWN) {
+                afterUnknown = null;
+                hook.run();
+            }
+            return updated;
+        }
+
+        @Override
+        public ToolExecutionRecord claimDispatch(String executionCallId,
+                String owner, Duration leaseDuration) {
+            Runnable hook = beforeClaim;
+            beforeClaim = null;
+            if (hook != null) {
+                hook.run();
+            }
+            ToolExecutionRecord claimed = delegate.claimDispatch(
+                    executionCallId, owner, leaseDuration);
+            Runnable after = afterClaim;
+            afterClaim = null;
+            if (after != null) {
+                after.run();
+            }
+            return claimed;
+        }
+
+        @Override
+        public ToolExecutionRecord renewDispatch(String executionCallId,
+                String owner, long dispatchGeneration,
+                Duration leaseDuration) {
+            return delegate.renewDispatch(executionCallId, owner,
+                    dispatchGeneration, leaseDuration);
+        }
+
+        @Override
+        public ToolExecutionRecord requestCancel(String executionCallId,
+                long expectedVersion) {
+            return delegate.requestCancel(executionCallId, expectedVersion);
+        }
+
+        @Override
+        public ToolExecutionRecord resolveUnknown(
+                ToolExecutionRecord expected,
+                Map<String, Object> resolutionResult,
+                Instant resolutionTime) {
+            if (rejectResolve) {
+                return null;
+            }
+            if (failResolve) {
+                throw new IllegalStateException("database down");
+            }
+            return delegate.resolveUnknown(expected, resolutionResult,
+                    resolutionTime);
+        }
+
+        @Override
+        public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
+            return delegate.hasActiveByRuntimeSession(runtimeSessionId);
+        }
+
+        @Override
+        public boolean hasActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            return delegate.hasActiveByBinding(bindingId,
+                    runtimeGeneration);
+        }
     }
 
     private static final class StaleBindingRepository
@@ -1286,6 +3330,13 @@ class RuntimeBrokerServiceTest {
                 Duration leaseDuration) {
             return delegate.renewOperation(bindingId, owner,
                     operationGeneration, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord releaseOperation(String bindingId,
+                String owner, long operationGeneration) {
+            return delegate.releaseOperation(bindingId, owner,
+                    operationGeneration);
         }
     }
 
