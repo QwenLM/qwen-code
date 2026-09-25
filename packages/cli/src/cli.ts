@@ -831,9 +831,7 @@ export async function runCliEntry(
       // help fall-through the whole-argv scan let through. A `--help`
       // inside one quoted token never triggered this; the trigger is a
       // help token as its own argv word.
-      const carriedWord = backgroundFlagPromptWord(
-        argv[backgroundFlag] ?? '',
-      );
+      const carriedWord = backgroundFlagPromptWord(argv[backgroundFlag] ?? '');
       let helpScanEnd = backgroundFlag;
       if (carriedWord !== undefined) {
         helpScanEnd = argv.length;

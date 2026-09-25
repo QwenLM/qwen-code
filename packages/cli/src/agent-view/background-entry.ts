@@ -136,11 +136,12 @@ const TERMINAL_SESSION_STATES = new Set(['failed', 'stopped', 'completed']);
 
 /**
  * True when the store holds a managed session for `cwd` recorded at or
- * after `since` — the positive "the supervisor already wrote the record"
- * signal that a dispatch rejection cannot carry: the response envelope
- * has only a code and a message, and a supervisor that dies mid-dispatch
- * sends nothing at all, so the client settles from the socket's `end`
- * with `code: 'closed'`.
+ * after `since` whose PTY host was actually spawned — the positive "the
+ * supervisor already wrote the record and launched something" signal that
+ * a dispatch rejection cannot carry: the response envelope has only a code
+ * and a message, and a supervisor that dies mid-dispatch sends nothing at
+ * all, so the client settles from the socket's `end` with `code:
+ * 'closed'`.
  *
  * The dispatch handler records the session, spawns its PTY host and
  * persists the pids BEFORE the ready wait — a window as long as the
@@ -155,23 +156,48 @@ const TERMINAL_SESSION_STATES = new Set(['failed', 'stopped', 'completed']);
  * so a definitively failed launch would otherwise satisfy the predicate
  * and be certified "may still be starting" — exit 2, the do-not-retry
  * code — while `qwen sessions ps` lists it `failed`.
+ *
+ * The pid term is the other half of the same exclusion, and it is what
+ * makes the certification evidence rather than a coincidence of directory
+ * and clock. A recorded row alone proves nothing was started: the handler
+ * writes the session-state record before any host exists, and that record
+ * is byte-identical pre- and post-spawn because the pids go into the
+ * WORKER record right after the spawn and before any further store I/O —
+ * a crash before the ready wait must not leave an unsignalable orphan
+ * host holding the deterministic session socket. So the term keys on the
+ * pid fields themselves: never on readiness, never on a terminal-adjacent
+ * state, and never on the worker record's mere existence, which the
+ * dispatch path already creates pid-less. Without it a launch that never
+ * spawned anything was certified in flight, the wrapper honored
+ * do-not-retry, and the task was lost outright while `qwen sessions ps`
+ * presented the orphan as `starting` forever — the cost the guard exists
+ * to avoid (a retry starting a second agent) is impossible when no host
+ * was spawned.
  */
 async function sessionRecordedSince(
   since: number,
   cwd: string,
 ): Promise<boolean> {
   try {
-    const { listAgentViewSessionStates } = await import(
+    const { listAgentViewSessionStates, readAgentViewWorker } = await import(
       './supervisor-store.js'
     );
     const resolvedCwd = path.resolve(cwd);
-    return (await listAgentViewSessionStates()).some(
-      (state) =>
-        state.ownership === 'managed' &&
-        !TERMINAL_SESSION_STATES.has(state.sessionState) &&
-        state.projectCwd === resolvedCwd &&
-        Date.parse(state.createdAt) >= since,
-    );
+    for (const state of await listAgentViewSessionStates()) {
+      if (
+        state.ownership !== 'managed' ||
+        TERMINAL_SESSION_STATES.has(state.sessionState) ||
+        state.projectCwd !== resolvedCwd ||
+        Date.parse(state.createdAt) < since
+      ) {
+        continue;
+      }
+      const worker = await readAgentViewWorker(state.sessionId);
+      if (worker?.hostPid !== undefined || worker?.workerPid !== undefined) {
+        return true;
+      }
+    }
+    return false;
   } catch {
     // An unreadable store proves nothing about the launch; the failure
     // report stands.
@@ -244,10 +270,12 @@ export async function runBackgroundDispatch(
     //   keeps recording and launching after the client gives up — a store
     //   I/O stall can push it past the cap;
     // - a rejection the store shows arrived AFTER the session was recorded
-    //   for this cwd (see sessionRecordedSince), which is what a supervisor
-    //   killed inside the ready wait leaves behind: `sessionState:
-    //   'starting'`, `ownership: 'managed'`, a live detached PTY host and a
-    //   session directory on disk.
+    //   for this cwd AND its PTY host was spawned — the pid in the worker
+    //   record is the evidence, not the row's existence (see
+    //   sessionRecordedSince). That is what a supervisor killed inside the
+    //   ready wait leaves behind: `sessionState: 'starting'`, `ownership:
+    //   'managed'`, a live detached PTY host and a session directory on
+    //   disk.
     //
     // Certifying failure in either case has a wrapping script (the consumer
     // this entry is built for) retry and start a second agent on the same
