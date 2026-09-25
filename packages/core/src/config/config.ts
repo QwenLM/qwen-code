@@ -405,6 +405,12 @@ function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
 }
 
+function normalizeAdvisorModel(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -1438,6 +1444,11 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Explicit model selector for the native Advisor tool. Empty, whitespace,
+   * and "off" disable Advisor and do not fall back to the primary model.
+   */
+  advisorModel?: string;
   /**
    * Built-in WebSearch settings. `enabled: false` disables the tool; when the
    * setting is omitted, the tool may derive a backend from the active provider
@@ -3025,6 +3036,7 @@ export class Config {
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
+  private advisorModel?: string;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -3621,6 +3633,7 @@ export class Config {
         ? params.memoryAgentMaxTurns
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.advisorModel = normalizeAdvisorModel(params.advisorModel);
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -6104,6 +6117,26 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  getAdvisorModel(): string | undefined {
+    return this.advisorModel;
+  }
+
+  async setAdvisorModel(model: string | undefined): Promise<boolean> {
+    const normalizedModel = normalizeAdvisorModel(model);
+    if (normalizedModel && this.getDisabledTools().has(ToolNames.ADVISOR)) {
+      return false;
+    }
+
+    this.advisorModel = normalizedModel;
+    if (!this.initialized || !this.toolRegistry) {
+      return true;
+    }
+
+    await this.syncAdvisorToolRegistration(this.toolRegistry);
+    await this.llmClient?.setTools();
+    return true;
   }
 
   /**
@@ -11230,6 +11263,31 @@ export class Config {
     }
   }
 
+  private async syncAdvisorToolRegistration(
+    registry: ToolRegistry,
+    options?: { forSubAgent?: boolean },
+  ): Promise<void> {
+    if (
+      !this.getAdvisorModel() ||
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      options?.forSubAgent
+    ) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
+
+    if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
+
+    registry.unregisterTool(ToolNames.ADVISOR);
+    await this.registerLazyTool(registry, ToolNames.ADVISOR, async () => {
+      const { AdvisorTool } = await import('../tools/advisor.js');
+      return new AdvisorTool(this);
+    });
+    // Consume the factory so disabling Advisor removes its registration completely.
+    await registry.ensureTool(ToolNames.ADVISOR);
+  }
+
   async registerSessionSourceTool(
     registry: ToolRegistry = this.toolRegistry,
   ): Promise<void> {
@@ -11511,6 +11569,7 @@ export class Config {
     await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
+    await this.syncAdvisorToolRegistration(registry, options);
     await registerLazy(ToolNames.TOOL_CALL, async () => {
       const { ToolCallTool } = await import('../tools/tool-call.js');
       return new ToolCallTool(registry);
