@@ -201,24 +201,22 @@ async function smokeTest(prefix: string): Promise<void> {
 // on a version directory a live older session may still be importing.
 async function restoreVendoredRipgrepExecBits(prefix: string): Promise<void> {
   const ripgrepDir = path.join(packageDir(prefix), 'vendor', 'ripgrep');
-  let entries: fs.Dirent[];
+  let names: string[];
   try {
-    entries = await fsPromises.readdir(ripgrepDir, { withFileTypes: true });
+    names = await fsPromises.readdir(ripgrepDir);
   } catch {
     return; // This package ships no vendored ripgrep; nothing to heal.
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const rgBinary = path.join(ripgrepDir, entry.name, 'rg');
+  for (const name of names) {
     try {
-      await fsPromises.chmod(rgBinary, 0o755);
-    } catch (error) {
-      // ENOENT just means this platform directory has no unix binary
-      // (x64-win32 ships rg.exe); anything else still must not fail the
-      // update — the runtime probe handles a still-broken binary.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        debugLogger.warn(`Failed to chmod ${rgBinary}:`, error);
-      }
+      await fsPromises.chmod(path.join(ripgrepDir, name, 'rg'), 0o755);
+    } catch {
+      // Expected wherever `name` is not a platform directory holding a unix rg
+      // (the tree also carries COPYING, and x64-win32 ships rg.exe), and no
+      // other failure may block the update either — the runtime probe handles
+      // a still-broken binary. Deliberately not logged: this runs in the update
+      // worker, which returns before route dispatch and so never binds a
+      // debug-log session, leaving a warn here nowhere to go.
     }
   }
 }

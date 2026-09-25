@@ -8,24 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
-// The heal reports a chmod failure through the debug logger, which writes
-// nowhere unless a session is bound — and the update worker binds none. Spy on
-// it so both halves of the contract ("did not block the update" and "was
-// reported") are assertable.
-const { mockDebugLogger } = vi.hoisted(() => ({
-  mockDebugLogger: {
-    isEnabled: vi.fn().mockReturnValue(false),
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
-vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
-  createDebugLogger: () => mockDebugLogger,
-}));
-
 import {
   activateManagedNpmUpdate,
   cleanupManagedNpmUpdate,
@@ -96,7 +78,8 @@ function vendoredRipgrepDir(prefix: string): string {
 // Mirror the published tarball: pnpm pack normalizes every non-`bin` file to
 // 0644, including the vendored ripgrep binaries (#12668). The win32 directory
 // ships rg.exe instead of rg and must not fail activation, and COPYING is the
-// non-directory entry the real tree carries beside the platform directories.
+// non-directory entry the real tree carries beside the platform directories —
+// so the heal tries `COPYING/rg` and has to swallow that failure too.
 function writeVendoredRipgrep(prefix: string): string {
   const ripgrepDir = vendoredRipgrepDir(prefix);
   for (const platform of ['x64-linux', 'arm64-darwin', 'x64-win32']) {
@@ -132,7 +115,6 @@ function clearVendoredRipgrepExecBits(prefix: string): void {
 
 beforeEach(() => {
   vi.stubEnv('NPM_CONFIG_GLOBALCONFIG', '/global/npmrc');
-  mockDebugLogger.warn.mockClear();
 });
 
 afterEach(() => {
@@ -215,15 +197,10 @@ describe('managed npm update', () => {
     for (const binary of ['x64-linux/rg', 'arm64-darwin/rg']) {
       expectExecBit(path.join(activatedRipgrep, binary));
     }
-    // COPYING is the non-directory entry the published tree carries beside the
-    // platform directories, and the heal must skip it: chmod'ing `COPYING/rg`
-    // fails ENOTDIR, which is not the ENOENT the win32 layout produces, so it
-    // takes the reporting branch.
-    expect(mockDebugLogger.warn).not.toHaveBeenCalled();
   });
 
   it.skipIf(process.platform === 'win32')(
-    'still activates when restoring the exec bit fails with a non-ENOENT error',
+    'still activates when chmod fails on a vendored binary',
     async () => {
       const root = makeTemporaryDirectory();
       const bootstrap = writeBaseInstallation(root);
@@ -234,9 +211,10 @@ describe('managed npm update', () => {
       );
       writeInstallation(update.stagingDir, '2.0.0');
       const stagedRipgrep = writeVendoredRipgrep(update.stagingDir);
-      // A self-referential symlink makes chmod fail ELOOP: a non-ENOENT errno
-      // that needs neither a read-only mount nor a non-root uid, so it behaves
-      // the same on a laptop and on CI.
+      // A self-referential symlink makes chmod fail ELOOP: the portable way to
+      // force a failure here, needing neither a read-only mount nor a non-root
+      // uid, so it behaves the same on a laptop and on CI. Skipped on win32
+      // because creating a symlink there needs a privilege tests do not have.
       const looped = path.join(stagedRipgrep, 'x64-linux', 'rg');
       fs.rmSync(looped);
       fs.symlinkSync('rg', looped);
@@ -255,12 +233,8 @@ describe('managed npm update', () => {
           ),
         ),
       ).toMatchObject({ version: '2.0.0' });
+      // The failure does not abort the loop: the remaining binaries heal.
       const activatedRipgrep = vendoredRipgrepDir(update.versionDir);
-      // Reported rather than swallowed, and the loop still heals the rest.
-      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to chmod'),
-        expect.objectContaining({ code: 'ELOOP' }),
-      );
       expectExecBit(path.join(activatedRipgrep, 'arm64-darwin', 'rg'));
     },
   );
