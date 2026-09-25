@@ -838,3 +838,157 @@ describe('legacy-spelled deny coverage (round-2 review)', () => {
     ).toBe(false);
   });
 });
+
+// R4-1, per the maintainer ruling on this PR (pomelo-nwu, 2026-09-25): "A
+// persisted legacy deny/ask/disallowedTools prefix whose suffix was changed by
+// legacy name reduction can therefore stop matching its own MCP tool. This is
+// fail-open for restrictions … preserve the legacy spelling for restrictive
+// prefix matches with server provenance, and add a regression for deny/ask as
+// well as allow."
+//
+// The wildcard arm now reads `generateLegacyMcpToolName`'s reduction of the
+// tool's own vouched raw identity, guarded so the reduction can only vouch for
+// the server it came from. Every positive row here was `false` / `default` /
+// `registered` before that, so reverting the reduction reddens all of them.
+describe('legacy-spelled wildcard prefixes keep covering their own server (R4-1)', () => {
+  // `get+data` on the dotted server: the raw identity carries the `+`, the
+  // legacy reduction turns it into `_`, and the registered name carries a hash
+  // suffix — three spellings, and the persisted prefix is the middle one.
+  const dotted = prodTool('foo.bar', 'get+data');
+  const dottedRaw = 'mcp__foo.bar__get+data';
+  const dottedLegacy = 'mcp__foo.bar__get_data';
+  const prefixRule = 'mcp__foo.bar__get_*';
+
+  const matchesRuleWith = (rule: string, tool: DiscoveredMCPTool) =>
+    matchesRule(
+      parseRule(rule),
+      tool.name,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      tool.permissionAliases,
+    );
+
+  it('builds the tool the ruling names', () => {
+    expect(dotted.permissionAliases).toEqual([dottedRaw, dottedLegacy]);
+    expect(dotted.name.startsWith('mcp__foo_bar__get_data_')).toBe(true);
+    // Neither candidate spelling the prefix arms compared before is the one
+    // the operator copied their prefix from.
+    expect(dotted.name.startsWith('mcp__foo.bar__get_')).toBe(false);
+    expect(dottedRaw.startsWith('mcp__foo.bar__get_')).toBe(false);
+    expect(dottedLegacy.startsWith('mcp__foo.bar__get_')).toBe(true);
+  });
+
+  it('matches the persisted legacy prefix on all three matchers', () => {
+    expect(matchesMcpPattern(prefixRule, dotted.name, dottedRaw)).toBe(true);
+    expect(
+      matchesToolPattern(prefixRule, dotted.name, dotted.permissionAliases),
+    ).toBe(true);
+    expect(matchesRuleWith(prefixRule, dotted)).toBe(true);
+  });
+
+  it.each([
+    ['deny', { permissionsDeny: [prefixRule] }, 'deny'],
+    ['ask', { permissionsAsk: [prefixRule] }, 'ask'],
+    ['allow', { permissionsAllow: [prefixRule] }, 'allow'],
+  ])(
+    'keeps a legacy-spelled %s prefix effective end to end',
+    async (_label, lists, expected) => {
+      const pm = new PermissionManager(makeConfig(lists));
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: dotted.name,
+          toolAliases: dotted.permissionAliases,
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it('reports the legacy-denied tool disabled at registration', async () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: [prefixRule] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.getToolRegistrationStatus(dotted.name, dotted.permissionAliases),
+    ).toBe('disabled');
+  });
+
+  it('does not let the reduction reach a differently-registered server', async () => {
+    // The whole reason this PR exists: `foo_bar` is a DIFFERENT server, so the
+    // reduction of its own raw identity must not satisfy a rule written for
+    // `foo.bar` — in either direction.
+    const safe = prodTool('foo_bar', 'get+data');
+    expect(safe.name).not.toBe(dotted.name);
+    expect(safe.permissionAliases).toEqual([
+      'mcp__foo_bar__get+data',
+      'mcp__foo_bar__get_data',
+    ]);
+
+    expect(matchesMcpPattern(prefixRule, safe.name)).toBe(false);
+    expect(
+      matchesMcpPattern(prefixRule, safe.name, 'mcp__foo_bar__get+data'),
+    ).toBe(false);
+    expect(
+      matchesToolPattern(prefixRule, safe.name, safe.permissionAliases),
+    ).toBe(false);
+    expect(matchesRuleWith(prefixRule, safe)).toBe(false);
+
+    for (const lists of [
+      { permissionsDeny: [prefixRule] },
+      { permissionsAllow: [prefixRule] },
+    ]) {
+      const pm = new PermissionManager(makeConfig(lists));
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: safe.name,
+          toolAliases: safe.permissionAliases,
+        }),
+      ).toBe('default');
+    }
+  });
+
+  it('does not let a middle-truncated reduction supply the separator to a shorter server wildcard', () => {
+    // `generateLegacyMcpToolName` cuts at slice(0, 28), so for a server key of
+    // 24+ characters the reduction shortens the key and injects the `__` a
+    // prefix match needs. The server-provenance guard is what rejects it; this
+    // is the wildcard sibling of the server-level row pinned above (R2-2).
+    const premium = prodTool(
+      'weather-forecast-server-premium',
+      'get_extended_forecast_for_next_week',
+    );
+    const legacyAlias = generateLegacyMcpToolName(
+      'mcp__weather-forecast-server-premium__get_extended_forecast_for_next_week',
+    );
+    const shorterServerRule = 'mcp__weather-forecast-server__*';
+    expect(legacyAlias.split('__')[1]).toBe('weather-forecast-server');
+    expect(legacyAlias.startsWith('mcp__weather-forecast-server__')).toBe(true);
+
+    expect(
+      matchesToolPattern(
+        shorterServerRule,
+        premium.name,
+        premium.permissionAliases,
+      ),
+    ).toBe(false);
+    expect(
+      matchesToolPattern(shorterServerRule, premium.name, [legacyAlias]),
+    ).toBe(false);
+    expect(matchesRuleWith(shorterServerRule, premium)).toBe(false);
+
+    // The premium server's own wildcard still matches, so the guard did not
+    // cost the legitimate direction.
+    expect(
+      matchesToolPattern(
+        'mcp__weather-forecast-server-premium__get_*',
+        premium.name,
+        premium.permissionAliases,
+      ),
+    ).toBe(true);
+  });
+});

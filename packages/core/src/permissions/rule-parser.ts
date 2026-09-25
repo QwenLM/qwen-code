@@ -10,7 +10,10 @@ import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeMcpToolName,
+} from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
@@ -1636,13 +1639,17 @@ export function matchesDomainPattern(
  * pre-normalization `mcp__<server>__<tool>` spelling, resolved from the
  * tool's advertised `permissionAliases` by `resolveRawMcpIdentity` — an alias
  * is accepted as the raw identity only when its own normalization IS the
- * registered name, so a different server's tool cannot supply one. Exact,
- * server-level and wildcard prefixes are then compared *literally* against
- * those two spellings. Nothing is reconstructed and nothing is hashed: a
- * registered name whose tail merely imitates a normalization hash proves
- * nothing, which is what keeps a server registered under the provider-safe
- * key `foo_bar` from satisfying a rule written for the *different* server
- * `foo.bar` (#10199).
+ * registered name, so a different server's tool cannot supply one. Exact and
+ * server-level prefixes are compared *literally* against those two spellings;
+ * the wildcard arm also reads the legacy `generateLegacyMcpToolName`
+ * reduction of the raw identity, because a persisted prefix was copied from
+ * the spelling settings showed when it was written (see
+ * {@link resolveLegacyMcpSpelling} for the provenance that keeps the
+ * reduction from vouching for a different server). Nothing is reconstructed
+ * and nothing is hashed: a registered name whose tail merely imitates a
+ * normalization hash proves nothing, which is what keeps a server registered
+ * under the provider-safe key `foo_bar` from satisfying a rule written for
+ * the *different* server `foo.bar` (#10199).
  *
  * The legacy `sanitizeToolNameForProvider` reduction is avoided in only one
  * direction: a rule written in a legacy unsafe spelling (`mcp__foo.bar`) no
@@ -1654,7 +1661,11 @@ export function matchesDomainPattern(
  * whether that removes a restriction depends on the rule's semantics —
  * fail-closed on `allow` (the tool falls back to `ask`), fail-open on
  * `deny`/`ask` rules and on `disallowedTools` blocklists, which is why every
- * reachable caller threads the alias channel.
+ * reachable caller threads the alias channel. Threading is necessary but not
+ * sufficient for a wildcard prefix: the channel resolves the *raw* identity,
+ * and a prefix whose tail crosses a character the legacy reduction changed
+ * matches neither the registered name nor the raw one, so the wildcard arm
+ * reads that reduction too.
  */
 export function matchesMcpPattern(
   pattern: string,
@@ -1702,7 +1713,20 @@ export function matchesMcpPattern(
     if (prefix === '') {
       return false;
     }
-    return matchesPrefixLiterally(prefix);
+    // A persisted prefix was copied from the spelling settings showed when it
+    // was written, so this arm also reads the legacy reduction of the tool's
+    // own raw identity. A `deny` / `ask` / `disallowedTools` prefix that lost
+    // its match is a fail-open — the call the operator denied runs with no
+    // prompt — and the reduction is the spelling it was written against.
+    // Wildcard arm only: an exact rule already reaches every advertised
+    // spelling through `matchesAdvertisedExactName`, and a server-level rule
+    // reaches the raw identity through `spellings`, so neither needs a
+    // reduction that could carry a truncation artifact.
+    const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
+    return (
+      matchesPrefixLiterally(prefix) ||
+      (legacySpelling !== undefined && legacySpelling.startsWith(prefix))
+    );
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
@@ -1748,6 +1772,39 @@ function resolveRawMcpIdentity(
   return toolAliases?.find(
     (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,
   );
+}
+
+/**
+ * The legacy `generateLegacyMcpToolName` reduction of a tool's raw identity,
+ * for a wildcard prefix persisted in that spelling — or `undefined` when the
+ * reduction cannot vouch for the tool's server.
+ *
+ * Provenance is established twice over. The input is the raw identity that
+ * {@link resolveRawMcpIdentity} already vouched for, so it belongs to this
+ * tool and not to a different server that sanitizes into the same registered
+ * name. And the reduction must have left the server segment byte-identical:
+ * past 63 characters `generateLegacyMcpToolName` cuts at
+ * `slice(0, 28) + '___' + slice(-32)`, which for a server key of 24+
+ * characters shortens the key *and* injects the very `__` separator a prefix
+ * match needs, so a rule written for `weather-forecast-server` would
+ * otherwise reach the different server `weather-forecast-server-premium`
+ * through that server's own legacy alias.
+ *
+ * A lossless reduction is the raw identity itself and adds no spelling.
+ */
+function resolveLegacyMcpSpelling(
+  rawToolName: string | undefined,
+): string | undefined {
+  if (rawToolName === undefined || !rawToolName.startsWith('mcp__')) {
+    return undefined;
+  }
+  const legacy = generateLegacyMcpToolName(rawToolName);
+  if (legacy === rawToolName) {
+    return undefined;
+  }
+  return legacy.split('__')[1] === rawToolName.split('__')[1]
+    ? legacy
+    : undefined;
 }
 
 /**
