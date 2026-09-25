@@ -8,18 +8,29 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
-const { mockSpawn, mockExecSync, clipboardMockState } = vi.hoisted(() => ({
-  mockSpawn: vi.fn(),
-  mockExecSync: vi.fn(),
-  clipboardMockState: {
-    failLoad: false,
-    loadDelayMs: 0,
-    // The module resolves, but using it still throws - the shape of a native
-    // addon built against a different Node ABI.
-    throwOnConstruct: false,
-    throwOnHasFormat: false,
-  },
-}));
+const { mockSpawn, mockExecSync, clipboardMockState, mockDebugLogger } =
+  vi.hoisted(() => ({
+    mockSpawn: vi.fn(),
+    mockExecSync: vi.fn(),
+    clipboardMockState: {
+      failLoad: false,
+      loadDelayMs: 0,
+      // The module resolves, but using it still throws - the shape of a native
+      // addon built against a different Node ABI.
+      throwOnConstruct: false,
+      throwOnHasFormat: false,
+    },
+    // clipboardUtils records every failure it diagnoses through
+    // createDebugLogger, which is a no-op without an active debug session, so
+    // the diagnostics are only assertable through a spy.
+    mockDebugLogger: {
+      isEnabled: vi.fn(() => true),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
+  }));
 
 // Mock @teddyzhu/clipboard
 vi.mock('@teddyzhu/clipboard', async () => {
@@ -67,6 +78,17 @@ vi.mock('node:child_process', () => ({
   exec: vi.fn(),
   execFile: vi.fn(),
 }));
+
+// Swap only the logger factory; every other core export is passed through, so
+// the module graph under test keeps resolving exactly as it does in CI.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: () => mockDebugLogger,
+  };
+});
 
 // We intentionally do NOT mock node:fs root to avoid breaking indirect
 // dependencies (e.g. debugLogger, symlink) that import from 'node:fs'.
@@ -611,6 +633,51 @@ describe('clipboardUtils', () => {
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
     });
+
+    it('records the exit code and args when a failed query writes no stderr', async () => {
+      // The shape xclip produces when it exits EXIT_FAILURE without writing
+      // anything to stderr: the user is notified, so the debug log is the only
+      // place the reason can come from.
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(createMockChild('', 1));
+
+      await expect(clipboardHasImage(vi.fn())).resolves.toBe(false);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'xclip exited with code 1. Args: -selection clipboard -t TARGETS -o',
+      );
+    });
+
+    it('records the exit code when wl-paste --list-types fails silently', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('', 1));
+
+      await expect(clipboardHasImage(vi.fn())).resolves.toBe(false);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'wl-paste --list-types exited with code 1',
+      );
+    });
+
+    it('records the timeout when the xclip query never answers', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(createHangingChild());
+
+      await expect(clipboardHasImage(vi.fn())).resolves.toBe(false);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringMatching(/^xclip timed out after \d+ms$/),
+      );
+    }, 10000);
+
+    it('records the timeout when the wl-paste query never answers', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createHangingChild());
+
+      await expect(clipboardHasImage(vi.fn())).resolves.toBe(false);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringMatching(/^wl-paste --list-types timed out after \d+ms$/),
+      );
+    }, 10000);
   });
 
   // ─── xclip / X11 path tests ───────────────────────────────────
@@ -690,12 +757,18 @@ describe('clipboardUtils', () => {
       mockSpawn.mockImplementation(() => {
         callCount++;
         const stdout = createMockStdout();
+        // Production pipes fd 2 and attaches a handler to it, so the fixture
+        // must expose the stream or that attachment throws inside the promise
+        // executor and this test passes without running anything past it.
+        const stderr = new EventEmitter();
         const child = new EventEmitter() as EventEmitter & {
           stdout: ReturnType<typeof createMockStdout>;
+          stderr: typeof stderr;
           kill: ReturnType<typeof vi.fn>;
           killed: boolean;
         };
         child.stdout = stdout;
+        child.stderr = stderr;
         child.kill = vi.fn();
         child.killed = false;
 
@@ -722,6 +795,14 @@ describe('clipboardUtils', () => {
 
       const result = await saveClipboardImage('/tmp/test');
       expect(result).toBe(null);
+
+      // Witness that the run actually reached the BMP branch: it derived the
+      // .bmp path and unlinked it after the save failed. `toBe(null)` on its
+      // own also passed when this fixture lacked a stderr stream, because the
+      // resulting TypeError was swallowed by saveClipboardImage's catch-all.
+      const { unlink } = await import('node:fs/promises');
+      const unlinked = vi.mocked(unlink).mock.calls.map((c) => String(c[0]));
+      expect(unlinked.filter((p) => p.endsWith('.bmp'))).toHaveLength(1);
     });
 
     it('should prefer PNG over BMP when both are available', async () => {
@@ -732,12 +813,18 @@ describe('clipboardUtils', () => {
       mockSpawn.mockImplementation((command: string, args: string[]) => {
         callCount++;
         const stdout = createMockStdout();
+        // Production pipes fd 2 and attaches a handler to it, so the fixture
+        // must expose the stream or that attachment throws inside the promise
+        // executor and this test passes without running anything past it.
+        const stderr = new EventEmitter();
         const child = new EventEmitter() as EventEmitter & {
           stdout: ReturnType<typeof createMockStdout>;
+          stderr: typeof stderr;
           kill: ReturnType<typeof vi.fn>;
           killed: boolean;
         };
         child.stdout = stdout;
+        child.stderr = stderr;
         child.kill = vi.fn();
         child.killed = false;
 
@@ -766,6 +853,18 @@ describe('clipboardUtils', () => {
       // fails. Only the list-types spawn fires.
       expect(spawnCalls).toHaveLength(1);
       expect(spawnCalls[0].args).toContain('--list-types');
+
+      // Neither save can spawn: saveFromCommand opens with O_EXCL first and
+      // mkdir is mocked, so each branch fails at the open and unlinks the path
+      // it derived. .png before .bmp is the preference this test is named for,
+      // and it is only observable now that the type query resolves instead of
+      // throwing on a missing stderr stream.
+      const { unlink } = await import('node:fs/promises');
+      const unlinked = vi.mocked(unlink).mock.calls.map((c) => {
+        const target = String(c[0]);
+        return target.slice(target.lastIndexOf('.'));
+      });
+      expect(unlinked).toEqual(['.png', '.bmp']);
     });
   });
 
@@ -904,6 +1003,23 @@ describe('clipboardUtils', () => {
 
       const result = await saveClipboardImage('/tmp/test');
       expect(result).toBe(null);
+    });
+
+    it('records why the save path gave up when spawning wl-paste throws', async () => {
+      // saveFileWithWlPaste calls getWlPasteImageTypes without an
+      // onUnavailable callback, so this log line is the only trace a
+      // synchronous spawn throw (EMFILE under fd pressure) leaves behind.
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      const spawnError = new Error('spawn EMFILE');
+      mockSpawn.mockImplementation(() => {
+        throw spawnError;
+      });
+
+      await expect(saveClipboardImage('/tmp/test')).resolves.toBe(null);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Failed to spawn wl-paste --list-types:',
+        spawnError,
+      );
     });
 
     // Note: PNG save success path requires saveFromCommand to resolve with true,

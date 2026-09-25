@@ -311,6 +311,7 @@ async function checkClipboardForImage(
         } catch {
           /* ignore */
         }
+        debugLogger.debug(`${command} timed out after ${PROCESS_TIMEOUT_MS}ms`);
         onUnavailable?.();
         resolve(false);
       }, PROCESS_TIMEOUT_MS);
@@ -324,6 +325,12 @@ async function checkClipboardForImage(
       child.on('close', (code) => {
         clearTimeout(timer);
         if (code !== 0) {
+          // Unconditional, like saveFromCommand's: a tool that exits non-zero
+          // without writing to stderr (xclip does) still has to leave the exit
+          // code and args behind, or the notify carries no diagnosis.
+          debugLogger.debug(
+            `${command} exited with code ${code}. Args: ${args.join(' ')}`,
+          );
           if (stderr) {
             debugLogger.debug(`${command} stderr: ${stderr.trim()}`);
           }
@@ -444,8 +451,11 @@ async function getWlPasteImageTypes(
         // same non-zero exit code, and only stderr tells them apart.
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-    } catch {
+    } catch (error) {
       // Do NOT cache failed result (spawn throw)
+      // Logged, not swallowed: the save path calls this without an
+      // onUnavailable callback, so this is the only trace a throw leaves.
+      debugLogger.error('Failed to spawn wl-paste --list-types:', error);
       onUnavailable?.();
       resolve([]);
       return;
@@ -459,6 +469,9 @@ async function getWlPasteImageTypes(
       } catch {
         /* ignore */
       }
+      debugLogger.debug(
+        `wl-paste --list-types timed out after ${PROCESS_TIMEOUT_MS}ms`,
+      );
       // Do NOT cache failed result (timeout)
       onUnavailable?.();
       resolve([]);
@@ -474,6 +487,9 @@ async function getWlPasteImageTypes(
       clearTimeout(timer);
       if (code !== 0) {
         // Do NOT cache failed result
+        // Unconditional, like saveFromCommand's: an empty stderr still has to
+        // leave the exit code behind, or the notify carries no diagnosis.
+        debugLogger.debug(`wl-paste --list-types exited with code ${code}`);
         if (stderr) {
           debugLogger.debug(`wl-paste stderr: ${stderr.trim()}`);
         }
