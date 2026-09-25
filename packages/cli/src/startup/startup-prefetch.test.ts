@@ -15,6 +15,7 @@ import {
 import {
   startEarlyStartupPrefetches,
   startPostRenderPrefetches,
+  UPDATE_CHECK_DELAY_MS,
 } from './startup-prefetch.js';
 
 const mockDebug = vi.hoisted(() => vi.fn());
@@ -127,7 +128,7 @@ describe('startupPrefetch', () => {
     delete process.env['QWEN_CODE_CUSTOM_SANDBOX_IMAGE'];
     delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
     delete process.env['QWEN_CODE_SKIP_UPDATE_CHECK_ONCE'];
-    vi.useRealTimers();
+    vi.useFakeTimers();
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'up-to-date',
       currentVersion: '1.0.0',
@@ -148,6 +149,12 @@ describe('startupPrefetch', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+
+  // The update check waits UPDATE_CHECK_DELAY_MS before it starts.
+  async function settle() {
+    await vi.advanceTimersByTimeAsync(UPDATE_CHECK_DELAY_MS);
+    await vi.dynamicImportSettled();
+  }
 
   function captureIdeConnectionStatuses() {
     const statuses: StartupIdeConnectionStatus[] = [];
@@ -213,7 +220,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
     expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
@@ -225,6 +232,17 @@ describe('startupPrefetch', () => {
       'startup_prefetch_completed',
       { name: 'update_check' },
     );
+  });
+
+  it('waits UPDATE_CHECK_DELAY_MS before checking for updates', async () => {
+    startPostRenderPrefetches(makeConfig(), makeSettings());
+
+    await vi.advanceTimersByTimeAsync(UPDATE_CHECK_DELAY_MS - 1);
+    await vi.dynamicImportSettled();
+    expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
+
+    await settle();
+    expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
   });
 
   it('installs npm updates in the background after first render', async () => {
@@ -240,7 +258,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, settings);
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockHandleAutoUpdate).toHaveBeenCalledWith(
       {
@@ -268,7 +286,7 @@ describe('startupPrefetch', () => {
     });
 
     startPostRenderPrefetches(makeConfig(), makeSettings());
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockHandleAutoUpdate).toHaveBeenCalledOnce();
     expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
@@ -290,7 +308,7 @@ describe('startupPrefetch', () => {
     });
 
     startPostRenderPrefetches(makeConfig(), makeSettings());
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
       message: 'Update available\nRun /update to install the update.',
@@ -315,7 +333,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockRequestUpdateOnExit).toHaveBeenCalledTimes(1);
     expect(mockHandleAutoUpdate).not.toHaveBeenCalled();
@@ -332,7 +350,7 @@ describe('startupPrefetch', () => {
     });
 
     startPostRenderPrefetches(makeConfig(), makeSettings());
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
     expect(mockGetInstallationInfo).not.toHaveBeenCalled();
@@ -353,7 +371,7 @@ describe('startupPrefetch', () => {
     });
 
     startPostRenderPrefetches(makeConfig(), makeSettings());
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
     expect(mockHandleAutoUpdate).not.toHaveBeenCalled();
@@ -368,7 +386,7 @@ describe('startupPrefetch', () => {
 
     try {
       startPostRenderPrefetches(makeConfig(), makeSettings());
-      await vi.dynamicImportSettled();
+      await settle();
 
       expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
     } finally {
@@ -382,7 +400,7 @@ describe('startupPrefetch', () => {
 
     try {
       startPostRenderPrefetches(makeConfig(), makeSettings());
-      await vi.dynamicImportSettled();
+      await settle();
 
       expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
       expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
@@ -398,7 +416,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
@@ -415,7 +433,7 @@ describe('startupPrefetch', () => {
       connectIde: true,
     });
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
@@ -430,7 +448,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
       message: 'Update check skipped (registry error) — run /update to retry.',
@@ -451,7 +469,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
       message: `Update check skipped (registry did not respond within ${Math.round(FETCH_TIMEOUT_MS / 1000)}s) — run /update to retry.`,
@@ -470,7 +488,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
       message:
@@ -486,7 +504,7 @@ describe('startupPrefetch', () => {
     try {
       startPostRenderPrefetches(config, makeSettings());
 
-      await vi.dynamicImportSettled();
+      await settle();
 
       expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
       expect(statuses).toEqual([]);
@@ -502,7 +520,7 @@ describe('startupPrefetch', () => {
     try {
       startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-      await vi.dynamicImportSettled();
+      await settle();
 
       expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
       expect(statuses).toEqual([]);
@@ -518,7 +536,7 @@ describe('startupPrefetch', () => {
     try {
       startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-      await vi.dynamicImportSettled();
+      await settle();
 
       expect(statuses).toEqual([
         { state: 'connecting' },
@@ -539,7 +557,7 @@ describe('startupPrefetch', () => {
     try {
       startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-      await vi.dynamicImportSettled();
+      await settle();
       await vi.advanceTimersByTimeAsync(15_000);
 
       expect(statuses).toEqual([
@@ -576,14 +594,14 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-    await vi.dynamicImportSettled();
+    await settle();
     await vi.advanceTimersByTimeAsync(15_000);
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockDisconnectIde).toHaveBeenCalledTimes(1);
 
     resolveConnect();
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockDisconnectIde).toHaveBeenCalledTimes(2);
     expect(mockWarn).toHaveBeenCalledWith(
@@ -603,7 +621,7 @@ describe('startupPrefetch', () => {
     try {
       startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-      await vi.dynamicImportSettled();
+      await settle();
 
       expect(statuses).toEqual([
         { state: 'connecting' },
@@ -631,12 +649,12 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-    await vi.dynamicImportSettled();
+    await settle();
     await vi.advanceTimersByTimeAsync(15_000);
 
     const underlyingError = new Error('socket closed');
     rejectConnect(underlyingError);
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockWarn).toHaveBeenCalledWith(
       'ide_connect failed:',
@@ -657,7 +675,7 @@ describe('startupPrefetch', () => {
       initializeTelemetry: true,
     });
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockInitializeTelemetry).toHaveBeenCalledWith(config);
   });
@@ -667,7 +685,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockInitializeTelemetry).not.toHaveBeenCalled();
   });
@@ -685,7 +703,7 @@ describe('startupPrefetch', () => {
       }),
     ).not.toThrow();
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockWarn).toHaveBeenCalledWith('telemetry_init failed:', error);
   });
@@ -699,7 +717,7 @@ describe('startupPrefetch', () => {
       startPostRenderPrefetches(config, makeSettings()),
     ).not.toThrow();
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockWarn).toHaveBeenCalledWith('update_check failed:', error);
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
@@ -715,7 +733,7 @@ describe('startupPrefetch', () => {
 
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockStartBackgroundHousekeeping).not.toHaveBeenCalled();
   });
@@ -726,7 +744,7 @@ describe('startupPrefetch', () => {
     startPostRenderPrefetches(config, makeSettings());
     startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+    await settle();
 
     expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
   });

@@ -115,17 +115,30 @@ function cleanupOrphanedManagedNpmUpdateArtifacts(
 function resolveNpmGlobalConfigPath(): string {
   const configured = process.env['NPM_CONFIG_GLOBALCONFIG'];
   if (configured) return path.resolve(configured);
-  const output = execFileSync(
-    process.execPath,
-    [
-      getNpmCliPath(process.execPath, process.platform),
-      'config',
-      'get',
-      'globalconfig',
-      '--global',
-    ],
-    { encoding: 'utf8', timeout: 10_000 },
-  ).trim();
+  const npmCliPath = getNpmCliPath(process.execPath, process.platform);
+  const runNpm = (args: string[]) =>
+    execFileSync(process.execPath, [npmCliPath, ...args], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  let output: string;
+  try {
+    output = runNpm(['config', 'get', 'globalconfig', '--global']);
+  } catch {
+    // npm refuses to print a value that looks like a secret, such as a prefix
+    // path containing a UUID, and redacts it from other commands' output. Its
+    // child processes still receive the resolved configuration.
+    output =
+      runNpm([
+        'exec',
+        '--offline',
+        '-c',
+        `"${process.execPath}" -p "process.env.npm_config_globalconfig || require('path').resolve(process.env.npm_config_global_prefix, 'etc', 'npmrc')"`,
+      ])
+        .split(/\r?\n/)
+        .at(-1) ?? '';
+  }
   if (!output || output === 'null' || output === 'undefined') {
     throw new Error('Unable to resolve the global npm configuration');
   }

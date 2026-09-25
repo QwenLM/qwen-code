@@ -208,6 +208,19 @@ describe('BridgeClient — Live speak-to-user channel', () => {
       }),
     ).rejects.toMatchObject({ code: -32602 });
   });
+
+  it('reports an ended voice call without claiming that speech was delivered', async () => {
+    const client = makeLiveSpeakClient(
+      vi.fn(async () => false),
+      (sessionId) => sessionId === 'live-session',
+    );
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'live-session',
+        message: '任务完成了。',
+      }),
+    ).resolves.toEqual({ accepted: false });
+  });
 });
 
 describe('BridgeClient — background notification turn boundary', () => {
@@ -1389,6 +1402,38 @@ describe('BridgeClient — token usage accounting', () => {
     // The sibling `_meta.durationMs` (LLM round-trip) rides through too; a frame
     // with no error/retry meta reports 0 for both API-health increments.
     expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200, 0, 0);
+  });
+
+  it('does not charge the metrics ring for a replayed timing frame', async () => {
+    // Paged transcript replay emits one empty-text frame per recorded request
+    // and tool call, carrying `_meta.timing` and deliberately no `_meta.usage`.
+    // A present `usage.durationMs` is what marks a frame as a live model round,
+    // so a timing frame must leave the token-burn and LLM-latency windows alone.
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:timing', onTokenUsage);
+
+    for (const timing of [
+      {
+        kind: 'request',
+        status: 'ok',
+        durationMs: 6544,
+        ttftMs: 2344,
+        startedAt: 1_760_000_000_000,
+        model: 'qwen3.8-max',
+      },
+      { kind: 'tool', durationMs: 16, callId: 'call-1', toolName: 'glob' },
+    ]) {
+      await client.sessionUpdate({
+        sessionId: 'sess:timing',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { timing },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+    }
+
+    expect(onTokenUsage).not.toHaveBeenCalled();
   });
 
   it('forwards per-round model API error / retry increments from _meta', async () => {

@@ -77,7 +77,7 @@ import {
 } from './settingsUtils.js';
 import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
-import { QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -1427,6 +1427,11 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('should use system folderTrust over user setting', () => {
+      vi.mocked(isWorkspaceTrusted).mockImplementation((settings) => ({
+        isTrusted:
+          settings.security?.folderTrust?.enabled === true ? undefined : true,
+        source: undefined,
+      }));
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettingsContent = {
         security: {
@@ -1441,6 +1446,7 @@ describe('Settings Loading and Merging', () => {
             enabled: true, // This should be ignored
           },
         },
+        context: { fileName: 'WORKSPACE.md' },
       };
       const systemSettingsContent = {
         security: {
@@ -1464,6 +1470,8 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.security?.folderTrust?.enabled).toBe(true); // System setting should be used
+      expect(settings.isTrusted).toBe(false);
+      expect(settings.merged.context?.fileName).toBeUndefined();
     });
 
     it('should handle contextFileName correctly when only in user settings', () => {
@@ -2133,195 +2141,88 @@ describe('Settings Loading and Merging', () => {
       ]);
     });
 
-    it('should handle JSON parsing errors gracefully by renaming corrupted file', () => {
+    it('should fail closed and preserve malformed operator settings', () => {
       const invalidJsonContent = 'invalid json';
-      const userReadError = new SyntaxError(
-        "Expected ',' or '}' after property value in JSON at position 10",
-      );
-
-      // No .orig backup available
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
-        const pathStr = String(p);
-        if (pathStr.endsWith('.orig')) return false;
-        return true;
-      });
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) {
-            vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
-              throw userReadError;
-            });
-            return invalidJsonContent;
-          }
-          return '{}';
-        },
-      );
-
-      // Should NOT throw — corrupted settings degrade gracefully
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      // Verify the corrupted file was copied to .corrupted
-      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
-      const corruptedCopy = copyCalls.find(
-        (call: unknown[]) =>
-          call[0] === USER_SETTINGS_PATH &&
-          String(call[1]).includes('.corrupted'),
-      );
-      expect(corruptedCopy).toBeDefined();
-
-      // Corrupted dialog is driven by corruptedPath, not by migrationWarnings
-      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
-      expect(result.wasRecovered).toBe(false);
-
-      vi.restoreAllMocks();
-    });
-
-    it('should ignore a stale .orig backup and reset to empty when settings.json is corrupted', () => {
-      // `.orig` is no longer used for recovery — writeWithBackupSync removes it
-      // on success, so any leftover is stale and must not be restored from.
-      const invalidJsonContent = 'invalid json';
-      const staleBackupContent = JSON.stringify({
-        $version: SETTINGS_VERSION,
-        model: { id: 'backup-model' },
-      });
-
       (mockFsExistsSync as Mock).mockReturnValue(true);
-
       (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          if (p === `${USER_SETTINGS_PATH}.orig`) return staleBackupContent;
-          return '{}';
-        },
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? invalidJsonContent : '{}',
       );
 
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      // The stale backup must NOT be written back to the original path.
-      const writeCalls = (fs.writeFileSync as Mock).mock.calls;
-      const restoreWrite = writeCalls.find(
-        (call: unknown[]) =>
-          call[0] === USER_SETTINGS_PATH && call[1] === staleBackupContent,
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
+        /Cannot read operator sandbox policy/,
       );
-      expect(restoreWrite).toBeUndefined();
-
-      // Settings are reset to empty and corruption is reported, not recovered.
-      expect(result.wasRecovered).toBe(false);
-      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
-      const resetWrites = writeCalls.filter(
-        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      expect(fs.copyFileSync).toHaveBeenCalledWith(
+        USER_SETTINGS_PATH,
+        `${USER_SETTINGS_PATH}.corrupted`,
       );
-      expect(resetWrites.length).toBeGreaterThan(0);
-
-      vi.restoreAllMocks();
+      expect(fs.writeFileSync).not.toHaveBeenCalledWith(
+        USER_SETTINGS_PATH,
+        '{}',
+        'utf-8',
+      );
     });
 
-    it('should degrade gracefully when both settings.json and backup are corrupted', () => {
-      const invalidJsonContent = 'invalid json';
-      const invalidBackupContent = 'also invalid';
+    it.each([
+      ['user', () => USER_SETTINGS_PATH],
+      ['system', getSystemSettingsPath],
+    ])(
+      'should fail closed if %s operator settings tear after policy pre-read',
+      (_scope, getFile) => {
+        const file = getFile();
+        const validJsonContent = JSON.stringify({
+          $version: 4,
+          tools: {
+            executionSandbox: {
+              filesystem: 'read-only',
+              network: 'closed',
+            },
+          },
+        });
+        let reads = 0;
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === file,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p !== file) return '{}';
+            reads += 1;
+            return reads === 1 ? validJsonContent : '{';
+          },
+        );
 
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
-        const pathStr = String(p);
-        if (
-          pathStr === USER_SETTINGS_PATH ||
-          pathStr === `${USER_SETTINGS_PATH}.orig`
-        )
-          return true;
-        return false;
-      });
+        let error: unknown;
+        try {
+          loadSettings(MOCK_WORKSPACE_DIR);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(FatalConfigError);
+        expect(error).toMatchObject({ message: expect.stringContaining(file) });
+        expect(reads).toBe(2);
+        expect(fs.copyFileSync).not.toHaveBeenCalled();
+        expect(fs.writeFileSync).not.toHaveBeenCalledWith(file, '{}', 'utf-8');
+      },
+    );
 
+    it('should still fail closed when preserving malformed settings fails', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          if (p === `${USER_SETTINGS_PATH}.orig`) return invalidBackupContent;
-          return '{}';
-        },
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? 'invalid json' : '{}',
       );
-
-      // Should NOT throw — falls through to rename-and-degrade
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
-      expect(result.wasRecovered).toBe(false);
-      const resetWrites = (fs.writeFileSync as Mock).mock.calls.filter(
-        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
-      );
-      expect(resetWrites.length).toBeGreaterThan(0);
-
-      // Verify the corrupted file was copied to .corrupted
-      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
-      expect(
-        copyCalls.some(
-          (call: unknown[]) =>
-            call[0] === USER_SETTINGS_PATH &&
-            String(call[1]).includes('.corrupted'),
-        ),
-      ).toBe(true);
-
-      vi.restoreAllMocks();
-    });
-
-    it('should start with empty settings when copy of corrupted file fails', () => {
-      const invalidJsonContent = 'invalid json';
-
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
-        const pathStr = String(p);
-        if (pathStr.endsWith('.orig')) return false;
-        return true;
-      });
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          return '{}';
-        },
-      );
-
-      // Simulate copy failure (e.g., permission denied)
       (fs.copyFileSync as Mock).mockImplementation(() => {
         throw new Error('EACCES: permission denied');
       });
 
-      // Should still NOT throw — proceeds with empty settings
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      // Corruption warning no longer goes through migrationWarnings —
-      // copy failed so corruptedPath is undefined too
-      const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
-      expect(result.corruptedPath).toBeUndefined();
-
-      vi.restoreAllMocks();
-    });
-
-    it('should return warnings suitable for early stderr emission when settings.json has invalid JSON', () => {
-      const invalidJsonContent = '{ broken json!!!';
-      (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
+        /Cannot read operator sandbox policy/,
       );
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          return '{}';
-        },
+      expect(fs.writeFileSync).not.toHaveBeenCalledWith(
+        USER_SETTINGS_PATH,
+        '{}',
+        'utf-8',
       );
-      (fs.renameSync as Mock).mockImplementation(() => {});
-
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      const warnings = getSettingsWarnings(result);
-
-      // Corruption warning no longer goes through migrationWarnings —
-      // it is emitted via settings.corruptedPath check in llm.tsx
-      // early stderr path instead. Verify corruptedPath is set.
-      expect(result.corruptedPath).toBeDefined();
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
-
-      vi.restoreAllMocks();
     });
 
     describe('corruption env var propagation', () => {
@@ -3288,37 +3189,81 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.ui?.theme).toBe('dark');
     });
 
-    it('should NOT merge workspace settings when workspace is not trusted', () => {
+    it.each([false, undefined])(
+      'should NOT merge workspace settings when trust is %s',
+      (isTrusted) => {
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        const userSettingsContent = {
+          ui: { theme: 'dark' },
+          security: { folderTrust: { enabled: true } },
+          tools: { sandbox: false },
+          context: { fileName: 'USER.md' },
+        };
+        const workspaceSettingsContent = {
+          tools: { sandbox: true },
+          security: { folderTrust: { enabled: false } },
+          context: { fileName: 'WORKSPACE.md' },
+        };
+
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify(workspaceSettingsContent);
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+        expect(settings.merged.tools?.sandbox).toBe(false); // User setting
+        expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
+        expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      },
+    );
+
+    it('reads folder trust enabled only in system defaults for the initial check', async () => {
+      // Folder trust enabled by the fleet/operator scope alone must reach the
+      // phase-1 trust check, not just the merged settings: otherwise the
+      // loader trusts the workspace and applies its scope while every
+      // Config-side gate (loadCliConfig derives `trustedFolder` from the
+      // merged settings) reports it untrusted.
       vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
+        isTrusted: undefined,
+        source: undefined,
       });
       (mockFsExistsSync as Mock).mockReturnValue(true);
-      const userSettingsContent = {
-        ui: { theme: 'dark' },
-        tools: { sandbox: false },
-        context: { fileName: 'USER.md' },
-      };
-      const workspaceSettingsContent = {
-        tools: { sandbox: true },
-        context: { fileName: 'WORKSPACE.md' },
-      };
-
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
+          if (p === getSystemDefaultsPath()) {
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+            });
+          }
           return '{}';
         },
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.merged.tools?.sandbox).toBe(false); // User setting
-      expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
-      expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+      expect(settings.isTrusted).toBe(false);
+
+      // `loadCliConfig` re-runs the real resolver against the merged
+      // settings; the phase-1 argument must yield the same decision.
+      const { isWorkspaceTrusted: resolveTrust } = await vi.importActual<
+        typeof import('./trustedFolders.js')
+      >('./trustedFolders.js');
+      const phase1Settings = vi.mocked(isWorkspaceTrusted).mock.calls[0][0];
+      expect(resolveTrust(phase1Settings).isTrusted).toBe(
+        resolveTrust(settings.merged).isTrusted,
+      );
     });
 
     it('should use an explicit runtime trust decision instead of cached folder trust', () => {
@@ -3708,6 +3653,30 @@ describe('Settings Loading and Merging', () => {
       expect(
         getSettingsWarnings(settings).some((warning) =>
           warning.includes('tools.workflowsEnabled'),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  describe('advisorModel scope handling', () => {
+    it('ignores workspace values and preserves the user selection', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ advisorModel: 'user-advisor' });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ advisorModel: 'workspace-advisor' });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.advisorModel).toBe('user-advisor');
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('advisorModel'),
         ),
       ).toBe(true);
     });
@@ -5069,46 +5038,49 @@ describe('Settings Loading and Merging', () => {
       expect(process.env['TESTTEST']).toEqual('1234');
     });
 
-    it('does not load project .env files from untrusted workspaces', () => {
-      delete process.env['PROJECT_ENV_VAR'];
-      const cwdSpy = vi
-        .spyOn(process, 'cwd')
-        .mockReturnValue(MOCK_WORKSPACE_DIR);
+    it.each([false, undefined])(
+      'does not load project .env files when trust is %s',
+      (isTrusted) => {
+        delete process.env['PROJECT_ENV_VAR'];
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
 
-      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+        const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
 
-      vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
-      });
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-        [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
-      );
-      const userSettingsContent: Settings = {
-        ui: {
-          theme: 'dark',
-        },
-        security: {
-          folderTrust: {
-            enabled: true,
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
+        );
+        const userSettingsContent: Settings = {
+          ui: {
+            theme: 'dark',
           },
-        },
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
-          return '{}';
-        },
-      );
+          security: {
+            folderTrust: {
+              enabled: true,
+            },
+          },
+        };
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
+            return '{}';
+          },
+        );
 
-      loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
-      // Project .env should NOT be loaded when workspace is untrusted
-      expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
-      cwdSpy.mockRestore();
-    });
+        // Project .env should NOT be loaded when workspace is untrusted
+        expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+        cwdSpy.mockRestore();
+      },
+    );
 
     it('uses user .qwen/.env as fallback when the project .env lacks an API key', () => {
       delete process.env['OPENCODE_GO_API_KEY'];

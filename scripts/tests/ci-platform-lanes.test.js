@@ -104,9 +104,13 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
 
 it('keeps browser gates hosted independently of the shared Linux runner', () => {
   expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(20);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(20);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(20);
+  // 30, not 20: at 184 smoke tests plus ~7.5 min of setup, passing runs hit
+  // 20 flat (tests done at 20:07:49, cancelled 20:07:53; the last of 184
+  // still running at 02:04:58, cancelled 02:05:04). Sharding is the fix at
+  // the source once the suite keeps growing.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(30);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(30);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(30);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
@@ -661,7 +665,7 @@ describe('GitHub helper tests', () => {
   it('keeps the dependency-free fast lane off npm-package suites', () => {
     // The github_ci_only helper step runs before ANY dependency install (the
     // setup-node and `npm ci` steps are gated on the full profile), so every
-    // suite it lists must import node: builtins only. These 10 suites import
+    // suite it lists must import node: builtins only. These 11 suites import
     // the `yaml` npm package; letting the fast lane run the full list made an
     // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
     // fresh hosted runner (#10548 review R6-1). The full-profile helper step
@@ -686,6 +690,7 @@ describe('GitHub helper tests', () => {
       '.github/scripts/assign-pr-owner.test.mjs',
       '.github/scripts/ci-disk-pressure.test.mjs',
       '.github/scripts/e2e-build.test.mjs',
+      '.github/scripts/ecs-runner/review-scratch-cleanup.test.mjs',
     ];
     for (const suite of yamlSuites) {
       expect(depFreeSuites, suite).not.toContain(suite);

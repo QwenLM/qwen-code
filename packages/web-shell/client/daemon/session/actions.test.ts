@@ -485,6 +485,37 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('standaloneSession');
     expect(getWorkspaceModelsAfterSessionClear(current)).toBeUndefined();
   });
+
+  it('drops the connection session context only when the clear asks for it', () => {
+    // Leaving Live has to be a real state change: `undefined` is the downstream
+    // sentinel for "inherit from the connection", so a cleared connection that
+    // still advertises { kind: 'live' } sends the next prompt straight back
+    // into Live, where createSession rejects a live context (#12620).
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'live-a',
+      sessionContext: { kind: 'live' },
+      commands: [commandInfo('old-command')],
+      skills: ['old-skill'],
+    };
+
+    const dropped = getConnectionAfterSessionClear(
+      current,
+      'live-a',
+      undefined,
+      true,
+    );
+
+    expect(dropped).not.toHaveProperty('sessionContext');
+    expect(dropped).not.toHaveProperty('sessionId');
+
+    // The drop stays opt-in: every other call site keeps the 3-arg shape, so a
+    // context nobody chose to leave must survive the clear, and the incoming
+    // state is never mutated in place.
+    const kept = getConnectionAfterSessionClear(current, 'live-a');
+    expect(kept.sessionContext).toEqual({ kind: 'live' });
+    expect(current.sessionContext).toEqual({ kind: 'live' });
+  });
 });
 
 /**
@@ -914,6 +945,58 @@ describe('createDaemonSessionActions', () => {
       label: 'exact label',
     });
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
+  });
+
+  it('notifies prompt removal on the stale-session branch with the foreign session id', async () => {
+    const session = createMockSession('session-current');
+    const clientRemovePendingPrompt = vi.fn(async () => ({ removed: true }));
+    (
+      session.client as unknown as {
+        removePendingPrompt: typeof clientRemovePendingPrompt;
+      }
+    ).removePendingPrompt = clientRemovePendingPrompt;
+    const onPromptRemoved = vi.fn();
+    const { actions } = createActionsHarness({ session, onPromptRemoved });
+
+    await expect(
+      actions.removePendingPrompt('prompt-1', { sessionId: 'session-old' }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(clientRemovePendingPrompt).toHaveBeenCalledWith(
+      'session-old',
+      'prompt-1',
+    );
+    expect(onPromptRemoved).toHaveBeenCalledWith(
+      session,
+      'prompt-1',
+      'session-old',
+    );
+  });
+
+  it('does not retire a prompt whose stale-session removal was refused', async () => {
+    // A refused removal (`removed: false`) means the prompt is still running
+    // in the foreign session; the `removed` guard must keep `onPromptRemoved`
+    // from firing, or the settlement admission key is retired while the turn
+    // keeps running.
+    const session = createMockSession('session-current');
+    const clientRemovePendingPrompt = vi.fn(async () => ({ removed: false }));
+    (
+      session.client as unknown as {
+        removePendingPrompt: typeof clientRemovePendingPrompt;
+      }
+    ).removePendingPrompt = clientRemovePendingPrompt;
+    const onPromptRemoved = vi.fn();
+    const { actions } = createActionsHarness({ session, onPromptRemoved });
+
+    await expect(
+      actions.removePendingPrompt('prompt-1', { sessionId: 'session-old' }),
+    ).resolves.toEqual({ removed: false });
+
+    expect(clientRemovePendingPrompt).toHaveBeenCalledWith(
+      'session-old',
+      'prompt-1',
+    );
+    expect(onPromptRemoved).not.toHaveBeenCalled();
   });
 
   it('does not report a stats error while the session is disconnected', async () => {
@@ -5728,6 +5811,40 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it('drops the connection session context through the real clearSession action', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession({ dropSessionContext: true });
+
+    expect(getConnection().sessionContext).toBeUndefined();
+    expect(getConnection().sessionId).toBeUndefined();
+  });
+
+  it('keeps the connection session context when clearSession drops only the session', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession();
+
+    expect(getConnection().sessionId).toBeUndefined();
+    expect(getConnection().sessionContext).toEqual({ kind: 'live' });
+  });
+
   it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');
     const replacement = createMockSession('session-b');
@@ -6577,6 +6694,28 @@ describe('accepted attachment sources', () => {
     await Promise.resolve();
     expect(addNotice).not.toHaveBeenCalled();
   });
+});
+
+it('clearing selected stopped session removes stale stop and recovery flags', () => {
+  const next = getConnectionAfterSessionClear(
+    {
+      status: 'disconnected',
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      runtimeStopped: true,
+      runtimeStopPersistenceUnconfirmed: true,
+      capacityRecovery: {
+        sessionId: 'session-1',
+        mode: 'load',
+        error: new Error('full'),
+      },
+    },
+    'session-1',
+  );
+  expect(next.sessionId).toBeUndefined();
+  expect(next.runtimeStopped).not.toBe(true);
+  expect(next.runtimeStopPersistenceUnconfirmed).not.toBe(true);
+  expect(next.capacityRecovery).toBeUndefined();
 });
 
 function createTimedCreateClient({

@@ -1,3 +1,10 @@
+.dialog {
+  width: min(360px, calc(100vw - 32px));
+  gap: 14px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+
 .trigger {
   position: relative;
   display: inline-flex;
@@ -48,44 +55,6 @@
   color: var(--destructive);
 }
 
-.requirements {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.requirement {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.requirementState {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--muted-foreground);
-}
-
-.dot[data-ready='true'] {
-  background: #22c55e;
-}
-
-.dot[data-denied='true'] {
-  background: var(--destructive);
-}
-
 .error {
   margin: 0;
   color: var(--destructive);
@@ -97,17 +66,30 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 44px;
-  padding: 10px 12px;
+  min-height: 36px;
+  padding: 6px 0;
   border-radius: 14px;
-  background: var(--muted);
   color: var(--foreground);
   font-size: 13px;
 }
 
+.establishing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 120px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.establishing .liveStateOrb {
+  animation: livePulse 1.2s ease-in-out infinite;
+}
+
 .liveStateOrb {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   flex: 0 0 auto;
   border-radius: 50%;
   background: radial-gradient(circle at 35% 30%, #fff, #8b6bf0 45%, #4b35a7);
@@ -118,26 +100,6 @@
 .liveState[data-state='starting'] .liveStateOrb,
 .liveState[data-state='speaking'] .liveStateOrb {
   animation: livePulse 1.2s ease-in-out infinite;
-}
-
-.transcript {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  color: var(--foreground);
-  background: var(--muted);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.transcript[data-role='assistant'] {
-  border-radius: 18px;
-  font-style: italic;
-}
-
-.transcript[data-role='user'] {
-  color: var(--muted-foreground);
-  background: transparent;
 }
 
 .hint {
@@ -160,13 +122,110 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .trigger::after {
+  .trigger::after,
+  .establishing .liveStateOrb {
     animation: none !important;
   }
+}
+
+.screenShare {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The share notice reads as ordinary status, not as the alarm the dropped-input
+   line is, so it reuses the region's layout but not its colour. */
+.screenShare .droppingStatus,
+.screenShare [data-live-screen-feed] {
+  flex-basis: 100%;
 }
 
 .browserActions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.levelMeter {
+  --live-input-level: 0;
+  flex: 1 1 auto;
+  min-width: 48px;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--foreground) 12%, transparent);
+}
+
+.levelMeterFill {
+  height: 100%;
+  width: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transform: scaleX(var(--live-input-level));
+  transform-origin: left center;
+}
+
+.levelMeter[data-muted='true'] .levelMeterFill {
+  background: color-mix(in srgb, var(--foreground) 35%, transparent);
+}
+
+/* Frames are being dropped, not sent: the bar still follows the voice, in a
+   colour that does not read as "all good". */
+.levelMeter[data-dropping='true'] .levelMeterFill {
+  background: var(--destructive, #d9534f);
+}
+
+.droppingStatus {
+  margin: 0;
+  color: var(--destructive, #d9534f);
+  font-size: 12px;
+}
+
+.droppingStatus:not(:empty) {
+  margin-top: 6px;
+}
+
+/* One grid item for the state row and its status line, so the empty live
+   region adds neither height nor a grid gap. */
+.liveStateGroup {
+  display: flex;
+  flex-direction: column;
+}
+
+.controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.dialog .roundControl {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+
+.roundControl[aria-pressed='true'] {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.dialog .shareButton {
+  width: 100%;
+  height: 36px;
+  border-radius: 999px;
+}
+
+.shareButton[aria-pressed='true'] {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.screenShare [data-live-screen-share-label] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
