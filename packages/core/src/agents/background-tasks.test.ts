@@ -1171,8 +1171,8 @@ describe('BackgroundTaskRegistry', () => {
         registry.register(makeRegistration('bg-2', { model: 'weak-model' })),
       ).toThrow(
         'Cannot start background agent: the concurrency cap ' +
-          'for model "weak-model" (1) reached — a running foreground ' +
-          'sub-agent counts toward it. Wait for it to finish or stop an agent ' +
+          'for model "weak-model" (1) reached — it is already held by running ' +
+          'background agents. Wait for one to finish or stop an agent ' +
           'on that model first.',
       );
       expect(registry.get('bg-2')).toBeUndefined();
@@ -1180,6 +1180,28 @@ describe('BackgroundTaskRegistry', () => {
       // ...but a different model is unaffected.
       registry.register(makeRegistration('bg-3', { model: 'strong-model' }));
       expect(registry.get('bg-3')?.status).toBe('running');
+    });
+
+    it('names the foreground sub-agent when a foreground claim holds the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      // A foreground sub-agent holds the only slot on the capped model.
+      const fg = registry.tryReserveForegroundModelSlot('weak-model', null);
+      expect(fg).toBeDefined();
+
+      // A background launch refused against that model is told to wait for the
+      // foreground sub-agent, not for a background agent that is not there.
+      expect(() =>
+        registry.register(makeRegistration('bg-1', { model: 'weak-model' })),
+      ).toThrow(
+        'Cannot start background agent: the concurrency cap ' +
+          'for model "weak-model" (1) reached — a running foreground ' +
+          'sub-agent counts toward it. Wait for it to finish or stop an agent ' +
+          'on that model first.',
+      );
     });
 
     it('lets a model without a per-model cap use the global limit', () => {

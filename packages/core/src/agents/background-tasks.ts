@@ -626,11 +626,16 @@ export class BackgroundTaskRegistry {
             `${JSON.stringify(model)}: ${claimedForModel}/${perModelCap} ` +
             `(foreground sub-agent claims included). Refusing new background agent.`,
         );
+        const foregroundClaims = this.countForegroundClaimsOnModel(model);
+        const reason =
+          foregroundClaims > 0
+            ? `a running foreground sub-agent counts toward it. Wait for it to ` +
+              `finish or stop an agent on that model first.`
+            : `it is already held by running background agents. Wait for one to ` +
+              `finish or stop an agent on that model first.`;
         throw new Error(
           `Cannot start background agent: the concurrency cap ` +
-            `for model "${model}" (${perModelCap}) reached — a running ` +
-            `foreground sub-agent counts toward it. Wait for it to finish or ` +
-            `stop an agent on that model first.`,
+            `for model "${model}" (${perModelCap}) reached — ${reason}`,
         );
       }
     }
@@ -1463,6 +1468,27 @@ export class BackgroundTaskRegistry {
       this.getRunningBackgroundCount(model) +
       this.getReservedBackgroundSlotCount(model)
     );
+  }
+
+  /**
+   * Number of FOREGROUND per-model claims currently held on `model`. Used to
+   * word the per-model refusal message by the real occupant: a background
+   * launch refused on a model held by a foreground sub-agent should be told to
+   * wait for that sub-agent, while one refused on a model held only by other
+   * background agents should not be sent chasing a foreground sub-agent that
+   * is not there.
+   */
+  private countForegroundClaimsOnModel(model?: string): number {
+    if (model === undefined) {
+      return 0;
+    }
+    let count = 0;
+    for (const claim of this.reservedBackgroundSlots.values()) {
+      if (claim.foreground && claim.model === model) {
+        count++;
+      }
+    }
+    return count;
   }
 
   private getOutstandingBackgroundLaunchCount(ownerId: string | null): number {
