@@ -13423,6 +13423,13 @@ describe('useLlmStream', () => {
     it('does not expose command-idle while a detached continuation streams', async () => {
       let releaseLog!: () => void;
       let releaseToolStream!: () => void;
+      const commandIdleStateRef = {
+        current: {
+          streamingState: StreamingState.Idle,
+          localCommandDispatchStartedIdle: false,
+          activeModelStreams: 0,
+        },
+      };
       mockLogMessage.mockImplementationOnce(
         () =>
           new Promise<void>((resolve) => {
@@ -13431,9 +13438,19 @@ describe('useLlmStream', () => {
       );
       mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
 
-      const hook = renderTestHook([], undefined, undefined, undefined, {
-        logMessage: mockLogMessage,
-      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+      const hook = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        undefined,
+        {
+          logMessage: mockLogMessage,
+        } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>,
+        undefined,
+        false,
+        [],
+        commandIdleStateRef,
+      );
       let slashRequest!: Promise<void>;
       let toolResultRequest!: Promise<void>;
       const detachedAbortController = new AbortController();
@@ -13446,9 +13463,9 @@ describe('useLlmStream', () => {
         await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(1));
         expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
         expect(
-          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+          commandIdleStateRef.current.localCommandDispatchStartedIdle,
         ).toBe(true);
-        expect(hook.commandIdleStateRef.current.activeModelStreams).toBe(0);
+        expect(commandIdleStateRef.current.activeModelStreams).toBe(0);
 
         mockSendMessageStream.mockImplementationOnce(() =>
           (async function* () {
@@ -13490,7 +13507,7 @@ describe('useLlmStream', () => {
           StreamingState.Responding,
         );
         expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
-        expect(hook.commandIdleStateRef.current.activeModelStreams).toBe(1);
+        expect(commandIdleStateRef.current.activeModelStreams).toBe(1);
 
         await act(async () => {
           releaseToolStream();
