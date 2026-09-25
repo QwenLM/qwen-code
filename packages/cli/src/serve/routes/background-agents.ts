@@ -37,6 +37,7 @@ import {
   reconcileRowLiveness,
 } from '../../commands/sessions/managed-rows.js';
 import type { AgentViewTaskState } from '../../agent-view/presentation.js';
+import { isWithinRoot } from '../../config/path-comparison.js';
 import { sendUntrustedWorkspaceResponse } from '../workspace-route-runtime.js';
 
 /** One background agent, as this route reports it. */
@@ -71,6 +72,28 @@ export interface RegisterBackgroundAgentRoutesDeps {
   /** Overridden in tests; defaults to the real live-session registry. */
   listRecords?: typeof listLiveSessions;
   isWorkspaceTrusted?: () => boolean;
+  /**
+   * The workspace this daemon is bound to. Only agents working inside it
+   * are listed.
+   *
+   * The supervisor's store is process-global: it holds a row for every
+   * background agent on this machine, whatever workspace it was launched
+   * in. Without this the trust gate would be answering a question about
+   * one workspace while the rows came from all of them — a daemon bound
+   * to a trusted workspace would describe another workspace's agents,
+   * including the prompt a `--bg` row falls back to for its name.
+   * Scoping the rows is what makes the gate above cover exactly the data
+   * the response carries, which is also what the acting routes already
+   * assume: `POST /session` refuses a foreign `cwd` with
+   * `workspace_mismatch`.
+   *
+   * Compared lexically, as `isWithinRoot` does wherever else serve draws
+   * this boundary — no `realpath`, so an agent cwd reached through a
+   * symlink can read as outside the workspace it belongs to. Registered
+   * secondary workspaces are not covered either; this is the primary
+   * workspace's roster.
+   */
+  boundWorkspace?: string;
 }
 
 export function registerBackgroundAgentRoutes(
@@ -91,14 +114,20 @@ export function registerBackgroundAgentRoutes(
       // row whose worker pid is not recorded yet keeps the pid the
       // registry half proved alive instead of reading as `failed`. The
       // filter drops the registry-only rows the merge appends — this
-      // route reports background agents, not every session here.
+      // route reports background agents, not every session here — and
+      // the ones belonging to another workspace, so what comes back is
+      // the roster the trust gate above actually vouched for.
+      const boundWorkspace = deps.boundWorkspace;
       const [records, snapshots] = await Promise.all([
         listRecords(),
         listSnapshots(),
       ]);
       const rows = reconcileRowLiveness(
         mergeSessionRows(records, managedSessionRows(snapshots)).filter(
-          (row) => row.managed,
+          (row) =>
+            row.managed &&
+            (boundWorkspace === undefined ||
+              isWithinRoot(row.cwd, boundWorkspace)),
         ),
       );
       // `taskState` is set on every row `managedSessionRows` returns —

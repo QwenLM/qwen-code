@@ -8,7 +8,10 @@ import express from 'express';
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core/services/session-registry.js';
-import type { AgentViewSessionSnapshot } from '../../agent-view/protocol.js';
+import type {
+  AgentViewRosterEntry,
+  AgentViewSessionSnapshot,
+} from '../../agent-view/protocol.js';
 import { registerBackgroundAgentRoutes } from './background-agents.js';
 
 const SESSION = '0f8e1c42-9d3a-4d21-8f77-2b6a7c9e0c31';
@@ -60,16 +63,38 @@ function record(
   };
 }
 
+/**
+ * The roster half of a snapshot. A helper because the scope case below
+ * needs two agents in two workspaces, and writing five roster fields out
+ * twice buries the one that differs.
+ */
+function roster(
+  sessionId: string,
+  cwd: string,
+  displayName: string,
+): AgentViewRosterEntry {
+  return {
+    sessionId,
+    projectCwd: cwd,
+    activeCwd: cwd,
+    displayName,
+    createdAt: '2026-09-04T11:58:00Z',
+    updatedAt: '2026-09-04T11:59:00Z',
+  };
+}
+
 function appWith(
   listSnapshots: () => Promise<AgentViewSessionSnapshot[]>,
   // Empty by default, so a case that does not care about the registry
   // cannot pick up sessions live on the machine running the suite.
   listRecords: () => Promise<SessionRegistryRecord[]> = async () => [],
+  extra: { boundWorkspace?: string } = {},
 ) {
   const app = express();
   registerBackgroundAgentRoutes(app, {
     listSnapshots: listSnapshots as never,
     listRecords: listRecords as never,
+    ...extra,
   });
   return app;
 }
@@ -232,6 +257,90 @@ describe('GET /background-agents', () => {
     expect(response.body.error).toBe('Background agents are unavailable.');
     expect(response.body.code).toBe('background_agents_unavailable');
     expect(response.body.message).toContain('EACCES');
+  });
+
+  it('lists only the agents inside the workspace the daemon is bound to', async () => {
+    // The supervisor's store is process-global: it holds every background
+    // agent on this machine. A daemon bound to one workspace therefore
+    // cannot answer from the whole store, or the trust gate vouches for
+    // one workspace while the response describes another's — and for a
+    // real `--bg` session the name is the launch prompt, so what leaks is
+    // what someone typed.
+    const FOREIGN = 'a1b2c3d4-0000-4000-8000-000000000002';
+    const worker = {
+      schemaVersion: 1 as const,
+      workerPid: LIVE_PID,
+      protocolVersion: 1,
+      platform: 'linux' as const,
+      recentOutputBytes: 0,
+    };
+    const response = await request(
+      appWith(
+        async () => [
+          snapshot({
+            rosterEntry: roster(SESSION, '/w/app', 'release audit'),
+            worker,
+          }),
+          snapshot({
+            sessionId: FOREIGN,
+            state: {
+              ...snapshot().state,
+              sessionId: FOREIGN,
+              projectCwd: '/elsewhere/secret',
+              originalCwd: '/elsewhere/secret',
+              activeCwd: '/elsewhere/secret',
+            },
+            rosterEntry: roster(
+              FOREIGN,
+              '/elsewhere/secret',
+              'rotate the prod keys',
+            ),
+            worker,
+          }),
+        ],
+        async () => [],
+        { boundWorkspace: '/w/app' },
+      ),
+    ).get('/background-agents');
+
+    expect(response.status).toBe(200);
+    expect(response.body.agents).toEqual([
+      {
+        sessionId: SESSION,
+        name: 'release audit',
+        taskState: 'waiting',
+        cwd: '/w/app',
+        pid: LIVE_PID,
+        startedAt: '2026-09-04T11:58:00.000Z',
+      },
+    ]);
+    // Named separately from the shape above: the disclosure is the
+    // foreign prompt and cwd, and an empty-list regression would satisfy
+    // `toEqual` on a subset without proving those two stayed out.
+    const listed = JSON.stringify(response.body.agents);
+    expect(listed).not.toContain('rotate the prod keys');
+    expect(listed).not.toContain('/elsewhere/secret');
+    expect(listed).not.toContain(FOREIGN);
+  });
+
+  it('lists a nested workspace agent, as a subdirectory is still inside it', async () => {
+    // The scope is containment, not equality: `--bg` sessions routinely
+    // run in a subdirectory of the bound workspace, and refusing those
+    // would empty the roster for a daemon started at a repo root.
+    const response = await request(
+      appWith(
+        async () => [
+          snapshot({
+            state: { ...snapshot().state, activeCwd: '/w/app/packages/cli' },
+          }),
+        ],
+        async () => [],
+        { boundWorkspace: '/w/app' },
+      ),
+    ).get('/background-agents');
+
+    expect(response.body.agents).toHaveLength(1);
+    expect(response.body.agents[0].cwd).toBe('/w/app/packages/cli');
   });
 
   it('refuses to list anything for an untrusted workspace', async () => {
