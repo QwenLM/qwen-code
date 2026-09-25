@@ -88,7 +88,25 @@ describe('formatFetchErrorForUser', () => {
 });
 
 describe('isConnectionLevelError', () => {
-  it.each(['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH'])(
+  // Pins every member of CONNECTION_LEVEL_ERROR_CODES (fetch.ts) so dropping
+  // a code from the set — or losing the ...TLS_ERROR_CODES spread — fails
+  // here. Keep in sync with fetch.ts.
+  it.each([
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'EPROTO',
+    'ERR_SSL_WRONG_VERSION_NUMBER',
+    'UND_ERR_SOCKET',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'CERT_HAS_EXPIRED',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+  ])(
     'treats %s as connection-level (https upgrade may fall back to http)',
     (code) => {
       expect(

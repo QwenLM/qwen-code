@@ -1360,9 +1360,11 @@ describe('WebFetchTool', () => {
     });
 
     it('should fall back to http when the upgraded host is unreachable (EHOSTUNREACH/ENETUNREACH)', async () => {
-      // Hosts whose port 443 is dropped at the network layer fail the
-      // opportunistic https upgrade with EHOSTUNREACH/ENETUNREACH, not
-      // ECONNREFUSED — the http fallback must still fire.
+      // An ICMP host/network unreachable (a firewall REJECT, or a missing
+      // route) fails the opportunistic https upgrade before any handshake,
+      // with no RST for ECONNREFUSED to see — the http fallback must still
+      // fire. (A silently DROPped port instead pends the connect and
+      // surfaces as UND_ERR_CONNECT_TIMEOUT.)
       for (const code of ['EHOSTUNREACH', 'ENETUNREACH'] as const) {
         const fetchSpy = vi
           .spyOn(fetchUtils, 'fetchWithPolicy')
