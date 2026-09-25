@@ -1,5 +1,59 @@
 # 验证结果：远程会话经 launchd 中继使用本地桌面机（PR #11799）
 
+## 最终候选复核（2026-09-25）
+
+核心 Linux Serve → Mac 桌面流程通过。下方是按时间倒序保留的执行记录，历史“待完成/尚未提交”描述反映当时状态，不覆盖后来的复验结果。HTTP + IP 接入引导属于独立跟进 #12696。
+
+独立测试工程师在 Node 22.23.2 串行复跑当前候选：CLI registry/WebSocket 35、静态 CSP 20、Serve capability 开关 2、desktop-relay 47、Web Shell client/panel/Vite 36，合计 140/140 通过（13 个文件，所有命令 exit 0）；`git diff --check` 通过。已部署候选的全量 build/typecheck/bundle 通过。该结论不替代推送后新提交的 CI。
+
+未覆盖范围仍为连续 GUI 输入取消、Safari、跨机 SSH raw MCP、全新 Mac 安装/TCC；公开 `@latest` 安装路径仍需包含本实现的包发布。原生授权没有截图，只有用户明确确认和实际 connected/工具执行证据。
+
+公开报告及 5 张已检查隐私信息的截图：[PR 测试报告评论](https://github.com/QwenLM/qwen-code/pull/11799#issuecomment-5832844845)。截图包含未连接/已连接面板、实际桌面 MCP 结果、测试文档及断开后拒绝调用。原生授权框补拍因独立截图进程未获屏幕录制权限失败，未上传该图，也未制作替代图；用户确认 Allow 后已复核 connected，补拍结束再次断开。评论明确区分历史调用结果与后来补拍的连接面板，并注明未提交候选补丁、未覆盖范围，不作为 PR HEAD 的完整验收结论。
+
+## 2026-09-25 20:06：生命周期修复后的真机补验
+
+运行候选仍为下文 SHA256 `62f4eb07…`，不是尚未包含这些修复的远端 PR HEAD。
+
+- 用户明确确认看到了原生框并点击 Allow；中继返回 connected。此前仅凭“等待确认”或窗口元数据推断用户可见是不成立的。
+- 切到第二会话显示“被其他会话使用中”，再回原会话调用 desktop-node-repl 成功，返回 `darwin` 与切换前写入的 `relay-switch-check` 标记，未重新连接或重设标记。先前的会话切换注册丢失未复现。
+- 本地仅准备独立测试文档作为 fixture，不计为远程控制证据。随后远端会话通过 desktop-node-repl / Computer Use 读取并修改 Mac 文档：全选、输入后观察到 `Hello from remote Linux - Mac Computer Use verified`。输入请求是小写 hello，实际首字母大写；不宣称逐字节输入一致。首次 cell 返回 running，之后通过 node_repl_wait 收集完成，没有盲目重发输入。
+- 中文系统下 `getApp('TextEdit')` 未匹配到应用；改用 `com.apple.TextEdit` 成功。单凭 app_not_running 断言应用进程不存在是不准确的。
+- 独立测试工程师重跑当前源代码：node-repl desktop-relay 47/47，CLI sender registry / WebSocket 35/35，合计 82/82。已撤回的 session/resume 方案未混入本次产物。
+
+20:18 收尾结果：
+
+- 截图通过：仅返回测试文档内容区，排除标题栏/边缘并 flatten 白底。前两张从 y=120 裁剪的图均为空白；改为 y=60 后清晰显示 `REMOTE LINUX TO MAC VERIFIED`。独立从该会话原始 tool_result 提取并目检 636×352 PNG，SHA256 为 `ed3e0831810ff2fb6b9d44fd1315ec3aaf7b1419d870cbf129674cdf8e6c3a76`。空白源于裁掉文字，模型此前归因 TCC 的结论已被否定；没有要求用户修改系统权限，没有发布原图或桌面背景。
+- 点击真实面板“断开”后 UI 显示未连接，Mac relay 为 stopped；tool_search 返回零命中，随后按旧精确工具名调用返回 `Tool "mcp__desktop-node-repl__node_repl" not found in registry.`，没有重新授权或静默重连。
+- 本轮结论：**Linux Serve → 用户原生授权 → Mac Computer Use 读写与裁剪截图 → 会话切换保持 → 主动断开撤销**这条核心场景通过。测试文档保留在本地临时目录，未用 GUI 保存修改；测试会话页面保留供查看，桌面连接已断开。
+- 限制：连续 GUI 输入中的取消仍未覆盖（已覆盖非 GUI cell 取消后超过 30 秒继续调用）；Safari、跨机 SSH raw MCP 路径未完整验收。不能据此宣布所有平台或 PR 发布门禁全部通过，当前补丁也尚未提交/推送。
+
+## 2026-09-25：真实 Linux → Mac 连接入口补验
+
+基于 `0ae4ff5660` 的后续工作树修复，尚未完成完整桌面验收。Linux 上运行 Mac 构建并传输的 bundle，复用 Linux 已安装的原生依赖，没有在服务器构建或覆盖既有安装。Mac 通过 SSH local-forward 访问 Linux Serve；本地转发端口不是另一台本地 Serve。
+
+- 真实 Linux Serve 健康检查和模型仅回复 OK 的对话通过。
+- 浏览器日志明确显示 `/status` 被页面 `connect-src` 拦截。这推翻了下节“探测被浏览器权限阻止”的推断：权限查询为 `prompt` 不等于请求已弹出授权框。
+- 修复后，仅 `clientMcpOverWs === true` 的生产页面及 SPA fallback 放行固定地址 `http://127.0.0.1:47821`；默认 CSP 不变，Vite 使用与生产一致的环境变量语义。只有明确 `denied` 才提示浏览器权限，其他探测失败不再声称用户尚未授权。
+- 全量 build、typecheck、bundle 与相关文件 lint 通过；生产路由开关 2 项、静态路由 20 项、Web Shell/Vite 35 项测试通过。重新部署的 `dist/cli.js` 两端 SHA256 均为 `942a5662eb33408fb814f5bb04caa560ce37ef46e1f92987d5053e2498835326`。
+- 同一浏览器页面无需修改权限即检测到 Mac 中继，状态为“未连接”。点击“连接这台电脑”后进入“等待确认”；Mac 窗口列表确认对应 `osascript` 进程拥有可见窗口。未截图、未自动点击授权。随后确认框进程结束，`/status` 没有 active 连接；不能仅据此区分超时与用户拒绝。
+
+解锁后补验（19:08–19:13）：用户回复“好了”后，Mac 锁屏状态为 false，中继 `/status` 返回该 Linux 会话的 `connected`。同一 Web Shell 会话的远端 shell 返回 `Linux`；`mcp__desktop-node-repl__node_repl` 执行 `nodeRepl.write((await import('node:os')).platform())` 返回 `darwin`，已展开工具结果核对，不仅依赖模型总结。首次使用 `process.platform` 的探针因隔离内核没有 `process` 失败，不能计为通过；随后受支持的 `node:os` 探针通过。未读取凭据或截取屏幕。
+
+- Computer Use SDK 初始化成功，`getPlatform()` 的实际工具结果为 `macos`。TextEdit 返回 `No open application window.`；新建快捷键被 SDK 以 `app_window_unavailable` 拒绝，随后再观察仍无窗口。没有重复发送、输入文字或返回截图，已请用户准备空白测试文档。
+- 真实 Web Shell 取消补验：桌面 cell 设置 `cancelProbe.finished=false` 后等待 60 秒，在执行中点击停止。19:19:58 页面确认回合取消，19:20:32 中继仍为 connected，之后允许新的只读调用，实际结果为 `{"platform":"darwin","probe":{"finished":false},"computerStillPresent":true}`。证明跨过 30 秒关联超时后可继续调用且原内核状态保留；本项是非 GUI cell，不冒称桌面连续输入取消已验收。
+- 第二会话面板显示“被其他会话使用中”；该会话实际 `tool_search` 返回 `No tools found matching 'desktop-node-repl'`，没有发起连接或替换原会话。返回原会话后面板仍为“已连接”。这是正常会话工具隔离证据，不是恶意跨会话协议攻击测试。
+- 随后原会话调用却返回 `Tool not found in registry`，因此**切换再返回不通过**。代码核实：页面切换会 detach 旧会话；没有其他客户端/订阅时，live session 被关闭，恢复会话不继承旧的 session-scoped 注册，而 relay 的 WS 尚在。修复使用服务端现有 EventBus 订阅保活并跟踪结束，订阅由 sender owner 管理，注销/替换/断开时释放，不新增权限投票者。针对真实 EventBus 的生命周期、替换与失败回滚回归及既有 WS 测试 35 项通过；修复后的跨机复验待完成。曾尝试的 `session/resume` 方案因 consensus 投票副作用已撤回，未部署。
+- 生命周期修复经独立复核、聚焦 lint、全量 build/typecheck/bundle 后已部署到原 Linux 隔离目录。新 bundle 两端 SHA256 为 `62f4eb078eea1958c777f7d0e53cd4fb0353138cb3c01eaf1a2b5610a4c8889c`。停止旧 Serve 后 Mac relay 返回 `stopped / connection closed (code 1000)`；新 Serve 健康检查成功后 relay 仍为 stopped，没有静默重连。此时只读检查显示 Mac 再次锁屏，未反复触发原生确认框；解锁后的重新授权与修复后真机复验待完成。
+- 本轮重新完成全量 build/typecheck（含 integration），以及中继聚焦 20 项、Web Shell/Vite 36 项、静态路由 20 项测试，均通过。
+
+**仍未验收**：GUI 操作与截图、连续桌面操作的取消、断开及重启。连接、平台探针、非 GUI 取消恢复和正常会话隔离通过不等于这些项目已通过。Safari 和 SSH raw MCP 路径也尚无完整验收证据。
+
+### 原生框不可见的后续排查
+
+用户报告仍看不到确认框。只读窗口元数据检查发现：确认框位于主屏幕范围内，但系统前台为 `loginwindow`；`CGSessionCopyCurrentDictionary` 返回 `CGSSessionScreenIsLocked=1`、onConsole=1、loginDone=1。当前 Mac 处于锁屏状态，窗口存在不能证明用户可见，也不能据此认定激活代码失败。没有尝试解锁、绕过锁屏或截取屏幕。
+
+保留弹框前标准 `activate` 的一行改动，删除排查中临时加入的 AppKit 激活策略代码，避免把锁屏问题转成不必要的实现复杂度。参数测试同时锁定默认/取消按钮 Deny、60 秒对话框超时和 70 秒进程上限；中继 47 项测试通过。解锁后连接已成功，见上方补验；没有把窗口列表的可见标记当成人眼看到弹框的证据。
+
 ## 2026-09-25：Mac 补验（尚未完成跨机验收）
 
 验证提交：`04d5d90fcc`，Mac 上重新打包并安装本分支的中继，使用 `@qwen-code/cua-sdk@0.20.11`。以下结果不替代后文 2026-09-23 的 Linux 记录。

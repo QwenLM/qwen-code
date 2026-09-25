@@ -59,7 +59,7 @@ describe('probeDesktopRelay', () => {
     ).resolves.toEqual({ kind: 'ready', version: '0.1.5' });
   });
 
-  it('reads an unreachable port or a foreign answer as not set up', async () => {
+  it('reports an undetected relay for failed requests or foreign answers', async () => {
     const refused = vi.fn<FetchLike>(async () => {
       throw new TypeError('Failed to fetch');
     });
@@ -71,19 +71,22 @@ describe('probeDesktopRelay', () => {
     });
   });
 
-  it('reports when the browser is withholding local network access', async () => {
-    vi.stubGlobal('navigator', {
-      permissions: {
-        query: vi.fn().mockResolvedValue({ state: 'prompt' }),
-      },
-    });
-    const refused = vi.fn<FetchLike>(async () => {
-      throw new TypeError('Failed to fetch');
-    });
-    await expect(probeDesktopRelay(refused)).resolves.toEqual({
-      kind: 'permission-required',
-    });
-  });
+  it.each(['prompt', 'granted', 'denied'])(
+    'does not infer a permission denial from %s',
+    async (state) => {
+      vi.stubGlobal('navigator', {
+        permissions: {
+          query: vi.fn().mockResolvedValue({ state }),
+        },
+      });
+      const refused = vi.fn<FetchLike>(async () => {
+        throw new TypeError('Failed to fetch');
+      });
+      await expect(probeDesktopRelay(refused)).resolves.toEqual({
+        kind: state === 'denied' ? 'permission-required' : 'missing',
+      });
+    },
+  );
 });
 
 describe('connectDesktopRelay', () => {

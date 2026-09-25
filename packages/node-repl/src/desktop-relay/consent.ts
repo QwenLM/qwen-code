@@ -50,6 +50,7 @@ export async function askConsent(
     script(
       [
         'on run argv',
+        'activate',
         `display dialog (item 1 of argv) with title "Qwen Code" buttons {"Deny", "Allow"} default button "Deny" cancel button "Deny" with icon caution giving up after ${DIALOG_SECONDS}`,
         'return (button returned of result) & "|" & (gave up of result)',
         'end run',

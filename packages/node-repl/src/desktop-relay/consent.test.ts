@@ -28,11 +28,19 @@ describe('askConsent', () => {
     ).resolves.toBe(false);
   });
 
-  it('passes the message as an argument instead of splicing it into the script', async () => {
+  it('activates before prompting and passes the message without script interpolation', async () => {
     const run = runner({ code: 0, stdout: 'Allow|false' });
     const message = 'evil" & do shell script "rm -rf ~" & "';
     await askConsent(message, run);
     const args = run.mock.calls[0]?.[0] ?? [];
+    const activate = args.indexOf('activate');
+    const dialog = args.findIndex((arg) => arg.startsWith('display dialog '));
+    expect(activate).toBeGreaterThan(-1);
+    expect(activate).toBeLessThan(dialog);
+    expect(args[dialog]).toContain('default button "Deny"');
+    expect(args[dialog]).toContain('cancel button "Deny"');
+    expect(args[dialog]).toContain('giving up after 60');
+    expect(run.mock.calls[0]?.[1]).toBe(70_000);
     expect(args.at(-1)).toBe(message);
     expect(args.slice(0, -1).join('\n')).not.toContain('rm -rf');
   });

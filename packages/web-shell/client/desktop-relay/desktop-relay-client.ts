@@ -101,7 +101,7 @@ async function needsLocalNetworkPermission(): Promise<boolean> {
     const status = await navigator.permissions.query({
       name: 'local-network-access' as PermissionName,
     });
-    return status.state !== 'granted';
+    return status.state === 'denied';
   } catch {
     return false;
   }

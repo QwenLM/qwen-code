@@ -1,6 +1,6 @@
 # 远程 Qwen Code 使用本地桌面机：launchd 按需拉起的 node_repl 中继
 
-> 状态：v3，已实现（本 PR），全量 build、typecheck 和相关单元测试已通过，未在真机上跑过。v1（中继驱动守护进程）和 v2（`qwen bridge` 子命令）都被替换，原因见 §1、§2。
+> 状态：v3，已实现（本 PR）。2026-09-25 真实 Linux → Mac 的原生授权、桌面读写与裁剪截图、会话切换保持、主动断开撤销和非 GUI 取消恢复已通过。生命周期缺陷已修复并复验；未覆盖场景与发布前提见 §6 及 `docs/verification/remote-computer-use/results.md`。v1（中继驱动守护进程）和 v2（`qwen bridge` 子命令）都被替换，原因见 §1、§2。
 > 基线：`origin/main` @ `42f9d13cda`（2026-09-19）。真机验证步骤见 `docs/verification/remote-computer-use/README.md`。
 > 关联：#5626（反向工具通道）、#10962（本地文件桥）、#11548（Web Shell 连接远程 daemon）、#11475（远程 daemon 工作流）、`docs/users/features/computer-use.md`
 
@@ -50,7 +50,9 @@ launchd（inetd 模式）拉起：node-repl-mcp desktop-relay agent
          mcp_message ⇄ node_repl                         该会话里出现 node_repl 工具
 ```
 
-代码都在 `packages/node-repl/src/desktop-relay/`，入口是 `node-repl-mcp desktop-relay <command>`（`src/index.ts` 按参数动态加载，普通 MCP 模式不受影响）：
+会话生命周期补充（2026-09-25）：session-scoped MCP 注册持有服务端现有事件订阅，不注册普通客户端、不参与权限投票，也不把会话事件转发给桌面。订阅防止浏览器切走时 live session 被自动回收；真正关闭会话会终止订阅、撤回工具，并让中继退出 connected。注销、断开和同名注册替换都会释放旧所有者的订阅；不持久化或自动恢复桌面授权。直接使用 `session/resume` 保活的方案已撤回，因为它会增加 consensus 模式下的投票者。
+
+中继代码在 `packages/node-repl/src/desktop-relay/`，入口是 `node-repl-mcp desktop-relay <command>`（`src/index.ts` 按参数动态加载，普通 MCP 模式不受影响）：
 
 | 文件                 | 作用                                                                                                      |
 | -------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -143,16 +145,16 @@ qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@latest \
 | 8   | server 名称只允许 `[A-Za-z0-9_-]`，`desktop-node-repl` 合法                                                                   | `cli/src/runtime/validate-server-name.ts:7`                                               |
 | 9   | MCP SDK 1.30 的 server 用一个 handler 处理 `initialize`；中继不依赖它能否重复初始化，自己缓存                                 | `@modelcontextprotocol/sdk/dist/esm/server/index.js:52`                                   |
 
-## 6. 未验证（需要真机）
+## 6. 验证边界与发布前提
 
-1. launchd inetd 模式下，`new net.Socket({ fd: 0 })` 能否正常读写接受的 TCP 连接；`socket.end()` 后浏览器能否立即拿到响应。
-2. `osascript display dialog` 从 LaunchAgent 进程弹出时是否在最前面、能否正常点击。
-3. Chrome（含本地网络访问权限提示）和 Safari 从 https 页面访问 `http://127.0.0.1:47821` 的实际表现。
-4. TCC 授权实际记在谁名下；第一次授权屏幕录制后是否需要重新连接。
-5. 模型看到远端注册的 `node_repl` 后是否确实跳过 bootstrap；截图体积与 10 MB 帧上限的关系。
-6. 发布：`npx … @latest desktop-relay install` 要等 `@qwen-code/node-repl-mcp` 发布包含本改动的版本后才可用；发布前用 `--package <tarball>` 安装（见验证说明）。
+1. 已实测 macOS launchd socket 激活、HTTP 安全边界及用户点击原生 Allow 后连接；原生框没有成功留存截图，不以窗口元数据冒充用户确认。
+2. 已实测 Chromium 浏览器通过 SSH localhost 转发访问 Linux Serve，再调用 Mac Computer Use 读写测试文稿并返回裁剪截图；不代表 Safari、HTTPS 部署或所有截图尺寸已验收。
+3. 非 GUI cell 的取消、超过 30 秒后的继续调用、会话切换保持及断开撤销已通过；连续 GUI 输入中的取消与跨机 SSH raw MCP 尚未完整验收。
+4. 全新 Mac 的首次安装、TCC 首次授权及权限归属仍需专门验证；本轮使用已有 Mac 上安装的候选 tarball。
+5. 发布：`npx … @latest desktop-relay install` 要等 `@qwen-code/node-repl-mcp` 发布包含本改动的版本后才可用；发布前用 `--package <tarball>` 安装（见验证说明）。
 
 ## 7. 非目标与后续
 
 - 非目标：在远端模拟桌面（Xvfb）；独立的桌面 app；中继 `qwen-cua-driver` 守护进程或它的 HTTP MCP。
 - 后续：Linux 桌面（systemd socket 激活）和 Windows 的安装方式；是否需要比“Web Shell 断开 / kill”更直接的本地停止开关。
+- HTTP + 服务器 IP 访问时的安全连接引导单独由 #12696 跟进，不在本 PR 放宽浏览器安全上下文限制。

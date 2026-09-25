@@ -1,7 +1,7 @@
 # 验证：远程会话经 launchd 中继使用本地桌面机（本轮：macOS）
 
 > 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`（§6 列出了本文要回答的未验证项）；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
-> 状态（2026-09-25）：Mac 上已补验安装、launchd、安全边界和浏览器权限提示，见 `results.md` 首节。**跨机端到端流程尚未通过验收**，本文未被结果明确覆盖的“预期”仍不是实测结论。
+> 状态（2026-09-25）：真实 Linux Serve → 用户原生授权 → Mac 文稿读写与裁剪截图 → 会话切换保持 → 断开撤销的核心流程已通过，见 `results.md`。连续 GUI 输入取消、Safari、跨机 SSH raw MCP 和全新 Mac 首次安装尚未完整验收；本文未被结果明确覆盖的“预期”仍不是实测结论。HTTP + IP 接入引导另见 #12696。
 > 需要：一台 Mac（Chrome，最好再有 Safari），Node 22；一台能从 Mac 用 SSH 连到的 Linux 开发机。两边都要能构建本 PR。
 > 出了问题先看文末的 **F. 排查手册**。
 
@@ -79,21 +79,21 @@ QWEN_SERVE_CLIENT_MCP_OVER_WS=1 node dist/cli.js serve   # 记下端口和 token
 
 Mac：`ssh -N -L 4170:127.0.0.1:<端口> devbox`，然后在 Chrome 打开 `http://localhost:4170`（回环地址是安全上下文）。
 
-1. 新建会话。侧边栏底部点显示器图标（“Use this computer”）。预期状态：Not connected。如果显示 Needs browser permission，由用户在浏览器提示或网站设置里允许本地网络访问，再重新检测。如果显示 Not set up，记录浏览器控制台的错误。另起一个未设 `QWEN_SERVE_CLIENT_MCP_OVER_WS` 的普通 daemon，确认 standalone 默认不显示此入口。
+1. 新建会话。侧边栏底部点显示器图标（“Use this computer”）。预期状态：Not connected。如果显示 Browser permission required，先核对权限是否明确 denied，再由用户在站点设置中处理。权限为 prompt 不能证明弹窗已出现。如果显示 Relay not detected，记录浏览器控制台的具体错误，尤其检查 CSP 是否阻止固定中继地址；不要直接认定未安装或未授权。另起一个未设 `QWEN_SERVE_CLIENT_MCP_OVER_WS` 的普通 daemon，确认 standalone 默认不显示此入口。
 2. 点 **Connect this computer**。预期：状态变为 Waiting for approval，桌面弹出确认框。点 Allow。预期：状态变为 Connecting…，随后 Connected；系统通知“is now using this computer”。
 3. 在同一会话里输入（保持默认审批模式）：
 
-   > 用 computer use 在我的 Mac 上打开“备忘录”，新建一条备忘录，内容写 hello from remote。每一步操作之后都重新读取界面状态，确认结果。
+   > 用 computer use 在我的 Mac 上打开“文本编辑”，新建一个不保存的测试文稿，内容写 hello from remote。不要打开已有文稿或访问私人内容。每一步操作之后都重新读取界面状态，确认结果。
 
    记录：模型是否执行了 bootstrap（`qwen mcp add … node-repl` 或 `npm install @qwen-code/cua-sdk`，出现就拒绝并记录）；`getPlatform()` 是否返回 `macos`；读参考文档走的是哪条路；macOS 的授权提示弹给了谁（预期是 `node`）；授权后是否需要重新连接；任务是否完成；3 次 `node_repl` 调用的耗时。
 
    **取消（2026-09-23 的修复，必须验证）**：再让模型跑一个持续操作屏幕的单元，例如：
 
-   > 用 computer use 在备忘录里每隔一秒输入一个数字，从 1 输入到 60，放在同一个 node_repl 单元里完成，yield_time_ms 设为 60000。
+   > 用 computer use 在刚才的测试文稿里每隔一秒输入一个数字，从 1 输入到 60，放在同一个 node_repl 单元里完成，yield_time_ms 设为 60000。
 
    数字开始出现后，在 Web Shell 里点停止。预期：几秒内桌面上不再出现新数字（中继把 `notifications/cancelled` 改写 id 后转发，node_repl 中止单元）。记录停止后又多出了几个数字。如果一直输到 60，说明取消没有到达桌面，按 F.6 排查。
 
-4. 让模型截一张全屏图（`app.getState({ includeScreenshot: true })`）。记录是成功还是得到“above the … byte limit”错误；注明屏幕分辨率。
+4. 先确认测试窗口和透明、半透明区域后面没有私人内容，再通过 desktop MCP 获取仅包含测试窗口的截图。不要默认截全屏；如接口只能截全屏，先由用户整理桌面再采集。检查图片不含账号、令牌、私人聊天或其他窗口后才展示，未经用户同意不公开上传。记录截图尺寸及是否触发大小限制。
 5. 在同一 workspace 的另一个会话里打开面板。预期：In use by another session。
 6. 回到原会话点 **Disconnect**。预期：状态回到 Not connected；再让模型调用 `node_repl` 时得到明确错误；`pgrep -fl desktop-relay` 无输出。
 7. 再连一次后，在开发机上重启 `qwen serve`。预期：中继结束（不重连），面板显示连接已关闭。
@@ -143,7 +143,7 @@ log show --last 5m --predicate 'process == "osascript"' | tail -20  # 确认框/
 
 | #   | 现象                                                       | 先查                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | --- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | 面板显示 Not set up                                        | 在 Mac 终端执行 B.1 的 `curl`。`curl` 正常而浏览器失败，是浏览器拦截：看开发者工具的 Console 和 Network 里 `127.0.0.1:47821/status` 的错误；Chrome 检查站点设置里的“本地网络访问”权限；Safari 记录具体报错（混合内容或 CORS）。`curl` 也失败，看 #2。                                                                                                                                                                        |
+| 1   | 面板显示 Relay not detected                                | 在 Mac 终端执行 B.1 的 `curl`。`curl` 正常而浏览器失败，是浏览器拦截：看开发者工具的 Console 和 Network 里 `127.0.0.1:47821/status` 的错误；Chrome 检查站点设置里的“本地网络访问”权限；Safari 记录具体报错（混合内容或 CORS）。`curl` 也失败，看 #2。                                                                                                                                                                        |
 | 2   | `curl` 连接被拒绝或卡住                                    | `lsof -nP -iTCP:47821 -sTCP:LISTEN` 没有输出：launchd 没有注册，重新 install 并看 `launchctl bootstrap` 的报错。有监听但连接立刻断开：看 `agent.log` 和 `launchctl print` 里的 last exit code，常见原因是 plist 里的 node 路径失效（nvm 切换或删除了该版本，重新 install 即可）。有监听但卡住：说明 `net.Socket({ fd: 0 })` 在 inetd 模式下有问题，用 #8 的方法绕开 launchd 对比。                                           |
 | 3   | `/connect` 之后没有对话框                                  | 在终端直接执行 `osascript -e 'display dialog "test"'`：终端里能弹出，而 relay 弹不出，说明是 LaunchAgent 的会话问题，记下 `agent.log` 和 `log show` 的输出。对话框在其他窗口后面也算问题，一并记录。                                                                                                                                                                                                                         |
 | 4   | 允许后一直停在 Connecting / Registering，或显示 failed     | `active.json` 的 `message` 字段写着原因。`unsupported-daemon` 或注册被拒：确认远端 daemon 启动时带了 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`（main 上默认关闭）。鉴权失败：检查 token。`register_failed` 且带 `already_registered`：同一会话已有旧注册，重启会话后再试。远端 daemon 日志里搜 `mcp_register`。                                                                                                                      |

@@ -104,6 +104,14 @@ describe('DesktopRelayPanel', () => {
     expect(text()).toContain('QWEN_SERVE_CLIENT_MCP_OVER_WS=1');
   });
 
+  it('explains a failed connection even when the relay provides no message', () => {
+    mount({ phase: 'failed' });
+    expect(container?.querySelector('[role="alert"]')?.textContent).toBe(
+      'Could not reach the desktop relay on this computer.',
+    );
+    expect(button('Connect this computer')).toBeDefined();
+  });
+
   it('uses the current Web Shell language', () => {
     mount({ phase: 'idle' }, 'zh-CN');
     expect(button('连接这台电脑')).toBeDefined();

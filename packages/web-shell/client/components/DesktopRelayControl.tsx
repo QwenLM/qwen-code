@@ -56,7 +56,7 @@ const COPY = {
     'desktopRelay.copy': 'Copy command',
     'desktopRelay.copied': 'Copied',
     'desktopRelay.setupHint':
-      'Set up once: run this in a terminal on this computer, then check again. It registers a macOS launchd socket; nothing keeps running in the background.',
+      'If not installed, run this once in a terminal on this computer, then check again. If already installed, check browser connection errors. It registers a macOS launchd socket; nothing keeps running in the background.',
     'desktopRelay.approveHint':
       'Approve the request in the dialog that opened on this computer.',
     'desktopRelay.otherSessionHint':
@@ -65,7 +65,7 @@ const COPY = {
       'Start a session first. The connection binds to exactly one session.',
     'desktopRelay.status.checking': 'Checking…',
     'desktopRelay.status.permissionRequired': 'Browser permission required',
-    'desktopRelay.status.missing': 'Not set up',
+    'desktopRelay.status.missing': 'Relay not detected',
     'desktopRelay.status.idle': 'Not connected',
     'desktopRelay.status.awaitingApproval': 'Waiting for approval',
     'desktopRelay.status.connecting': 'Connecting…',
@@ -99,14 +99,14 @@ const COPY = {
     'desktopRelay.copy': '复制命令',
     'desktopRelay.copied': '已复制',
     'desktopRelay.setupHint':
-      '只需设置一次：在这台电脑的终端里运行下面的命令，然后重新检测。它注册一个 macOS launchd socket，平时没有进程在后台运行。',
+      '若尚未安装，请在这台电脑的终端里运行下面的命令，然后重新检测；若已安装，请检查浏览器的连接错误。它注册一个 macOS launchd socket，平时没有进程在后台运行。',
     'desktopRelay.approveHint': '请在这台电脑弹出的对话框里确认。',
     'desktopRelay.otherSessionHint':
       '这台电脑已连接到另一个会话。在这里连接会替换那个连接。',
     'desktopRelay.needsSessionHint': '请先创建一个会话。连接只绑定一个会话。',
     'desktopRelay.status.checking': '检测中…',
     'desktopRelay.status.permissionRequired': '需要浏览器权限',
-    'desktopRelay.status.missing': '未设置',
+    'desktopRelay.status.missing': '未检测到中继',
     'desktopRelay.status.idle': '未连接',
     'desktopRelay.status.awaitingApproval': '等待确认',
     'desktopRelay.status.connecting': '连接中…',
@@ -334,9 +334,9 @@ export function DesktopRelayPanel({
         </p>
       ) : null}
 
-      {phase === 'failed' && status.message ? (
+      {phase === 'failed' ? (
         <p className="text-xs text-destructive" role="alert">
-          {status.message}
+          {status.message ?? t('desktopRelay.error.unreachable')}
         </p>
       ) : null}
 

@@ -12,6 +12,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   mountWebShellAssets,
+  mountWebShellSpaFallback,
   buildWebShellCsp,
   buildWebShellPermissionsPolicy,
   remoteDaemonConnectOrigins,
@@ -248,6 +249,32 @@ describe('public PWA HTTP routes', () => {
     stderr.writeStderrLine.mockReset();
     await rm(directory, { recursive: true, force: true });
   });
+
+  it.each([false, true])(
+    'limits desktop relay CSP to the opt-in endpoint (enabled=%s)',
+    async (enabled) => {
+      const shell = express();
+      mountWebShellAssets(shell, directory, [], enabled);
+      mountWebShellSpaFallback(shell, directory, [], enabled);
+      for (const route of ['/', '/session/test', '/unknown-page']) {
+        const response = await request(shell)
+          .get(route)
+          .set('Accept', 'text/html')
+          .expect(200);
+        const directives =
+          response.headers['content-security-policy'].split('; ');
+        expect(
+          directives.find((directive: string) =>
+            directive.startsWith('connect-src '),
+          ),
+        ).toBe(
+          enabled
+            ? "connect-src 'self' http://127.0.0.1:47821 https://unpkg.com/@qwen-code/"
+            : "connect-src 'self' https://unpkg.com/@qwen-code/",
+        );
+      }
+    },
+  );
 
   it.each(['/manifest.webmanifest', '/MANIFEST.WEBMANIFEST/'])(
     'serves %s without a token and permits revalidation',

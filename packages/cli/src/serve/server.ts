@@ -2179,7 +2179,12 @@ export function createServeApp(
         )
       : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
+    mountWebShellAssets(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
     mountMcpAppSandbox(app);
   }
 
@@ -3746,7 +3751,12 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir, webShellFrameAncestors);
+    mountWebShellSpaFallback(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
   }
 
   installFinalErrorHandler(app);
