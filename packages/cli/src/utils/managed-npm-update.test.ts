@@ -131,6 +131,57 @@ describe('managed npm update', () => {
     expect(fs.readFileSync(runningChunk, 'utf8')).toBe('old chunk');
   });
 
+  it('restores the exec bit on vendored ripgrep binaries during activation', async () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      bootstrap,
+      path.join(root, 'updates'),
+    );
+    writeInstallation(update.stagingDir, '2.0.0');
+    // Mirror the published tarball: npm pack normalizes every non-`bin` file
+    // to 0644, including the vendored ripgrep binaries (#12668). The win32
+    // directory ships rg.exe instead of rg and must not fail activation.
+    const stagedRipgrep = path.join(
+      update.stagingDir,
+      'node_modules',
+      '@qwen-code',
+      'qwen-code',
+      'vendor',
+      'ripgrep',
+    );
+    fs.mkdirSync(path.join(stagedRipgrep, 'x64-linux'), { recursive: true });
+    fs.mkdirSync(path.join(stagedRipgrep, 'arm64-darwin'), {
+      recursive: true,
+    });
+    fs.mkdirSync(path.join(stagedRipgrep, 'x64-win32'), { recursive: true });
+    for (const binary of ['x64-linux/rg', 'arm64-darwin/rg']) {
+      const filePath = path.join(stagedRipgrep, binary);
+      fs.writeFileSync(filePath, 'fake rg');
+      fs.chmodSync(filePath, 0o644);
+    }
+    fs.writeFileSync(path.join(stagedRipgrep, 'x64-win32', 'rg.exe'), 'fake');
+
+    await activateManagedNpmUpdate(update, '2.0.0', bootstrap);
+
+    const activatedRipgrep = path.join(
+      update.versionDir,
+      'node_modules',
+      '@qwen-code',
+      'qwen-code',
+      'vendor',
+      'ripgrep',
+    );
+    for (const binary of ['x64-linux/rg', 'arm64-darwin/rg']) {
+      // Windows synthesizes modes without an exec bit concept; the assertion
+      // is vacuous there and meaningful on the POSIX installs this fixes.
+      expect(
+        fs.statSync(path.join(activatedRipgrep, binary)).mode & 0o111,
+      ).not.toBe(0);
+    }
+  });
+
   it('still activates when the lock is compromised during activation', async () => {
     const root = makeTemporaryDirectory();
     const bootstrap = writeBaseInstallation(root);
