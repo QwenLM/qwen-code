@@ -54,6 +54,7 @@ import {
   deliverResult,
   sha256,
   freezeRequest,
+  setThinking,
   describeThinking,
   outputBudgetKey,
 } from './batch-docs.js';
@@ -527,17 +528,10 @@ export async function runPlan(
       ? `preview: ${task.items.length} item(s), window ${task.completionWindow} — nothing uploaded, nothing billed`
       : `task ${task.id}: ${task.items.length} item(s), window ${task.completionWindow}`,
   );
-  const effective = {
-    ...request,
-    params: {
-      ...request.params,
-      ...(plan.enableThinking === undefined
-        ? {}
-        : plan.enableThinking
-          ? { enable_thinking: true }
-          : { enable_thinking: false, reasoning_effort: 'none' }),
-    },
-  };
+  const effective = { ...request, params: { ...request.params } };
+  if (plan.enableThinking !== undefined) {
+    setThinking(effective.params, task.model, plan.enableThinking);
+  }
   const limit = outputLimitOf(task, attempt.maxOutputTokens);
   deps.out(
     `model ${task.model}, ${describeThinking(effective)}, ` +

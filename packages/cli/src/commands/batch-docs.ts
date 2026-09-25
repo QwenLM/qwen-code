@@ -18,7 +18,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import type { BatchPlan, TaskItem } from './batch-task.js';
-import { customIdOf } from './batch-task.js';
+import { customIdOf, targetProblem } from './batch-task.js';
 
 export const sha256 = (text: string) =>
   crypto.createHash('sha256').update(text).digest('hex');
@@ -86,20 +86,26 @@ export const outputBudgetKey = (params: Record<string, unknown> = {}) =>
 /**
  * The Qwen-on-DashScope wire shape for "thinking off", as realtime emits it:
  * the tiered family reads `reasoning_effort`, the rest `enable_thinking`.
- * Other model families have their own knobs, so they get nothing here.
+ * Enabling a tiered model removes the disable override, preserving its default
+ * or an explicitly configured effort. Other model families get nothing here.
  */
-function disableThinking(
+export function setThinking(
   params: Record<string, unknown>,
   model: string | undefined,
+  enabled: boolean,
 ): boolean {
   if (isTieredEffortWireModel(model)) {
     delete params['enable_thinking'];
     delete params['thinking_budget'];
-    params['reasoning_effort'] = 'none';
+    if (!enabled) params['reasoning_effort'] = 'none';
+    else if (params['reasoning_effort'] === 'none')
+      delete params['reasoning_effort'];
     return true;
   }
   if (isQwenFamilyWireModel(model)) {
-    params['enable_thinking'] = false;
+    if (enabled && params['reasoning_effort'] === 'none')
+      delete params['reasoning_effort'];
+    params['enable_thinking'] = enabled;
     return true;
   }
   return false;
@@ -124,7 +130,7 @@ export function freezeRequest(
     !config.thinkingMandatory &&
     params['enable_thinking'] === undefined &&
     params['reasoning_effort'] === undefined &&
-    !disableThinking(params, model)
+    !setThinking(params, model, false)
   ) {
     notes.push(
       `disabled reasoning is not reproduced for ${model ?? 'this model'} in Batch requests; the provider default thinking mode applies`,
@@ -132,9 +138,13 @@ export function freezeRequest(
   }
   if (
     config?.thinkingMandatory &&
-    (config.reasoning === false || params['enable_thinking'] === false)
+    (config.reasoning === false ||
+      params['enable_thinking'] === false ||
+      params['reasoning_effort'] === 'none')
   ) {
-    delete params['enable_thinking'];
+    if (params['enable_thinking'] === false) delete params['enable_thinking'];
+    if (params['reasoning_effort'] === 'none')
+      delete params['reasoning_effort'];
     notes.push('thinking cannot be disabled for this model; left on');
   }
   if (
@@ -228,10 +238,8 @@ export function assembleRequests(
     if (plan.maxOutputTokens !== undefined) {
       body[outputBudgetKey(request?.params)] = plan.maxOutputTokens;
     }
-    if (plan.enableThinking === true) {
-      body['enable_thinking'] = true;
-    } else if (plan.enableThinking === false) {
-      disableThinking(body, model);
+    if (plan.enableThinking !== undefined) {
+      setThinking(body, model, plan.enableThinking);
     }
     const inputTokens = estimateTokens(JSON.stringify(messages));
     requests.push({
@@ -441,6 +449,15 @@ export function deliverResult(
       reason: `target directory "${item.target}" resolves outside the project root`,
     };
   }
+  const ancestorProblem = targetProblem(
+    path.relative(realRoot, fs.realpathSync(ancestor)),
+  );
+  if (ancestorProblem) {
+    return {
+      kind: 'held',
+      reason: `target directory "${item.target}" ${ancestorProblem}`,
+    };
+  }
   fs.mkdirSync(parent, { recursive: true });
   // Revalidate the created parent: the chain must really live under the
   // project at delivery time, not just before the mkdir.
@@ -449,6 +466,13 @@ export function deliverResult(
     return {
       kind: 'held',
       reason: `target directory "${item.target}" resolves outside the project root`,
+    };
+  }
+  const parentProblem = targetProblem(path.relative(realRoot, realParent));
+  if (parentProblem) {
+    return {
+      kind: 'held',
+      reason: `target directory "${item.target}" ${parentProblem}`,
     };
   }
   if (fs.existsSync(targetPath)) {

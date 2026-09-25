@@ -80,7 +80,7 @@ export type BatchPlan = z.infer<typeof batchPlanSchema>;
  * hidden path — at any depth, since `.git/hooks`, `.github/workflows` and
  * `.qwen/settings.json` configure tools or run code in nested projects too.
  */
-function targetProblem(target: string): string | undefined {
+export function targetProblem(target: string): string | undefined {
   const normalized = path.normalize(target);
   const segments = normalized.split(/[\\/]/);
   if (path.isAbsolute(target) || segments[0] === '..') {

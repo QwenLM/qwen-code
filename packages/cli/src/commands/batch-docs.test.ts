@@ -163,6 +163,20 @@ describe('assembleRequests', () => {
       'enable_thinking',
     );
   });
+  it('enables tiered thinking when the frozen model settings disabled it', () => {
+    const request = freezeRequest({ reasoning: false }, 'qwen3.8-max');
+    const body = assembleRequests(
+      { ...plan, enableThinking: true },
+      [item()],
+      1,
+      root,
+      'qwen3.8-max',
+      request,
+    )[0].line['body'];
+    expect(body).not.toHaveProperty('reasoning_effort');
+    expect(body).not.toHaveProperty('enable_thinking');
+    expect(request.params).toEqual({ reasoning_effort: 'none' });
+  });
 });
 
 describe('freezeRequest', () => {
@@ -210,6 +224,18 @@ describe('freezeRequest', () => {
       thinking_budget: 512,
       reasoning_effort: 'low',
     });
+  });
+
+  it('removes a disabling effort from thinking-mandatory models', () => {
+    const request = freezeRequest(
+      {
+        thinkingMandatory: true,
+        extra_body: { reasoning_effort: 'none' },
+      },
+      'qwen3.8-max',
+    );
+    expect(request.params).not.toHaveProperty('reasoning_effort');
+    expect(request.notes.join()).toMatch(/cannot be disabled/);
   });
 
   it('resolves the thinking switch with the realtime precedence', () => {
@@ -499,6 +525,26 @@ describe('deliverResult', () => {
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
+  });
+
+  it('holds a visible symlink into a hidden directory before creating children', () => {
+    fs.mkdirSync(path.join(root, '.qwen'));
+    fs.symlinkSync(
+      path.join(root, '.qwen'),
+      path.join(root, 'output'),
+      'junction',
+    );
+    const outcome = deliverResult(
+      item({ target: 'output/new/settings.json' }),
+      content,
+      root,
+      sourceHash,
+    );
+    expect(outcome).toMatchObject({
+      kind: 'held',
+      reason: expect.stringContaining('hidden path'),
+    });
+    expect(fs.existsSync(path.join(root, '.qwen', 'new'))).toBe(false);
   });
 
   it('holds without creating directories outside a symlinked parent', () => {
