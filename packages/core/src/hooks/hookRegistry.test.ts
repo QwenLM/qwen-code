@@ -18,6 +18,7 @@ describe('HookRegistry', () => {
     mockConfig = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue(undefined),
       getProjectHooks: vi.fn().mockReturnValue(undefined),
       getExtensions: vi.fn().mockReturnValue([]),
@@ -84,6 +85,113 @@ describe('HookRegistry', () => {
       const allHooks = registry.getAllHooks();
       expect(allHooks).toHaveLength(1);
       expect(allHooks[0].source).toBe(HooksConfigSource.User);
+    });
+
+    describe('system scope', () => {
+      const commandHooks = (command: string, name: string) => ({
+        [HookEventName.PreToolUse]: [
+          { hooks: [{ type: HookType.Command, command, name }] },
+        ],
+      });
+
+      it('registers system hooks under the system source, before user and project hooks', async () => {
+        mockConfig.getSystemHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo system', 'system-hook'));
+        mockConfig.getUserHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo user', 'user-hook'));
+        mockConfig.getProjectHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo project', 'project-hook'));
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        expect(
+          registry.getAllHooks().map(({ source, config }) => ({
+            source,
+            name: config.name,
+          })),
+        ).toEqual([
+          { source: HooksConfigSource.System, name: 'system-hook' },
+          { source: HooksConfigSource.User, name: 'user-hook' },
+          { source: HooksConfigSource.Project, name: 'project-hook' },
+        ]);
+      });
+
+      it('orders the hooks planned for an event by source priority: project, user, system, extensions', async () => {
+        mockConfig.getSystemHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo system', 'system-hook'));
+        mockConfig.getUserHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo user', 'user-hook'));
+        mockConfig.getProjectHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo project', 'project-hook'));
+        mockConfig.getExtensions = vi.fn().mockReturnValue([
+          {
+            isActive: true,
+            hooks: commandHooks('echo extension', 'extension-hook'),
+          },
+        ]);
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        expect(
+          registry
+            .getHooksForEvent(HookEventName.PreToolUse)
+            .map(({ source }) => source),
+        ).toEqual([
+          HooksConfigSource.Project,
+          HooksConfigSource.User,
+          HooksConfigSource.System,
+          HooksConfigSource.Extensions,
+        ]);
+      });
+
+      it('registers system-only hooks as system hooks, not user hooks', async () => {
+        mockConfig.getSystemHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo system', 'system-hook'));
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        const allHooks = registry.getAllHooks();
+        expect(allHooks).toHaveLength(1);
+        expect(allHooks[0].source).toBe(HooksConfigSource.System);
+        expect(
+          allHooks.some(({ source }) => source === HooksConfigSource.User),
+        ).toBe(false);
+      });
+
+      it('registers nothing and does not throw when there are no system hooks', async () => {
+        mockConfig.getSystemHooks = vi.fn().mockReturnValue(undefined);
+
+        const registry = new HookRegistry(mockConfig);
+        await expect(registry.initialize()).resolves.toBeUndefined();
+
+        expect(registry.getAllHooks()).toHaveLength(0);
+      });
+
+      it('keeps the same hook from system and user settings as two entries', async () => {
+        // The duplicate key includes the source; this pins that established
+        // behaviour so a change to the key is a deliberate one.
+        const same = commandHooks('echo same', 'same-hook');
+        mockConfig.getSystemHooks = vi.fn().mockReturnValue(same);
+        mockConfig.getUserHooks = vi.fn().mockReturnValue(same);
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
+          HooksConfigSource.System,
+          HooksConfigSource.User,
+        ]);
+      });
     });
 
     it('should load hooks from getUserHooks regardless of trust', async () => {

@@ -10,16 +10,26 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeEnvironment,
+  hasLoadedEnvironmentValues,
+  isFileSourcedEnvKey,
   loadEnvironment,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
-import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from './shared-env-keys.js';
+import {
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+} from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
-import { TrustLevel } from './trustedFolders.js';
+import { TrustLevel, resetTrustedFoldersForTesting } from './trustedFolders.js';
+import {
+  AGENT_EXECUTION_BACKEND_ENV,
+  agentExecutionBackend,
+} from './agent-execution.js';
 
 const TRACKED_ENV = [
+  AGENT_EXECUTION_BACKEND_ENV,
   'CLOUD_SHELL',
   'GOOGLE_CLOUD_PROJECT',
   'RUNTIME_DOTENV',
@@ -88,6 +98,8 @@ const TRACKED_ENV = [
   'qwen_update_base_url',
   'Qwen_Update_Base_Url',
   'QWEN_HOME',
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
@@ -106,6 +118,11 @@ const TRACKED_ENV = [
   'QWEN_SANDBOX_IMAGE',
   'QWEN_SANDBOX_PROXY_COMMAND',
   'QWEN_SANDBOX_NET',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'DASHSCOPE_PROXY_BASE_URL',
+  'QWEN_TEST_PROVIDER_KEY',
+  'DEMO_VAR',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -157,6 +174,321 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   tmpDirs = [];
+});
+
+describe('operator container requirement across environment reload', () => {
+  it.each(['load', 'reload', 'snapshot'])(
+    'reports an excluded home settings.env requirement during %s',
+    (operation) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      const settingsFile = path.join(os.homedir(), '.qwen', 'settings.json');
+      fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({
+          env: { [key]: 'docker', RUNTIME_SETTINGS_ONLY: 'loaded' },
+        }),
+      );
+      const settings = testSettings(
+        JSON.parse(fs.readFileSync(settingsFile, 'utf8')),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        if (operation === 'snapshot') {
+          const snapshot = buildRuntimeEnvironment(
+            settings,
+            workspace,
+            {},
+            true,
+          );
+          expect(snapshot.effectiveEnv[key]).toBeUndefined();
+          expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe('loaded');
+        } else {
+          if (operation === 'load') loadEnvironment(settings, workspace);
+          else reloadEnvironment(settings, workspace, true);
+          expect(process.env[key]).toBeUndefined();
+          expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('loaded');
+        }
+        expect(agentExecutionBackend()).toBeUndefined();
+        expect(isFileSourcedEnvKey(key)).toBe(false);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    },
+  );
+
+  it.each(
+    ['.env', '.qwen/.env', 'settings.env'].flatMap((source) =>
+      ['', 'docker', 'podman'].map((value) => ({ source, value })),
+    ),
+  )(
+    'preserves the operator requirement with $source = $value',
+    ({ source, value }) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      process.env[key] = 'docker';
+      const settings = testSettings({});
+      if (source === 'settings.env') {
+        settings.env = { [key]: value, RUNTIME_SETTINGS_ONLY: 'before' };
+      } else {
+        const file = path.join(workspace, source);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, `${key}=${value}\nRUNTIME_DOTENV=before\n`);
+      }
+      loadEnvironment(settings, workspace);
+      expect(agentExecutionBackend()).toBe('container');
+      const reloaded = reloadEnvironment(settings, workspace, true);
+      expect(process.env[key]).toBe('docker');
+      expect(isFileSourcedEnvKey(key)).toBe(false);
+      expect(agentExecutionBackend()).toBe('container');
+      expect(reloaded.updatedKeys).not.toContain(key);
+      expect(
+        buildRuntimeEnvironment(settings, workspace, {}, true).effectiveEnv[
+          key
+        ],
+      ).toBeUndefined();
+      if (source === 'settings.env')
+        settings.env = { RUNTIME_SETTINGS_ONLY: 'after' };
+      else
+        fs.writeFileSync(
+          path.join(workspace, source),
+          'RUNTIME_DOTENV=after\n',
+        );
+      const deleted = reloadEnvironment(settings, workspace, true);
+      expect(deleted.removedKeys).not.toContain(key);
+      expect(process.env[key]).toBe('docker');
+      expect(agentExecutionBackend()).toBe('container');
+      expect(
+        process.env[
+          source === 'settings.env' ? 'RUNTIME_SETTINGS_ONLY' : 'RUNTIME_DOTENV'
+        ],
+      ).toBe('after');
+    },
+  );
+
+  it.each(['.env', '.qwen/.env'])(
+    'rejects the home %s requirement across reload and relaunch',
+    async (source) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const file = path.join(os.homedir(), source);
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${key}=podman\n`);
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env[key]).toBe('podman');
+      expect(isFileSourcedEnvKey(key)).toBe(true);
+      expect(() => agentExecutionBackend()).toThrow(
+        'Export it in the launch environment instead',
+      );
+      fs.writeFileSync(file, `${key}=docker\n`);
+      reloadEnvironment(testSettings({}), workspace, true);
+      expect(process.env[key]).toBe('podman');
+      expect(isFileSourcedEnvKey(key)).toBe(true);
+      expect(() => agentExecutionBackend()).toThrow(
+        'Export it in the launch environment instead',
+      );
+      fs.rmSync(file);
+      vi.resetModules();
+      const child = await import('./environment.js');
+      const childExecution = await import('./agent-execution.js');
+      child.loadEnvironment(testSettings({}), workspace);
+      child.reloadEnvironment(testSettings({}), workspace, true);
+      expect(process.env[key]).toBe('podman');
+      expect(child.isFileSourcedEnvKey(key)).toBe(true);
+      expect(() => childExecution.agentExecutionBackend()).toThrow(
+        'Export it in the launch environment instead',
+      );
+      child.resetEnvironmentTrackingForTesting();
+    },
+  );
+
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'does not acquire a requirement from project %s',
+    (source) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      const settings = testSettings({});
+      if (source === 'settings.env') settings.env = { [key]: 'docker' };
+      else {
+        const file = path.join(workspace, source);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, `${key}=docker\n`);
+      }
+      loadEnvironment(settings, workspace);
+      expect(process.env[key]).toBeUndefined();
+      expect(agentExecutionBackend()).toBeUndefined();
+      reloadEnvironment(settings, workspace, true);
+      expect(process.env[key]).toBeUndefined();
+      expect(agentExecutionBackend()).toBeUndefined();
+    },
+  );
+});
+
+describe('relaunch environment provenance', () => {
+  it('preserves ancestor-only values and provenance across child reloads', async () => {
+    vi.resetModules();
+    const parent = await import('./environment.js');
+    const ancestor = makeWorkspace();
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(ancestor, '.env'), 'RUNTIME_DOTENV=ancestor\n');
+    parent.loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'ancestor-settings' } }),
+      ancestor,
+    );
+    vi.resetModules();
+    const child = await import('./environment.js');
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_EMPTY=child\n');
+    child.loadEnvironment(testSettings({}), workspace);
+    fs.writeFileSync(path.join(workspace, '.env'), '');
+    const reload = child.reloadEnvironment(testSettings({}), workspace);
+    expect(reload.removedKeys).toEqual(['RUNTIME_EMPTY']);
+    expect(process.env['RUNTIME_EMPTY']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('ancestor');
+    expect(process.env['RUNTIME_SETTINGS']).toBe('ancestor-settings');
+    for (const key of ['RUNTIME_DOTENV', 'RUNTIME_SETTINGS']) {
+      expect(child.isFileSourcedEnvKey(key)).toBe(true);
+    }
+    vi.resetModules();
+    const grandchild = await import('./environment.js');
+    expect(grandchild.getRelaunchEnvProvenance()).toEqual(
+      child.getRelaunchEnvProvenance(),
+    );
+    grandchild.loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'local' } }),
+      workspace,
+    );
+    grandchild.reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['RUNTIME_SETTINGS']).toBeUndefined();
+    expect(grandchild.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(false);
+    grandchild.resetEnvironmentTrackingForTesting();
+    child.resetEnvironmentTrackingForTesting();
+  });
+
+  beforeEach(() => resetEnvironmentTrackingForTesting());
+
+  it('preserves frozen file provenance and publishes newly loaded keys after a partial read failure', () => {
+    const workspace = makeWorkspace();
+    const homeEnv = path.join(os.homedir(), '.env');
+    fs.writeFileSync(homeEnv, 'NODE_EXTRA_CA_CERTS=/operator/file.pem\n');
+    loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'retained' } }),
+      workspace,
+    );
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['NODE_EXTRA_CA_CERTS']).toBe('/operator/file.pem');
+    expect(
+      JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!).dotEnv,
+    ).toContain('NODE_EXTRA_CA_CERTS');
+
+    fs.rmSync(homeEnv);
+    fs.mkdirSync(homeEnv);
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_DOTENV=new\n');
+    const result = reloadEnvironment(testSettings({}), workspace);
+    expect(result.envFileReadFailed).toBe(true);
+    expect(process.env['RUNTIME_DOTENV']).toBe('new');
+    expect(
+      JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!).dotEnv,
+    ).toEqual(
+      expect.arrayContaining(['NODE_EXTRA_CA_CERTS', 'RUNTIME_DOTENV']),
+    );
+  });
+
+  it('restores file provenance before loading files while preserving inherited values', async () => {
+    vi.resetModules();
+    const parent = await import('./environment.js');
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_DOTENV=file\n');
+    process.env['RUNTIME_PARENT'] = 'operator';
+    parent.loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'settings' } }),
+      workspace,
+    );
+    // Ordinary child-process environment copies must carry provenance too.
+
+    vi.resetModules();
+    const child = await import('./environment.js');
+    expect(process.env['RUNTIME_DOTENV']).toBe('file');
+    expect(process.env['RUNTIME_SETTINGS']).toBe('settings');
+    expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBe(
+      child.getRelaunchEnvProvenance()[PRIVATE_RELAUNCH_ENV_PROVENANCE],
+    );
+    expect(child.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
+    expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(true);
+    expect(child.isFileSourcedEnvKey('RUNTIME_PARENT')).toBe(false);
+    expect(child.getRelaunchEnvProvenance()).toEqual(
+      parent.getRelaunchEnvProvenance(),
+    );
+
+    child.loadEnvironment(testSettings({}), workspace);
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_DOTENV=updated\n');
+    child.reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['RUNTIME_DOTENV']).toBe('updated');
+    expect(process.env['RUNTIME_SETTINGS']).toBe('settings');
+    expect(child.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
+    expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(true);
+    vi.resetModules();
+    const grandchild = await import('./environment.js');
+    expect(grandchild.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
+    expect(grandchild.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(true);
+    grandchild.resetEnvironmentTrackingForTesting();
+    child.resetEnvironmentTrackingForTesting();
+  });
+
+  it.each(['project .env', 'home .env', 'settings.env'])(
+    'rejects forged provenance from %s on load, reload and runtime snapshots',
+    (source) => {
+      const workspace = makeWorkspace();
+      const keys = [
+        PRIVATE_RELAUNCH_ENV_PROVENANCE,
+        PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
+      ];
+      const forged = JSON.stringify({ dotEnv: ['FORGED'], settingsEnv: [] });
+      const values = Object.fromEntries(keys.map((key) => [key, forged]));
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = values;
+      } else {
+        fs.writeFileSync(
+          path.join(source === 'home .env' ? os.homedir() : workspace, '.env'),
+          keys.map((key) => `${key}=${forged}`).join('\n'),
+        );
+      }
+      loadEnvironment(settings, workspace);
+      expect(JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!)).toEqual(
+        { dotEnv: [], settingsEnv: [] },
+      );
+      expect(process.env[keys[1]]).not.toBe(forged);
+      reloadEnvironment(settings, workspace);
+      expect(JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!)).toEqual(
+        { dotEnv: [], settingsEnv: [] },
+      );
+      expect(process.env[keys[1]]).not.toBe(forged);
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      for (const key of keys) {
+        expect(snapshot.effectiveEnv[key]).toBeUndefined();
+      }
+    },
+  );
+
+  it.each(['{', '{"dotEnv":[1],"settingsEnv":[]}'])(
+    'rejects malformed inherited provenance instead of losing its trust boundary: %s',
+    async (metadata) => {
+      process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE] = metadata;
+      vi.resetModules();
+      await expect(import('./environment.js')).rejects.toThrow();
+      expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBeUndefined();
+    },
+  );
 });
 
 describe('update download source environment', () => {
@@ -287,6 +619,42 @@ describe('daemon registration capacity environment', () => {
 });
 
 describe('buildRuntimeEnvironment', () => {
+  it.each([false, true])(
+    'stops at a symlinked home (home env: %s)',
+    (hasHomeEnv) => {
+      const root = makeWorkspace();
+      const home = path.join(root, 'home');
+      const linkedHome = path.join(root, 'linked-home');
+      fs.mkdirSync(home);
+      fs.symlinkSync(home, linkedHome, 'junction');
+      process.env['HOME'] = linkedHome;
+      process.env['USERPROFILE'] = linkedHome;
+      fs.writeFileSync(
+        path.join(root, '.env'),
+        'RUNTIME_PARENT=workspace-only',
+      );
+      const homeEnvFile = path.join(linkedHome, '.env');
+      if (hasHomeEnv) {
+        fs.writeFileSync(homeEnvFile, 'RUNTIME_DOTENV=home-only');
+      }
+      const settings = testSettings({
+        security: { folderTrust: { enabled: false } },
+      });
+
+      const snapshot = buildRuntimeEnvironment(
+        settings,
+        os.homedir(),
+        {},
+        false,
+      );
+      expect(snapshot.envFilePaths).toEqual(hasHomeEnv ? [homeEnvFile] : []);
+      expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe(
+        hasHomeEnv ? 'home-only' : undefined,
+      );
+      expect(snapshot.effectiveEnv['RUNTIME_PARENT']).toBeUndefined();
+    },
+  );
+
   it('computes a runtime overlay without mutating process.env or base env', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(
@@ -446,6 +814,49 @@ describe('buildRuntimeEnvironment', () => {
 
     expect(snapshot.envFilePaths).not.toContain(path.join(parent, '.env'));
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('loads an ancestor .env of an explicitly trusted child workspace', () => {
+    const parent = makeWorkspace();
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child);
+    fs.writeFileSync(
+      path.join(parent, '.env'),
+      'TRUST_ANCESTOR_MARKER=from-ancestor-env\n',
+    );
+    const trustedFoldersPath = path.join(parent, 'trustedFolders.json');
+    // The rule is keyed on the child workspace, so it cannot match the
+    // ancestor being walked: the ancestor has no decision of its own, and the
+    // child's explicit TRUST_FOLDER must still keep the ancestor's .env alive.
+    fs.writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({ [child]: TrustLevel.TRUST_FOLDER }),
+    );
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+    resetTrustedFoldersForTesting();
+
+    try {
+      const snapshot = buildRuntimeEnvironment(
+        testSettings({ security: { folderTrust: { enabled: true } } }),
+        child,
+        {},
+      );
+
+      expect(snapshot.envFilePaths).toContain(path.join(parent, '.env'));
+      expect(snapshot.effectiveEnv['TRUST_ANCESTOR_MARKER']).toEqual(
+        'from-ancestor-env',
+      );
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
   });
 });
 
@@ -1267,12 +1678,10 @@ describe('loadEnvironment', () => {
     expect(process.env['ld_library_path']).toBe('/workspace-a/first');
   });
 
-  // The bwrap backend derives its writable roots from XDG_CACHE_HOME and
-  // os.tmpdir() (TMPDIR/TMP/TEMP), and resolveSandboxNetworkMode flips to
-  // proxied — spawning QWEN_SANDBOX_PROXY_COMMAND through `bash -c` on the
-  // host — purely on that variable's presence. None of them may arrive from
-  // repository content: the project .env/settings.env application and reload
-  // paths must reject them like the other hardcoded exclusions.
+  // Sandbox selection, host-side proxy commands, and process-wide cache/temp
+  // roots are operator inputs. The tool boundary also derives writable scratch
+  // from os.tmpdir() (TMPDIR/TMP/TEMP). None may arrive from repository content:
+  // project .env/settings.env application and reload paths must reject them.
   it('never applies the sandbox confinement keys from project .env or settings.env, including reload', () => {
     resetEnvironmentTrackingForTesting();
     const workspace = makeWorkspace();
@@ -1418,5 +1827,92 @@ describe('loadEnvironment', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(envPath);
     expect(warnings[0]).toContain('NODE_OPTIONS');
+  });
+});
+
+describe('hasLoadedEnvironmentValues', () => {
+  it('ignores a configured provider key that settings.env supplies', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    loadEnvironment(
+      testSettings({
+        env: { QWEN_TEST_PROVIDER_KEY: 'from-settings' },
+        modelProviders: {
+          openai: [{ id: 'bench', envKey: 'QWEN_TEST_PROVIDER_KEY' }],
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['QWEN_TEST_PROVIDER_KEY']).toBe('from-settings');
+    expect(hasLoadedEnvironmentValues()).toBe(false);
+  });
+
+  it('ignores the documented OpenAI variables that ~/.qwen/.env supplies', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envFile = path.join(os.homedir(), '.qwen', '.env');
+    fs.mkdirSync(path.dirname(envFile), { recursive: true });
+    fs.writeFileSync(
+      envFile,
+      'OPENAI_API_KEY=sk-file\nOPENAI_BASE_URL=https://api.example/v1\n',
+    );
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['OPENAI_API_KEY']).toBe('sk-file');
+    expect(hasLoadedEnvironmentValues()).toBe(false);
+  });
+
+  it('never exempts a boot-time key that a provider entry names', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envFile = path.join(os.homedir(), '.qwen', '.env');
+    fs.mkdirSync(path.dirname(envFile), { recursive: true });
+    fs.writeFileSync(envFile, 'NODE_EXTRA_CA_CERTS=/certs/ca.pem\n');
+    loadEnvironment(
+      testSettings({
+        modelProviders: {
+          openai: [{ id: 'bench', envKey: 'NODE_EXTRA_CA_CERTS' }],
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['NODE_EXTRA_CA_CERTS']).toBe('/certs/ca.pem');
+    expect(hasLoadedEnvironmentValues()).toBe(true);
+  });
+
+  it('tolerates malformed provider entries', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    loadEnvironment(
+      testSettings({
+        env: { OPENAI_API_KEY: 'sk-settings' },
+        modelProviders: {
+          openai: { id: 'not-a-list' },
+          anthropic: [null, { id: 'no-env-key' }],
+        } as unknown as Settings['modelProviders'],
+      }),
+      workspace,
+    );
+
+    expect(hasLoadedEnvironmentValues()).toBe(false);
+  });
+
+  it.each([
+    ['DASHSCOPE_PROXY_BASE_URL', 'https://proxy.example'],
+    ['DEMO_VAR', '1'],
+  ])('still reports any other value, such as %s', (key, value) => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    loadEnvironment(
+      testSettings({
+        env: { OPENAI_API_KEY: 'sk-settings', [key]: value },
+      }),
+      workspace,
+    );
+
+    expect(process.env[key]).toBe(value);
+    expect(hasLoadedEnvironmentValues()).toBe(true);
   });
 });

@@ -68,6 +68,7 @@ describe('loadExtensionWorkflows', () => {
         extensionDisplayName: 'Google Cloud',
         scriptPath: path.join(root, 'workflows', 'a-review.js'),
         description: 'Runs a-review',
+        whenToUse: 'on review',
         contentDigest: expect.stringMatching(/^[0-9a-f]{16}$/),
       },
       {
@@ -301,6 +302,34 @@ describe('loadExtensionWorkflows', () => {
     expect(chars).toHaveLength(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS);
     expect(chars.at(-1)).toBe('…');
     expect(chars.slice(0, -1).every((c) => c === '😀')).toBe(true);
+  });
+
+  // `whenToUse` decides whether the model may start the workflow on its own,
+  // so a blank one must read as absent rather than as an empty condition.
+  it('keeps whenToUse only when it says something, shortened like the description', async () => {
+    const long = '😀'.repeat(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS + 10);
+    await write(
+      'workflows/blank.js',
+      workflowSource('blank', ", whenToUse: '   '"),
+    );
+    await write(
+      'workflows/long.js',
+      workflowSource('long', `, whenToUse: '  ${long}  '`),
+    );
+    await write('workflows/none.js', workflowSource('none'));
+
+    const byName = new Map(
+      (await loadExtensionWorkflows(root, owner, undefined)).map((w) => [
+        w.name,
+        w,
+      ]),
+    );
+    expect('whenToUse' in byName.get('gcp:blank')!).toBe(false);
+    expect('whenToUse' in byName.get('gcp:none')!).toBe(false);
+    const chars = Array.from(byName.get('gcp:long')!.whenToUse!);
+    expect(chars).toHaveLength(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS);
+    expect(chars[0]).toBe('😀');
+    expect(chars.at(-1)).toBe('…');
   });
 
   it.skipIf(isWindows)(

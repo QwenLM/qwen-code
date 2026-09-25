@@ -118,7 +118,9 @@ describe('AddWorkspaceDialog', () => {
     submit();
 
     const err = alert();
-    expect(err?.textContent).toBe('Path must be absolute');
+    expect(err?.textContent).toBe(
+      'Enter an absolute path or an SSH workspace URL.',
+    );
     expect(input().getAttribute('aria-invalid')).toBe('true');
     expect(input().getAttribute('aria-describedby')).toBe(
       'add-workspace-error add-workspace-hint',
@@ -300,6 +302,216 @@ describe('AddWorkspaceDialog', () => {
     });
     afterEach(() => {
       vi.useRealTimers();
+    });
+
+    it('submits an SSH URL with Enter without browsing the local filesystem', async () => {
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+          browseDirectories
+          initialPath="/local/"
+        />,
+      );
+      await settle();
+      expect(onSuggest).toHaveBeenCalledWith('/local/');
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).not.toBeNull();
+      expect(document.body.textContent).toContain('ssh://');
+      onSuggest.mockClear();
+      const url = 'ssh://alice@build-box:2222/srv/project';
+      type(`  ${url}  `);
+      await settle();
+      expect(onSuggest).not.toHaveBeenCalled();
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).toBeNull();
+      const enter = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        input().dispatchEvent(enter);
+      });
+      expect(enter.defaultPrevented).toBe(false);
+      expect(input().value.trim()).toBe(url);
+      await act(async () => {
+        input().form!.requestSubmit();
+      });
+      expect(onAdd).toHaveBeenCalledWith(url, true);
+    });
+
+    it('renders a persistent remote directory browser', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          locations={[
+            {
+              origin: 'http://localhost',
+              label: 'This computer',
+              remote: false,
+            },
+            {
+              origin: 'https://remote.example:4170',
+              label: 'remote.example:4170',
+              remote: true,
+            },
+          ]}
+          selectedLocation="https://remote.example:4170"
+          onLocationChange={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      await settle();
+
+      expect(input().value).toBe('/home/me/');
+      expect(listbox()).not.toBeNull();
+      expect(document.body.textContent).toContain('Folder source');
+      expect(document.body.textContent).toContain('remote.example:4170');
+      expect(document.body.textContent).toContain(
+        'Choose a folder below, or type an absolute path.',
+      );
+      expect(submitButton().textContent).toBe('Add this folder');
+
+      act(() => input().blur());
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('switches the folder source from inside the browser', async () => {
+      const onLocationChange = vi.fn();
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          locations={[
+            {
+              origin: 'http://localhost',
+              label: 'This computer',
+              remote: false,
+            },
+            {
+              origin: 'https://remote.example:4170',
+              label: 'remote.example:4170',
+              remote: true,
+            },
+          ]}
+          selectedLocation="http://localhost"
+          onLocationChange={onLocationChange}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={vi.fn().mockResolvedValue(SUGGESTIONS)}
+        />,
+      );
+
+      act(() => {
+        document
+          .querySelector<HTMLButtonElement>(
+            'button[aria-labelledby="workspace-location-label"]',
+          )!
+          .click();
+      });
+      const remote = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((option) => option.textContent === 'remote.example:4170');
+      act(() => remote!.click());
+
+      expect(onLocationChange).toHaveBeenCalledWith(
+        'https://remote.example:4170',
+      );
+    });
+
+    it('navigates to the parent directory without submitting', async () => {
+      const onAdd = vi.fn();
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/code/"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => {
+        document
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Parent folder"]',
+          )!
+          .click();
+      });
+
+      expect(input().value).toBe('/home/me/');
+      expect(onAdd).not.toHaveBeenCalled();
+    });
+
+    it('opens the typed directory on Enter instead of registering it', async () => {
+      const onAdd = vi.fn();
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => {
+        input().dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+      });
+
+      expect(input().value).toBe('/home/me/');
+      expect(onAdd).not.toHaveBeenCalled();
+    });
+
+    it('hides stale remote suggestions as soon as the path changes', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      type('/other/');
+      expect(listbox()).toBeNull();
+    });
+
+    it('reports a failed remote directory lookup', async () => {
+      const onSuggest = vi.fn().mockRejectedValue(new Error('offline'));
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      await settle();
+
+      expect(alert()?.textContent).toContain('Could not read folders');
     });
 
     it('debounces a suggestion fetch for an absolute prefix and lists directories', async () => {
@@ -966,7 +1178,8 @@ describe('AddWorkspaceDialog', () => {
           resolveAdd = resolve;
         }),
     );
-    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={onAdd} />);
+    const onClose = vi.fn();
+    mount(<AddWorkspaceDialog onClose={onClose} onAdd={onAdd} />);
 
     type('/abs/project');
     submit();
@@ -977,10 +1190,22 @@ describe('AddWorkspaceDialog', () => {
     expect(submitButton().textContent).toBe('Adding…');
     expect(submitButton().disabled).toBe(true);
     expect(input().disabled).toBe(true);
+    expect(document.querySelector('button[aria-label="Close"]')).toBeNull();
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onClose).not.toHaveBeenCalled();
 
     resolveAdd();
     await act(async () => {
       await Promise.resolve();
     });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

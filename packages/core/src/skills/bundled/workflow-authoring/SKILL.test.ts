@@ -170,6 +170,8 @@ describe('bundled workflow-authoring skill', () => {
     ['`node:vm` sandbox'],
     // meta: the full contract, including the field the approval dialog prints.
     ['optionally `whenToUse` and `phases: [{ title, detail? }]`'],
+    // whenToUse: what it does for a workflow an extension ships.
+    ['`whenToUse` also lists the workflow for the model to start'],
     // parallel(): the eager form is refused, after the dispatches were spent.
     ['`parallel([() => agent(...)])`'],
     ['a non-function element rejects the whole batch'],
@@ -200,13 +202,32 @@ describe('bundled workflow-authoring skill', () => {
     ['A different effort is a different resume cache key'],
     // disallowedTools only narrows, names what it accepts, and a schema agent
     // cannot deny its answer.
-    ['stallMs?, disallowedTools? })'],
+    ['stallMs?, disallowedTools?, tools? })'],
     ['never re-enable one'],
     ['`mcp__<server>__*`'],
     ["such as `'Bash'`, resolves the call to null"],
     ['include `structured_output` resolves to null'],
     ['not on their order or duplicates'],
     ['named by its tool name or its display name'],
+    // tools narrows to exact names, refuses patterns and exec, and fails the
+    // call rather than dispatching an agent that could only spend its turn.
+    ['never brings back a tool the floor below or a deny takes away'],
+    ['an MCP tool by the name the model sees'],
+    [
+      "Patterns (`'*'`, `mcp__<server>`, `mcp__<server>__*`), `exec` and an empty list reject the call",
+    ],
+    ['the agent keeps `exec`, which can call only the listed tools'],
+    ["An entry that names no tool, such as `'Bash'`"],
+    [
+      "shares no tool with the `agentType`'s own allowlist or whose every tool is denied",
+    ],
+    ['also given `structured_output`'],
+    ['is simply not given, as with an `agentType` allowlist'],
+    ['or one no subagent may use (such as `todo_write`)'],
+    [
+      'Built-in spellings, order and duplicates do not change the resume key; other spellings do',
+    ],
+    ['whatever their `agentType` or their `tools`'],
     // What the disallowed-tool floor means for a script. The tools themselves
     // are checked against the orchestrator's own list below.
     ['cannot fan out further'],
@@ -218,6 +239,8 @@ describe('bundled workflow-authoring skill', () => {
       'inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any other thunk rejection',
     ],
     ['so null-check a `workflow()` result too'],
+    // The name-only lock reaches nested calls too.
+    ['`workflow({ scriptPath })` throws the same way; nest by name'],
     // isolation: every refusal, and the workaround for the nested one.
     ['when the session is already inside a worktree'],
     ['pass it as `workingDir`'],
@@ -227,7 +250,13 @@ describe('bundled workflow-authoring skill', () => {
     // Labels: the failures list carries nothing else.
     ['Make it unique per dispatch'],
     // The journal: every line type, and what a bare `started` means.
+    ['a `launched` line when the run starts'],
     ['a `started` line when an agent is dispatched'],
+    // Resume: what is refused, and what to do instead.
+    ['journal is no longer on disk has nothing to resume'],
+    ['start it again without `resumeFromRunId`'],
+    ['would run two copies of its agents against one journal'],
+    ['listed as failed with an `interrupted` error'],
     ['Only `result` lines feed the resume cache'],
     ['means the run was interrupted'],
     // budget: where total comes from, what spent() counts, what the gate

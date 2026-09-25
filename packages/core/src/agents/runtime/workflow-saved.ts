@@ -73,6 +73,11 @@ export interface SavedWorkflowEntry {
   extensionDisplayName?: string;
   /** `meta.description`, parsed when the extension loaded; extension workflows only. */
   description?: string;
+  /**
+   * `meta.whenToUse`, parsed when the extension loaded; extension workflows
+   * only. When present, the workflow's command is listed for the model.
+   */
+  whenToUse?: string;
 }
 
 /** A resolved saved workflow with its script source loaded. */
@@ -386,6 +391,7 @@ export async function listSavedWorkflows(
         ? { extensionDisplayName: workflow.extensionDisplayName }
         : {}),
       description: workflow.description,
+      ...(workflow.whenToUse ? { whenToUse: workflow.whenToUse } : {}),
     });
   }
   // Iterate user FIRST then project so project entries overwrite (win).
@@ -583,12 +589,14 @@ export async function saveWorkflowScript(
 }
 
 /**
- * Run-id shape accepted for a persisted inline script. Mirrors the tool's
- * `resumeFromRunId` guard (`workflow.ts`) and the snapshot pruner: the id is
- * a path segment here, so anything but the generated `wf_<hex>` shape is
- * refused rather than joined into a path.
+ * Whether `value` has the shape of a generated run id, `wf_<hex>`. A run id
+ * becomes a path segment under the runs and inline-script directories, so an
+ * id from outside — a client's `taskId`, a directory name — is checked with
+ * this before it is joined into a path.
  */
-const INLINE_RUN_ID_PATTERN = /^wf_[0-9a-f]+$/;
+export function isWorkflowRunId(value: string): boolean {
+  return /^wf_[0-9a-f]+$/.test(value);
+}
 
 /**
  * Persist the source of an inline `Workflow({script})` run to
@@ -612,7 +620,7 @@ export async function persistInlineWorkflowScript(
   runId: string,
   script: string,
 ): Promise<string | null> {
-  if (!INLINE_RUN_ID_PATTERN.test(runId)) {
+  if (!isWorkflowRunId(runId)) {
     debugLogger.warn(`refusing to persist a script for run id: ${runId}`);
     return null;
   }
@@ -654,7 +662,7 @@ export async function deleteInlineWorkflowScript(
   config: Config,
   runId: string,
 ): Promise<boolean> {
-  if (!INLINE_RUN_ID_PATTERN.test(runId)) return false;
+  if (!isWorkflowRunId(runId)) return false;
   const storage = config.storage;
   if (!storage) return false;
   try {

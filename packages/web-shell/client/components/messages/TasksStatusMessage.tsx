@@ -15,6 +15,7 @@ import {
 } from './agentForest';
 import {
   useActions,
+  useConnection,
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
@@ -315,6 +316,36 @@ function formatActivityLabel(
   return sanitizeControlChars(label);
 }
 
+/**
+ * The daemon's own sentence for a refused workflow action, when it sent one.
+ *
+ * Some refusals rest on state only the daemon can see — the run is recorded
+ * as live in another process, its history could not keep the args it was
+ * launched with, its journal is gone, the record that would keep a second
+ * runner off it could not be written — and each says what to do instead.
+ * They arrive as a `400`/`409`/`503` whose body carries `{code: 'workflow_…',
+ * error}`. Every other failure keeps the generic message: an unexpected
+ * error's text is not written for a reader.
+ */
+const WORKFLOW_REFUSAL_STATUSES: ReadonlySet<unknown> = new Set([
+  400, 409, 503,
+]);
+
+function workflowRefusalMessage(error: unknown): string | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (!WORKFLOW_REFUSAL_STATUSES.has(status)) return undefined;
+  const body = (error as { body?: unknown }).body;
+  if (typeof body !== 'object' || body === null) return undefined;
+  const { code, error: message } = body as { code?: unknown; error?: unknown };
+  if (typeof code !== 'string' || !code.startsWith('workflow_')) {
+    return undefined;
+  }
+  if (typeof message !== 'string' || message.trim().length === 0) {
+    return undefined;
+  }
+  return sanitizeControlChars(message.trim());
+}
+
 export function TasksStatusMessage({
   message,
   embedded = false,
@@ -602,7 +633,9 @@ export function TasksStatusMessage({
       } catch (error: unknown) {
         if (expectedSessionIdRef.current !== sessionId) return;
         console.warn('[web-shell] failed to control workflow:', error);
-        setActionError(t('workflow.action.failed'));
+        setActionError(
+          workflowRefusalMessage(error) ?? t('workflow.action.failed'),
+        );
       } finally {
         if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
@@ -1457,6 +1490,12 @@ function TaskDetail({
   onCancelConfirmDismiss?: () => void;
 }) {
   const documentMode = useTranscriptRenderMode() === 'document';
+  // Restarting a run restored from history is a daemon capability: an older
+  // daemon answers those actions with `{changed: false}`, so without the flag
+  // the controls stay hidden for history the way they were before it existed.
+  const retryHistorical =
+    useConnection().supportedCommands?.workflowToolFeatures?.retryHistorical ===
+    true;
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
   const isAbandonable = task.kind === 'agent' && task.status === 'paused';
@@ -1470,11 +1509,29 @@ function TaskDetail({
     task.isBackgrounded &&
     task.status === 'running';
   const canResume = task.kind === 'workflow' && task.status === 'paused';
-  const canRetry =
-    task.kind === 'workflow' && !task.isHistorical && task.status === 'failed';
-  const canRerun =
+  // A run restored from history restarts like a live one, as long as the
+  // daemon takes those actions for history and its history has the args to
+  // start it with -- which covers a run whose args were too large to keep and
+  // one recorded before they were kept at all.
+  //
+  // `argsOmitted` is still read beside it: a daemon older than
+  // `argsUnavailable` sends only that one, and dropping it would put back a
+  // Retry this client had learned to hide.
+  const canRestart =
     task.kind === 'workflow' &&
-    !task.isHistorical &&
+    (!task.isHistorical ||
+      (retryHistorical && !task.argsUnavailable && !task.argsOmitted));
+  // Withholding the buttons takes away the only place the daemon's reason
+  // used to appear: it arrived by pressing Retry and being refused. Say it
+  // without the failed round trip.
+  const restartWithheld =
+    task.kind === 'workflow' &&
+    task.isHistorical === true &&
+    retryHistorical === true &&
+    (task.argsUnavailable === true || task.argsOmitted === true);
+  const canRetry = canRestart && task.status === 'failed';
+  const canRerun =
+    canRestart &&
     (task.status === 'completed' ||
       task.status === 'failed' ||
       task.status === 'cancelled');
@@ -1561,6 +1618,7 @@ function TaskDetail({
   const actionControls =
     !documentMode &&
     ((canCancel && onCancel) ||
+      restartWithheld ||
       ((canPause || canResume || canRetry || canRerun) && onWorkflowAction)) ? (
       <div className={styles.actionBar} data-plan-interactive>
         {showCancelConfirm ? (
@@ -1597,6 +1655,11 @@ function TaskDetail({
                   ? t('workflow.action.pause')
                   : t('workflow.action.resume')}
               </button>
+            )}
+            {restartWithheld && (
+              <span className={styles.actionHint}>
+                {t('workflow.action.argsUnavailable')}
+              </span>
             )}
             {canRetry && onWorkflowAction && (
               <button

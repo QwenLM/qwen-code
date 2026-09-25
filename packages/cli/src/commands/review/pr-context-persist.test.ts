@@ -27,6 +27,7 @@ import {
   recoverLedger,
 } from './pr-context.js';
 import type { Ledger } from './lib/ledger.js';
+import { resolveCriticalPosture } from './lib/posture.js';
 
 describe('persistRecoveredLedger', () => {
   // The serialization seam the helper tests could not reach before the
@@ -105,6 +106,39 @@ describe('persistRecoveredLedger', () => {
         foreign: false,
         merged: false,
       });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a roundless stub does not divert the anonymous recovery (#10136 R20-1)', () => {
+    // The anonymous counter-advance branch protects a work list this
+    // machine already holds. Keyed on the file merely EXISTING, a
+    // contentless object diverted the recovery into it: `exRound` read -1,
+    // the branch advanced a counter over nothing, and the recovered
+    // findings were never written — so the next round had no ledger to
+    // dedup against and re-posted what the previous round already reported.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(side, JSON.stringify({ mergeBaseSha: 'b'.repeat(40) }));
+      persistRecoveredLedger(
+        side,
+        {
+          ledger,
+          commitId: 'a'.repeat(40),
+          reviewId: 42,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect(written['findings']).toEqual(ledger.findings);
+      expect(written['anonymousAdoption']).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1002,7 +1036,13 @@ describe('persistRecoveredLedger', () => {
         round: 8,
         findings: ledger.findings,
         reviewId: 200,
+        // The counter is the one fact this write adopts unvouched (#10136
+        // R24-1), and the plan-time posture reads it — so it says so.
+        roundAdoptedAnonymously: true,
       });
+      // …and the reader that buys less review WORK off the counter refuses
+      // it: round 8 is past the schedule, so only the stamp keeps it out.
+      expect(resolveCriticalPosture({ sideLedger: written })).toBeNull();
       expect(written.churnRounds).toBeUndefined();
       expect(written.sha).toBeUndefined();
       expect(written.commitId).toBeUndefined();
@@ -1403,6 +1443,74 @@ describe('persistRecoveredLedger', () => {
       expect(
         JSON.parse(readFileSync(side, 'utf8')).anonymousAdoption,
       ).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an anonymous advance stamps the adopted COUNTER — a vouched whole write clears it (#10136 R24-1)', () => {
+    // The counter-advance keeps this account's own list, so neither LIST
+    // flag moves — but the round number it writes may be a stranger's as
+    // far as this run can tell, and the plan-time posture buys less review
+    // work off that number. The stamp is what the posture reader refuses
+    // on; an identity-KNOWN recovery rebuilds the file from a vouched
+    // ledger and must not carry it.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({
+          ...ledger,
+          round: 3,
+          reviewId: 30,
+          foreign: false,
+          merged: false,
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 8,
+            findings: [{ id: 'R8-1', sev: 'S', file: 'x.ts', title: 'theirs' }],
+          },
+          commitId: null,
+          reviewId: 80,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const advanced = JSON.parse(readFileSync(side, 'utf8'));
+      expect(advanced.round).toBe(8);
+      expect(advanced.findings).toEqual(ledger.findings);
+      expect(advanced.foreign).toBe(false);
+      expect(advanced.anonymousAdoption).toBeUndefined();
+      expect(advanced.roundAdoptedAnonymously).toBe(true);
+      expect(resolveCriticalPosture({ sideLedger: advanced })).toBeNull();
+
+      // An identity-known recovery of this account's own later round.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 9,
+            findings: [{ id: 'R9-1', sev: 'S', file: 'own.ts', title: 'own' }],
+          },
+          commitId: null,
+          reviewId: 90,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      const vouched = JSON.parse(readFileSync(side, 'utf8'));
+      expect(vouched.round).toBe(9);
+      expect(vouched.roundAdoptedAnonymously).toBeUndefined();
+      expect(resolveCriticalPosture({ sideLedger: vouched })).toBe('round');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

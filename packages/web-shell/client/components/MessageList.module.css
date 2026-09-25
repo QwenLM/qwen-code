@@ -226,6 +226,7 @@
 .sessionTimelineViewport {
   width: calc(100% + 32px);
   max-height: min(640px, max(220px, calc(100vh - 220px)));
+  max-height: min(640px, max(220px, calc(100dvh - 220px)));
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-color: transparent transparent !important;
@@ -331,67 +332,69 @@
   transform: scaleX(2.8);
 }
 
-.sessionTimelineItem:has(.sessionTimelineButton:hover)
-  + .sessionTimelineItem
-  .sessionTimelineTick,
-.sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
-  + .sessionTimelineItem
-  .sessionTimelineTick,
-.sessionTimelineItem:has(+ .sessionTimelineItem .sessionTimelineButton:hover)
-  .sessionTimelineTick,
-.sessionTimelineItem:has(
-    + .sessionTimelineItem .sessionTimelineButton:focus-visible
-  )
-  .sessionTimelineTick {
-  transform: scaleX(2.2);
-}
+@supports (selector(:has(*))) {
+  .sessionTimelineItem:has(.sessionTimelineButton:hover)
+    + .sessionTimelineItem
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
+    + .sessionTimelineItem
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(+ .sessionTimelineItem .sessionTimelineButton:hover)
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(
+      + .sessionTimelineItem .sessionTimelineButton:focus-visible
+    )
+    .sessionTimelineTick {
+    transform: scaleX(2.2);
+  }
 
-.sessionTimelineItem:has(.sessionTimelineButton:hover)
-  + .sessionTimelineItem
-  + .sessionTimelineItem
-  .sessionTimelineTick,
-.sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
-  + .sessionTimelineItem
-  + .sessionTimelineItem
-  .sessionTimelineTick,
-.sessionTimelineItem:has(
-    + .sessionTimelineItem + .sessionTimelineItem .sessionTimelineButton:hover
-  )
-  .sessionTimelineTick,
-.sessionTimelineItem:has(
+  .sessionTimelineItem:has(.sessionTimelineButton:hover)
     + .sessionTimelineItem
+    + .sessionTimelineItem
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
+    + .sessionTimelineItem
+    + .sessionTimelineItem
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(
+      + .sessionTimelineItem + .sessionTimelineItem .sessionTimelineButton:hover
+    )
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(
       + .sessionTimelineItem
-      .sessionTimelineButton:focus-visible
-  )
-  .sessionTimelineTick {
-  transform: scaleX(1.6);
-}
+        + .sessionTimelineItem
+        .sessionTimelineButton:focus-visible
+    )
+    .sessionTimelineTick {
+    transform: scaleX(1.6);
+  }
 
-.sessionTimelineItem:has(.sessionTimelineButton:hover)
-  + .sessionTimelineItem
-  + .sessionTimelineItem
-  + .sessionTimelineItem
-  .sessionTimelineTick,
-.sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
-  + .sessionTimelineItem
-  + .sessionTimelineItem
-  + .sessionTimelineItem
-  .sessionTimelineTick,
-.sessionTimelineItem:has(
+  .sessionTimelineItem:has(.sessionTimelineButton:hover)
     + .sessionTimelineItem
-      + .sessionTimelineItem
-      + .sessionTimelineItem
-      .sessionTimelineButton:hover
-  )
-  .sessionTimelineTick,
-.sessionTimelineItem:has(
     + .sessionTimelineItem
+    + .sessionTimelineItem
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
+    + .sessionTimelineItem
+    + .sessionTimelineItem
+    + .sessionTimelineItem
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(
       + .sessionTimelineItem
+        + .sessionTimelineItem
+        + .sessionTimelineItem
+        .sessionTimelineButton:hover
+    )
+    .sessionTimelineTick,
+  .sessionTimelineItem:has(
       + .sessionTimelineItem
-      .sessionTimelineButton:focus-visible
-  )
-  .sessionTimelineTick {
-  transform: scaleX(1.2);
+        + .sessionTimelineItem
+        + .sessionTimelineItem
+        .sessionTimelineButton:focus-visible
+    )
+    .sessionTimelineTick {
+    transform: scaleX(1.2);
+  }
 }
 
 .sessionTimelineButtonInRange .sessionTimelineTick {

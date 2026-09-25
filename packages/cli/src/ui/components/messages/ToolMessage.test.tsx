@@ -861,6 +861,33 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders structured Advisor feedback instead of JSON', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="advisor"
+        description="Consult Advisor"
+        resultDisplay={{
+          type: 'advisor_review',
+          verdict: 'Check the edge case.',
+          risks: 'Retries may be missing.',
+          missingEvidence: 'No failing test output.',
+          recommendation: 'Add a regression test.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('/advisor');
+    expect(output).toContain('Consult Advisor');
+    expect(output).toContain('Verdict');
+    expect(output).toContain('Risks');
+    expect(output).toContain('Missing evidence');
+    expect(output).toContain('Recommendation');
+    expect(output).not.toContain('"advisor_review"');
+  });
+
   it('suppresses todo panel when resultDisplay has unchanged flag', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
@@ -1910,6 +1937,34 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:# My Plan');
     expect(output).toContain('- Step 1: Do something');
     expect(output).toContain('- Step 2: Do another thing');
+  });
+
+  it('renders structured shell results as their display text', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'shell_result',
+          version: 1,
+          text: 'Health check complete',
+          output: 'raw stdout must not replace display text',
+          directory: '/workspace',
+          exitCode: 0,
+          signal: null,
+          pid: 42,
+          error: null,
+          outcome: 'completed',
+          notices: [],
+          truncated: false,
+          outputFiles: [],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Health check complete');
+    expect(lastFrame()).not.toContain('shell_result');
+    expect(lastFrame()).not.toContain('raw stdout');
   });
 
   it('renders structured question answers as their display text', () => {
