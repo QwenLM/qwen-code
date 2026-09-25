@@ -23,7 +23,7 @@
 - `disable-model-invocation: true`：只有用户能进入 Batch 路径；`/batch` 的描述里只允许模型**建议**用户输入 `/batch-api`。
 - `allowedTools` 只预先放行只读工具（`glob`、`grep_search`、`read_file`）；写 plan 和 `qwen batch run`（会花钱）仍要经过审批。
 - 流程：
-  1. `qwen batch check`：检查凭据、endpoint 和 Batch 路由，并显示一次提交会冻结的参数。不产生计费；失败就停止，不在准备上花钱。
+  1. 先用 `qwen batch --help` 确认 CLI 有这些子命令（旧版 CLI 会把 `batch check` 当成计费的提问），再用 `qwen batch check` 检查凭据、endpoint 和 Batch 路由，并显示一次提交会冻结的参数。不产生计费；失败就停止，不在准备上花钱。
   2. 判断任务是否适合。不适合就说明原因并停止，**绝不悄悄改用实时模式自己做**。
   3. 轻量准备：glob 出文件，抽样读 2–3 个，写一份共享规则。
   4. 把 plan 写到 `.qwen/batch/plans/<slug>.json`。
@@ -77,7 +77,7 @@ batch.ts：endpoint / 鉴权解析，CLI 命令注册
 - **同一任务同一时刻只有一个命令在跑。** 每个任务一个锁文件，记录 pid 和主机名。只有确定释放了才接管：锁写在本机、且那个 pid 已经不存在。另一台主机的锁永远不接管。
 - **custom_id = `<itemId>#<attempt>`**，重试之后结果仍能准确对回条目。每个条目记下拥有它的 attempt，只有这个 attempt 的结果行能改变它：旧 attempt 的失败不会把条目重新打开、导致再付一次钱。
 - **交付不覆盖已有文件。** 目标文件已存在且内容不同就判为冲突（held）；内容相同算作已交付，因此重复 collect 是幂等的。写入前重新计算源文件哈希，提交后被改过的源文件会让结果 held。
-- **Batch 沿用用户的实时设置。** `run` 把配置里的 `samplingParams` 和 `extra_body` 按实时路径的方式（原样发送、`extra_body` 最后合并）冻结进任务，每次重试都复用。没有对应线上字段的统一 reasoning effort 只作为提示报告，不猜测。
+- **Batch 沿用用户的实时设置。** `run` 把配置里的 `samplingParams` 和 `extra_body` 按实时路径的方式（原样发送、`extra_body` 最后合并）冻结进任务，每次重试都复用。关闭 reasoning 时按实时路径的 Qwen 写法冻结（分档模型用 `reasoning_effort: "none"`，其余用 `enable_thinking: false`），其他模型家族只报告不发送；输出上限写在冻结参数已使用的字段上（`max_completion_tokens` / `max_new_tokens`，否则 `max_tokens`）。
 - **没有单价就不给金额估算。** token 估算总会显示（粗略：拉丁文字约 4 字符/token，中日韩文字约 1.5 字符/token）。金额估算需要 `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` / `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`。plan 的 `maxCostUsd` 是**估算闸门，不是账单上限**；设了它却没配单价时拒绝提交。
 - **记账会说明自己的缺口。** 用量汇总所有 attempt 的结果文件；有结果行缺少用量时，总数标为不完整，绝不静默当作 0。会话里的准备开销执行器看不到，所有报告都会注明。Batch 的用量不计入会话的缓存统计。
 
@@ -109,7 +109,7 @@ batch.ts：endpoint / 鉴权解析，CLI 命令注册
 - 由 `batch-task.ts` 用 zod `.strict()` 校验：
   - item id 须匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,59}`，因为它会进入 custom_id；
   - id 和 target 都必须唯一；
-  - target 不能位于 `.git/`、`.github/`、`.husky/` 或 `.qwen/` 之下：交付发生在批准几小时之后、无人值守，不能生成配置工具或执行代码的文件；
+  - target 必须在项目内，且不能位于任何隐藏路径下（任意层级的 `.git/`、`.github/`、`.qwen/` 等）：交付发生在批准几小时之后、无人值守，不能生成配置工具或执行代码的文件；写不进去的目标在计费前就被拒绝；
   - 未知字段直接报错，agent 写错字段要大声失败，不能悄悄改变行为。
 - `kind` 是字面量；新的 kind 使用新的 schema 版本。
 - `enableThinking` 只在用户明确要求时才设置；对必须开 thinking 的模型，设为 `false` 会被拒绝。

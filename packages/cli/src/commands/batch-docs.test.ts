@@ -166,6 +166,34 @@ describe('assembleRequests', () => {
 });
 
 describe('freezeRequest', () => {
+  it('disables thinking in the wire shape realtime uses for the model', () => {
+    // Tiered Qwen reads reasoning_effort; other Qwen models the switch.
+    expect(freezeRequest({ reasoning: false }, 'qwen3.8-max').params).toEqual({
+      reasoning_effort: 'none',
+    });
+    expect(freezeRequest({ reasoning: false }, 'qwen-plus').params).toEqual({
+      enable_thinking: false,
+    });
+    // Other families have their own knobs: send nothing and say so.
+    const gpt = freezeRequest({ reasoning: false }, 'gpt-5.4');
+    expect(gpt.params).toEqual({});
+    expect(gpt.notes.join()).toMatch(/not reproduced for gpt-5.4/);
+  });
+
+  it('writes the output limit under the budget key the frozen params use', () => {
+    const [request] = assembleRequests(
+      { ...plan, maxOutputTokens: 4096 },
+      [item()],
+      1,
+      root,
+      'gpt-5.4',
+      freezeRequest({ samplingParams: { max_completion_tokens: 1024 } }),
+    );
+    const body = request.line['body'] as Record<string, unknown>;
+    expect(body['max_completion_tokens']).toBe(4096);
+    expect(body).not.toHaveProperty('max_tokens');
+  });
+
   it('sends samplingParams and extra_body verbatim, as realtime does', () => {
     const { params } = freezeRequest({
       samplingParams: {
@@ -197,9 +225,11 @@ describe('freezeRequest', () => {
         'enable_thinking'
       ],
     ).toBe(true);
-    expect(freezeRequest({ reasoning: false }).params['enable_thinking']).toBe(
-      false,
-    );
+    expect(
+      freezeRequest({ reasoning: false }, 'qwen-plus').params[
+        'enable_thinking'
+      ],
+    ).toBe(false);
   });
 
   it('never disables thinking on a thinking-mandatory model', () => {

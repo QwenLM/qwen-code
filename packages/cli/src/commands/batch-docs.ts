@@ -12,6 +12,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import type { BatchPlan, TaskItem } from './batch-task.js';
 import { customIdOf } from './batch-task.js';
@@ -69,8 +73,41 @@ export interface GenerationConfigLike {
   thinkingMandatory?: boolean;
 }
 
+// Output-budget keys some endpoints read instead of `max_tokens`. When the
+// frozen params carry one, the limit goes there: realtime never sends it
+// alongside `max_tokens`, because some endpoints reject the pair.
+const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
+
+/** The body key an output limit is written under for these params. */
+export const outputBudgetKey = (params: Record<string, unknown> = {}) =>
+  PROVIDER_OUTPUT_BUDGET_KEYS.find((key) => params[key] !== undefined) ??
+  'max_tokens';
+
+/**
+ * The Qwen-on-DashScope wire shape for "thinking off", as realtime emits it:
+ * the tiered family reads `reasoning_effort`, the rest `enable_thinking`.
+ * Other model families have their own knobs, so they get nothing here.
+ */
+function disableThinking(
+  params: Record<string, unknown>,
+  model: string | undefined,
+): boolean {
+  if (isTieredEffortWireModel(model)) {
+    delete params['enable_thinking'];
+    delete params['thinking_budget'];
+    params['reasoning_effort'] = 'none';
+    return true;
+  }
+  if (isQwenFamilyWireModel(model)) {
+    params['enable_thinking'] = false;
+    return true;
+  }
+  return false;
+}
+
 export function freezeRequest(
   config: GenerationConfigLike | undefined,
+  model?: string,
 ): FrozenRequest {
   const notes: string[] = [];
   // Realtime sends samplingParams and extra_body to the wire verbatim, with
@@ -82,10 +119,21 @@ export function freezeRequest(
   })) {
     if (value !== undefined && value !== null) params[key] = value;
   }
-  if (params['enable_thinking'] === undefined && config?.reasoning === false) {
-    params['enable_thinking'] = false;
+  if (
+    config?.reasoning === false &&
+    !config.thinkingMandatory &&
+    params['enable_thinking'] === undefined &&
+    params['reasoning_effort'] === undefined &&
+    !disableThinking(params, model)
+  ) {
+    notes.push(
+      `disabled reasoning is not reproduced for ${model ?? 'this model'} in Batch requests; the provider default thinking mode applies`,
+    );
   }
-  if (params['enable_thinking'] === false && config?.thinkingMandatory) {
+  if (
+    config?.thinkingMandatory &&
+    (config.reasoning === false || params['enable_thinking'] === false)
+  ) {
     delete params['enable_thinking'];
     notes.push('thinking cannot be disabled for this model; left on');
   }
@@ -110,7 +158,10 @@ export function freezeRequest(
 
 /** One-line description of the thinking mode a frozen request runs with. */
 export function describeThinking(request: FrozenRequest | undefined): string {
-  const value = request?.params['enable_thinking'];
+  const value =
+    request?.params['reasoning_effort'] === 'none'
+      ? false
+      : request?.params['enable_thinking'];
   return value === true
     ? 'thinking on'
     : value === false
@@ -175,10 +226,12 @@ export function assembleRequests(
       messages,
     };
     if (plan.maxOutputTokens !== undefined) {
-      body['max_tokens'] = plan.maxOutputTokens;
+      body[outputBudgetKey(request?.params)] = plan.maxOutputTokens;
     }
-    if (plan.enableThinking !== undefined) {
-      body['enable_thinking'] = plan.enableThinking;
+    if (plan.enableThinking === true) {
+      body['enable_thinking'] = true;
+    } else if (plan.enableThinking === false) {
+      disableThinking(body, model);
     }
     const inputTokens = estimateTokens(JSON.stringify(messages));
     requests.push({

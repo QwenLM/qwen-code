@@ -33,7 +33,9 @@ of items.
   `read_file`); writing the plan and `qwen batch run` (which spends money)
   stay behind the approval prompt.
 - Flow:
-  1. `qwen batch check`: verifies credentials, endpoint and the Batch route
+  1. `qwen batch --help` confirms the CLI has these subcommands (an older CLI
+     would treat `batch check` as a billed prompt); then `qwen batch check`
+     verifies credentials, endpoint and the Batch route
      and shows the settings a run would freeze. Nothing is billed; on
      failure, stop before spending anything on preparation.
   2. Judge suitability. Unsuitable → explain and stop; **never silently do
@@ -123,9 +125,12 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   changed since submission holds its result.
 - **Batch runs the user's realtime settings.** `run` freezes the configured
   `samplingParams` and `extra_body` into the task exactly as realtime sends
-  them (verbatim, `extra_body` merged last), and every retry reuses them. A
-  unified reasoning effort with no wire equivalent is reported as a note,
-  not guessed.
+  them (verbatim, `extra_body` merged last), and every retry reuses them.
+  Disabled reasoning becomes the Qwen wire shape realtime uses
+  (`reasoning_effort: "none"` for the tiered family, `enable_thinking: false`
+  otherwise) and is only reported for other model families; an output limit
+  is written under the budget key the frozen params already use
+  (`max_completion_tokens` / `max_new_tokens`, else `max_tokens`).
 - **No money figure without prices.** Token estimates are always shown
   (rough: ~4 characters per token for Latin text, ~1.5 for CJK). A dollar
   estimate needs
@@ -166,9 +171,11 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   - item ids match `[A-Za-z0-9][A-Za-z0-9_-]{0,59}`, since they ride inside
     the custom_id;
   - ids and targets are unique;
-  - targets never start inside `.git/`, `.github/`, `.husky/` or `.qwen/`:
-    delivery runs hours after approval with nobody watching, so it must not
-    create files that configure tools or run code;
+  - targets stay inside the project and outside every hidden path (`.git/`,
+    `.github/`, `.qwen/`, … at any depth): delivery runs hours after approval
+    with nobody watching, so it must not create files that configure tools or
+    run code, and a target that could not be written is refused before
+    anything is billed;
   - unknown fields fail loudly, so an agent's typo cannot silently change
     behavior.
 - `kind` is a literal; a new kind gets a new schema version.

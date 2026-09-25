@@ -73,9 +73,26 @@ export const batchPlanSchema = z
 
 export type BatchPlan = z.infer<typeof batchPlanSchema>;
 
-// Delivery happens hours after the plan was approved, with nobody watching,
-// so targets never land where a new file configures tools or runs code.
-const PROTECTED_TARGET_DIRS = new Set(['.git', '.github', '.husky', '.qwen']);
+/**
+ * Why a target may not be written, or undefined when it may. Checked before
+ * anything is billed. Delivery happens hours after approval with nobody
+ * watching, so a target must stay inside the project and outside every
+ * hidden path — at any depth, since `.git/hooks`, `.github/workflows` and
+ * `.qwen/settings.json` configure tools or run code in nested projects too.
+ */
+function targetProblem(target: string): string | undefined {
+  const normalized = path.normalize(target);
+  const segments = normalized.split(/[\\/]/);
+  if (path.isAbsolute(target) || segments[0] === '..') {
+    return 'is outside the project';
+  }
+  const hidden = segments.find(
+    (segment) => segment.startsWith('.') && segment !== '.',
+  );
+  return hidden === undefined
+    ? undefined
+    : `is inside the hidden path ${hidden}, which is not allowed for batch delivery`;
+}
 
 export function validatePlan(raw: unknown, file: string): BatchPlan {
   const parsed = batchPlanSchema.safeParse(raw);
@@ -100,10 +117,10 @@ export function validatePlan(raw: unknown, file: string): BatchPlan {
       );
     }
     targetOf.set(item.target, item.id);
-    const top = path.normalize(item.target).split(/[\\/]/)[0].toLowerCase();
-    if (PROTECTED_TARGET_DIRS.has(top)) {
+    const problem = targetProblem(item.target);
+    if (problem !== undefined) {
       throw new Error(
-        `${file}: item "${item.id}" writes into ${top}/, which is not allowed for batch delivery`,
+        `${file}: item "${item.id}" target "${item.target}" ${problem}`,
       );
     }
   }

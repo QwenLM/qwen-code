@@ -45,6 +45,7 @@ uploaded or billed:
 qwen batch run .qwen/batch/plans/<slug>.json --dry-run
 # preview: 42 item(s), window 24h — nothing uploaded, nothing billed
 # model qwen-plus, thinking off, max output 8192 tokens (frozen from your current settings; retries reuse them)
+# writes new files to: docs/en/ (42)
 # ~180,000 in / ~190,000 out tokens (rough estimate); ...
 # snapshot 3f9c2a7e5d10b884; submit exactly this batch with: qwen batch run .qwen/batch/plans/<slug>.json --expect 3f9c2a7e5d10b884
 ```
@@ -122,8 +123,9 @@ output files are deleted.
   includes what your session spent preparing the plan.
 - `clean` refuses while a batch may still be running or holds uncollected
   results, unless you pass `--force`.
-- Targets may not be inside `.git/`, `.github/`, `.husky/` or `.qwen/`:
-  results are written hours after you approved the plan.
+- Targets must stay inside the project and outside any hidden path
+  (`.git/`, `.github/`, `.qwen/`, … at any depth): results are written hours
+  after you approved the plan. The preview lists the target directories.
 
 Design: [`docs/design/2026-09-23-batch-api-design.md`](../../design/2026-09-23-batch-api-design.md).
 An offline end-to-end check (fake Batch API, real built CLI) lives in

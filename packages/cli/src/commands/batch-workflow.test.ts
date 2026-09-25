@@ -1368,6 +1368,10 @@ describe('review fixes', () => {
       (plan) => {
         plan['maxOutputTokens'] = 64;
       },
+      (plan) => {
+        (plan['items'] as Array<Record<string, unknown>>)[0]['target'] =
+          'docs/en/elsewhere.md';
+      },
     ];
     for (const mutate of mutations) {
       const h = (harness = setup());

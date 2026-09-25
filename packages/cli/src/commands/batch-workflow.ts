@@ -13,6 +13,7 @@
 // session's realtime cache statistics — the two price models stay separate.
 import fs from 'node:fs';
 import path from 'node:path';
+import { isQwenFamilyWireModel } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import {
   SETTLED_STATUSES,
   MAX_REQUESTS_PER_FILE,
@@ -54,6 +55,7 @@ import {
   sha256,
   freezeRequest,
   describeThinking,
+  outputBudgetKey,
 } from './batch-docs.js';
 import type { DeliveryOutcome } from './batch-docs.js';
 
@@ -297,7 +299,7 @@ function outputLimitOf(
   task: BatchTask,
   attemptLimit: number | undefined,
 ): number | undefined {
-  const frozen = task.request?.params['max_tokens'];
+  const frozen = task.request?.params[outputBudgetKey(task.request?.params)];
   return (
     attemptLimit ??
     task.plan.maxOutputTokens ??
@@ -428,7 +430,8 @@ export interface RunOptions {
 /**
  * What the user approves when they approve a paid submission: everything the
  * provider will bill for — each request line (sources, instructions, model,
- * frozen parameters), the completion window and the account it runs on.
+ * frozen parameters), the completion window and the account it runs on —
+ * and every file the results will be written to.
  */
 const snapshotDigest = (task: BatchTask, assembly: AttemptAssembly) =>
   sha256(
@@ -436,9 +439,24 @@ const snapshotDigest = (task: BatchTask, assembly: AttemptAssembly) =>
       task.completionWindow,
       task.endpoint?.baseUrl,
       task.endpoint?.keyFingerprint,
+      ...task.items.map((item) => `${item.id}\t${item.target}`),
       assembly.jsonl,
     ].join('\n'),
   ).slice(0, 16);
+
+/** Where results will be written, by directory, for the preview. */
+function describeTargets(task: BatchTask): string {
+  const perDir = new Map<string, number>();
+  for (const item of task.items) {
+    const dir = path.dirname(item.target);
+    perDir.set(dir, (perDir.get(dir) ?? 0) + 1);
+  }
+  const dirs = [...perDir].map(([dir, n]) => `${dir}/ (${n})`);
+  return (
+    `writes new files to: ${dirs.slice(0, 5).join(', ')}` +
+    (dirs.length > 5 ? ` and ${dirs.length - 5} more director(ies)` : '')
+  );
+}
 
 export async function runPlan(
   deps: WorkflowDeps,
@@ -452,7 +470,7 @@ export async function runPlan(
   keepPlansOutOfGit(deps.cwd, planPath);
   const store = new BatchTaskStore(batchHomeDir(deps.env));
   const task = store.create(plan, deps.cwd, deps.ep.model);
-  const request = freezeRequest(deps.ep.generationConfig);
+  const request = freezeRequest(deps.ep.generationConfig, deps.ep.model);
   task.request = request;
   task.endpoint = endpointOf(deps.ep);
 
@@ -470,6 +488,15 @@ export async function runPlan(
     if (plan.enableThinking === false && request.thinkingMandatory) {
       throw new Error(
         `plan sets enableThinking=false but ${task.model} requires thinking; remove the field.`,
+      );
+    }
+    // The switch is Qwen's wire field; other families use their own knobs.
+    if (
+      plan.enableThinking !== undefined &&
+      !isQwenFamilyWireModel(task.model)
+    ) {
+      throw new Error(
+        `plan sets enableThinking, which only applies to Qwen models; ${task.model} is not one. Remove the field.`,
       );
     }
     assembly = assembleAttempt(task, attemptNumber, attempt.itemIds);
@@ -506,7 +533,9 @@ export async function runPlan(
       ...request.params,
       ...(plan.enableThinking === undefined
         ? {}
-        : { enable_thinking: plan.enableThinking }),
+        : plan.enableThinking
+          ? { enable_thinking: true }
+          : { enable_thinking: false, reasoning_effort: 'none' }),
     },
   };
   const limit = outputLimitOf(task, attempt.maxOutputTokens);
@@ -518,6 +547,7 @@ export async function runPlan(
   for (const note of request.notes) {
     deps.err(`[batch] note: ${note}`);
   }
+  deps.out(describeTargets(task));
   deps.out(cost.text);
   if (options.dryRun) {
     deps.out(
@@ -1223,7 +1253,7 @@ async function retryLocked(
 export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
   const api = deps.api ?? liveApi;
   await api.probe(deps.ep);
-  const request = freezeRequest(deps.ep.generationConfig);
+  const request = freezeRequest(deps.ep.generationConfig, deps.ep.model);
   const frozenLimit = request.params['max_tokens'];
   deps.out(
     `ready: ${new URL(deps.ep.baseUrl).host} accepts Batch requests with these credentials (nothing was billed)`,

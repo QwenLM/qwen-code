@@ -32,7 +32,18 @@ and never call the Batch API yourself.
 Run every `qwen batch …` command with the shell tool as
 `"${QWEN_CODE_CLI:-qwen}" batch …` — `QWEN_CODE_CLI` names the CLI running
 this session, so a plain `qwen` on PATH (possibly an older install without
-these subcommands) is only the fallback. First:
+these subcommands) is only the fallback. First make sure the CLI you reach
+has them. Help output never calls a model:
+
+```
+"${QWEN_CODE_CLI:-qwen}" batch --help
+```
+
+If the output does not list `batch run <plan>`, the `qwen` it reached is an
+older install without these subcommands — say so (the session's CLI is not on
+PATH as `qwen`) and stop. Do not run any other `batch` command there: an older
+CLI treats `batch check` as a prompt and answers it with a billed model call.
+Then:
 
 ```
 "${QWEN_CODE_CLI:-qwen}" batch check
@@ -40,12 +51,9 @@ these subcommands) is only the fallback. First:
 
 It proves the credentials, endpoint and Batch route work and shows the model,
 thinking mode and output limit a run would freeze from the user's current
-settings — without a billed request. If it fails (for example Qwen OAuth,
-which has no Batch route), relay its message and stop: do not read files or
-draft a plan the executor cannot submit. If the shell reports an unknown
-command or unknown argument, the `qwen` it reached is an older install
-without these subcommands — say so (the session's CLI is not on PATH as
-`qwen`) and stop. Pass its `note:` lines on to the user.
+settings — without a billed request. If it fails (for example Qwen OAuth, which has no Batch route),
+relay its message and stop: do not read files or draft a plan the executor
+cannot submit. Pass its `note:` lines on to the user.
 
 ## 1. Decide suitability honestly — this is your main job
 
@@ -109,7 +117,8 @@ Rules:
   becomes part of the provider-side `custom_id`.
 - Paths are relative to the current working directory. Every `target` must
   be unique and must not overwrite an existing file — pick fresh output
-  paths, outside `.git/`, `.github/`, `.husky/` and `.qwen/` (refused). Results
+  paths inside the project and outside any hidden path such as `.git/`,
+  `.github/` or `.qwen/`, at any depth (refused). Results
   that arrive to a changed source or an occupied target are held, not
   written.
 - Optional fields: `completionWindow` (default `24h`, max `14d`),

@@ -83,6 +83,13 @@ describe('bundled batch-api skill', () => {
       body.indexOf('## 4. Submit through the executor'),
     );
     expect(body).toContain('"${QWEN_CODE_CLI:-qwen}" batch check');
+    // An older CLI turns `batch check` into a billed prompt, so the install
+    // is probed with --help first, which never calls a model.
+    const probe = body.indexOf('"${QWEN_CODE_CLI:-qwen}" batch --help');
+    expect(probe).toBeGreaterThan(-1);
+    expect(probe).toBeLessThan(
+      body.indexOf('"${QWEN_CODE_CLI:-qwen}" batch check'),
+    );
     expect(body).toContain('Never fall back to doing the transform yourself');
     // Every executor call goes through the session's own CLI first.
     expect(body).toContain('"${QWEN_CODE_CLI:-qwen}" batch run');

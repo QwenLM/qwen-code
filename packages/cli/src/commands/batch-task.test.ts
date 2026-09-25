@@ -31,6 +31,32 @@ const validPlan = {
 };
 
 describe('validatePlan', () => {
+  it('refuses targets outside the project or inside any hidden path', () => {
+    for (const target of [
+      'packages/app/.qwen/settings.json',
+      'vendor/x/.git/hooks/pre-commit',
+      '../en/intro.md',
+      '/tmp/intro.md',
+      'docs/en/../../../etc/passwd',
+    ]) {
+      expect(() =>
+        validatePlan(
+          { ...validPlan, items: [{ ...validPlan.items[0], target }] },
+          'plan.json',
+        ),
+      ).toThrow(/outside the project|not allowed for batch delivery/);
+    }
+    expect(() =>
+      validatePlan(
+        {
+          ...validPlan,
+          items: [{ ...validPlan.items[0], target: 'docs/en/./intro.md' }],
+        },
+        'plan.json',
+      ),
+    ).not.toThrow();
+  });
+
   it('refuses targets inside tool configuration directories', () => {
     for (const target of [
       '.github/workflows/x.yml',
