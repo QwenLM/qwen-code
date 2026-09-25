@@ -52,8 +52,10 @@ function nativePrefixesFromSource(source) {
   );
 }
 
-// The rule `isNativeLocation` implements, restated so a change there has to be
-// made here too.
+// A hand-copied duplicate of the rule `isNativeLocation` implements in
+// `scripts/check-desktop-isolation.js`, used below to check the prefix *data*.
+// Only the array literal is read back from the script, not the rule, so a
+// change to the script's rule does not fail here -- update this copy by hand.
 const isNativeLocation = (location, prefixes) =>
   prefixes.some(
     (prefix) => location === prefix || location.startsWith(`${prefix}/`),
@@ -86,8 +88,12 @@ describe('desktop isolation guard — nativePrefixes coverage', () => {
   });
 
   it('negates every native prefix that exists on disk', () => {
+    // Keyed on the manifest, not the directory: `packages/*` only makes a
+    // directory a workspace member if it holds a package.json, while ignored
+    // build residue (node_modules, src-tauri/target) survives a branch switch
+    // under a path that is no longer a package at all.
     const onDisk = nativePrefixes.filter((prefix) =>
-      existsSync(join(root, prefix)),
+      existsSync(join(root, prefix, 'package.json')),
     );
     // Without this the test would also pass on a tree where the package moved
     // and no prefix resolved at all.
@@ -95,7 +101,7 @@ describe('desktop isolation guard — nativePrefixes coverage', () => {
     for (const prefix of onDisk) {
       expect(
         npmNegations,
-        `${prefix} exists on disk but package.json does not negate it, so it joins the root npm workspace set.`,
+        `${prefix} holds a package.json but the root manifest does not negate it, so \`packages/*\` pulls it into the root npm workspace set.`,
       ).toContain(prefix);
     }
   });
@@ -106,7 +112,12 @@ describe('desktop isolation guard — nativePrefixes coverage', () => {
     // root npm workspace set"). The coverage assertions above are deliberately
     // superset-shaped so this entry, which nothing negates, stays legal.
     expect(nativePrefixes).toContain('packages/desktop-shell');
-    expect(existsSync(join(root, 'packages', 'desktop-shell'))).toBe(false);
+    // The manifest, not the directory: ignored build residue under the old
+    // path survives a branch switch and is not the re-entry this pins.
+    expect(
+      existsSync(join(root, 'packages', 'desktop-shell', 'package.json')),
+      'packages/desktop-shell holds a package.json again, so `packages/*` pulls the pre-rename path back into the root npm workspace set.',
+    ).toBe(false);
   });
 });
 
@@ -114,11 +125,24 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
   const filterStep = desktopJob.steps.find((step) => step.id === 'filter');
   const filterRun = String(filterStep?.run ?? '');
 
-  it('still carries the Cargo.toml existence guard', () => {
+  it('still carries the Cargo.toml existence guard, and it clears changed', () => {
     // Not redundant with the filter: the filter also matches on ci.yml and
     // desktop-release.yml changing, which a head with no crate at all can do.
     // That is the #8132 failure the job's header comment describes.
-    expect(filterRun).toMatch(/! -f \S+\/src-tauri\/Cargo\.toml/u);
+    // The condition is only half the guard: without the assignment inside its
+    // own body, every gated step still runs against a crate that is not there.
+    const guardBody =
+      /! -f \S+\/src-tauri\/Cargo\.toml \]\]; then\n([\s\S]*?)\n[ \t]*fi/u.exec(
+        filterRun,
+      )?.[1];
+    expect(
+      guardBody,
+      'the Cargo.toml guard lost its `if ...; then ... fi` body',
+    ).toBeDefined();
+    expect(
+      guardBody,
+      'the Cargo.toml guard no longer sets changed=false inside its own body, so a head without the crate runs every gated step and reports a missing working directory as a failure of the PR',
+    ).toMatch(/^\s*changed=false\s*$/mu);
   });
 
   it('names one crate directory in all five places, and it exists', () => {
@@ -176,12 +200,14 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       `${crateDir}/src-tauri/Cargo.toml does not exist, so every gated step in desktop_shell skips and the job reports success having compiled nothing.`,
     ).toBe(true);
     // The filter is `grep -Eq '^(<alternative>|...)'` over the PR's changed
-    // file names, so the alternative has to be a literal prefix of a path
-    // inside the crate: a head that edits only the crate must still run the
-    // job.
+    // file names, so the alternative is a bare path prefix and has to end in
+    // `/`: without it, `packages/desktop` also matches a sibling such as
+    // `packages/desktop-extra/`, and the job runs on heads that never touch
+    // the crate. Building a path out of `crateDir` -- this same alternative
+    // with the slash stripped -- and comparing it back proves nothing.
     expect(
-      `${crateDir}/src-tauri/src/main.rs`.startsWith(filterAlternative),
-      `the filter alternative ${filterAlternative} does not match paths under ${crateDir}`,
+      filterAlternative.endsWith('/'),
+      `the filter alternative ${filterAlternative} has no trailing slash, so the changed-files filter also matches sibling paths that merely start with it`,
     ).toBe(true);
   });
 });
