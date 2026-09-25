@@ -10,10 +10,10 @@ import java.util.concurrent.CompletionStage;
  * <p>Acquire and release must be idempotent by Runtime Session identifier.
  * Execute results must contain a string {@code executionStatus}. Cancel
  * results must contain {@code state} with one of {@code prepared},
- * {@code executing}, {@code cancel_requested}, or {@code settled}; a settled
- * response must also contain a valid execution result. Status results use
- * the same states plus {@code unknown}. Release acknowledges completion only
- * with {@code true}.
+ * {@code executing}, {@code cancel_requested}, {@code settled}, or
+ * {@code unknown}; a settled response must also contain a valid execution
+ * result. Status results use the same states. Release acknowledges
+ * completion only with {@code true}.
  */
 public interface RuntimeTransport {
     CompletionStage<Void> acquire(RuntimeLease lease,
@@ -43,6 +43,10 @@ public interface RuntimeTransport {
      * transport should not complete it on an I/O thread. The default fails
      * closed, so a transport without the lookup can never settle an
      * execution.
+     *
+     * <p>An HTTP adapter must validate the wire envelope and project it to
+     * this shape, stripping {@code protocolVersion} and {@code lastSequence}.
+     * The Broker does not consume the Runtime's response cursor yet.
      */
     default CompletionStage<Map<String, Object>> status(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
