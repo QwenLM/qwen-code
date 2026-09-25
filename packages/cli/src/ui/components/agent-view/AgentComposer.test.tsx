@@ -215,6 +215,34 @@ describe('AgentComposer', () => {
   const latestOptions = (callSite: number): { isActive: boolean } =>
     capturedKeypressOptions[capturedKeypressOptions.length - 2 + callSite]!;
 
+  it('releases same-chunk keys only after input dismisses the menu', async () => {
+    renderWithMenu();
+    const items = [{ id: 'open-link', label: 'Open Link', onSelect: vi.fn() }];
+    const open = () =>
+      act(async () => {
+        menuApi?.openMenu(items, { x: 0, y: 0 });
+      });
+    await open();
+
+    await act(async () => {
+      // Hold the same callback: no render may occur between these keys.
+      const handleKey = baseTextInputProps.onKeypress!;
+      expect(handleKey({ name: 'a', sequence: 'a' } as Key)).toBe(false);
+      expect(handleKey({ name: 'return', sequence: '\r' } as Key)).toBe(false);
+    });
+
+    await open();
+    await act(async () => {
+      const handleKey = baseTextInputProps.onKeypress!;
+      // A fresh menu owns Enter even after the previous menu was dismissed.
+      expect(handleKey({ name: 'return', sequence: '\r' } as Key)).toBe(true);
+      menuApi?.executeIndex(0);
+      // Even if the overlay executes first, the same Enter cannot submit.
+      expect(handleKey({ name: 'return', sequence: '\r' } as Key)).toBe(true);
+    });
+    expect(items[0]!.onSelect).toHaveBeenCalledOnce();
+  });
+
   it('goes quiet while the right-click context menu is open', async () => {
     // AgentChatContent mounts ContentMouseController on the teammate tab, so
     // this composer is now reachable with the menu open. KeypressContext

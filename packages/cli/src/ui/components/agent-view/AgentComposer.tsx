@@ -18,7 +18,7 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { AgentStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
 import {
   ApprovalMode,
@@ -122,6 +122,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   // values, so the menu cannot consume a key for us — each consumer has to go
   // quiet itself, exactly as InputPrompt does for the main view.
   const { menu: contextMenu, closeMenu } = useContextMenu();
+  const inputDismissedMenuRef = useRef<typeof contextMenu>(null);
 
   // ── Escape to cancel the active agent round ──
 
@@ -210,7 +211,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       // then processed normally, mirroring click-away dismissal. The
       // dismissing key must fall through rather than be swallowed, since
       // BaseTextInput still owns every non-navigation key.
-      if (contextMenu !== null) {
+      if (
+        contextMenu !== null &&
+        inputDismissedMenuRef.current !== contextMenu
+      ) {
         if (
           key.name === 'up' ||
           key.name === 'down' ||
@@ -219,6 +223,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         ) {
           return true;
         }
+        // Only input dismissal releases subsequent keys before a render.
+        // Menu activation must not also submit the draft on that same Enter.
+        inputDismissedMenuRef.current = contextMenu;
         closeMenu();
       }
 
