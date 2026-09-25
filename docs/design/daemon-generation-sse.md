@@ -9,16 +9,23 @@ main model when the fast model is missing or cannot be resolved.
 
 ## Contract
 
-The request body is `{ "prompt": string }`. Prompts must be non-empty and no
-larger than 32 KiB in UTF-8. The endpoint emits `started`, optional `thinking`,
-`delta`, `done`, and `error` SSE events. It is consumed with `fetch`, because
-native `EventSource` cannot send a POST body.
+The request body requires a non-empty `prompt` no larger than 32 KiB in UTF-8.
+It may include `skipOutputLanguagePreference: boolean` and
+`outputLanguageFallback: string`; the fallback is a single-line language label
+of at most 128 characters. By default, a fixed preference from the session
+runtime applies. An explicit output-language request or translation target in
+the prompt remains authoritative. When the preference is absent or `auto`,
+the fallback applies to explanatory prose. Setting
+`skipOutputLanguagePreference` to `true` omits the configured preference; a
+supplied fallback still applies. The endpoint emits `started`, optional
+`thinking`, `delta`, `done`, and `error` SSE events. It is consumed with
+`fetch`, because native `EventSource` cannot send a POST body.
 
 Generation is isolated from the main conversation: it does not read or mutate
 chat history, does not use the main system prompt or memory, and always sends
-`tools: []`. Clients cannot select a model or generation settings.
-The contract is task-agnostic: translation is the first Web Shell consumer,
-not part of the endpoint schema.
+`tools: []`. Clients cannot select a model or sampling settings.
+The contract is task-agnostic: translation and shell-command explanation are
+Web Shell consumers, not part of the endpoint schema.
 
 ## Architecture
 
@@ -45,15 +52,21 @@ models after deltas have been emitted would duplicate or mix output.
 ## Web Shell thinking translation
 
 Completed thinking blocks expose a translation action on hover. The action
-remains visible while the thinking block is expanded. The
-Web Shell sends a translation prompt through this endpoint and renders deltas
-in a popover. The final input and output token counts appear below the
-translation. The popover can cancel an in-flight request or discard the cached
-result and translate again. A content-free `thinking` event reports progress without
-exposing reasoning. Active thinking blocks never expose the action.
-Completed translations are cached in page memory by language, message, and
-content, so reopening the popover does not make another model request; a page
-refresh clears the cache.
+remains visible while the thinking block is expanded. The Web Shell sends a
+translation prompt through this endpoint and renders deltas in a popover. The
+final input and output token counts appear below the translation. The popover
+can cancel an in-flight request or discard the cached result and translate
+again. A content-free `thinking` event reports progress without exposing
+reasoning. Active thinking blocks never expose the action.
+
+Shell approvals also expose an Explain action. It sends the command in a
+stateless prompt, uses the current UI language as a fallback when no fixed
+output-language preference is configured, and honors a fixed session
+preference by default. Translation results are cached in page memory by
+language, message, and content. Explain results are cached for the lifetime of
+their mounted popover, so closing and reopening it does not trigger another
+request; reopening after unmounting generates a fresh explanation. A page
+refresh clears both caches.
 
 ## Non-goals
 
@@ -62,4 +75,3 @@ refresh clears the cache.
 - Arbitrary model or sampling overrides
 - SSE replay or reconnect resume
 - A task registry or task-specific schemas
-- Changes to `packages/core`

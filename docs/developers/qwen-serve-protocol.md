@@ -3563,6 +3563,31 @@ content. A model failure after streaming starts produces an `error` event; it
 does not retry with another model. Prompts are limited to 32 KiB of UTF-8 text.
 Disconnecting the HTTP client cancels the generation request.
 
+Optional request fields are additive within `v1`; existing clients may continue
+to send only `prompt`. `skipOutputLanguagePreference` is a boolean that omits
+the runtime's configured output-language preference when `true`. The optional
+`outputLanguageFallback` must be a non-empty single-line string of at most 128
+characters; it is used for explanatory prose when no fixed preference is
+available, including when the configured preference is `auto`. A fixed
+preference applies by default, while an explicit output-language request or
+translation target in the task remains authoritative. Both fields are
+validated by the REST route and the ACP child.
+
+The TypeScript SDK exposes these options through `DaemonClient.generateSessionContent`
+and `DaemonSessionClient.generateContent`; workspace generation uses
+`DaemonClient.generateWorkspaceContent`.
+
+### `POST /workspace/generate`
+
+Capability tag: `workspace_generation`.
+
+Run the same request-scoped, tool-free generation flow against the primary
+workspace runtime without creating or selecting a session. It accepts the same
+`prompt`, `skipOutputLanguagePreference`, and `outputLanguageFallback` fields
+and returns the same SSE event sequence. The output-language preference is
+resolved from the primary workspace runtime. Clients should preflight
+`workspace_generation` before using this route.
+
 ### Mutation: approval, tools, skills, init, MCP restart
 
 The daemon exposes five mutation control routes that let remote clients change runtime posture without touching the daemon host's CLI. Approval-mode control retains its non-strict compatibility gate. Tool toggle, skill toggle, workspace init, and MCP restart use the strict mutation gate: trusted-loopback primary, bearer-authenticated, and paired Local Control requests pass. A token-less primary request that reaches the gate without trusted-loopback authority receives `401 {code: 'token_required'}`; missing or invalid configured credentials and unpaired Local Control credentials are rejected earlier with plain `401 Unauthorized`. All five:

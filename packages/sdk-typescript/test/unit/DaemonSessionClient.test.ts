@@ -1845,13 +1845,21 @@ describe('DaemonSessionClient', () => {
     });
 
     const events = [];
-    for await (const event of session.generateContent('Translate this')) {
+    for await (const event of session.generateContent('Translate this', {
+      skipOutputLanguagePreference: true,
+      outputLanguageFallback: 'English',
+    })) {
       events.push(event);
     }
 
     expect(events).toHaveLength(1);
     expect(calls[0]?.url).toBe('http://daemon/session/s-1/generate');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]?.body as string)).toEqual({
+      prompt: 'Translate this',
+      skipOutputLanguagePreference: true,
+      outputLanguageFallback: 'English',
+    });
   });
 
   it('forwards pending prompt list requests with encoded session id and clientId', async () => {

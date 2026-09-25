@@ -13,21 +13,17 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
+import {
+  OUTPUT_LANGUAGE_AUTO,
+  OUTPUT_LANGUAGE_MARKER_PREFIX as LLM_OUTPUT_LANGUAGE_MARKER_PREFIX,
+  isAutoLanguage,
+  parseOutputLanguagePreference,
+} from '@qwen-code/qwen-code-core/utils/output-language.js';
 import { getLanguageNameFromLocale } from './index.js';
 import { SUPPORTED_LANGUAGES } from './languages.js';
 
 const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
-const LLM_OUTPUT_LANGUAGE_MARKER_PREFIX = 'qwen-code:llm-output-language:';
-
-/** Special value meaning "follow the user's input language" */
-export const OUTPUT_LANGUAGE_AUTO = 'auto';
-
-/**
- * Checks if a value represents the "auto" setting.
- */
-export function isAutoLanguage(value: string | undefined | null): boolean {
-  return !value || value.toLowerCase() === OUTPUT_LANGUAGE_AUTO;
-}
+export { OUTPUT_LANGUAGE_AUTO, isAutoLanguage };
 
 /**
  * Normalizes a language input to its canonical form.
@@ -159,32 +155,6 @@ Raw tool/system outputs may contain fixed-format English. Preserve them verbatim
 }
 
 /**
- * Extracts the language from the content of an output language rule file.
- * Supports both the new marker format and legacy heading format.
- */
-function parseOutputLanguageFromContent(content: string): string | null {
-  // Primary: machine-readable marker (e.g., <!-- qwen-code:llm-output-language: 中文 -->)
-  const markerRegex = new RegExp(
-    String.raw`<!--\s*${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX}\s*(.*?)\s*-->`,
-    'i',
-  );
-  const markerMatch = content.match(markerRegex);
-  if (markerMatch?.[1]?.trim()) {
-    return markerMatch[1].trim();
-  }
-
-  // Fallback: legacy heading format (e.g., # CRITICAL: Chinese Output Language Rule)
-  const headingMatch = content.match(
-    /^#.*?CRITICAL:\s*(.*?)\s+Output Language Rule\b/im,
-  );
-  if (headingMatch?.[1]?.trim()) {
-    return headingMatch[1].trim();
-  }
-
-  return null;
-}
-
-/**
  * Reads the current output-language file content.
  */
 function readOutputLanguageFileContent(): string | null {
@@ -293,7 +263,7 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
   const currentFileLanguage =
     currentFileContent === null
       ? null
-      : parseOutputLanguageFromContent(currentFileContent);
+      : parseOutputLanguagePreference(currentFileContent);
   const shouldMigrateFixedFileToAuto =
     isAutoLanguage(outputLanguage) &&
     currentFileLanguage !== null &&

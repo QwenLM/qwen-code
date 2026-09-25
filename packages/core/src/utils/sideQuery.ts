@@ -147,7 +147,7 @@ function applyThinkingDefault(
   };
 }
 
-export async function getOutputLanguageInstruction(
+async function getOutputLanguageInstruction(
   config: Config,
 ): Promise<string | undefined> {
   const outputLanguageFilePath = config.getOutputLanguageFilePath?.();

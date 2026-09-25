@@ -21,6 +21,7 @@ vi.mock('../../WebShellContexts', async () => {
 
 const {
   AssistantMessage,
+  ThinkingTranslateButton,
   ThinkingMessage,
   formatThinkingDuration,
   getThinkingSummaryKey,
@@ -240,7 +241,13 @@ describe('AssistantMessage thinking logic', () => {
   });
 
   it('only translates completed thinking and reuses the in-memory result', async () => {
-    const generateContent = vi.fn(async function* () {
+    const generateContent = vi.fn(async function* (
+      _prompt: string,
+      _options?: {
+        signal?: AbortSignal;
+        skipOutputLanguagePreference?: boolean;
+      },
+    ) {
       yield {
         v: 1 as const,
         type: 'started' as const,
@@ -288,6 +295,9 @@ describe('AssistantMessage thinking logic', () => {
     act(() => thinkingToggle?.click());
 
     await act(async () => translateButton?.click());
+    expect(
+      generateContent.mock.calls[0]?.[1]?.skipOutputLanguagePreference,
+    ).toBe(true);
     expect(document.body.textContent).toContain('翻译结果');
     expect(document.body.textContent).toContain('发送 Token：12');
     expect(document.body.textContent).toContain('生成 Token：4');
@@ -307,6 +317,65 @@ describe('AssistantMessage thinking logic', () => {
     ).find((button) => button.textContent === '重新翻译');
     await act(async () => retranslateButton?.click());
     expect(generateContent).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the UI language as an Explain fallback and reuses mounted results', async () => {
+    const generateContent = vi.fn(async function* (
+      _prompt: string,
+      _options?: {
+        signal?: AbortSignal;
+        skipOutputLanguagePreference?: boolean;
+        outputLanguageFallback?: string;
+      },
+    ) {
+      yield {
+        v: 1 as const,
+        type: 'started' as const,
+        requestId: 'explain-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-1',
+        seq: 0,
+        text: '说明结果',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    });
+    const container = render(
+      <ThinkingTranslateButton
+        content="rm -rf ./build"
+        generateContent={generateContent}
+        mode="explain-shell"
+      />,
+      'zh-CN',
+    );
+    const explainButton = container.querySelector<HTMLButtonElement>('button');
+
+    await act(async () => explainButton?.click());
+
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(generateContent.mock.calls[0]?.[0]).not.toContain(
+      'in Simplified Chinese',
+    );
+    expect(generateContent.mock.calls[0]?.[1]).toMatchObject({
+      outputLanguageFallback: 'Simplified Chinese',
+    });
+    expect(document.body.textContent).toContain('说明结果');
+
+    act(() => explainButton?.click());
+    await act(async () => explainButton?.click());
+
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain('说明结果');
   });
 
   it('only offers translation when the UI language is Chinese', () => {

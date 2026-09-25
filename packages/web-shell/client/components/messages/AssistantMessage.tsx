@@ -291,7 +291,11 @@ interface ThinkingMessageProps {
 
 export type SessionContentGenerator = (
   prompt: string,
-  opts?: { signal?: AbortSignal },
+  opts?: {
+    signal?: AbortSignal;
+    skipOutputLanguagePreference?: boolean;
+    outputLanguageFallback?: string;
+  },
 ) => AsyncGenerator<DaemonSessionGenerationEvent>;
 
 interface ThinkingTranslation {
@@ -539,6 +543,9 @@ export function ThinkingTranslateButton({
   const [translationThinking, setTranslationThinking] = useState(false);
   const [translationError, setTranslationError] = useState(false);
   const translationAbortRef = useRef<AbortController | undefined>(undefined);
+  const explainCacheRef = useRef<
+    { key: string; value: ThinkingTranslation } | undefined
+  >(undefined);
 
   useEffect(
     () => () => {
@@ -551,14 +558,25 @@ export function ThinkingTranslateButton({
     async (force = false) => {
       if (!generateContent || (translationLoading && !force)) return;
       const cacheKey = `${mode}:${language}:${content}`;
-      const cached = thinkingTranslationCache.get(cacheKey);
+      const cached =
+        mode === 'translate'
+          ? thinkingTranslationCache.get(cacheKey)
+          : explainCacheRef.current?.key === cacheKey
+            ? explainCacheRef.current.value
+            : undefined;
       if (cached && !force) {
-        cacheThinkingTranslation(cacheKey, cached);
+        if (mode === 'translate') cacheThinkingTranslation(cacheKey, cached);
         setTranslation(cached);
         return;
       }
 
-      if (force) thinkingTranslationCache.delete(cacheKey);
+      if (force) {
+        if (mode === 'translate') {
+          thinkingTranslationCache.delete(cacheKey);
+        } else if (explainCacheRef.current?.key === cacheKey) {
+          explainCacheRef.current = undefined;
+        }
+      }
       translationAbortRef.current?.abort();
       const controller = new AbortController();
       translationAbortRef.current = controller;
@@ -573,10 +591,16 @@ export function ThinkingTranslateButton({
           language === 'zh-CN' ? 'Simplified Chinese' : 'English';
         const prompt =
           mode === 'explain-shell'
-            ? `Explain the following shell command in ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``
+            ? `Explain the following shell command. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``
             : `Translate the following model reasoning into ${targetLanguage}. Preserve its meaning and Markdown formatting. Output only the translation.\n\n${content}`;
         for await (const event of generateContent(prompt, {
           signal: controller.signal,
+          ...(mode === 'translate' && {
+            skipOutputLanguagePreference: true,
+          }),
+          ...(mode === 'explain-shell' && {
+            outputLanguageFallback: targetLanguage,
+          }),
         })) {
           if (translationAbortRef.current !== controller) return;
           if (event.type === 'thinking') {
@@ -593,7 +617,11 @@ export function ThinkingTranslateButton({
               inputTokens: event.inputTokens,
               outputTokens: event.outputTokens,
             };
-            cacheThinkingTranslation(cacheKey, result);
+            if (mode === 'translate') {
+              cacheThinkingTranslation(cacheKey, result);
+            } else {
+              explainCacheRef.current = { key: cacheKey, value: result };
+            }
             setTranslation(result);
           } else if (event.type === 'error') {
             throw new Error(event.message);

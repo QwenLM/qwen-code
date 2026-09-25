@@ -47,6 +47,7 @@ import {
   parseGoalControlRequest,
   readArtifactSnapshot,
 } from '@qwen-code/qwen-code-core';
+import { isValidOutputLanguageLabel } from '@qwen-code/qwen-code-core/utils/output-language.js';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CHANNEL_PROMPT_META_KEY,
@@ -7326,6 +7327,9 @@ export function registerSessionRoutes(
       async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const prompt = body['prompt'];
+        const skipOutputLanguagePreference =
+          body['skipOutputLanguagePreference'];
+        const outputLanguageFallback = body['outputLanguageFallback'];
         if (
           typeof prompt !== 'string' ||
           prompt.trim().length === 0 ||
@@ -7334,6 +7338,26 @@ export function registerSessionRoutes(
           res.status(400).json({
             error: `\`prompt\` must be a non-empty string no larger than ${GENERATION_MAX_PROMPT_BYTES} UTF-8 bytes`,
             code: 'invalid_prompt',
+          });
+          return;
+        }
+        if (
+          skipOutputLanguagePreference !== undefined &&
+          typeof skipOutputLanguagePreference !== 'boolean'
+        ) {
+          res.status(400).json({
+            error: '`skipOutputLanguagePreference` must be a boolean',
+            code: 'invalid_generation_options',
+          });
+          return;
+        }
+        if (
+          outputLanguageFallback !== undefined &&
+          !isValidOutputLanguageLabel(outputLanguageFallback)
+        ) {
+          res.status(400).json({
+            error: 'outputLanguageFallback must be a short, single-line string',
+            code: 'invalid_generation_options',
           });
           return;
         }
@@ -7354,11 +7378,24 @@ export function registerSessionRoutes(
         };
         res.once('close', onClose);
 
+        const generationOptions =
+          skipOutputLanguagePreference === true ||
+          outputLanguageFallback !== undefined
+            ? {
+                ...(skipOutputLanguagePreference === true && {
+                  skipOutputLanguagePreference: true,
+                }),
+                ...(outputLanguageFallback !== undefined && {
+                  outputLanguageFallback,
+                }),
+              }
+            : undefined;
         const stream = runtime.bridge.generateSessionContent(
           sessionId,
           prompt,
           abort.signal,
           clientId !== undefined ? { clientId } : undefined,
+          generationOptions,
         );
 
         res.status(200);
