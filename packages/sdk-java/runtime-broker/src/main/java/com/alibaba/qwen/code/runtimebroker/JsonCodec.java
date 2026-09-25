@@ -17,7 +17,9 @@ final class JsonCodec {
         Object parsed;
         try {
             parsed = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8),
-                    JSONReader.Feature.DisableReferenceDetect);
+                    JSONReader.Feature.DisableReferenceDetect,
+                    JSONReader.Feature.UseBigDecimalForDoubles,
+                    JSONReader.Feature.UseBigDecimalForFloats);
         } catch (RuntimeException exception) {
             throw new RuntimeBrokerException(400, "runtime_broker_invalid_json",
                     context + " contains invalid JSON.", false, exception);

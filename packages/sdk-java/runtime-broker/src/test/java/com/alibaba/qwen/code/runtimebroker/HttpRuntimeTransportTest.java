@@ -134,6 +134,21 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void acceptsIntegralExponentsInTheAttestationResponse() throws Exception {
+        String body = new String(JSON.writeValueAsBytes(successBody()),
+                StandardCharsets.UTF_8)
+                .replace("\"protocolVersion\":2",
+                        "\"protocolVersion\":0.2E+1")
+                .replace("\"epoch\":4", "\"epoch\":0.4E+1");
+        reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
+
+        RuntimeAttestation proof = attest().toCompletableFuture()
+                .get(2, TimeUnit.SECONDS);
+
+        assertEquals(4, proof.getEpoch());
+    }
+
+    @Test
     void classifiesEverySharedFixtureOutcome() throws Exception {
         for (JsonNode fixture : suite.required("cases")) {
             JsonNode expected = fixture.required("expected");
@@ -559,6 +574,14 @@ class HttpRuntimeTransportTest {
     @Test
     void rejectsAMalformedSuccessResponse() throws IOException {
         byte[] valid = JSON.writeValueAsBytes(successBody());
+        String validJson = new String(valid, StandardCharsets.UTF_8);
+        byte[] exponentialProtocol = validJson.replace(
+                "\"protocolVersion\":2",
+                "\"protocolVersion\":0.20000000000000001E+1")
+                .getBytes(StandardCharsets.UTF_8);
+        byte[] exponentialEpoch = validJson.replace(
+                "\"epoch\":4", "\"epoch\":0.40000000000000001E+1")
+                .getBytes(StandardCharsets.UTF_8);
         ObjectNode unknownField = successBody();
         unknownField.put("debug", true);
         ObjectNode newerProtocol = successBody();
@@ -592,10 +615,14 @@ class HttpRuntimeTransportTest {
                 json(200, JSON.writeValueAsBytes(roundedProtocol)));
         replies.put("rounded-up version",
                 json(200, JSON.writeValueAsBytes(roundedUpProtocol)));
+        replies.put("exponential rounded-up version",
+                json(200, exponentialProtocol));
         replies.put("epoch",
                 json(200, JSON.writeValueAsBytes(fractionalEpoch)));
         replies.put("rounded-up epoch",
                 json(200, JSON.writeValueAsBytes(roundedUpEpoch)));
+        replies.put("exponential rounded-up epoch",
+                json(200, exponentialEpoch));
         for (Map.Entry<String, Reply> planned : replies.entrySet()) {
             reply.set(planned.getValue());
 
