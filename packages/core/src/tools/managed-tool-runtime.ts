@@ -262,6 +262,8 @@ export class ManagedToolRuntime {
     if (this.startedPrompts.has(identity.promptId)) {
       throw new Error('Managed Runtime cannot reopen a previous tool turn.');
     }
+    this.entries.clear();
+    this.calls.clear();
     identity = structuredClone(identity);
     this.snapshotPending = true;
     this.startedPrompts.add(identity.promptId);

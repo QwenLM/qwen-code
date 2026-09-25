@@ -465,8 +465,6 @@ export interface CapabilitiesEnvelope {
   qwenCodeVersion?: string;
   /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
   sessionLiveStatePollIntervalMs?: number;
-  /** Private Hosted Harness handshake. Present only in that deployment profile. */
-  hostedHarness?: HostedHarnessCapabilities;
   mode: ServeMode;
   features: string[];
   /**

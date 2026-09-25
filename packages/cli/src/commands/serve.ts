@@ -623,25 +623,25 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Use a separate Managed Runtime worker at this HTTP(S) origin. Requires --experimental-managed-agents.',
+          'Reserved experimental Runtime URL; not implemented and rejects startup.',
       })
       .option('experimental-managed-runtime-token', {
         type: 'string',
         requiresArg: true,
         description:
-          'Bearer token for the separate Managed Runtime worker. Falls back to QWEN_MANAGED_RUNTIME_TOKEN, then the daemon token.',
+          'Reserved experimental Runtime credential; not implemented and rejects startup.',
       })
       .option('managed-runtime-broker-url', {
         type: 'string',
         requiresArg: true,
         description:
-          'Java Runtime Broker HTTP(S) origin for --profile hosted-harness. Falls back to QWEN_RUNTIME_BROKER_URL.',
+          'Reserved Broker URL for --profile hosted-harness; not implemented and rejects startup.',
       })
       .option('managed-runtime-broker-token', {
         type: 'string',
         requiresArg: true,
         description:
-          'Harness-to-Broker bearer credential. Falls back to QWEN_RUNTIME_BROKER_TOKEN.',
+          'Reserved Broker credential for --profile hosted-harness; not implemented and rejects startup.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',

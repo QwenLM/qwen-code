@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -45,8 +46,9 @@ public final class LocalProcessRuntimeProvisioner
                 thread.setDaemon(true);
                 return thread;
             });
-    private final ConcurrentMap<String, OwnedProcess> owned =
+    private final ConcurrentMap<List<Object>, OwnedProcess> owned =
             new ConcurrentHashMap<>();
+    private final Set<List<Object>> issued = ConcurrentHashMap.newKeySet();
 
     public LocalProcessRuntimeProvisioner(List<String> command,
             Path workingDirectory, HttpRuntimeTransport transport) {
@@ -127,12 +129,12 @@ public final class LocalProcessRuntimeProvisioner
 
     @Override
     public boolean isUsable(RuntimeLease lease) {
-        OwnedProcess process = owned.get(lease.getRuntimeInstanceId());
+        OwnedProcess process = owned.get(ownershipKey(lease));
         return process != null && process.process.isAlive();
     }
 
     void stop(RuntimeLease lease) {
-        OwnedProcess process = owned.remove(lease.getRuntimeInstanceId());
+        OwnedProcess process = owned.remove(ownershipKey(lease));
         if (process != null) {
             process.process.destroy();
         }
@@ -212,7 +214,16 @@ public final class LocalProcessRuntimeProvisioner
             RuntimeLease lease = new RuntimeLease(runtimeInstanceId,
                     endpoint, token, leaseId, epoch);
             attest(request, ownedProcess.seed, lease);
-            owned.put(runtimeInstanceId, ownedProcess);
+            List<Object> key = ownershipKey(lease);
+            // A dead worker's port can be reused, but its old lease may still
+            // arrive for release. Never issue that identity again.
+            if (!issued.add(key)) {
+                throw new RuntimeBrokerException(409,
+                        "runtime_broker_resource_conflict",
+                        "Managed Runtime lease identity was already issued.",
+                        false);
+            }
+            owned.put(key, ownedProcess);
             adopted = true;
             return lease;
         } catch (IOException exception) {
@@ -234,7 +245,7 @@ public final class LocalProcessRuntimeProvisioner
         if (lastLease == null || seed == null) {
             return RuntimeObservation.unknown(handle);
         }
-        OwnedProcess process = owned.get(lastLease.getRuntimeInstanceId());
+        OwnedProcess process = owned.get(ownershipKey(lastLease));
         if (process == null) {
             return RuntimeObservation.unknown(handle);
         }
@@ -273,11 +284,18 @@ public final class LocalProcessRuntimeProvisioner
 
     private void attestOwned(RuntimeProvisionRequest request,
             RuntimeLease lease) {
-        OwnedProcess process = owned.get(lease.getRuntimeInstanceId());
+        OwnedProcess process = owned.get(ownershipKey(lease));
         if (process == null || !process.process.isAlive()) {
             throw failed("Managed Runtime process is not alive.");
         }
         attest(request, process.seed, lease);
+    }
+
+    private static List<Object> ownershipKey(RuntimeLease lease) {
+        // A binding id survives generations; even the same seed can start
+        // distinct workers. The attested endpoint distinguishes those attempts.
+        return List.of(lease.getRuntimeInstanceId(), lease.getEndpoint(),
+                lease.getLeaseId(), lease.getEpoch(), lease.getToken());
     }
 
     private void attest(RuntimeProvisionRequest request,

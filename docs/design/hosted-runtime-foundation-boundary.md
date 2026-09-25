@@ -36,6 +36,13 @@ from failures to establish process-tree cleanup. Only the proven-exit error is
 accepted during local worker reclamation. Other shutdown consumers retain the
 existing Error behavior and messages.
 
+Managed-tool invocation records are retained for retries within the active turn.
+Starting a new turn requires all prior work to settle, then discards the previous
+turn's invocation records and call slots. The 1,024-invocation bound therefore
+applies to one turn, rather than the lifetime of the session. Old references fail
+after the turn advances; completed calls cannot be prepared again under an old
+prompt ID.
+
 ## Broker contract and ownership
 
 All HTTP Broker operations are scoped by the resolved Harness session and its
@@ -59,6 +66,15 @@ unreachable process is UNKNOWN. Only a locally observed dead Process supports
 NOT_FOUND. Broker restart adoption remains unavailable, preventing a transient
 attestation failure from authorizing a replacement worker beside a live one.
 
+Process ownership is keyed by the complete lease, including its attested endpoint.
+The binding ID survives generation changes, and retrying even the same seed can
+start distinct workers. Releasing one attempt must not remove, kill, confirm, or
+report usability for another attempt's process.
+Issued identities remain reserved for the provisioner's lifetime, including
+after release. If a worker exits and a retry reuses its seed and endpoint, the
+new candidate is destroyed and rejected with a non-retryable identity conflict.
+This prevents a delayed old release from targeting a replacement process.
+
 Broker clients can retry failed acquisition, invalidate issued clients on release,
 and retain terminal release intent across concurrent release calls.
 
@@ -68,6 +84,16 @@ Build and typecheck all packages. Run focused Core, Bridge, CLI and Java tests.
 Test real ReadFile preparation, oversized-but-bounded edit confirmations, acquire
 retry, released-client rejection, unsupported profile startup, forced worker
 termination and Java HTTP unsupported/UNKNOWN/authentication boundaries.
+
+Also verify more than 1,024 completed invocations across turns, current-turn retry
+deduplication, and rejection of expired references. Provision two workers for the
+same binding using different generations and again using an identical seed;
+releasing the losing lease must preserve the winner and leave no orphan processes
+after both leases are released. Every serve option must either be parsed by the
+fast path or explicitly fall back to the full parser.
+Exercise endpoint reuse after both a worker crash and normal release. Pin the
+actual serve entry point's rejection before listening, and exclude Shell and
+both Grep implementations even when registered in the source tool registry.
 
 Tests imported from the preview for absent worker routes are removed; provider
 unit and transport-fixture tests remain. Those removed tests cannot establish
@@ -84,3 +110,14 @@ a shared wire format, durable reserve/start and explicit resolution APIs, sessio
 store/continuation wiring, process containment for Shell/Grep, and a real cold-start
 E2E test. Enabling the hosted profile depends on those behaviors, not solely on
 configuration validation or mocked transport tests.
+
+Before mounting, bind file-history relative paths and `executionCwd` to the
+authenticated, resolved workspace rather than trusting a supplied binding. Unify
+the worker/client wire schemas and reconcile the experimental client's 8 MiB
+response budget (including its separate media allowance) with the owned-route
+contract's 1 MiB tool-result limit. Keep the Hosted handshake middleware unmounted
+until its capability digest is validated; ordinary capabilities do not advertise
+it. Specify and test the Broker server's loopback/TLS deployment boundary and
+bounded request concurrency, and validate the static provisioner through its
+eventual integration caller. These are prerequisites for enabling the profile,
+not capabilities provided by this PR.

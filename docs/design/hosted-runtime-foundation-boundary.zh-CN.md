@@ -30,6 +30,11 @@ ProcessRegistry 使用 ProcessExitError 区分已确认的非零退出码或信�
 无法证明进程树清理完成的错误。本地 worker 回收只接受前者。其他关闭流程的
 消费者继续保留已有 Error 行为和错误消息。
 
+Managed-tool 调用记录保留至当前轮次结束，以支持轮次内重试。开始新轮次前必须
+等待此前所有工作完成，随后丢弃上一轮的调用记录及调用槽。因此 1,024 次调用的
+上限针对单个轮次，而不是会话的整个生命周期。轮次推进后旧引用失效；已完成的
+调用不能使用旧 prompt ID 再次 prepare。
+
 ## Broker 契约与所有权
 
 所有 Broker HTTP 操作归属已解析的 Harness 会话及其 Runtime 会话；tenant 和
@@ -49,6 +54,13 @@ local-process provisioner 只认领自身持有的进程。未持有或不可达
 只有本地观测到 Process 已死亡才支持 NOT_FOUND。Broker 重启后的进程认领仍不可用，
 避免临时 attestation 故障允许在存活 worker 旁创建替代 worker。
 
+进程所有权以包含已证明 endpoint 的完整 lease 为键。binding ID 跨 generation
+保持不变，即使重试同一 seed，也可能启动不同 worker。释放某次尝试不得删除、
+终止、确认另一尝试的进程，也不得将另一进程的存活状态报告为自身的可用性。
+已发放身份在 provisioner 的整个生命周期内保持保留，release 后也不删除。
+若 worker 退出后重试复用了其 seed 与 endpoint，则销毁新的候选进程，并以
+不可重试的身份冲突拒绝发放，避免延迟到达的旧 release 指向替代进程。
+
 Broker 客户端允许重试失败的 acquire，在 release 时使已发放客户端失效，并在
 并发 release 调用之间保留 terminal 意图。
 
@@ -58,6 +70,14 @@ Broker 客户端允许重试失败的 acquire，在 release 时使已发放客�
 覆盖真实 ReadFile prepare、超过请求限额但仍在响应预算内的编辑确认、acquire
 重试、已释放客户端拒绝、未实现 profile 启动拒绝、强制终止 worker，以及 Java
 HTTP 的 unsupported、UNKNOWN 和认证边界。
+
+另外验证跨轮次完成超过 1,024 次调用、当前轮次重试去重以及过期引用拒绝。
+对同一 binding 分别使用不同 generation 和完全相同的 seed 启动两个 worker；
+释放失败尝试的 lease 必须保留胜出的 worker，两份 lease 都释放后不得遗留孤儿
+进程。每个 serve 参数必须由 fast path 解析，或明确回退到完整解析器。
+覆盖 worker 崩溃和正常 release 后的 endpoint 复用。测试实际 serve 入口在监听
+之前拒绝启动，并验证源工具 registry 即使注册了 Shell 及两种 Grep 实现，也
+不会将它们纳入 managed 能力。
 
 移除从预览带入、依赖不存在 worker 路由的测试；保留 provider 单测和传输 fixture
 测试。在真正包含 worker 实现之前，被移除的测试无法证明 worker 覆盖率。
@@ -71,3 +91,11 @@ HTTP 的 unsupported、UNKNOWN 和认证边界。
 reserve/start 与显式 resolution API、session-store/continuation 接线、
 Shell/Grep 进程管控，以及真实冷启动 E2E 测试。启用 hosted profile 必须建立在
 这些行为之上，不能仅依靠配置校验或 mock 传输测试。
+
+挂载前，必须将文件历史中的相对路径及 `executionCwd` 绑定到已认证且已解析的
+工作区，不能信任传入的 binding。统一 worker/client wire schema，并协调实验
+客户端的 8 MiB 响应预算（含独立媒体例外）与自有路由契约的 1 MiB 工具结果上限。
+Hosted 握手中间件在 capability digest 完成验证前不得挂载；普通 capabilities
+不宣称该能力。明确并测试 Broker 服务端的 loopback/TLS 部署边界和有界请求并发，
+通过未来实际集成的调用方验证 static provisioner。这些都是启用 profile 的
+前置条件，不是本 PR 已提供的能力。
