@@ -1,7 +1,7 @@
 # 交接：远程 Qwen Code 使用本地桌面机（PR #11799）
 
 > 写给接手的 session 或 agent。按顺序阅读：本文 → 方案 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md` → 真机验证说明 `docs/verification/remote-computer-use/README.md`。
-> 状态（2026-09-23，第六次修订）：**代码已实现，CI 全绿，与 main 无冲突**。作者的 Mac 上跑过全量 build、typecheck 和定向单元测试；**端到端流程还没在任何机器上跑过**，这是现在唯一的阻塞项。
+> 状态（2026-09-25）：代码已实现；Mac 上补验了真实 launchd、安全边界、浏览器权限提示，以及真实 SDK Client 到 node-repl 的取消协议闭环。入口现在由 daemon capability 控制，普通用户默认隐藏。已同步 main `99fd76553e` 并通过全量本地构建、类型检查和 lint，推送后的 CI 另行确认。**Linux Serve → Mac 的端到端流程尚未通过验收**；详见 `docs/verification/remote-computer-use/results.md` 首节。
 >
 > 如果你是在另一台 Mac 上接手的 agent：直接从 §5 开始，按验证说明跑。
 
@@ -17,6 +17,7 @@
   - 文档：`docs/users/features/computer-use.md` 新增一节；`packages/node-repl/README.md` 新增 Desktop relay 一节；本目录下的方案、交接和验证说明。
 - 2026-09-19 修订关闭了五个代码问题：client MCP 与 settings 中的 `node-repl` 同名冲突、多客户端取消消息串线、SDK pin 漂移、`uninstall --purge --home` 可递归删除任意目录，以及交互侧文案被打进只读 transcript 后超过 bundle 上限。
 - 2026-09-23 修订（`12ebef1ca1`）：中继原来丢弃所有 `notifications/cancelled`，但 node_repl 靠它中止正在运行的单元，结果用户停止对话后桌面还在被操作。现在只要恰好一个待处理请求用这个 id，就改写 id 后转发。验证说明 C.3 加了对应的检查。
+- 2026-09-25 补验继续修复取消后 pending 残留：SDK 取消后不回包，中继必须主动清理，否则后续复用 ID 的取消会失效。真实子进程测试已覆盖连续取消和后续调用；仍不是跨机 Web Shell 停止按钮验收。同轮修正了 skill 示例优先选择桌面工具的判断。
 - 用户原始诉求：远程 Linux 开发机（无图形界面）上的 Qwen Code，能通过 computer use 操作用户面前那台有图形界面的机器。
 
 ## 2. 用户的工作约定（必须遵守）
@@ -41,7 +42,7 @@
 ## 4. 待用户决定
 
 1. 这个 PR 何时从草稿转为 ready；是否要把实现和方案拆成两个 PR。
-2. 侧边栏的“使用这台电脑”是否默认显示（现在默认显示，桌面端外壳默认隐藏）。
+2. 侧边栏的“使用这台电脑”已改为 capability-gated：普通 standalone 默认隐藏，远端显式开启 client MCP 后显示；宿主可通过 `footer.items` 显式启用，桌面端外壳默认隐藏。
 3. 何时发布包含本改动的 `@qwen-code/node-repl-mcp` 版本（发布前 Web Shell 里显示的安装命令装不到中继）。
 4. 授权记在 `node` 名下：官方 node 用 Node.js 的签名，TCC 按签名识别，所以给它屏幕录制和辅助功能，等于这台 Mac 上所有 node 脚本都拿到了这两项权限（复制 node 换个路径也没用）。二选一：接受并在用户文档里写明；或者以后做一个单独签名的 helper。
 5. 反向通道在 main 上默认关闭，远端 daemon 要带 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1` 启动。是只写进文档，还是推动默认打开。

@@ -1,5 +1,26 @@
 # 验证结果：远程会话经 launchd 中继使用本地桌面机（PR #11799）
 
+## 2026-09-25：Mac 补验（尚未完成跨机验收）
+
+验证提交：`04d5d90fcc`，Mac 上重新打包并安装本分支的中继，使用 `@qwen-code/cua-sdk@0.20.11`。以下结果不替代后文 2026-09-23 的 Linux 记录。
+
+- 冻结锁文件安装、全量 build/bundle、lint、typecheck 均通过；中继测试 45/45、Web Shell 入口与权限测试 23/23、daemon 开关到 capability 的聚焦测试 9/9 通过。
+- 真实 launchd 连续五次 `/status` 均返回 200，耗时分别为 0.215、0.195、0.156、0.144、0.152 秒，未观察到此前担心的 10 秒节流。空闲时由 launchd 监听，没有常驻中继进程。
+- 真实 HTTP 边界：正常状态 200，外来 Host 421，无 Origin 的连接请求 403，预检 204 并包含 CORS/PNA 响应头。这里只验证了不需要授权的请求。
+- 真实 launchd 的 raw MCP 路径：通过 TCP socket 完成 `initialize` 和 `tools/list`，返回 node-repl 0.1.6 及五个工具，未发起任何 `tools/call`，因此不应触发桌面授权；这不是跨机 SSH 验收。
+- 真实 Web Shell：无会话时面板显示“等待会话”；创建仅回复 OK 的验收会话后，探测被浏览器权限阻止时显示“需要浏览器权限”，不再显示安装命令。浏览器已交还用户处理本地网络授权，没有绕过权限。
+- 默认入口：配置生产链与 listener 测试确认，未设 `QWEN_SERVE_CLIENT_MCP_OVER_WS` 时不广告 capability，默认 standalone sidebar 隐藏入口；宿主显式配置 `footer.items` 可选择显示。实际开启的浏览器样本带 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`，不能作为默认隐藏的浏览器证据。
+- 该提交 CI 的单元测试、无 AK 集成测试通过；静态检查在运行 lint 前被 gate freshness 拦下（main 更新了 CI 配置），不是 lint 错误。已合并 main，合并后的检查另行记录，不能沿用合并前绿灯。
+- 复查修复了工具选择示例：原先读取 `ALL_TOOLS.jsName`，而 Codex 工具元数据使用 `name`，两端工具同时存在时会错误回退到普通 server。改成直接优先取桌面工具、缺失时取普通工具。测试实际执行文档示例，修复前桌面优先用例失败，修复后六项 skill 测试通过，同时检查图文转发没有把图片变成文本。
+- 真实 node-repl 子进程补验找到了取消后的残留请求：SDK 在取消后不发响应，中继原先一直保留 pending。再次复用相同请求 ID 时取消被当成歧义丢弃，2 秒任务实测运行 2007 ms 到完成。修复后转发取消即清理请求、结束等待且不发送响应；首次和再次复用 ID 的请求都正常取消，pending 均为 0，后续调用成功且原 kernel 变量保留。两次探测分别在 1302/1305 ms 进行（包含固定 1 秒等待，不代表准确取消延迟）。中继回归测试 46/46 通过。该补验直接连接生产中继类和真实子进程，不涉及浏览器、WebSocket、GUI 或系统授权，不替代 Web Shell 停止按钮验收。
+- 继续核对远端消费者后，补齐取消的外层响应：ACP 中继以 `-32800` 结束原 frame，防止 registrar 在 30 秒后因等待无回复而判定传输失败；raw MCP 仍不回包，取消通知本身也不回包。同时修复 SDK control transport：通知的合成 ack、已经取消请求的迟到结果/错误，不再交给已移除响应处理器的 MCP Client。真实 SDK 测试修复前会报 unknown message ID，修复后通过；既有 registrar 和协议协商测试也通过。此处只改一个共享传输点，没有扩展 daemon API 或注册协议。中继测试增至 47/47。
+- 生产组件闭环补验通过：真实 SDK Client → SdkControlClientTransport → ClientMcpRegistrar → AcpRelay → McpChildRelay → 真实 node-repl 子进程。AbortSignal 取消后，302 ms 时观察到取消回复，daemon 和 child pending 均为 0；1 秒后调用成功、kernel 变量保留；再等待跨过默认 30 秒超时窗口（31 秒），Client.onerror 仍为 0，再次调用成功。线缆使用进程内连接，因此证明的是组件协议闭环，**不是跨机 WebSocket、浏览器或 GUI 验收**。
+- 合并 main `99fd76553e` 并完成上述修复后，重新执行全量 build、typecheck（含 integration）、bundle 和 lint，全部通过；相关 core 23 项、中继 47 项、Web Shell 23 项测试通过。初次并行构建/检查曾因 dist/coverage 产物变化报错，后续稳定构建后的完整检查已重跑通过；不把失败轮次计为通过。最新 CI 需以推送后的检查结果为准。
+
+**仍未验收**：真实 Linux Serve → 本机 Mac 的反向通道、原生 Allow/Deny、模型实际调用桌面工具、截图、Web Shell 停止对话、跨会话隔离、断连与重启，以及 Safari。当前 Mac 没有已配置的目标 Linux SSH 主机，需提供 SSH 地址或可访问的 Serve URL；浏览器本地网络授权仍需用户本人操作。不能据此宣布完整场景可交付。
+
+---
+
 > 执行时间：2026-09-23。执行机器：`vscode-sqlx011163220057.na131`，Linux 5.10 x86_64，4 核 / 15 GB，Node v24.19.0，无图形界面。
 > 分支：`docs/remote-computer-use-plan` @ `7c2359015b`。
 > 一句话结论：**这台机器上没有 Mac，A、B.5、C、D 的 macOS 部分无法执行**；能做的部分是"用等价的 socket 激活真跑中继自己的 HTTP 面 + 静态核对取消链路"，B.1–B.4 与 HTTP 边界全部符合预期，另外发现 2 个新问题（§4）。

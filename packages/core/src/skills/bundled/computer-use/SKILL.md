@@ -23,11 +23,8 @@ for the model to receive an image. Prefer the desktop relay tool when it is
 present; otherwise use the regular `node-repl` server:
 
 ```js
-const nodeReplTool = ALL_TOOLS.some(
-  ({ jsName }) => jsName === 'mcp__desktop_node_repl__node_repl',
-)
-  ? tools.mcp__desktop_node_repl__node_repl
-  : tools.mcp__node_repl__node_repl;
+const nodeReplTool =
+  tools.mcp__desktop_node_repl__node_repl ?? tools.mcp__node_repl__node_repl;
 const result = await nodeReplTool({ code });
 for (const block of result.content ?? []) {
   if (block.type === 'text') {

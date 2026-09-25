@@ -1,7 +1,7 @@
 # 验证：远程会话经 launchd 中继使用本地桌面机（本轮：macOS）
 
 > 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`（§6 列出了本文要回答的未验证项）；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
-> 状态（2026-09-23）：作者在自己的 Mac 上用 Node 22 跑过全量 build、typecheck 和定向单元测试，CI 全绿；**端到端流程没有在任何机器上跑过**，本文所有“预期”都来自读代码。
+> 状态（2026-09-25）：Mac 上已补验安装、launchd、安全边界和浏览器权限提示，见 `results.md` 首节。**跨机端到端流程尚未通过验收**，本文未被结果明确覆盖的“预期”仍不是实测结论。
 > 需要：一台 Mac（Chrome，最好再有 Safari），Node 22；一台能从 Mac 用 SSH 连到的 Linux 开发机。两边都要能构建本 PR。
 > 出了问题先看文末的 **F. 排查手册**。
 
@@ -79,7 +79,7 @@ QWEN_SERVE_CLIENT_MCP_OVER_WS=1 node dist/cli.js serve   # 记下端口和 token
 
 Mac：`ssh -N -L 4170:127.0.0.1:<端口> devbox`，然后在 Chrome 打开 `http://localhost:4170`（回环地址是安全上下文）。
 
-1. 新建会话。侧边栏底部点显示器图标（“Use this computer”）。预期状态：Not connected。如果显示 Not set up，说明探测失败，记录浏览器控制台的错误。
+1. 新建会话。侧边栏底部点显示器图标（“Use this computer”）。预期状态：Not connected。如果显示 Needs browser permission，由用户在浏览器提示或网站设置里允许本地网络访问，再重新检测。如果显示 Not set up，记录浏览器控制台的错误。另起一个未设 `QWEN_SERVE_CLIENT_MCP_OVER_WS` 的普通 daemon，确认 standalone 默认不显示此入口。
 2. 点 **Connect this computer**。预期：状态变为 Waiting for approval，桌面弹出确认框。点 Allow。预期：状态变为 Connecting…，随后 Connected；系统通知“is now using this computer”。
 3. 在同一会话里输入（保持默认审批模式）：
 

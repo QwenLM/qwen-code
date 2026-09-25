@@ -7,7 +7,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { runInNewContext } from 'node:vm';
+import { describe, expect, it, vi } from 'vitest';
 import { parseSkillContent } from '../../skill-load.js';
 
 function loadComputerUseSkill() {
@@ -23,6 +24,47 @@ function loadComputerUseSkill() {
 }
 
 describe('bundled computer-use skill', () => {
+  it.each([true, false])(
+    'runs the forwarding example with desktop relay available=%s',
+    async (desktopAvailable) => {
+      const { body } = loadComputerUseSkill();
+      const example = body.match(/```js\n([\s\S]*?)\n```/)?.[1];
+      expect(example).toBeDefined();
+      const screenshot = {
+        type: 'image',
+        data: 'screenshot',
+        mimeType: 'image/png',
+      };
+      const result = {
+        content: [{ type: 'text', text: 'macos' }, screenshot],
+      };
+      const desktop = vi.fn().mockResolvedValue(result);
+      const regular = vi.fn().mockResolvedValue(result);
+      const text = vi.fn();
+      const image = vi.fn();
+      await runInNewContext(`(async () => {${example}})()`, {
+        tools: {
+          mcp__node_repl__node_repl: regular,
+          ...(desktopAvailable
+            ? { mcp__desktop_node_repl__node_repl: desktop }
+            : {}),
+        },
+        ALL_TOOLS: desktopAvailable
+          ? [{ name: 'mcp__desktop_node_repl__node_repl' }]
+          : [],
+        code: 'return platform',
+        text,
+        image,
+      });
+      expect(desktopAvailable ? desktop : regular).toHaveBeenCalledWith({
+        code: 'return platform',
+      });
+      expect(desktopAvailable ? regular : desktop).not.toHaveBeenCalled();
+      expect(text).toHaveBeenCalledWith('macos');
+      expect(image).toHaveBeenCalledWith(screenshot);
+    },
+  );
+
   it('loads a self-contained App workflow for every connected platform', () => {
     const { config, body } = loadComputerUseSkill();
     expect(config.name).toBe('computer-use');

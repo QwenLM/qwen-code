@@ -162,6 +162,36 @@ describe('AcpRelay', () => {
     });
   });
 
+  it('settles the outer frame for a cancelled request but not a notification', async () => {
+    const h = harness();
+    void h.relay.run();
+    await connect(h);
+    await h.deliver({
+      type: 'mcp_message',
+      id: 'cancelled-call',
+      server: DESKTOP_RELAY_SERVER_NAME,
+      payload: { jsonrpc: '2.0', id: 4, method: 'tools/call' },
+    });
+    expect(h.sent.at(-1)).toMatchObject({
+      type: 'mcp_message',
+      id: 'cancelled-call',
+      payload: { id: 4, error: { code: -32800 } },
+    });
+    const replies = h.sent.length;
+    await h.deliver({
+      type: 'mcp_message',
+      id: 'cancellation-notification',
+      server: DESKTOP_RELAY_SERVER_NAME,
+      payload: {
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: { requestId: 4 },
+      },
+    });
+    expect(h.sent).toHaveLength(replies);
+    h.relay.stop();
+  });
+
   it('warms the runtime and retries a failed registration, then gives up', async () => {
     const rewarm = vi.fn(async () => undefined);
     const h = harness({ rewarm, maxRegisterAttempts: 2 });

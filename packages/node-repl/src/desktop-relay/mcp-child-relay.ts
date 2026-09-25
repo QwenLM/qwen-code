@@ -47,7 +47,7 @@ function isRequestId(value: unknown): value is JsonRpcId {
 
 interface Pending {
   originalId: JsonRpcId;
-  resolve: (reply: JsonRpcMessage) => void;
+  resolve: (reply: JsonRpcMessage | undefined) => void;
 }
 
 /**
@@ -64,7 +64,7 @@ interface Pending {
 export class McpChildRelay {
   private readonly pending = new Map<number, Pending>();
   private nextId = 1;
-  private initialize: Promise<JsonRpcMessage> | undefined;
+  private initialize: Promise<JsonRpcMessage | undefined> | undefined;
   private initializedForwarded = false;
   private exitReason: string | undefined;
 
@@ -102,10 +102,13 @@ export class McpChildRelay {
       this.initialize = first;
       const reply = await first;
       // A failed handshake is retried by the next client, not inherited.
-      if (reply.error !== undefined) this.initialize = undefined;
+      if (reply === undefined || reply.error !== undefined) {
+        this.initialize = undefined;
+      }
       return reply;
     }
     const first = await this.initialize;
+    if (first === undefined) return undefined;
     return first.error !== undefined
       ? { jsonrpc: '2.0', id, error: first.error }
       : { jsonrpc: '2.0', id, result: first.result };
@@ -132,6 +135,8 @@ export class McpChildRelay {
         ...message,
         params: { ...params, requestId: relayId },
       });
+      // The MCP SDK sends no response after cancellation.
+      this.settle(relayId, undefined);
       return;
     }
     this.child.send(message);
@@ -150,7 +155,7 @@ export class McpChildRelay {
   private forward(
     message: JsonRpcMessage,
     originalId: JsonRpcId,
-  ): Promise<JsonRpcMessage> {
+  ): Promise<JsonRpcMessage | undefined> {
     const relayId = this.nextId++;
     return new Promise((resolve) => {
       this.pending.set(relayId, { originalId, resolve });
@@ -198,7 +203,7 @@ export class McpChildRelay {
     );
   }
 
-  private settle(relayId: number, reply: JsonRpcMessage): void {
+  private settle(relayId: number, reply: JsonRpcMessage | undefined): void {
     const entry = this.pending.get(relayId);
     if (entry === undefined) return;
     this.pending.delete(relayId);

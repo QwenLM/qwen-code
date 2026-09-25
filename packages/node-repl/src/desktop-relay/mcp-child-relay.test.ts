@@ -139,6 +139,30 @@ describe('McpChildRelay', () => {
     ]);
   });
 
+  it('retires cancelled requests without a child reply so ids can be reused', async () => {
+    const child = new FakeChild();
+    const relay = new McpChildRelay(child);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const pending = relay.handle({
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+      });
+      const relayId = child.last().id;
+      await relay.handle({
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: { requestId: 7 },
+      });
+      expect(child.last()).toMatchObject({
+        method: 'notifications/cancelled',
+        params: { requestId: relayId },
+      });
+      await expect(pending).resolves.toBeUndefined();
+      child.reply({ jsonrpc: '2.0', id: relayId, result: 'late reply' });
+    }
+  });
+
   it('replaces a reply above the frame budget with an error', async () => {
     const child = new FakeChild();
     const relay = new McpChildRelay(child, 64);

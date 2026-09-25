@@ -355,11 +355,11 @@ export class AcpRelay {
       return;
     }
     if (frame.server !== undefined && frame.server !== this.serverName) return;
+    const requestId = (payload as { id?: unknown }).id;
     let reply: JsonRpcMessage | undefined;
     try {
       reply = await this.options.rpc.handle(payload);
     } catch (error) {
-      const requestId = (payload as { id?: unknown }).id;
       reply = errorReply(
         typeof requestId === 'string' || typeof requestId === 'number'
           ? requestId
@@ -367,6 +367,14 @@ export class AcpRelay {
         -32603,
         describe(error),
       );
+    }
+    // A cancelled MCP call has no child reply, but the daemon still needs its
+    // outer frame settled; otherwise its timeout disconnects the MCP server.
+    if (
+      reply === undefined &&
+      (typeof requestId === 'string' || typeof requestId === 'number')
+    ) {
+      reply = errorReply(requestId, -32800, 'Request cancelled');
     }
     // Notifications get no reply, and a reply after the end has nowhere to go.
     if (reply === undefined || this.ended !== undefined) return;
