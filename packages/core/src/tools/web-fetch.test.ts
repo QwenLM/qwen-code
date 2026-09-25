@@ -177,6 +177,28 @@ describe('WebFetchTool', () => {
       );
     });
 
+    it('should convert a fetched table into a Markdown table', async () => {
+      // Pins the wiring in getTurndownService(): without addTableRules the
+      // page arrives as one paragraph per cell.
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
+        okResponse({
+          body: Buffer.from(
+            '<html><body><table><tr><th>Plan</th><th>Price</th></tr>' +
+              '<tr><td>Pro</td><td>29 EUR</td></tr></table></body></html>',
+          ),
+        }),
+      );
+      mockGenerateContent.mockRejectedValue(new Error('API error'));
+
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com', prompt: 'summarize' })
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toContain(
+        '| Plan | Price |\n| --- | --- |\n| Pro | 29 EUR |',
+      );
+    });
+
     it('should return an error result for non-2xx statuses', async () => {
       vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
         okResponse({ status: 404, statusText: 'Not Found' }),
