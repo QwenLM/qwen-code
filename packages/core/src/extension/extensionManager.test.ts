@@ -41,7 +41,6 @@ import type {
 import { ExtensionStore } from './extension-store.js';
 import { SubagentError } from '../subagents/types.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
-import type { Config } from '../config/config.js';
 import { ExtensionPreferencesStore } from './extensionPreferences.js';
 import {
   AGENT_PLUGIN_MCP_SCHEMA,
