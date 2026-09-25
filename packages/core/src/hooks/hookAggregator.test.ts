@@ -1347,8 +1347,6 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.decision).toBeUndefined();
     });
 
-    // An ask outside PreToolUse is read by nobody, so it must not cost a stop
-    // request its stop: only this consumer's ask outranks the exemption.
     it('leaves a stop request alone on a lane whose consumer reads no ask', () => {
       const result = aggregator.aggregateResults(
         [
@@ -1447,8 +1445,45 @@ describe('HookAggregator', () => {
       duration: 5,
     });
 
-    // An ask is answered by one approval, so a blocking outcome carrying one -- or
-    // collecting one from a sibling hook -- has to overwrite it.
+    it('refuses with the generic text when only a sibling carried a reason', () => {
+      const result = aggregator.aggregateResults(
+        [
+          okResult(HookEventName.PreToolUse, {
+            decision: 'allow',
+            reason: 'Hook executed successfully',
+          }),
+          blockingResult(HookEventName.PreToolUse, undefined),
+        ],
+        HookEventName.PreToolUse,
+      );
+      const output = createHookOutput(
+        HookEventName.PreToolUse,
+        result.finalOutput ?? {},
+      ) as PreToolUseHookOutput;
+      expect(output.isDenied()).toBe(true);
+      expect(result.finalOutput?.reason).toBe(
+        'Hook exited with a blocking error',
+      );
+      expect(output.getPermissionDecisionReason()).toBe(
+        'Hook exited with a blocking error',
+      );
+    });
+
+    it('keeps the blocking hook stopReason when it carries no decision', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.Stop, {
+            stopReason: '3 unit tests still failing - run npm test',
+          }),
+        ],
+        HookEventName.Stop,
+      );
+      expect(result.finalOutput?.continue).toBe(false);
+      expect(result.finalOutput?.stopReason).toBe(
+        '3 unit tests still failing - run npm test',
+      );
+    });
+
     it.each([
       [
         'a nested ask on the blocking hook itself',
@@ -1662,7 +1697,6 @@ describe('HookAggregator', () => {
       );
     });
   });
-
 
   describe('mergeWithOrLogic - PreToolUse permissionDecision ranking', () => {
     const aggregatePreToolUse = (outputs: HookOutput[]) => {

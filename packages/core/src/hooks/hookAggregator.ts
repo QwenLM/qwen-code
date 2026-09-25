@@ -199,8 +199,24 @@ export class HookAggregator {
     // A blocking outcome has to end in a decision the consumer acts on: a
     // payload with no decision, or with `allow`, runs the action, and `ask`
     // sends it to confirmation rather than the block the hook asked for.
-    if (results.some((result) => result.outcome === 'blocking')) {
-      finalOutput = this.enforceBlockingDeny(finalOutput, eventName);
+    // The denial text comes from the blocking results themselves: the merge
+    // can put a sibling's reason in the blocking hook's place.
+    const blockingResults = results.filter(
+      (result) => result.outcome === 'blocking',
+    );
+    if (blockingResults.length > 0) {
+      const authorText = blockingResults
+        .flatMap((result) =>
+          result.output ? [result.output.stopReason, result.output.reason] : [],
+        )
+        .find(
+          (text): text is string => typeof text === 'string' && text !== '',
+        );
+      finalOutput = this.enforceBlockingDeny(
+        finalOutput,
+        eventName,
+        authorText,
+      );
     }
 
     return {
@@ -219,10 +235,12 @@ export class HookAggregator {
   private enforceBlockingDeny(
     output: HookOutput | undefined,
     eventName: HookEventName,
+    authorText: string | undefined,
   ): HookOutput | undefined {
+    const reason = authorText ?? BLOCKING_REASON_FALLBACK;
     if (!output) {
       const shape = DENY_SHAPE[eventName];
-      return shape ? shape({}, BLOCKING_REASON_FALLBACK) : undefined;
+      return shape ? shape({}, reason) : undefined;
     }
     if (isBlockingHookOutput(eventName, output)) {
       return output;
@@ -232,10 +250,6 @@ export class HookAggregator {
     }
     const shape = DENY_SHAPE[eventName];
     if (!shape) return output;
-    const reason =
-      typeof output.reason === 'string' && output.reason
-        ? output.reason
-        : BLOCKING_REASON_FALLBACK;
     return shape(output, reason);
   }
 

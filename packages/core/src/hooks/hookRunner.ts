@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import { createHookOutput, HookEventName, HookType } from './types.js';
 import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
 import type {
@@ -78,11 +79,18 @@ export function resolvePowerShellExecutable(): string {
  */
 const MAX_OUTPUT_LENGTH = 1024 * 1024;
 
-/** Strip escapes line-wise so newlines survive. */
+// Model-bound text: strip escapes and non-whitespace controls, keep tab/CR.
+const PROMOTED_CONTROL_RE =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+
+/** Strip escapes line-wise so newlines and author tabs survive. */
 function stripPromotedText(text: string): string {
   return text
     .split('\n')
-    .map((line) => stripAnsiAndControl(line))
+    .map((line) =>
+      stripVTControlCharacters(line).replace(PROMOTED_CONTROL_RE, ''),
+    )
     .join('\n');
 }
 
@@ -135,6 +143,12 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 const SURVIVING_HOOK_TIMEOUT_EXIT_CODE = 124;
 const SURVIVING_HOOK_SUPERVISOR_GRACE_MS =
   HOOK_TERMINATE_GRACE_MS + HOOK_PROCESS_GROUP_POLL_MS * 2;
+
+// A legacy $..._PROJECT_DIR reference inside a quoted string expands to
+// nothing and exits 0 under the wrapper; warn so it is not silent.
+const LEGACY_PROJECT_DIR_REF_RE =
+  /(?<!\$env:)\$(?:QWEN|CLAUDE|GEMINI)_PROJECT_DIR\b/;
+const warnedLegacyProjectDirRefs = new Set<string>();
 
 // An eval source works in both TypeScript development and the single-file CLI
 // bundle without shipping a second executable asset beside the entry point.
@@ -1343,6 +1357,21 @@ export class HookRunner {
         process.platform === 'win32'
           ? '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
           : '';
+      if (
+        shellConfig.shell === 'powershell' &&
+        LEGACY_PROJECT_DIR_REF_RE.test(hookConfig.command) &&
+        !warnedLegacyProjectDirRefs.has(hookConfig.command)
+      ) {
+        warnedLegacyProjectDirRefs.add(hookConfig.command);
+        debugLogger.warn(
+          `PowerShell hook command uses a bare $QWEN/CLAUDE/GEMINI_PROJECT_DIR ` +
+            `reference. Under the hook wrapper an undefined variable inside a ` +
+            `quoted string expands to nothing and the hook exits 0, so a gate ` +
+            `written this way silently never runs. Use the environment scope, ` +
+            `e.g. "$env:QWEN_PROJECT_DIR", and prefix a quoted invocation with ` +
+            `the call operator '&'.`,
+        );
+      }
       const command =
         shellConfig.shell === 'powershell'
           ? `${utf8Prefix}${strictPrefix}${hookConfig.command}`
@@ -1755,8 +1784,6 @@ export class HookRunner {
     exitCode: number,
     stdoutEvent?: HookEventName,
   ): HookOutput {
-    // Terminal escapes must not reach the model or transcript through any
-    // promoted field.
     const cleanText = stripPromotedText(text);
     if (exitCode === EXIT_CODE_SUCCESS) {
       if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {

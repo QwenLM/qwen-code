@@ -1790,9 +1790,8 @@ describe('HookRunner', () => {
     );
 
     it('does not taskkill a surviving Windows hook whose pid already exited', async () => {
-      // Windows has no process group to signal, so a taskkill against a pid
-      // that has already exited could land on a recycled pid �?the #6067
-      // collateral-kill failure mode. The liveness probe is the guard.
+      // Windows has no process group: taskkill against a recycled pid is
+      // the #6067 collateral kill. The liveness probe is the guard.
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const survivingPid = 9912;
       vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
@@ -1958,12 +1957,8 @@ describe('HookRunner', () => {
     });
 
     it('warns and skips the SIGKILL fallback when the liveness re-probe fails unexpectedly', async () => {
-      // The re-probe shares the first probe's tri-state classification: an
-      // unexpected errno establishes nothing about the pid, so the fallback
-      // must be skipped (a pid-based kill against unknown state risks the
-      // #6067 recycled-pid collateral kill) �?but the skip must warn, or a
-      // host-level probe failure leaves the hook's cmd.exe tree running with
-      // no trace at all.
+      // An unexpected errno establishes nothing about the pid, so the kill
+      // is skipped (#6067); the skip warns so the tree leaves a trace.
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const survivingPid = 9919;
       let probes = 0;
@@ -2012,10 +2007,8 @@ describe('HookRunner', () => {
     });
 
     it('still reaps a surviving Windows hook whose liveness probe is denied', async () => {
-      // An elevated or protected hook makes process.kill(pid, 0) fail with
-      // EPERM on Windows, not ESRCH: the process exists but cannot be opened.
-      // That answer is alive, not dead �?treating it as dead would leave the
-      // hook's cmd.exe tree running (#11303).
+      // EPERM means exists-but-uncloseable: alive, not dead. Treating it as
+      // dead leaves the hook cmd.exe tree running (#11303).
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const survivingPid = 9915;
       vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
@@ -2052,12 +2045,6 @@ describe('HookRunner', () => {
     });
 
     it('does not taskkill a surviving Windows hook whose liveness probe fails unexpectedly', async () => {
-      // A probe error that is neither "gone" (ESRCH) nor "exists but denied"
-      // (EPERM/EACCES) establishes nothing about the pid. The reap still skips
-      // it �?taskkilling a pid of unknown state risks the #6067 recycled-pid
-      // collateral kill �?but the skip must warn, or a host-level probe
-      // failure leaves the hook's cmd.exe tree running (#11303) with no
-      // trace.
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const survivingPid = 9916;
       vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
@@ -3029,7 +3016,6 @@ describe('HookRunner', () => {
       // Verify spawn was called with powershell configuration
       expect(mockSpawn).toHaveBeenCalled();
       const spawnArgs = mockSpawn.mock.calls[0];
-      // Should use powershell executable with -NoProfile
       expect(spawnArgs[0]).toBe(
         'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
       );
@@ -3084,9 +3070,7 @@ describe('HookRunner', () => {
           '-Command',
           "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; echo test",
         ]);
-        // #8649's literal repro shape: shell prefix + quoted path with a
-        // space + argument. cmd.exe keeps the inner quotes, PowerShell does
-        // not, so the command must reach powershell untouched.
+        // cmd.exe keeps the inner quotes that PowerShell drops.
         await hookRunner.executeHook(
           {
             type: HookType.Command,
@@ -3157,7 +3141,6 @@ describe('HookRunner', () => {
           createMockInput(),
         );
         const fallbackArgs = mockSpawn.mock.calls[1][1];
-        // Same executable and argsPrefix; only the trailing command differs.
         expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
         expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
         expect(explicitArgs[2]).toBe(
@@ -3194,8 +3177,6 @@ describe('HookRunner', () => {
           HookEventName.PreToolUse,
           createMockInput(),
         );
-        // The body is appended verbatim after the prefix; no exit-code tail to
-        // be swallowed by a trailing backtick any more.
         expect(mockSpawn.mock.calls[0][1][2]).toContain(command);
       },
     );
@@ -3260,8 +3241,6 @@ describe('HookRunner', () => {
         [result],
         HookEventName.PreToolUse,
       );
-      // The refusal routes through the same blocking outcome as exit 2: the
-      // aggregator turns it into a deny in the shape the consumer reads.
       expect(aggregated.finalOutput?.decision).toBe('deny');
       expect(aggregated.finalOutput?.reason).toMatch(/call operator/);
     });
@@ -3337,15 +3316,11 @@ describe('HookRunner', () => {
       expect(spawnArgs[1][spawnArgs[1].length - 1]).toBe(
         'echo $CLAUDE_PROJECT_DIR',
       );
-      // Migration premise: the project-dir vars reach the hook through the
-      // spawn environment instead of the removed pre-launch substitution.
       expect(spawnArgs[2].env).toMatchObject({
         CLAUDE_PROJECT_DIR: '/test',
         GEMINI_PROJECT_DIR: '/test',
         QWEN_PROJECT_DIR: '/test',
       });
-      // Single quotes blocked expansion under the old pre-substitution too
-      // (the regex replaced anywhere in the text); they must pass untouched.
       await hookRunner.executeHook(
         {
           type: HookType.Command,
@@ -3387,8 +3362,6 @@ describe('HookRunner', () => {
         createMockInput(),
       );
       const spawnArgs = mockSpawn.mock.calls[0];
-      // Pin: dropping any prefix statement must fail here, not only the
-      // wrapping tests.
       expect(spawnArgs[1][2]).toMatch(
         /^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$global:LASTEXITCODE = \$null;\s*\$CLAUDE_PROJECT_DIR$/,
       );
@@ -3405,6 +3378,32 @@ describe('HookRunner', () => {
       );
       expect(output.systemMessage).not.toContain('\u001b');
       expect(output.reason).not.toContain('\u001b');
+    });
+
+    it('warns once per command about a bare project-dir reference under the PowerShell wrapper', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0, '', ''));
+      const runGate = (command: string) =>
+        hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+      const marker = 'bare $QWEN/CLAUDE/GEMINI_PROJECT_DIR';
+      const warnCount = () =>
+        mockDebugLogger.warn.mock.calls.filter(([text]) =>
+          String(text).includes(marker),
+        ).length;
+
+      await runGate('Write-Output "$QWEN_PROJECT_DIR/gate-warn-a"');
+      await runGate('Write-Output "$QWEN_PROJECT_DIR/gate-warn-a"');
+      expect(warnCount()).toBe(1);
+      await runGate('Write-Output "$QWEN_PROJECT_DIR/gate-warn-b"');
+      expect(warnCount()).toBe(2);
     });
 
     it('strips escapes from exit-0 messages and blocking deny reasons', async () => {
@@ -3446,7 +3445,7 @@ describe('HookRunner', () => {
         createMockProcess(
           2,
           '',
-          '{"decision":"deny","reason":"\\u001b[31mno\\u001b[0m","systemMessage":"\\u001b[2Jmsg","stopReason":"\\u001b[31mstop\\u001b[0m","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecisionReason":"\\u001b[31mwhy\\u001b[0m","additionalContext":"\\u001b[2Jctx"},"terminalSequence":"\\u001b]0;t\\u0007"}',
+          '{"decision":"deny","reason":"\\u001b[31mno\\u001b[0m","systemMessage":"\\u001b[2Jmsg","stopReason":"\\u001b[31mstop\\tA\\nnext\\u001b[0m","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecisionReason":"\\u001b[31mwhy\\u001b[0m","additionalContext":"a\\tb\\u001b[31mred\\u001b[0m"},"terminalSequence":"\\u001b]0;t\\u0007"}',
         ),
       );
       const result = await hookRunner.executeHook(
@@ -3468,11 +3467,11 @@ describe('HookRunner', () => {
       };
       expect(output.reason).toBe('no');
       expect(output.systemMessage).toBe('msg');
-      expect(output.stopReason).toBe('stop');
+      expect(output.stopReason).toBe('stop\tA\nnext');
       expect(output.hookSpecificOutput?.['permissionDecisionReason']).toBe(
         'why',
       );
-      expect(output.hookSpecificOutput?.['additionalContext']).toBe('ctx');
+      expect(output.hookSpecificOutput?.['additionalContext']).toBe('a\tbred');
       // terminalSequence is an escape channel by contract; it survives.
       expect(output.terminalSequence).toBe('\u001b]0;t\u0007');
     });
@@ -3509,8 +3508,6 @@ describe('HookRunner', () => {
   });
 
   describe('resolvePowerShellExecutable', () => {
-    // Mutation-verified: each case fails if probe, throw, cache, or pwsh
-    // priority is removed; beforeEach resets the cache for a clean probe.
     let execSpy: MockInstance<typeof shellUtils.resolveCommandPath>;
     beforeEach(() => {
       execSpy = vi.spyOn(shellUtils, 'resolveCommandPath');
@@ -3555,7 +3552,6 @@ describe('HookRunner', () => {
       execSpy.mockImplementation(((name: string) =>
         name === 'pwsh' ? { path: '/usr/bin/pwsh' } : { path: null }) as never);
       expect(resolvePowerShellExecutable()).toBe('/usr/bin/pwsh');
-      // Two failed candidates, then the next call re-probes and recovers.
       expect(execSpy).toHaveBeenCalledTimes(3);
     });
 

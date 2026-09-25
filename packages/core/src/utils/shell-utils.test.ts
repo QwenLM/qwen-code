@@ -1584,9 +1584,6 @@ describe('splitCommands', () => {
 });
 
 describe('resolveCommandPath', () => {
-  // Pinned: capturing the lookup's streams still returns the hit path, and a miss
-  // still reports no path and no error. That a miss no longer prints is a
-  // descriptor-level effect, verified with a redirected stderr, not assertable here.
   it('returns a path for a command that exists', () => {
     const { path, error } = resolveCommandPath(
       process.platform === 'win32' ? 'cmd.exe' : 'sh',
@@ -1601,6 +1598,24 @@ describe('resolveCommandPath', () => {
       path: null,
       error: undefined,
     });
+  });
+
+  it('resolves without opts when process.cwd() throws uv_cwd', () => {
+    const cwdSpy = vi.spyOn(process, 'cwd').mockImplementation(() => {
+      throw Object.assign(
+        new Error('ENOENT: no such file or directory, uv_cwd'),
+        { code: 'ENOENT', syscall: 'uv_cwd' },
+      );
+    });
+    try {
+      const { path: hit, error } = resolveCommandPath(
+        process.platform === 'win32' ? 'cmd.exe' : 'sh',
+      );
+      expect(error).toBeUndefined();
+      expect(typeof hit).toBe('string');
+    } finally {
+      cwdSpy.mockRestore();
+    }
   });
 
   it('absolutizes a relative probe hit against opts.cwd and takes only the first win32 hit', async () => {

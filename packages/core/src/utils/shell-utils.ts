@@ -2378,7 +2378,9 @@ export function resolveCommandPath(
 } {
   try {
     const isWin = process.platform === 'win32';
-    const probeCwd = opts?.cwd ?? process.cwd();
+    // No process.cwd() fallback: that read throws when the cwd is deleted;
+    // without opts the child simply inherits the process cwd.
+    const probeCwd = opts?.cwd;
 
     if (isWin) {
       const checkCommand = 'where.exe';
@@ -2391,7 +2393,7 @@ export function resolveCommandPath(
           shell: false,
           // Capture the finder's stderr so a miss does not leak into the user's session.
           stdio: ['ignore', 'pipe', 'pipe'],
-          cwd: probeCwd,
+          ...(probeCwd ? { cwd: probeCwd } : {}),
         });
       } catch {
         return { path: null, error: undefined };
@@ -2402,9 +2404,10 @@ export function resolveCommandPath(
       if (!first) return { path: null, error: undefined };
       // `path` follows the host platform; this arm must resolve Windows paths
       // on any host so the win32 resolution stays testable off Windows.
-      const resolved = path.win32.isAbsolute(first)
-        ? first
-        : path.win32.resolve(probeCwd, first);
+      const resolved =
+        !probeCwd || path.win32.isAbsolute(first)
+          ? first
+          : path.win32.resolve(probeCwd, first);
       accessSync(resolved, fsConstants.X_OK);
       return { path: resolved, error: undefined };
     } else {
@@ -2418,7 +2421,7 @@ export function resolveCommandPath(
           shell: false,
           // Capture the finder's stderr so a miss does not leak into the user's session.
           stdio: ['ignore', 'pipe', 'pipe'],
-          cwd: probeCwd,
+          ...(probeCwd ? { cwd: probeCwd } : {}),
         });
       } catch {
         return { path: null, error: undefined };
@@ -2427,9 +2430,10 @@ export function resolveCommandPath(
       if (!result) return { path: null, error: undefined };
       const first = result.split(/\r?\n/)[0]?.trim();
       if (!first) return { path: null, error: undefined };
-      const resolved = path.isAbsolute(first)
-        ? first
-        : path.resolve(probeCwd, first);
+      const resolved =
+        !probeCwd || path.isAbsolute(first)
+          ? first
+          : path.resolve(probeCwd, first);
       accessSync(resolved, fsConstants.X_OK);
       return { path: resolved, error: undefined };
     }
