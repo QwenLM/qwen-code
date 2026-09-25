@@ -772,6 +772,30 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('shows the Advisor verdict and expands the full review', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'advisor',
+        status: 'completed',
+        rawOutput: {
+          type: 'advisor_review',
+          verdict: 'Sound approach.',
+          risks: 'Retry handling is unclear.',
+          missingEvidence: 'No integration result.',
+          recommendation: 'Run the integration test.',
+        },
+      }),
+    ]);
+
+    act(() => {
+      (container.querySelector('button') as HTMLElement).click();
+    });
+
+    expect(container.textContent).toContain('Sound approach.');
+    expect(container.textContent).toContain('Retry handling is unclear.');
+    expect(container.textContent).toContain('Run the integration test.');
+  });
+
   it('expands a workflow tool into its live execution graph', () => {
     const tool = makeTool({
       toolName: 'workflow',
@@ -2751,6 +2775,38 @@ describe('tool output logic', () => {
         }),
       ),
     ).toContain('-deleted content');
+  });
+
+  it('builds a diff from the edit tool’s real parameter names on the full projection', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'REAL_PARAMETER_DIFF',
+          },
+        }),
+      ),
+    ).toContain('REAL_PARAMETER_DIFF');
+  });
+
+  it('does not render an attempted real-parameter diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
   });
 
   it('does not render an attempted typed diff for a failed edit', () => {

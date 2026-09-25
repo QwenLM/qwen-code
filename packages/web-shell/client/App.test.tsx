@@ -343,6 +343,8 @@ const {
       .mockResolvedValue({ enabled: false, install: { state: 'missing' } }),
     workspaceAcpPreheat: vi.fn().mockResolvedValue({ ready: true }),
     workspaceByCwd: vi.fn(() => ({
+      getSessionToolCalls: vi.fn(),
+      getSessionTurnIndexPage: vi.fn(),
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: loadSkillsStatus,
       workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
@@ -381,6 +383,13 @@ const {
       displayName: 'Side task',
     }),
     detachSession: vi.fn().mockResolvedValue(undefined),
+    getSessionTurnIndexPage: vi.fn().mockResolvedValue({
+      snapshot: 'snapshot',
+      start: 0,
+      totalTurns: 0,
+      turns: [],
+    }),
+    getSessionToolCalls: vi.fn(),
     getSessionTranscriptPage: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -619,6 +628,15 @@ const {
       onDismissFollowup: vi.fn(),
     },
     testState: {
+      turnChoices:
+        [] as import('@qwen-code/sdk/daemon').DaemonSessionTurnIndexEntry[],
+      turnLocations: new Map<
+        string,
+        import('./daemon/session/turn-navigation-store').DaemonTurnLocation
+      >(),
+      provisionalTurns:
+        [] as import('./daemon/session/turn-navigation-store').DaemonProvisionalTurn[],
+      promptStatus: 'idle' as 'idle' | 'running',
       ownerVersion: 0,
       recoveryVersion: 0,
       prompt: 'hello',
@@ -650,6 +668,14 @@ const {
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
+      openTurnCalls: undefined as
+        | ((
+            turnId: string,
+            recordId?: string,
+            promptId?: string,
+            promptLabel?: string,
+          ) => void)
+        | undefined,
       backgroundDetails: undefined as
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
@@ -896,7 +922,20 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       onDismissFollowup: mockFollowup.onDismissFollowup,
     }),
     useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
-    usePromptStatus: () => 'idle',
+    usePromptStatus: () => testState.promptStatus,
+    useTurnNavigationState: () => ({
+      mode: 'ready',
+      totalTurns: testState.turnChoices.length,
+      effectiveTurnCount:
+        testState.turnChoices.length + testState.provisionalTurns.length,
+      indexPages: new Map([[0, { turns: testState.turnChoices }]]),
+      provisionalTurns: testState.provisionalTurns,
+      locations: testState.turnLocations,
+    }),
+    useTurnNavigationStore: () => ({
+      refreshHead: vi.fn(),
+      loadOrdinal: vi.fn(),
+    }),
     useSettings: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
       testState.latestSettingsHookOptions = options;
       return {
@@ -1215,6 +1254,7 @@ vi.mock('./components/TranscriptViewport', async () => {
   const React = await import('react');
   const { useInteractionBlocker } = await import('./interactionBlockContext');
   const { useSubagentDetails } = await import('./subagentDetailsContext');
+  const { useOpenTurnCalls } = await import('./turnCallsContext');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
     const releaseRef = React.useRef<(() => void) | null>(null);
@@ -1263,6 +1303,7 @@ vi.mock('./components/TranscriptViewport', async () => {
     ) {
       testState.latestMessageListProps = props;
       testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
+      testState.openTurnCalls = useOpenTurnCalls();
       React.useImperativeHandle(ref, () => ({
         scrollToBottom: notificationScrollToBottom,
       }));
@@ -1527,7 +1568,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
-      onSessionsDeleted?: (sessionIds: string[]) => void;
+      onSessionsDeleted?: (
+        sessionIds: string[],
+        meta?: { attachedSessionId?: string },
+      ) => void;
       onOpenAddWorkspace?: () => void;
       onOpenGitDiff?: (workspaceCwd: string) => void;
       onOpenCommit?: (workspaceCwd: string) => void;
@@ -1678,6 +1722,23 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onSessionsDeleted?.(['session-1']),
           },
           'delete session',
+        ),
+        // Stands in for a sidebar row delete whose confirmation happened while
+        // the client was still attached: the real sidebar reports the id it
+        // captured at confirm time, because the daemon's terminal
+        // `session_closed` frame clears the attachment before the delete
+        // response resolves (#12619).
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'delete-session-after-close',
+            type: 'button',
+            onClick: () =>
+              props.onSessionsDeleted?.(['session-1'], {
+                attachedSessionId: 'session-1',
+              }),
+          },
+          'delete session after close',
         ),
         React.createElement(
           'button',
@@ -3745,6 +3806,497 @@ describe('task activity key', () => {
       second.container.querySelector('aside[aria-label="Right panel"]'),
     ).not.toBeNull();
   });
+
+  it('shows the tool calls entry only when the host opts in', async () => {
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.openTurnCalls).toBeUndefined();
+
+    rerender({ showToolCalls: true });
+    await flush();
+    expect(testState.openTurnCalls).toBeTypeOf('function');
+
+    rerender({ showToolCalls: false });
+    await flush();
+    expect(testState.openTurnCalls).toBeUndefined();
+  });
+
+  it('persists the selected turn calls record across reloads without leaking it to another session', async () => {
+    mockWorkspace.client.getSessionTurnIndexPage.mockResolvedValue({
+      snapshot: 'snapshot',
+      start: 0,
+      totalTurns: 2,
+      turns: [
+        {
+          ordinal: 1,
+          turnId: 'older-record',
+          promptId: 'older-prompt',
+          kind: 'prompt',
+          label: 'Older prompt',
+        },
+        {
+          ordinal: 2,
+          turnId: 'selected-record',
+          promptId: 'selected-prompt',
+          kind: 'prompt',
+          label: 'Selected prompt label',
+        },
+      ],
+    });
+    testState.turnChoices = (
+      await mockWorkspace.client.getSessionTurnIndexPage('session-1', {})
+    ).turns.map((turn, ordinal) => ({ ...turn, ordinal }));
+    mockWorkspace.client.getSessionToolCalls.mockImplementation(
+      (_sessionId: string, turnId: string) =>
+        Promise.resolve({
+          v: 1,
+          sessionId: 'session-1',
+          turnId,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'Selected historical turn' },
+                _meta: {
+                  qwenTranscript: { sourceRecordIds: [turnId] },
+                  'qwen.session.recordId': turnId,
+                },
+              },
+            },
+          ],
+        }),
+    );
+    const first = renderApp({ showToolCalls: true });
+    await flush();
+    expect(testState.openTurnCalls).toBeTypeOf('function');
+    act(() =>
+      testState.openTurnCalls?.('history-page-1:user-1', 'older-record'),
+    );
+    await flush();
+    const promptTrigger = first.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Prompt"]',
+    )!;
+    await act(async () => promptTrigger.click());
+    const selectedOption = [
+      ...document.body.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].find((option) => option.textContent === 'Selected prompt label')!;
+    expect(selectedOption).toBeDefined();
+    await act(async () => selectedOption.click());
+    await flush();
+    const persisted = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    )['/tmp/project\0session-1'];
+    expect(persisted).toMatchObject({
+      open: true,
+      activeTabId: 'turn_calls',
+      tabs: [
+        {
+          kind: 'turn_calls',
+          recordId: 'selected-record',
+          promptId: 'selected-prompt',
+        },
+      ],
+    });
+    expect(persisted.tabs).toHaveLength(1);
+    expect(persisted.tabs[0]).not.toHaveProperty('promptLabel');
+    act(() => first.unmount());
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        v: 1,
+        ['/tmp/project\0session-1']: {
+          ...persisted,
+          tabs: [
+            {
+              ...persisted.tabs[0],
+              title: 'Turn calls',
+              promptLabel: 'Outdated persisted prompt label',
+            },
+          ],
+        },
+      }),
+    );
+    mockWorkspace.client.getSessionToolCalls.mockClear();
+
+    const restored = renderApp({ showToolCalls: true });
+    await flush();
+    await flush();
+    expect(
+      restored.container.querySelector('button[title="Tool calls"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.getSessionToolCalls).toHaveBeenCalledWith(
+      'session-1',
+      'selected-record',
+    );
+
+    expect(
+      restored.container.querySelector('[aria-label="Prompt"]')?.textContent,
+    ).toBe('Selected prompt label');
+    mockWorkspace.client.getSessionToolCalls.mockClear();
+    mockConnection.sessionId = 'session-2';
+    restored.rerender();
+    await flush();
+    await flush();
+    expect(
+      restored.container.querySelector('button[title="Tool calls"]'),
+    ).toBeNull();
+    expect(mockWorkspace.client.getSessionToolCalls).not.toHaveBeenCalledWith(
+      'session-2',
+      'selected-record',
+    );
+
+    mockConnection.sessionId = 'session-1';
+    restored.rerender();
+    await flush();
+    await flush();
+    expect(
+      restored.container.querySelector('button[title="Tool calls"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.getSessionToolCalls).toHaveBeenCalledWith(
+      'session-1',
+      'selected-record',
+    );
+  });
+
+  it('keeps tool calls before its file and agent detail tabs when another prompt is opened', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'File content',
+      truncated: false,
+    });
+    mockWorkspace.client.resolveSubagentSession.mockResolvedValue({
+      sessionId: 'subagent-session',
+      status: 'completed',
+    });
+    mockWorkspace.client.getSessionToolCalls.mockImplementation(
+      (_sessionId: string, turnId: string) =>
+        Promise.resolve({
+          sessionId: 'session-1',
+          turnId,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'Selected prompt' },
+                _meta: { qwenTranscript: { sourceRecordIds: [turnId] } },
+              },
+            },
+          ],
+        }),
+    );
+    testState.blocks = [
+      {
+        id: 'user-1',
+        kind: 'user',
+        text: 'Inspect files',
+        sourceRecordIds: ['record-1'],
+        createdAt: 1,
+        updatedAt: 1,
+        clientReceivedAt: 1,
+      },
+      {
+        id: 'file-call',
+        kind: 'tool',
+        toolCallId: 'file-call',
+        toolName: 'read_file',
+        title: '',
+        status: 'completed',
+        preview: {},
+        rawInput: { file_path: '/tmp/project/notes.txt' },
+        createdAt: 2,
+        updatedAt: 3,
+        clientReceivedAt: 2,
+      },
+      {
+        id: 'agent-call',
+        kind: 'tool',
+        toolCallId: 'agent-call',
+        toolName: 'agent',
+        title: '',
+        status: 'completed',
+        preview: {},
+        rawInput: {
+          description: 'Inspect agent details',
+          subagent_type: 'Explore',
+        },
+        rawOutput: { type: 'task_execution', executionId: 'agent-execution' },
+        subagentSessionReady: true,
+        createdAt: 4,
+        updatedAt: 5,
+        clientReceivedAt: 4,
+      },
+    ];
+    const { container } = renderApp({ showToolCalls: true });
+    await flush();
+    await act(async () => testState.openTurnCalls?.('user-1', 'record-1'));
+    await flush();
+    const fileButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="View file"]',
+    );
+    expect(fileButton).not.toBeNull();
+    await act(async () => fileButton!.click());
+    await flush();
+    const tabTitles = () =>
+      [
+        ...container.querySelectorAll(
+          'aside[aria-label="Right panel"] [role="tab"]',
+        ),
+      ].map((tab) => tab.getAttribute('title'));
+    expect(tabTitles()).toEqual(['Tool calls', 'notes.txt']);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[title="Tool calls"]')!
+        .click(),
+    );
+    const agentButton = [
+      ...container.querySelectorAll<HTMLLIElement>(
+        '[data-web-shell-turn-calls] > li',
+      ),
+    ]
+      .find((row) => row.textContent?.includes('Inspect agent details'))
+      ?.querySelector<HTMLButtonElement>('button');
+    expect(agentButton).not.toBeNull();
+    await act(async () => agentButton!.click());
+    await flush();
+    expect(tabTitles()).toHaveLength(3);
+    expect(tabTitles().slice(0, 2)).toEqual(['Tool calls', 'notes.txt']);
+    const childTitles = tabTitles().slice(1);
+    expect(mockWorkspace.client.resolveSubagentSession).toHaveBeenCalledWith(
+      'session-1',
+      'agent-call',
+    );
+    await act(async () =>
+      testState.openTurnCalls?.(
+        'other-turn',
+        'other-record',
+        'other-prompt',
+        'Other prompt',
+      ),
+    );
+    await flush();
+    expect(tabTitles()).toEqual(['Tool calls', ...childTitles]);
+    expect(container.querySelector('[aria-label="Prompt"]')?.textContent).toBe(
+      'Other prompt',
+    );
+  });
+
+  it.each(['running', 'settled'] as const)(
+    'persists sender tool calls opened while %s without an echoed user identity',
+    async (phase) => {
+      testState.blocks = [
+        {
+          id: 'sender-user',
+          kind: 'user',
+          text: 'Sender prompt',
+          createdAt: 100,
+          updatedAt: 100,
+          clientReceivedAt: 100,
+        },
+      ];
+      const entry = {
+        ordinal: 0,
+        turnId: 'sender-record',
+        promptId: 'sender-prompt',
+        kind: 'prompt' as const,
+        label: 'Sender prompt',
+      };
+      const settle = () => {
+        testState.promptStatus = 'idle';
+        testState.provisionalTurns = [];
+        testState.turnChoices = [entry];
+        testState.turnLocations.set(entry.turnId, {
+          turnId: entry.turnId,
+          blockId: 'sender-user',
+          view: 'live',
+        });
+      };
+      if (phase === 'running') {
+        testState.promptStatus = 'running';
+        testState.provisionalTurns = [
+          {
+            provisionalId: 'live:sender-prompt',
+            promptId: entry.promptId,
+            blockId: 'sender-user',
+            label: entry.label,
+          },
+        ];
+      } else settle();
+      mockWorkspace.client.getSessionToolCalls.mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        turnId: entry.turnId,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: entry.label },
+              _meta: { qwenTranscript: { sourceRecordIds: [entry.turnId] } },
+            },
+          },
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'sender-call',
+              title: 'run_shell_command',
+              status: 'completed',
+              rawInput: { command: 'printf sender' },
+              rawOutput: 'sender',
+              _meta: { toolName: 'run_shell_command' },
+            },
+          },
+        ],
+      });
+      const first = renderApp({ showToolCalls: true });
+      await flush();
+      act(() => testState.openTurnCalls?.('sender-user'));
+      await flush();
+      const persisted = JSON.parse(
+        localStorage.getItem('qwen-code-web-shell-right-panel-state') ?? '{}',
+      )['/tmp/project\0session-1'];
+      expect(persisted.tabs).toEqual([
+        expect.objectContaining({
+          kind: 'turn_calls',
+          ...(phase === 'running'
+            ? { promptId: entry.promptId }
+            : { recordId: entry.turnId }),
+        }),
+      ]);
+      await act(async () =>
+        first.container
+          .querySelector<HTMLButtonElement>('[aria-label="Prompt"]')!
+          .click(),
+      );
+      expect(
+        document.body.querySelector('[role="option"][aria-selected="true"]')
+          ?.textContent,
+      ).toBe(entry.label);
+      await act(async () =>
+        first.container
+          .querySelector<HTMLButtonElement>('[aria-label="Prompt"]')!
+          .click(),
+      );
+      if (phase === 'running') {
+        expect(mockWorkspace.client.getSessionToolCalls).not.toHaveBeenCalled();
+        settle();
+        first.rerender();
+        await flush();
+        await flush();
+      }
+      expect(
+        mockWorkspace.client.getSessionToolCalls,
+      ).toHaveBeenCalledExactlyOnceWith('session-1', entry.turnId);
+      expect(first.container.textContent).toContain('printf sender');
+      act(() => first.unmount());
+      testState.blocks = [];
+      testState.turnLocations.clear();
+      mockWorkspace.client.getSessionToolCalls.mockClear();
+      const restored = renderApp({ showToolCalls: true });
+      await flush();
+      await flush();
+      expect(
+        restored.container.querySelector('button[title="Tool calls"]'),
+      ).not.toBeNull();
+      expect(restored.container.textContent).toContain('printf sender');
+      expect(
+        mockWorkspace.client.getSessionToolCalls,
+      ).toHaveBeenCalledExactlyOnceWith('session-1', entry.turnId);
+    },
+  );
+
+  it('restores live turn calls by prompt identity before its record arrives', async () => {
+    const user = {
+      id: 'user-1',
+      promptId: 'prompt-1',
+      kind: 'user',
+      text: 'Live prompt',
+      createdAt: 100,
+      updatedAt: 100,
+      clientReceivedAt: 100,
+    };
+    testState.blocks = [user];
+    const first = renderApp({ showToolCalls: true });
+    await flush();
+    act(() => testState.openTurnCalls?.('user-1'));
+    await flush();
+    const persistedTabs = () =>
+      JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      )['/tmp/project\0session-1'].tabs;
+    expect(persistedTabs()).toEqual([
+      expect.objectContaining({ kind: 'turn_calls', promptId: 'prompt-1' }),
+    ]);
+    act(() => first.unmount());
+    testState.blocks = [{ ...user, id: 'new-projection-user' }];
+    const { rerender, container } = renderApp({ showToolCalls: true });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('button[title="Tool calls"]'),
+    ).not.toBeNull();
+
+    testState.blocks = [
+      {
+        ...user,
+        id: 'new-projection-user',
+        sourceRecordIds: ['record-after-echo'],
+      },
+    ];
+    rerender();
+    await flush();
+    await flush();
+    expect(persistedTabs()).toEqual([
+      expect.objectContaining({
+        kind: 'turn_calls',
+        recordId: 'record-after-echo',
+      }),
+    ]);
+  });
+
+  it.each([undefined, ''])(
+    'ignores a stored turn calls tab without a durable record: %s',
+    async (recordId) => {
+      window.localStorage.setItem(
+        'qwen-code-web-shell-right-panel-state',
+        JSON.stringify({
+          '/tmp/project\0session-1': {
+            open: true,
+            activeTabId: 'turn_calls',
+            tabs: [
+              {
+                id: 'turn_calls',
+                kind: 'turn_calls',
+                title: 'Turn calls',
+                turnId: 'user-1',
+                recordId,
+              },
+            ],
+          },
+        }),
+      );
+      const { container } = renderApp({ showToolCalls: true });
+      await flush();
+      await flush();
+      expect(container.querySelector('button[title="Tool calls"]')).toBeNull();
+      expect(
+        mockWorkspace.client.getSessionTranscriptPage,
+      ).not.toHaveBeenCalled();
+    },
+  );
 
   it('reopens the right panel after a reload connects the session', async () => {
     window.localStorage.setItem(
@@ -10748,6 +11300,10 @@ function makePlanPermissionBlock() {
 }
 
 beforeEach(() => {
+  testState.turnChoices = [];
+  testState.turnLocations.clear();
+  testState.provisionalTurns = [];
+  testState.promptStatus = 'idle';
   // Split persistence uses sessionStorage; clear it so one test's split doesn't
   // auto-restore into the next test's App mount.
   try {
@@ -10847,6 +11403,8 @@ beforeEach(() => {
     .mockResolvedValue({ enabled: false, install: { state: 'missing' } });
   mockWorkspace.client.workspaceByCwd.mockReset();
   mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+    getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+    getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
     workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
     workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
     workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
@@ -10883,6 +11441,14 @@ beforeEach(() => {
   );
   mockWorkspace.client.detachSession.mockReset();
   mockWorkspace.client.detachSession.mockResolvedValue(undefined);
+  mockWorkspace.client.getSessionToolCalls.mockReset();
+  mockWorkspace.client.getSessionTurnIndexPage.mockReset();
+  mockWorkspace.client.getSessionTurnIndexPage.mockResolvedValue({
+    snapshot: 'snapshot',
+    start: 0,
+    totalTurns: 0,
+    turns: [],
+  });
   mockWorkspace.client.getSessionTranscriptPage.mockReset();
   mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
     v: 1,
@@ -10975,6 +11541,7 @@ beforeEach(() => {
   testState.latestStatusBarOnSelectModel = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
+  testState.openTurnCalls = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
@@ -21920,6 +22487,53 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('keeps a workspace context when a global new-session draft has no cwd', async () => {
+    // The missing-session "New session" button asks for a { kind: 'global' }
+    // draft. With no standalone capability and no trusted primary, that draft
+    // has no cwd either, so it reaches the very same `nextContext === undefined`
+    // the leave-Live fallback relies on — but the connection here is a
+    // workspace one, and only a context this click chose to leave may be
+    // dropped (#12620).
+    mockConnection.status = 'disconnected';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Session load failed';
+    mockConnection.errorStatus = 404;
+    mockConnection.missingSession = true;
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+    mockWorkspace.capabilities = {
+      features: [],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    // Mirrors production `clearSession`: the session id always goes, but the
+    // connection's session context only goes when the caller asks to drop it.
+    mockSessionActions.clearSession.mockImplementation(
+      async (options?: { dropSessionContext?: boolean }) => {
+        mockConnection.sessionId = undefined;
+        if (options?.dropSessionContext) {
+          mockConnection.sessionContext = undefined;
+        }
+      },
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'New session')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledWith(undefined);
+    expect(mockConnection.sessionContext).toEqual({
+      kind: 'workspace',
+      cwd: '/workspace',
+    });
+  });
+
   it('shows an automatic recap when the session remains active', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {
@@ -30723,6 +31337,88 @@ describe('App session callbacks', () => {
     expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
   });
 
+  it('lands in the no-workspace area after deleting the current standalone session', async () => {
+    // #12619: an attached standalone session carries no connection cwd, so
+    // the sidebar/picker delete call sites substitute the primary workspace
+    // cwd for the missing one. The post-delete landing must stay in the
+    // no-workspace area instead of following that fallback into the primary
+    // workspace.
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="delete-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+    expect(
+      testState.latestChatEditorProps?.selectedWorkspaceCwd,
+    ).toBeUndefined();
+    expect(onSessionIdChange).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'standalone' },
+    );
+  });
+
+  it('still leaves the deleted conversation when session_closed clears the attachment first', async () => {
+    // Real-stack ordering from the maintainer verification of #12619: the
+    // daemon publishes the terminal `session_closed` frame shortly before it
+    // answers POST /sessions/delete, so `connection.sessionId` is already
+    // undefined when the sidebar reports the removal. Reading the attachment
+    // at that point makes the call site return early, and the page keeps
+    // showing the deleted transcript with no way to send another prompt.
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    // The terminal frame lands before the delete response resolves.
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+
+    // The sidebar reports the removal with the id it captured at confirm time.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="delete-session-after-close"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
   it("keeps the deleted current session's workspace for the next chat", async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
@@ -33966,6 +34662,35 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="split-view-page"]'),
     ).not.toBeNull();
   });
+
+  it.each([true, undefined, false])(
+    'respects host open ownership %s without swallowing native fallback',
+    async (handled) => {
+      const onRightPanelOpen = vi.fn(() => handled);
+      const { container } = renderApp({ onRightPanelOpen });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+      });
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="split-open-attachment-one"]',
+          )
+          ?.click();
+      });
+      expect(onRightPanelOpen).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'attachment' }),
+      );
+      expect(
+        document.body.querySelectorAll(
+          'aside[aria-label="Right panel"] button[role="tab"]',
+        ),
+      ).toHaveLength(handled === false ? 1 : 0);
+    },
+  );
 
   it('keeps same-name attachment tabs separate across split sessions', async () => {
     const { container } = renderApp();
@@ -37590,7 +38315,7 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('keeps the Live path for New task when no draft target exists', async () => {
+  it('opens a plain draft from New task in a Live chat when no draft target exists', async () => {
     mockConnection.sessionContext = { kind: 'live' };
     mockConnection.workspaceCwd = '';
     mockWorkspace.capabilities = {
@@ -37605,7 +38330,19 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const { container } = renderApp();
+    // Mirrors production `clearSession`: the session id always goes, but the
+    // connection's session context only goes when the caller asks to drop it
+    // — which is exactly what the leave-Live fallback has to do, because an
+    // undefined pending context means "inherit from the connection".
+    mockSessionActions.clearSession.mockImplementation(
+      async (options?: { dropSessionContext?: boolean }) => {
+        mockConnection.sessionId = undefined;
+        if (options?.dropSessionContext) {
+          mockConnection.sessionContext = undefined;
+        }
+      },
+    );
+    const { container, rerender } = renderApp();
     await flush();
 
     await act(async () => {
@@ -37614,10 +38351,30 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    await flush();
+    await act(async () => {
+      rerender();
+      await flush();
+    });
 
-    expect(mockWorkspace.client.startLive).toHaveBeenCalledWith('new');
-    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockWorkspace.client.startLive).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledWith({
+      dropSessionContext: true,
+    });
+    expect(mockConnection.sessionContext).toBeUndefined();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('task prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: undefined,
+        sessionContext: undefined,
+      }),
+    );
   });
 
   it('keeps a legacy Live runtime cwd out of workspace product context', async () => {
