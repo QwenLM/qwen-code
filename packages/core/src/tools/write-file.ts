@@ -530,6 +530,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
     }
 
+    abortSignal.throwIfAborted();
+
     // Create parent directories AFTER the pre-write enforcement
     // check passes. Doing it before would leak intermediate
     // directories on the failure path (rejected new-file writes
