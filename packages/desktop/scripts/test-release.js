@@ -767,24 +767,86 @@ globalThis.fetch = async (url) => {
   );
   assert.equal(fs.existsSync(path.join(cacheDir, 'SHASUMS256.txt')), false);
 
-  // A target the repo pins nothing for must still produce a runtime: the
+  // A target with a missing node-pty pin must still produce a runtime: the
   // degrade arm fires on a dropped pin, not on an unknown target, and failing
   // there would trade a missing Web Terminal for no app at all (#11872).
-  // Emptying optionalDependencies reproduces that for this fixture's target,
-  // which desktopTarget() accepts.
   fs.writeFileSync(
     path.join(sourceRoot, 'package.json'),
-    JSON.stringify({ version: '0.0.0-test' }),
+    JSON.stringify({
+      version: '0.0.0-test',
+      optionalDependencies: {
+        '@lydell/node-pty-darwin-x64': '0.0.0-test',
+      },
+    }),
   );
-  const degraded = spawnSync(process.execPath, [testScript], {
+  const missingWrapper = spawnSync(process.execPath, [testScript], {
     encoding: 'utf8',
     env,
   });
-  assert.equal(degraded.status, 0, degraded.stderr);
-  assert.match(degraded.stderr, /@lydell\/node-pty-darwin-x64 is not pinned/);
+  assert.equal(missingWrapper.status, 0, missingWrapper.stderr);
+  assert.match(missingWrapper.stderr, /@lydell\/node-pty is not pinned/);
   assert.equal(
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'lib', 'node_modules')),
     false,
+  );
+
+  fs.writeFileSync(
+    path.join(sourceRoot, 'package.json'),
+    JSON.stringify({
+      version: '0.0.0-test',
+      optionalDependencies: { '@lydell/node-pty': '0.0.0-test' },
+    }),
+  );
+  const missingPrebuild = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(missingPrebuild.status, 0, missingPrebuild.stderr);
+  assert.match(
+    missingPrebuild.stderr,
+    /@lydell\/node-pty-darwin-x64 is not pinned/,
+  );
+
+  fs.writeFileSync(
+    path.join(sourceRoot, 'package.json'),
+    JSON.stringify({
+      version: '0.0.0-test',
+      optionalDependencies: { '@lydell/node-pty-darwin-x64': 'latest' },
+    }),
+  );
+  const missingWrapperBeforeMalformedPrebuild = spawnSync(
+    process.execPath,
+    [testScript],
+    { encoding: 'utf8', env },
+  );
+  assert.equal(
+    missingWrapperBeforeMalformedPrebuild.status,
+    0,
+    missingWrapperBeforeMalformedPrebuild.stderr,
+  );
+  assert.match(
+    missingWrapperBeforeMalformedPrebuild.stderr,
+    /@lydell\/node-pty is not pinned/,
+  );
+
+  fs.writeFileSync(
+    path.join(sourceRoot, 'package.json'),
+    JSON.stringify({
+      version: '0.0.0-test',
+      optionalDependencies: {
+        '@lydell/node-pty': 'latest',
+        '@lydell/node-pty-darwin-x64': '0.0.0-test',
+      },
+    }),
+  );
+  const malformedVersion = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.notEqual(malformedVersion.status, 0);
+  assert.match(
+    malformedVersion.stderr,
+    /node-pty package version must be exact for @lydell\/node-pty/,
   );
 
   const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
