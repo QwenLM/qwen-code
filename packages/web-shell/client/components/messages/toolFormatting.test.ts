@@ -330,6 +330,19 @@ describe('toolFormatting', () => {
     ).toBe('cat ~/.qwen/settings.json (查看 ~/.qwen/settings.json 文件内容)');
   });
 
+  it('ignores blank or non-string file descriptions', () => {
+    for (const description of ['   ', 42, {}]) {
+      expect(
+        getToolDescription(
+          tool({
+            toolName: 'read_file',
+            args: { file_path: 'src/orders.ts', description },
+          }),
+        ),
+      ).toBe('src/orders.ts');
+    }
+  });
+
   it('uses semantic shell descriptions for summaries', () => {
     const shellTool = tool({
       toolName: 'run_shell_command',

@@ -37,6 +37,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import * as toolCallsReader from './session-tool-calls.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
@@ -701,6 +702,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_git_worktrees',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -788,6 +790,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
       f !== 'workspace_github_prs' &&
+      f !== 'workspace_git_worktrees' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -832,6 +835,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_git_worktrees',
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',
@@ -30390,6 +30394,237 @@ describe('createServeApp', () => {
       ]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('reads tool calls only from the qualified persisted workspace without attaching ACP', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa1';
+      const secondaryCwd = path.join(wsDir, 'secondary-tools');
+      await fsp.mkdir(secondaryCwd);
+      await writeTranscriptSession(
+        sid,
+        'active',
+        wsDir,
+        'primary private text',
+      );
+      await writeTranscriptSession(
+        sid,
+        'active',
+        secondaryCwd,
+        'selected workspace prompt',
+      );
+      const primary = fakeBridge();
+      const secondary = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge: primary,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge: primary,
+          }),
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'secondary-tools',
+            workspaceCwd: secondaryCwd,
+            primary: false,
+            bridge: secondary,
+          }),
+        ]),
+      });
+      const response = await request(app)
+        .get(
+          `/workspaces/secondary-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.body).toMatchObject({
+        v: 1,
+        sessionId: sid,
+        turnId: `${sid}-user-1`,
+        events: expect.any(Array),
+      });
+      expect(JSON.stringify(response.body)).toContain(
+        'selected workspace prompt',
+      );
+      expect(JSON.stringify(response.body)).not.toContain(
+        'primary private text',
+      );
+      expect(response.body).not.toHaveProperty('nextCursor');
+      expect(response.body).not.toHaveProperty('hasMore');
+      const replayFailure = vi
+        .spyOn(toolCallsReader, 'readSessionToolCalls')
+        .mockRejectedValueOnce(
+          new toolCallsReader.SessionToolCallsReplayError(),
+        );
+      try {
+        const failed = await request(app)
+          .get(
+            `/workspaces/secondary-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(failed.status).toBe(500);
+        expect(failed.body.code).toBe('tool_calls_replay_incomplete');
+      } finally {
+        replayFailure.mockRestore();
+      }
+
+      for (const bridge of [primary, secondary]) {
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+        expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+        expect(bridge.flushSessionTranscriptCalls).toHaveLength(0);
+      }
+      const unknown = await request(app)
+        .get(
+          `/workspaces/unknown-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unknown.status).not.toBe(200);
+      expect(JSON.stringify(unknown.body)).not.toContain(
+        'primary private text',
+      );
+    });
+
+    it('flushes an already loaded session before freezing the tool calls snapshot', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa4';
+      await writeTranscriptSession(sid);
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          pendingInteractionCount: 0,
+          hasTurnError: false,
+        }),
+        flushSessionTranscriptImpl: async () => {
+          const base = {
+            sessionId: sid,
+            cwd: wsDir,
+            version: '1.0.0',
+            timestamp: '2026-05-28T12:00:01.000Z',
+          };
+          await fsp.appendFile(
+            path.join(
+              new Storage(wsDir).getProjectDir(),
+              'chats',
+              `${sid}.jsonl`,
+            ),
+            [
+              {
+                ...base,
+                uuid: 'flushed-call',
+                parentUuid: `${sid}-user-1`,
+                type: 'assistant',
+                message: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'flushed',
+                        name: 'read_file',
+                        args: { file_path: '/flushed' },
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                ...base,
+                uuid: 'flushed-result',
+                parentUuid: 'flushed-call',
+                type: 'tool_result',
+                message: {
+                  role: 'user',
+                  parts: [
+                    {
+                      functionResponse: {
+                        id: 'flushed',
+                        name: 'read_file',
+                        response: { output: 'flushed output' },
+                      },
+                    },
+                  ],
+                },
+                toolCallResult: {
+                  callId: 'flushed',
+                  responseParts: [],
+                  resultDisplay: 'flushed output',
+                },
+              },
+            ]
+              .map((record) => JSON.stringify(record))
+              .join('\n') + '\n',
+          );
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'flushed-tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge,
+          }),
+        ]),
+      });
+      const response = await request(app)
+        .get(
+          `/workspaces/flushed-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(JSON.stringify(response.body)).toContain('flushed output');
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.loadCalls).toHaveLength(0);
+      expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('requires a persisted turn anchor for tool calls and rejects archived sessions', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa2';
+      const archivedSid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa3';
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(archivedSid, 'archived');
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge,
+          }),
+        ]),
+      });
+      for (const suffix of [
+        '',
+        '?turnId=',
+        '?turnId=a&turnId=b',
+        '?turnId=missing',
+      ]) {
+        const response = await request(app)
+          .get(`/workspaces/tools/session/${sid}/tool-calls${suffix}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_turn_anchor');
+      }
+      const archived = await request(app)
+        .get(
+          `/workspaces/tools/session/${archivedSid}/tool-calls?turnId=${archivedSid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(archived.status).toBe(409);
+      expect(archived.body.code).toBe('session_archived');
+      expect(bridge.loadCalls).toHaveLength(0);
     });
 
     it('flushes the first live backward workspace transcript page', async () => {

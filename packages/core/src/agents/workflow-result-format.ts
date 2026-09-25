@@ -6,6 +6,7 @@
 
 import { types } from 'node:util';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
 function renderError(error: Error): string {
   const name = typeof error.name === 'string' ? error.name : 'Error';
@@ -40,7 +41,7 @@ export function stringifyWorkflowResult(
 }
 
 /**
- * Preserve line structure and indentation while removing terminal controls.
+ * Preserve line structure and indentation while removing terminal and bidi controls.
  * stripAnsiAndControl removes newlines and tabs, so sanitize per line after
  * expanding tabs to spaces.
  */
@@ -48,7 +49,7 @@ export function sanitizeWorkflowText(text: string): string {
   return text
     .replace(/\t/g, '  ')
     .split('\n')
-    .map((line) => stripAnsiAndControl(line))
+    .map((line) => stripDisplayControlChars(stripAnsiAndControl(line)))
     .join('\n');
 }
 

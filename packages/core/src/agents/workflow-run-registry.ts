@@ -685,7 +685,9 @@ export class WorkflowRunRegistry {
     if (entry.status !== 'completed' && entry.status !== 'failed') return;
 
     const statusText = entry.status === 'completed' ? 'completed' : 'failed';
-    const label = stripAnsiAndControl(entry.description) || entry.runId;
+    const label =
+      sanitizeWorkflowText(stripAnsiAndControl(entry.description)) ||
+      entry.runId;
     const prefix = entry.isBackgrounded ? 'Background workflow' : 'Workflow';
     const summary = `${prefix} "${label}" ${statusText}.`;
     const resultText =
@@ -777,7 +779,11 @@ export class WorkflowRunRegistry {
     };
     try {
       runOutsideAgentContext(() =>
-        this.completionCallback!(displayText, modelParts.join('\n'), meta),
+        this.completionCallback!(
+          sanitizeWorkflowText(displayText),
+          sanitizeWorkflowText(modelParts.join('\n')),
+          meta,
+        ),
       );
     } catch (error) {
       debugLogger.error('Failed to emit workflow completion:', error);
@@ -1591,7 +1597,10 @@ export class WorkflowRunRegistry {
     // Script-derived failure text rides into the snapshot, the /workflows
     // render, and the completion-notification XML: normalize it once at
     // this boundary and persist the same string in both projections.
-    entry.error = stripAnsiAndControl(message).slice(0, 4_096);
+    entry.error = sanitizeWorkflowText(stripAnsiAndControl(message)).slice(
+      0,
+      4_096,
+    );
     this.appendEvent(entry, {
       type: 'workflow-failed',
       at: endTime,

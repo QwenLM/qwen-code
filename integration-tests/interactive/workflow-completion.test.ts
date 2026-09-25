@@ -247,7 +247,9 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           `Reported error: Error: ${testCase.reportedError}`,
         );
         expect(reported).not.toContain(' at ');
-        expect(reported).not.toContain('Reported errors: [{}]');
+        expect(reported).toContain(
+          'Reported errors: [\\"Error: WORKFLOW_VM_ERROR_12176\\",\\"Error: AGENT_B_TIMEOUT_12176\\",\\"Error: AGENT_C_OOM_12176\\"]',
+        );
       }
       for (const detail of testCase.resultDetails ?? []) {
         const payload = isSlash

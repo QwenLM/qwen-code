@@ -293,6 +293,7 @@ export type {
   PaneHeaderActionsRenderer,
 } from './components/ChatPane';
 export type {
+  ArtifactFilter,
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './components/artifacts/TurnOutputs';
@@ -326,3 +327,5 @@ export type {
   WebShellMessageNavigationRequest,
   WebShellMessageNavigationResult,
 } from './hooks/useMessageNavigation';
+export { highlightCode } from './components/messages/codeHighlighter';
+export type { CodeHighlightRequest } from './components/messages/codeHighlighter';
