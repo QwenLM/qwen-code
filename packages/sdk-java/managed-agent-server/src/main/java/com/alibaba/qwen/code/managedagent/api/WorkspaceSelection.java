@@ -3,13 +3,15 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import com.fasterxml.jackson.databind.JsonNode;
+import java.util.regex.Pattern;
 import org.springframework.http.HttpStatus;
 
 public record WorkspaceSelection(String workspaceId, String cwdRelative) {
+    private static final Pattern IDENTIFIER =
+            Pattern.compile("[A-Za-z0-9._:-]{1,128}");
+
     public WorkspaceSelection {
-        if (workspaceId == null || workspaceId.isBlank()
-                || workspaceId.length() > 128
-                || hasUnpairedSurrogate(workspaceId)) {
+        if (workspaceId == null || !IDENTIFIER.matcher(workspaceId).matches()) {
             throw invalidRequest();
         }
         if (cwdRelative == null) {
@@ -52,21 +54,6 @@ public record WorkspaceSelection(String workspaceId, String cwdRelative) {
         } catch (WorkspaceException error) {
             throw invalidCwd();
         }
-    }
-
-    private static boolean hasUnpairedSurrogate(String value) {
-        for (int index = 0; index < value.length(); index++) {
-            char current = value.charAt(index);
-            if (Character.isHighSurrogate(current)) {
-                if (++index == value.length()
-                        || !Character.isLowSurrogate(value.charAt(index))) {
-                    return true;
-                }
-            } else if (Character.isLowSurrogate(current)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static ApiException invalidRequest() {
