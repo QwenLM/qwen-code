@@ -51,13 +51,15 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.enableWelcomeBack',
 ]);
 
-// `voiceModel` is `showInDialog: false` (so not in the dialog allowlist), but
-// the Web Shell `/model --voice` picker needs to read + persist it; the daemon
+// `voiceModel`, `imageModel`, and `advisorModel` are `showInDialog: false` (so
+// not in the dialog allowlist), but the Web Shell settings panel still renders
+// their rows and needs to read + persist them; for `voiceModel` the daemon
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
   'ui.compactMode',
   'voiceModel',
   'imageModel',
+  'advisorModel',
   'mcpServers',
 ]);
 
