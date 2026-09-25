@@ -3048,3 +3048,203 @@ describe('cancel/flush coordination', () => {
     );
   });
 });
+
+describe('verified fix regressions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps the [sender · task] label on the anchored final segment (Fix 1)', async () => {
+    const ch = makeChannel();
+
+    // The labeled chunk is flushed by the idle timer and its state entry is
+    // torn down; the later residual creates a fresh entry with no label of
+    // its own, so the label can only come from the completion segment.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
+    onResponseChunk(
+      ch,
+      'test-chat',
+      'part-1 ',
+      'sess-A',
+      undefined,
+      '[Alice · fix]',
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    onResponseChunk(ch, 'test-chat', 'part-2', 'sess-A');
+    await (
+      ch as unknown as {
+        onResponseComplete: (
+          c: string,
+          f: string,
+          s: string,
+          seg?: { sourceLabel?: string },
+        ) => Promise<void>;
+      }
+    ).onResponseComplete('test-chat', 'ignored', 'sess-A', {
+      sourceLabel: '[Alice · fix]',
+    });
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    const body = mockSendQQMessage.mock.calls[1][3] as {
+      markdown: { content: string };
+      msg_id?: string;
+    };
+    expect(body.markdown.content.startsWith('\\[Alice · fix\\]\n')).toBe(true);
+    // The anchored final segment stayed under the session's own msg_id.
+    expect(body.msg_id).toBe('msg-A');
+  });
+
+  it('a permanent flush failure while the turn is live keeps the msg_seq counter (Fix 2)', async () => {
+    const ch = makeChannel();
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(true))
+      .mockRejectedValueOnce(
+        new DeliveryError('FALLBACK_FAILED', 'permanent failure'),
+      )
+      .mockResolvedValueOnce(mockResponse(true));
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+
+    // Flush 1 succeeds under msg-A (seq counter 1), then a concurrent message
+    // moves the chat-level entry on to msg-B.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'part-1 ', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(seqMap.get('msg-A')).toBe(1);
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+
+    // Flush 2 fails permanently while the turn is still live. The anchor must
+    // survive so the counter is not cascaded away.
+    onResponseChunk(ch, 'test-chat', 'will-fail', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(sessionAnchors.has('sess-A')).toBe(true);
+    expect(seqMap.get('msg-A')).toBe(1);
+
+    // Flush 3 continues the counter: (msg-A, 2), not a deduped (msg-A, 1).
+    onResponseChunk(ch, 'test-chat', 'next', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(3);
+    const body = mockSendQQMessage.mock.calls[2][3] as Record<string, unknown>;
+    expect(body['msg_id']).toBe('msg-A');
+    expect(body['msg_seq']).toBe(2);
+  });
+
+  it('a parked session taken over by the normal completion path does not duplicate the next turn (Fix 4)', async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+
+    // Turn 1: the first flush is in flight when onResponseComplete parks the
+    // session for the deferred teardown.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'head', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    await onResponseComplete(ch, 'test-chat', 'head tail', 'sess-A');
+    expect(pendingStreamDelete.has('sess-A')).toBe(true);
+
+    // A residual arrives behind the in-flight send, so the settle re-arms the
+    // park and reschedules the flush. Invalidating the scheduled retry's
+    // reconnect generation makes idleFlush discard it, leaving the park flag
+    // and the residual entry behind — the state this fix defends against.
+    onResponseChunk(ch, 'test-chat', 'tail', 'sess-A');
+    resolveSend!(mockResponse(true));
+    await drain();
+    chp['_reconnectId'] = (chp['_reconnectId'] as number) + 1;
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(pendingStreamDelete.has('sess-A')).toBe(true);
+    expect(streamState(ch).get('sess-A')!.buffer).toBe('tail');
+
+    // The normal completion path takes over the parked residual and delivers
+    // it itself — and must clear the park flag along with the entry.
+    await onResponseComplete(ch, 'test-chat', 'head tail', 'sess-A');
+    expect(pendingStreamDelete.has('sess-A')).toBe(false);
+
+    // Turn 2: its idle flush delivers its text once; the completion must not
+    // deliver it a second time (a stale park made that flush's settle clear
+    // flushedSessions mid-turn, so onResponseComplete re-sent the text).
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'turn2', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    await onResponseComplete(ch, 'test-chat', 'turn2', 'sess-A');
+
+    const delivered = mockSendQQMessage.mock.calls
+      .map(
+        (c) =>
+          (c[3] as Record<string, unknown>)['markdown'] as {
+            content: string;
+          },
+      )
+      .filter((m) => m.content === 'turn2');
+    expect(delivered).toHaveLength(1);
+  });
+
+  it('a mid-turn response boundary does not arm the turn-ending teardown (Fix 3)', async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+
+    // part1 is in flight when part2 buffers behind it.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'part1 ', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    onResponseChunk(ch, 'test-chat', 'part2', 'sess-A');
+
+    // A mid-turn boundary (tool call / plan update) must not park the session
+    // for teardown; it hands the residual to the idle timer instead.
+    onResponseBoundary(ch, 'test-chat', 'sess-A');
+    expect(pendingStreamDelete.has('sess-A')).toBe(false);
+
+    resolveSend!(mockResponse(true));
+    await drain();
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // The post-boundary segment went out exactly once, and completing the
+    // turn does not re-send it.
+    await onResponseComplete(ch, 'test-chat', 'part2', 'sess-A');
+
+    const delivered = mockSendQQMessage.mock.calls
+      .map(
+        (c) =>
+          (c[3] as Record<string, unknown>)['markdown'] as {
+            content: string;
+          },
+      )
+      .filter((m) => m.content === 'part2');
+    expect(delivered).toHaveLength(1);
+  });
+});

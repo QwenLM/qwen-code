@@ -1317,6 +1317,21 @@ export class QQChannel extends ChannelBase {
           sessionId,
           (this.streamOrphanBuffer.get(sessionId) ?? '') + chunk,
         );
+        // Self-heal: if the parked entry has no send in flight, its settle
+        // chain can never run again (idleFlush discards on a reconnect
+        // generation mismatch without clearing the handle), leaving
+        // pendingStreamDelete armed for the rest of the process and diverting
+        // every later turn out of the streaming path. Re-arm the idle flush
+        // with the CURRENT generation so the residual can settle and un-park
+        // the session.
+        if (!this.flushingSessions.has(sessionId)) {
+          if (state.timer) clearTimeout(state.timer);
+          const reconnectId = this._reconnectId;
+          state.timer = setTimeout(() => {
+            this.idleFlush(sessionId, reconnectId);
+          }, QQChannel.IDLE_FLUSH_MS);
+          state.timer.unref?.();
+        }
         return;
       }
       // Superseded turn (a deferred send parked the entry and the new prompt
@@ -1488,8 +1503,15 @@ export class QQChannel extends ChannelBase {
     )
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
+        // of the entry's, but do release the anchor: no later settle can run
+        // for this state, so otherwise its msg_seq counter is stranded.
         const current = this.streamState.get(sessionId);
-        if (current !== state) return;
+        if (current !== state) {
+          if (state.msgId !== undefined) {
+            this.releaseSessionReplyAnchor(sessionId, state.msgId);
+          }
+          return;
+        }
         current.retryCount = 0;
         this.flushedSessions.add(sessionId);
 
@@ -1562,13 +1584,18 @@ export class QQChannel extends ChannelBase {
           if (current === state) {
             this.streamState.delete(sessionId);
           }
-          // Release the anchor regardless of whether a successor turn replaced
-          // the streamState entry: the expectedMsgId identity check (plus the
-          // internal cascade guards) keeps the successor's anchor untouched
-          // while still cascading THIS turn's msg_seq counter away — without
-          // it, a superseded turn's permanent failure orphans the counter
-          // forever, contradicting releaseSessionReplyAnchor's guarantee.
-          if (state.msgId !== undefined) {
+          // Release only when the settle is terminal (the session was parked
+          // for teardown) or this entry was superseded by a later turn. While
+          // this state is still the session's live turn, the anchor belongs to
+          // the reply still streaming: releasing it now cascades the
+          // msgSeqMap counter away, and the next chunk re-resolves the same
+          // msg_id from replyContextByMessageId and restarts msg_seq at 1 —
+          // a pair QQ already accepted, which it dedupes and silently drops.
+          // onResponseComplete's terminal release reclaims it at turn end.
+          const turnStillLive =
+            state.turn === (this.turnCounter.get(sessionId) ?? 0) &&
+            !this.pendingStreamDelete.has(sessionId);
+          if (!turnStillLive && state.msgId !== undefined) {
             this.releaseSessionReplyAnchor(sessionId, state.msgId);
           }
           if (this.pendingStreamDelete.has(sessionId)) {
@@ -1683,6 +1710,12 @@ export class QQChannel extends ChannelBase {
                 );
               }
             }
+          } else if (state.msgId !== undefined) {
+            // The entry was destroyed while this send was in flight (session
+            // death or a successor turn). Nothing will settle for this state,
+            // so release its anchor here — expectedMsgId keeps a successor's
+            // anchor untouched.
+            this.releaseSessionReplyAnchor(sessionId, state.msgId);
           }
         }
       })
@@ -1729,18 +1762,32 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
   ): void {
     const state = this.streamState.get(sessionId);
+    const currentTurn = this.turnCounter.get(sessionId) ?? 0;
+    // A stale entry belongs to an earlier turn; its parked flush chain will
+    // never settle again once the deletes below drop it and its timer, so its
+    // reply anchor has to be released here (expectedMsgId-gated, so a live
+    // turn's own anchor is untouched).
+    const staleMsgId =
+      state && state.turn !== currentTurn ? state.msgId : undefined;
     if (state?.timer) {
       clearTimeout(state.timer);
       state.timer = null;
     }
     if (state && this.flushingSessions.has(sessionId)) {
-      // A send is still in flight — defer the teardown to its settle chain
-      // (which re-flushes any residual buffer) instead of clearing the entry
-      // and its flushing marker here: the next segment would otherwise start
-      // a second send on the same session while the first is live, and a
-      // failed first send would have its retry skipped by the identity guard
-      // on the replaced entry, dropping the segment's text.
-      this.pendingStreamDelete.add(sessionId);
+      // A send is still in flight. Keep the entry and its flushing marker so
+      // the next segment cannot start a second send on the same session, but
+      // do NOT arm pendingStreamDelete: that flag means "the turn is over",
+      // and its settle path runs the turn's terminal teardown. This is a
+      // mid-turn window gap, so hand the residual to the idle timer instead —
+      // idleFlush's blocked branch re-arms while the in-flight send is live.
+      if (state.buffer) {
+        if (state.timer) clearTimeout(state.timer);
+        const reconnectId = this._reconnectId;
+        state.timer = setTimeout(() => {
+          this.idleFlush(sessionId, reconnectId);
+        }, QQChannel.IDLE_FLUSH_MS);
+        state.timer.unref?.();
+      }
       return;
     }
     this.streamState.delete(sessionId);
@@ -1748,6 +1795,9 @@ export class QQChannel extends ChannelBase {
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     this.streamOrphanBuffer.delete(sessionId);
+    if (staleMsgId !== undefined) {
+      this.releaseSessionReplyAnchor(sessionId, staleMsgId);
+    }
   }
 
   protected override async onResponseComplete(
@@ -1774,7 +1824,17 @@ export class QQChannel extends ChannelBase {
           ? anchorEntry.msgId
           : undefined;
       if (captured) {
-        await this.sendMessage(chatId, fullText, captured);
+        // Keep the [sender · task] attribution: sendMessage hardcodes an
+        // undefined sourceLabel, so the anchored send goes through the
+        // reply-context helper. The stale entry's own sourceLabel belongs to
+        // the old turn, so only this turn's label is used.
+        await this.sendMessageWithReplyContext(
+          chatId,
+          fullText,
+          undefined,
+          segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
+          captured,
+        );
         this.releaseSessionReplyAnchor(sessionId, captured);
       } else {
         await super.onResponseComplete(chatId, fullText, sessionId);
@@ -1810,11 +1870,27 @@ export class QQChannel extends ChannelBase {
         : undefined;
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    // This path just took over a parked deferred flush and delivered the
+    // residual itself, so the park flag must go with the entry. Left behind,
+    // onPromptEnd early-returns on it and the NEXT turn's first successful
+    // flush consumes it mid-turn and runs the terminal settle, which clears
+    // flushedSessions and makes onResponseComplete re-send that turn's text.
+    this.pendingStreamDelete.delete(sessionId);
     if (remaining) {
       if (capturedMsgId) {
         // Final segment keeps this session's reply anchor (per-session msgId),
-        // consistent with how idleFlush/flushAndTrack send mid-stream chunks.
-        await this.sendMessage(chatId, remaining, capturedMsgId);
+        // consistent with how idleFlush/flushAndTrack send mid-stream chunks,
+        // and keeps the [sender · task] attribution: sendMessage hardcodes an
+        // undefined sourceLabel, so the anchored send goes through the
+        // reply-context helper instead (msgIdOverride still wins over the
+        // reply context, so the anchor is unchanged).
+        await this.sendMessageWithReplyContext(
+          chatId,
+          remaining,
+          undefined,
+          sourceLabel,
+          capturedMsgId,
+        );
       } else {
         if (anchorEntry) {
           // The anchor existed but outlived its TTL — a long turn whose final
