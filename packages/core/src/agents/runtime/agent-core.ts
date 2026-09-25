@@ -59,6 +59,7 @@ import type {
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
+import { buildAdvisorReminder } from '../../core/advisor-policy.js';
 import { getInitialChatHistory } from '../../core/environmentContext.js';
 import {
   finalizeToolResponses,
@@ -1021,8 +1022,21 @@ export class AgentCore {
         if (this.runtimeContext.getExecutionEnvironment?.()) {
           toolsList = await this.prepareTools();
         }
+        const advisorReminder =
+          turnCounter === 1 && this.runtimeContext.getAdvisorModel?.()
+            ? buildAdvisorReminder(
+                !!this.runtimeContext
+                  .getToolRegistry()
+                  .getTool(ToolNames.ADVISOR) &&
+                  this.isToolExecutionAllowed(ToolNames.ADVISOR),
+                toolsList.map((tool) => tool.name),
+              )
+            : undefined;
         const messageParams = {
-          message: currentMessages[0]?.parts || [],
+          message: [
+            ...(advisorReminder ? [{ text: advisorReminder }] : []),
+            ...(currentMessages[0]?.parts || []),
+          ],
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],

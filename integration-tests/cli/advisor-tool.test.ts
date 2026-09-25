@@ -97,7 +97,11 @@ function configureEnv(testDir: string, baseUrl: string): void {
   vi.stubEnv('no_proxy', noProxy);
 }
 
-async function setupRig(baseUrl: string, advisorMaxUses = 0): Promise<TestRig> {
+async function setupRig(
+  baseUrl: string,
+  advisorMaxUses = 0,
+  visible = true,
+): Promise<TestRig> {
   const nextRig = new TestRig();
   await nextRig.setup('native advisor tool', {
     settings: {
@@ -120,6 +124,8 @@ async function setupRig(baseUrl: string, advisorMaxUses = 0): Promise<TestRig> {
       security: { auth: { selectedType: 'openai' } },
       advisorModel: 'advisor-model',
       advisorMaxUses,
+      tools: { visible: visible ? ['advisor'] : [] },
+      toolSearch: { threshold: 0 },
       ui: { enableFollowupSuggestions: false },
     },
   });
@@ -164,6 +170,63 @@ async function runPrompt(prompt: string, advisor = 'advisor-model') {
 }
 
 describe('native Advisor tool', () => {
+  it('discovers a deferred advisor and consults through the bridge without changing declarations', async () => {
+    server = await startFakeOpenAIServer(({ body }) => {
+      if (body['model'] === 'advisor-model') {
+        return { content: 'Deferred consultation succeeded.' };
+      }
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      const text = requestText(body);
+      if (text.includes('Deferred consultation succeeded.')) {
+        return { content: 'Executor continued after deferred advice.' };
+      }
+      const found = messages(body).some(
+        (message) =>
+          message['role'] === 'tool' &&
+          contentText(message['content']).includes('<functions>'),
+      );
+      return {
+        toolCalls: [
+          found
+            ? fakeToolCall(
+                'tool_call',
+                { name: 'advisor', arguments: {} },
+                'consult',
+              )
+            : fakeToolCall(
+                'tool_search',
+                { query: 'select:advisor' },
+                'discover',
+              ),
+        ],
+      };
+    }, fakeServerHostOptions());
+    rig = await setupRig(server.baseUrl, 0, false);
+    const output = await runPrompt(
+      'Assess this substantial implementation approach.',
+    );
+    expect(output).toContain('Executor continued after deferred advice.');
+    const requests = server.requests.map((request) => request.body);
+    const executor = requests.filter(
+      (body) => body['model'] === 'executor-model' && body['stream'] === true,
+    );
+    expect(executor.length).toBe(3);
+    expect(requestText(executor[0])).toContain('gather context first');
+    for (const body of executor) {
+      expect(toolNames(body)).not.toContain('advisor');
+      expect(toolNames(body)).toContain('tool_search');
+      expect(toolNames(body)).toContain('tool_call');
+    }
+    expect(toolNames(executor[2])).toEqual(toolNames(executor[0]));
+    const advisor = requests.filter(
+      (body) => body['model'] === 'advisor-model',
+    );
+    expect(advisor).toHaveLength(1);
+    expect(toolNames(advisor[0])).toEqual([]);
+  });
+
   it('forwards the transcript to a no-tools model and reinjects its review', async () => {
     let evidenceFile = '';
     server = await startFakeOpenAIServer(({ body }) => {

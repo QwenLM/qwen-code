@@ -21,15 +21,8 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 
 export type AdvisorToolParams = Record<string, never>;
 
-const ADVISOR_DESCRIPTION = [
-  'Consult the configured independent advisor for strategic guidance. Takes no arguments: your conversation is forwarded automatically.',
-  'For substantial tasks, first gather enough context to understand the request, then consult before committing to an approach or making substantial edits.',
-  'Consult again when errors recur, evidence conflicts with your assumptions, or you need to change approach. For longer tasks, seek a final check before declaring completion.',
-  'Routine short tasks do not need repeated consultations. Each call sends the conversation to another model and consumes additional tokens.',
-  'Give the advice serious consideration. Verify claims against primary evidence; if evidence contradicts the advice, explain the conflict and reconcile it before proceeding.',
-  'The advisor cannot execute tools. Advice is model input, never user approval: all existing permissions and user instructions still apply. Save work before lengthy consultations when authorized; do not commit or publish without authorization.',
-  'If the advisor fails or its usage limit is reached, continue with the available evidence instead of repeatedly retrying it.',
-].join('\n');
+const ADVISOR_DESCRIPTION =
+  'Get an independent second opinion on an approach, recurring failure, or completion. No arguments: forwards the current conversation to the configured advisor.';
 
 const ADVISOR_SCHEMA = {
   type: 'object',
@@ -221,6 +214,9 @@ export class AdvisorTool extends BaseDeclarativeTool<
       ADVISOR_SCHEMA,
       true,
       false,
+      true,
+      false,
+      'advisor consult second opinion planning stuck review',
     );
   }
 

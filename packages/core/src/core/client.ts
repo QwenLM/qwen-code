@@ -13,6 +13,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import { buildAdvisorReminder } from './advisor-policy.js';
 import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
@@ -4063,6 +4064,14 @@ export class LlmClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
+        if (this.config.getAdvisorModel?.()) {
+          const registry = this.config.getToolRegistry();
+          const advisorReminder = buildAdvisorReminder(
+            !!registry.getTool('advisor'),
+            registry.getFunctionDeclarations().map((tool) => tool.name),
+          );
+          if (advisorReminder) systemReminders.push(advisorReminder);
+        }
 
         if (
           messageType === SendMessageType.UserQuery &&
