@@ -63,9 +63,14 @@ reusable channels and startup promises. Coalesce startup within an engine;
 allow the two engines to start independently. Track dying generations until
 physical exit. Channel quarantine blocks fresh work only for that engine.
 
-Idle timers belong to the actual channel. A late exit from an old generation
-must not cancel another channel's timer. Shutdown awaits every engine startup,
-selection, session operation and owned channel; force shutdown reaches all
+Idle timers belong to the actual channel. Binding a restore to its channel and
+settling the restore both recheck idle channels, including timers consumed while
+selection had not yet bound an owner. An unrelated idle channel must not wait
+for the selected engine's restore RPC or cleanup to finish. Re-evaluation arms
+missing timers without extending another channel's existing idle deadline.
+A late exit from an old generation must not cancel another channel's timer.
+Shutdown awaits every engine startup, selection, session operation and owned
+channel; force shutdown reaches all
 tracked children. No failure path switches to the other factory.
 
 ### Registration and cleanup
@@ -80,6 +85,8 @@ merely because a malformed response returned its ID.
 Restore failures after a successful ACP response use the same original-channel
 cleanup discipline. Public timeout is not evidence of physical completion.
 Keep reservations until the original operation settles and cleanup completes.
+The cleanup fence covers receipt rejection as well as timeout; its retry hint
+is a backoff policy, not an estimate of when cleanup will complete.
 
 ### Live routing and workspace operations
 
@@ -89,10 +96,17 @@ and generation events must also match the sending channel/connection.
 
 Workspace MCP, configuration/status control and preheat use Legacy. Aggregate
 liveness and activity inspect both engines; idle reclamation locates the actual
-candidate by ID. The existing workspace-stop receipt addresses one physical
-channel, so stopping multiple live channels is explicitly blocked until that
-receipt is extended. A single live channel remains stoppable. Managed
-branch/side-task requests reject before mutating history.
+candidate by ID. Preheat keepalive extends only Legacy's idle deadline. Managed
+sessions and in-flight work prevent their own channel from being reclaimed;
+Managed has no independent preheat keepalive in this slice. Child resource
+sampling and user-language delivery also remain Legacy-only. Before production
+enablement, #12380 must define per-engine resource aggregation and language
+propagation together with host wiring.
+
+The existing workspace-stop receipt addresses one physical channel, so stopping
+multiple live channels is explicitly blocked until that receipt is extended.
+A single live channel remains stoppable. Managed branch/side-task requests reject
+before mutating history.
 
 ## Files and consumers
 

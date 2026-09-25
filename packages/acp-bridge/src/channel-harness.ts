@@ -260,7 +260,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     }
     if (!armIdleTimer) return;
     for (const ci of channelLifecycle.values()) {
-      if (!ci.isDying && hasNoChannelWork(ci)) {
+      if (!ci.isDying && !idleTimers.has(ci) && hasNoChannelWork(ci)) {
         await startIdleTimer(ci, context);
       }
     }

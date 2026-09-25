@@ -57,6 +57,8 @@ const EN: Messages = {
   'capacityChoice.resume': 'Resume conversation',
   'capacityChoice.blocked.stopping': 'Stopping',
   'capacityChoice.blocked.not_live': 'No live ACP',
+  'capacityChoice.blocked.multiple_engine_channels':
+    'Multiple execution engines are running',
   'capacityChoice.blocked.release_unavailable':
     'Owned process release cannot be observed',
   'capacityChoice.blocked.session_start_pending':
@@ -4135,6 +4137,7 @@ const ZH: Messages = {
   'capacityChoice.resume': '恢复会话',
   'capacityChoice.blocked.stopping': '正在停止',
   'capacityChoice.blocked.not_live': '没有运行中的 ACP',
+  'capacityChoice.blocked.multiple_engine_channels': '多个执行引擎正在运行',
   'capacityChoice.blocked.release_unavailable': '无法确认自有进程释放',
   'capacityChoice.blocked.session_start_pending': '正在启动或恢复会话',
   'capacityChoice.blocked.workspace_control_pending':

@@ -2380,7 +2380,7 @@ export function createSessionControlPlane(
   // `reason`. Scanned rather than tracked in a single variable, so a second
   // condemned channel can never silently displace the first.
   const freshSessionBlocker = (
-    engine?: BridgeExecutionEngine,
+    engine: BridgeExecutionEngine | undefined,
   ):
     | { channel: ChannelInfo; reason: BridgeChannelUnavailableReason }
     | undefined => {
@@ -2403,7 +2403,7 @@ export function createSessionControlPlane(
     return undefined;
   };
   const assertFreshSessionsAvailable = (
-    engine?: BridgeExecutionEngine,
+    engine: BridgeExecutionEngine | undefined,
   ): void => {
     assertRuntimeNotStopping();
     const blocker = freshSessionBlocker(engine);
@@ -2416,10 +2416,15 @@ export function createSessionControlPlane(
       );
     }
   };
+  const assertFreshSessionAdmissionOpen = (): void => {
+    // Paired quarantine is checked after selection so a healthy engine remains usable.
+    if (executionEngines) assertRuntimeNotStopping();
+    else assertFreshSessionsAvailable(undefined);
+  };
   const reserveFreshSession = (
     context: BridgeFreshSessionAdmissionContext,
   ): BridgeFreshSessionReservation | undefined => {
-    assertFreshSessionsAvailable();
+    assertFreshSessionAdmissionOpen();
     return opts.freshSessionAdmission?.(context);
   };
   const releaseFreshSessionReservation = (
@@ -7730,7 +7735,7 @@ export function createSessionControlPlane(
       };
     }
 
-    assertFreshSessionsAvailable();
+    assertFreshSessionAdmissionOpen();
     if (
       byId.size +
         inFlightSpawns.size +
@@ -7939,6 +7944,7 @@ export function createSessionControlPlane(
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       const restoreChannel = getChannelInfo(await harness.ensure(engine));
       restoreLifecycle.channel = restoreChannel;
+      void harness.settleReleasedRuntimeWork('session restore owner selected');
       if (restoreChannel.harness.isDying) {
         throw new BridgeChannelClosedError(`before session/${action}`);
       }
@@ -8599,7 +8605,7 @@ export function createSessionControlPlane(
         // Delete BEFORE settling: `hasNoChannelWork` counts in-flight
         // restores as channel work, so this restore's own entry would
         // otherwise block the reap of a channel it left empty.
-        void harness.settleReleasedRuntimeWork('session restore', false);
+        void harness.settleReleasedRuntimeWork('session restore');
       }
     });
     return await promise;
@@ -9785,7 +9791,7 @@ export function createSessionControlPlane(
       // (a fresh-spawn race that's about to register hasn't hit
       // `byId` yet but should still count toward the limit). Attaches
       // returned above bypass this — only NEW children are gated.
-      assertFreshSessionsAvailable();
+      assertFreshSessionAdmissionOpen();
       if (
         byId.size +
           inFlightSpawns.size +

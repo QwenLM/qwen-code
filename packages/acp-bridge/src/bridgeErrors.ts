@@ -162,9 +162,9 @@ export class SessionArchivingError extends Error {
  *
  * `restore_in_progress` is the ordinary case: a restore is running and the
  * caller can retry shortly. `awaiting_abandoned_cleanup` means the public
- * caller already received a timeout, but the non-cancellable ACP registration
- * request (and its cleanup) has not settled yet — retrying at the ordinary
- * cadence just re-hits the fence, so clients must back off much further.
+ * caller already received a timeout or registration failure, but registration
+ * or cleanup has not settled yet. Its conservative backoff is not an estimate
+ * of when cleanup will complete.
  */
 export type RestoreInProgressReason =
   | 'restore_in_progress'
@@ -205,7 +205,7 @@ export class RestoreInProgressError extends Error {
         : `session/${activeAction}`;
     super(
       reason === 'awaiting_abandoned_cleanup'
-        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned registration has not settled yet; retry ${retryTarget} once cleanup completes`
+        ? `Session "${sessionId}" has an abandoned registration from ${activeTarget} whose cleanup has not settled yet; retry ${retryTarget} once cleanup completes`
         : activeAction === 'spawn'
           ? `Session "${sessionId}" is already being registered by ${activeTarget}; retry ${retryTarget} after it completes`
           : `Session "${sessionId}" is already being restored via ${activeTarget}; retry ${retryTarget} after it completes`,

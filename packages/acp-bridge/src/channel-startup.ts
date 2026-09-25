@@ -234,12 +234,12 @@ export function createChannelStartup({
     channelLifecycle.track(info);
     // Belt-and-suspenders leak detection. The set is intentionally
     // multi-entry to cover the `killSession`-then-`spawnOrAttach`
-    // overlap window (size 2 is legitimate: one dying + one fresh
+    // overlap window (size 2 per engine is legitimate: one dying + one fresh
     // attach-target). Anything higher implies a `channel.exited`
     // handler never fired for some prior channel — a real leak we'd
     // otherwise notice only as gradually-growing RSS over hours.
     // The warning surfaces it the moment it happens. Threshold is
-    // 2 because that's the design ceiling; bumping it requires
+    // 2 per engine because that's the design ceiling; bumping it requires
     // updating both this guard and the comments around
     // `aliveChannels` declaration.
     const engineChannelCount = [...channelLifecycle.values()].filter(
@@ -247,8 +247,8 @@ export function createChannelStartup({
     ).length;
     if (engineChannelCount > 2) {
       writeStderrLine(
-        `qwen serve: WARNING aliveChannels.size=${engineChannelCount} ` +
-          `(expected 1, max 2 during killSession-then-spawnOrAttach ` +
+        `qwen serve: WARNING engine=${engine ?? 'single'} channelCount=${engineChannelCount} ` +
+          `(expected 1, max 2 per engine during killSession-then-spawnOrAttach ` +
           `overlap) — possible channel leak; check that prior channels' ` +
           `channel.exited fired and the handler ran cleanup.`,
       );

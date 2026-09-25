@@ -67,7 +67,9 @@ function paired(
   let selected: BridgeExecutionEngine = 'managed';
   const legacyFactory = vi.fn(async () => legacy.channel);
   const managedFactory = vi.fn(async () => managed.channel);
-  const select = vi.fn(() => selected);
+  const select = vi.fn<
+    NonNullable<BridgeOptions['executionEngines']>['select']
+  >(() => selected);
   const bridge = makeBridge({
     sessionScope: 'thread',
     channelIdleTimeoutMs: 60_000,
@@ -181,6 +183,119 @@ describe('ACP Bridge execution engines', () => {
     },
   );
 
+  it.each([undefined, 'Managed'])(
+    'rejects invalid selector result %j without starting either engine',
+    async (selected) => {
+      const p = paired();
+      p.select.mockReturnValue(selected as BridgeExecutionEngine);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow('Invalid execution engine selection');
+      expect(p.legacyFactory).not.toHaveBeenCalled();
+      expect(p.managedFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'isolates pending %s replay from the other engine',
+    async (operation) => {
+      const restored = deferred<ReturnType<typeof receipt>>();
+      const managed = engineChannel('managed', {
+        loadSessionImpl: () => restored.promise,
+        resumeSessionImpl: () => restored.promise,
+      });
+      const p = paired({}, engineChannel('legacy'), managed);
+      p.choose('legacy');
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      p.choose('managed');
+      const sessionId = 'persisted-managed';
+      const loading =
+        operation === 'load'
+          ? p.bridge.loadSession({ workspaceCwd: WS_A, sessionId })
+          : p.bridge.resumeSession({ workspaceCwd: WS_A, sessionId });
+      await vi.waitFor(() =>
+        expect(
+          managed.agent[
+            operation === 'load' ? 'loadSessionCalls' : 'resumeSessionCalls'
+          ],
+        ).toHaveLength(1),
+      );
+      try {
+        for (const [channel, text] of [
+          [p.legacy, 'foreign replay'],
+          [managed, 'owner replay'],
+        ] as const) {
+          await channel.agentConnection.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+            },
+          });
+        }
+      } finally {
+        restored.resolve(receipt('managed'));
+      }
+      await loading;
+      const iterator = p.bridge
+        .subscribeEvents(sessionId, { lastEventId: 0 })
+        [Symbol.asyncIterator]();
+      try {
+        expect((await iterator.next()).value).toMatchObject({
+          type: 'session_update',
+          data: { update: { content: { text: 'owner replay' } } },
+        });
+        expect(p.bridge.getSessionLastEventId(sessionId)).toBe(1);
+      } finally {
+        await iterator.return?.();
+      }
+    },
+  );
+
+  it('ignores generation events from a foreign connection', async () => {
+    const completion = deferred<Record<string, unknown>>();
+    const managed = engineChannel('managed', {
+      extMethodImpl: () => completion.promise,
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('legacy');
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const stream = p.bridge.generateSessionContent!(
+      session.sessionId,
+      'generate',
+      new AbortController().signal,
+    );
+    await vi.waitFor(() =>
+      expect(managed.agent.extMethodCalls).toHaveLength(1),
+    );
+    const requestId = managed.agent.extMethodCalls[0].params['requestId'];
+    try {
+      for (const [channel, model] of [
+        [p.legacy, 'foreign model'],
+        [managed, 'owner model'],
+      ] as const) {
+        await channel.agentConnection.extNotification(
+          'qwen/notify/session/generation/event',
+          {
+            v: 1,
+            sessionId: session.sessionId,
+            requestId,
+            event: { type: 'started', model, modelSource: 'main' },
+          },
+        );
+      }
+    } finally {
+      completion.resolve({ model: 'owner model', modelSource: 'main' });
+    }
+    const events = [];
+    for await (const event of stream) events.push(event);
+    expect(events).toEqual([
+      { type: 'started', requestId, model: 'owner model', modelSource: 'main' },
+      { type: 'done', requestId, model: 'owner model', modelSource: 'main' },
+    ]);
+  });
+
   it('reserves a generated ID while a rejected receipt is being cleaned up', async () => {
     const closed = deferred<Record<string, unknown>>();
     const managed = engineChannel('managed', {
@@ -198,7 +313,10 @@ describe('ACP Bridge execution engines', () => {
           workspaceCwd: WS_A,
           sessionId: 'generated-rejected',
         }),
-      ).rejects.toMatchObject({ reason: 'awaiting_abandoned_cleanup' });
+      ).rejects.toMatchObject({
+        reason: 'awaiting_abandoned_cleanup',
+        message: expect.not.stringContaining('timed out'),
+      });
       expect(p.legacyFactory).not.toHaveBeenCalled();
     } finally {
       closed.resolve({ closed: true });
@@ -693,6 +811,136 @@ describe('ACP Bridge execution engines', () => {
     expect(p.legacy.killed).toBe(true);
   });
 
+  it.each(['load', 'resume'] as const)(
+    'preserves the existing Legacy idle deadline during Managed %s',
+    async (operation) => {
+      vi.useFakeTimers();
+      const p = paired({ channelIdleTimeoutMs: 100 });
+      p.choose('legacy');
+      const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.closeSession(legacy.sessionId);
+      await vi.advanceTimersByTimeAsync(50);
+      p.choose('managed');
+      const request = { workspaceCwd: WS_A, sessionId: 'restored' };
+      if (operation === 'load') await p.bridge.loadSession(request);
+      else await p.bridge.resumeSession(request);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(p.legacy.killed).toBe(true);
+      expect(p.managed.killed).toBe(false);
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'reclaims Legacy while the selected Managed %s response is still pending',
+    async (operation) => {
+      vi.useFakeTimers();
+      const selection = deferred<BridgeExecutionEngine>();
+      const response = deferred<ReturnType<typeof receipt>>();
+      const managed = engineChannel('managed', {
+        loadSessionImpl: () => response.promise,
+        resumeSessionImpl: () => response.promise,
+      });
+      const p = paired(
+        { channelIdleTimeoutMs: 100 },
+        engineChannel('legacy'),
+        managed,
+      );
+      p.choose('legacy');
+      const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.closeSession(legacy.sessionId);
+      p.select.mockImplementation(() => selection.promise);
+      const restore =
+        operation === 'load'
+          ? p.bridge.loadSession({ workspaceCwd: WS_A, sessionId: 'pending' })
+          : p.bridge.resumeSession({
+              workspaceCwd: WS_A,
+              sessionId: 'pending',
+            });
+      try {
+        await vi.advanceTimersByTimeAsync(150);
+        expect(p.legacy.killed).toBe(false);
+        selection.resolve('managed');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(
+          managed.agent[
+            operation === 'load' ? 'loadSessionCalls' : 'resumeSessionCalls'
+          ],
+        ).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(100);
+        expect(p.legacy.killed).toBe(true);
+        expect(managed.killed).toBe(false);
+      } finally {
+        selection.resolve('managed');
+        response.resolve(receipt('managed'));
+        await restore;
+      }
+    },
+  );
+
+  describe.each(['load', 'resume'] as const)(
+    '%s idle settlement',
+    (operation) => {
+      it.each(['success', 'rejection', 'timeout'] as const)(
+        'rearms Legacy idle cleanup after slow selection ends in %s',
+        async (outcome) => {
+          vi.useFakeTimers();
+          const selection = deferred<BridgeExecutionEngine>();
+          const p = paired({
+            channelIdleTimeoutMs: 100,
+            initializeTimeoutMs: 200,
+          });
+          p.choose('legacy');
+          const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          await p.bridge.closeSession(legacy.sessionId);
+          p.select.mockImplementation(() => selection.promise);
+          const restore =
+            operation === 'load'
+              ? p.bridge.loadSession({ workspaceCwd: WS_A, sessionId: 'cold' })
+              : p.bridge.resumeSession({
+                  workspaceCwd: WS_A,
+                  sessionId: 'cold',
+                });
+          const result = Promise.allSettled([restore]);
+          await vi.advanceTimersByTimeAsync(150);
+          expect(p.legacy.killed).toBe(false);
+          if (outcome === 'success') selection.resolve('managed');
+          else if (outcome === 'rejection')
+            selection.reject(new Error('selection failed'));
+          else await vi.advanceTimersByTimeAsync(50);
+          const [settled] = await result;
+          expect(settled).toMatchObject(
+            outcome === 'success'
+              ? { status: 'fulfilled', value: { sessionId: 'cold' } }
+              : {
+                  status: 'rejected',
+                  reason: expect.objectContaining({
+                    message: expect.stringContaining(
+                      outcome === 'rejection'
+                        ? 'selection failed'
+                        : 'timed out',
+                    ),
+                  }),
+                },
+          );
+          await vi.advanceTimersByTimeAsync(100);
+          expect(p.legacy.killed).toBe(true);
+          if (outcome === 'success') {
+            expect(p.managed.killed).toBe(false);
+            await p.bridge.closeSession('cold');
+            await vi.advanceTimersByTimeAsync(100);
+            expect(p.managed.killed).toBe(true);
+          } else {
+            expect(p.managedFactory).not.toHaveBeenCalled();
+            selection.resolve('managed');
+            await vi.advanceTimersByTimeAsync(0);
+            expect(p.managedFactory).not.toHaveBeenCalled();
+          }
+          expect(p.bridge.sessionCount).toBe(0);
+        },
+      );
+    },
+  );
+
   it('reclaims a Managed-only idle channel', async () => {
     const p = paired();
     const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -704,38 +952,45 @@ describe('ACP Bridge execution engines', () => {
     expect(p.legacyFactory).not.toHaveBeenCalled();
   });
 
-  it('awaits both engine startups during shutdown', async () => {
+  it('awaits a second engine preheat during shutdown after the first startup settles', async () => {
     const legacy = engineChannel('legacy');
     const managed = engineChannel('managed');
-    const first = deferred<typeof legacy.channel>();
-    const second = deferred<typeof managed.channel>();
-    const select = vi
-      .fn()
-      .mockReturnValueOnce('legacy')
-      .mockReturnValueOnce('managed');
+    const first = deferred<typeof managed.channel>();
+    const second = deferred<typeof legacy.channel>();
+    const managedFactory = vi.fn(() => first.promise);
+    const legacyFactory = vi.fn(() => second.promise);
     const bridge = makeBridge({
       sessionScope: 'thread',
       executionEngines: {
-        legacy: () => first.promise,
-        managed: () => second.promise,
-        select,
+        legacy: legacyFactory,
+        managed: managedFactory,
+        select: () => 'managed',
       },
     });
     bridges.push(bridge);
-    const spawns = Promise.allSettled([
-      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    const spawn = Promise.allSettled([
       bridge.spawnOrAttach({ workspaceCwd: WS_A }),
     ]);
-    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(2));
-    const shutdown = bridge.shutdown();
-    first.resolve(legacy.channel);
-    second.resolve(managed.channel);
-    expect((await spawns).every((result) => result.status === 'rejected')).toBe(
-      true,
-    );
-    await shutdown;
+    await vi.waitFor(() => expect(managedFactory).toHaveBeenCalledOnce());
+    const preheat = Promise.allSettled([bridge.preheat()]);
+    await vi.waitFor(() => expect(legacyFactory).toHaveBeenCalledOnce());
+    let shutdownSettled = false;
+    const shutdown = bridge.shutdown().then(() => {
+      shutdownSettled = true;
+    });
+    try {
+      first.resolve(managed.channel);
+      expect((await spawn)[0].status).toBe('rejected');
+      expect(managed.killed).toBe(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(shutdownSettled).toBe(false);
+      expect(legacy.killed).toBe(false);
+    } finally {
+      second.resolve(legacy.channel);
+      expect((await preheat)[0].status).toBe('rejected');
+      await shutdown;
+    }
     expect(legacy.killed).toBe(true);
-    expect(managed.killed).toBe(true);
   });
 
   it.each([2, 3])(
