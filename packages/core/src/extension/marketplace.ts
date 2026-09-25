@@ -460,11 +460,23 @@ export async function parseInstallSource(
     // plain archive file (see #10741/#10742).
     if (repo.toLowerCase().startsWith('http://')) {
       // Match isSupportedArchiveUrl semantics: inspect the URL pathname so
-      // query strings / fragments don't hide the archive extension.
-      const { pathname } = new URL(repo);
-      if (isSupportedArchivePath(pathname)) {
+      // query strings / fragments don't hide the archive extension. Parse
+      // defensively — the sibling helpers in github.js swallow their own
+      // parse errors, and an unparseable http:// URL should keep falling
+      // through to the git path (whose error names the source) instead of
+      // surfacing a bare `TypeError: Invalid URL`.
+      let pathname: string | undefined;
+      try {
+        pathname = new URL(repo).pathname;
+      } catch {
+        // Not a parseable URL; leave it to the git path as before.
+      }
+      if (pathname !== undefined && isSupportedArchivePath(pathname)) {
         throw new Error(
-          `Archive URLs must use https:// (got ${redactUrlCredentials(repo)}). Re-download the archive from an HTTPS URL.`,
+          `Archive URLs must use https:// (got ${redactUrlCredentials(repo)}). ` +
+            `Re-download the archive from an HTTPS URL — or, if this is a Git ` +
+            `repository whose name ends in an archive extension, use an ` +
+            `https:// or git@ remote.`,
         );
       }
     }

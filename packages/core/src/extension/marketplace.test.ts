@@ -217,6 +217,34 @@ describe('parseInstallSource', () => {
         parseInstallSource('http://example.com/releases/extension.zip?token=1'),
       ).rejects.toThrow('Archive URLs must use https://');
     });
+
+    it('should reject an uppercase HTTP scheme with an archive extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('HTTP://example.com/releases/extension.tar.gz'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+
+    it('should reject http archive URLs when a fragment follows the extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('http://example.com/releases/extension.zip#v1'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+
+    it('should redact credentials in the https-required error', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource(
+          'http://user:ghp_s3cr3t@example.com/releases/extension.zip',
+        ),
+      ).rejects.toThrow(
+        'http://***REDACTED***@example.com/releases/extension.zip',
+      );
+    });
   });
 
   describe('HTTP URL parsing', () => {
@@ -228,6 +256,25 @@ describe('parseInstallSource', () => {
       expect(result.source).toBe('http://example.com:8080/repo');
       expect(result.type).toBe('git');
       expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should keep unparseable http URLs on the git path instead of throwing Invalid URL', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('http://exa mple.com/plugin.zip');
+
+      expect(result.type).toBe('git');
+      expect(result.source).toBe('http://exa mple.com/plugin.zip');
+    });
+
+    it('should mention the git-remote reading for http URLs that end in an archive extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('http://example.com:8080/team/tools.zip'),
+      ).rejects.toThrow(
+        /if this is a Git repository whose name ends in an archive extension/,
+      );
     });
   });
 

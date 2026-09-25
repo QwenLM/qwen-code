@@ -1250,13 +1250,17 @@ export class ExtensionManager {
       // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
       // not a marketplace — guide the user to install it directly instead.
       let isInstallableExtension = false;
+      let probeError: unknown;
       try {
         await parseInstallSource(trimmed, {
           networkPolicy: this.networkPolicy,
         });
         isInstallableExtension = true;
-      } catch {
-        // Not a recognizable install source either.
+      } catch (error) {
+        // Not a recognizable install source either; remember why so a
+        // policy rejection below can surface its real reason instead of the
+        // misleading "no marketplace" message.
+        probeError = error;
       }
       const redacted = redactUrlCredentials(trimmed);
       if (isInstallableExtension) {
@@ -1264,6 +1268,16 @@ export class ExtensionManager {
           `"${redacted}" looks like a single extension, not a marketplace. ` +
             `Install it directly with: /extensions install ${redacted}`,
         );
+      }
+      // A protocol-policy rejection (e.g. an insecure archive URL) is the
+      // actual diagnosis — rethrow it rather than burying it under a
+      // "No marketplace found" error that sends the user hunting for a
+      // marketplace.json the tool never even tried to fetch.
+      if (
+        probeError instanceof Error &&
+        probeError.message.startsWith('Archive URLs must use https://')
+      ) {
+        throw probeError;
       }
       throw new Error(
         `No marketplace found at "${redacted}". ` +

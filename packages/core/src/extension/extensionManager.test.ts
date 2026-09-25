@@ -4086,6 +4086,10 @@ describe('extension tests', () => {
         'Marketplace source cannot be empty.',
       );
 
+      await expect(
+        manager.addSource('http://example.com/plugin.zip'),
+      ).rejects.toThrow(/must use https:/);
+
       expect(events).toEqual([]);
     });
 
