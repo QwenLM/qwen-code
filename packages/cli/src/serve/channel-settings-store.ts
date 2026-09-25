@@ -722,9 +722,12 @@ export class WorkspaceChannelSettingsStore {
     const { current, storedChannels } = this.assertRevision(
       options.expectedRevision,
     );
+    const configured = Object.hasOwn(current.channels, name);
+    if (!configured && !current.startupNames.includes(name)) return current;
     const channels = { ...storedChannels };
     delete channels[name];
-    const hasAllSentinel = current.startupNames.some(isAllStartupName);
+    const hasAllSentinel =
+      configured && current.startupNames.some(isAllStartupName);
     const startupNames = hasAllSentinel
       ? Object.keys(channels).some(
           (channelName) => !isAllStartupName(channelName),
