@@ -40,6 +40,7 @@ import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver
 import {
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
@@ -83,8 +84,6 @@ export { getSystemDefaultsPath, getSystemSettingsPath };
 export type { EnvReloadResult } from './environment.js';
 
 const debugLogger = createDebugLogger('SETTINGS');
-
-const WORKSPACE_RESTRICTED_ROOT_SETTINGS = ['advisorModel'] as const;
 
 function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   let current: SettingDefinition | undefined = undefined;

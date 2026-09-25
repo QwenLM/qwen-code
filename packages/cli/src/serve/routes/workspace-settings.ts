@@ -21,6 +21,7 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -109,6 +110,12 @@ interface SettingsResponse {
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
 
+/** Both restriction lists, for the membership test the write guard needs. */
+const WORKSPACE_RESTRICTED_KEYS = new Set<string>([
+  ...WORKSPACE_RESTRICTED_SETTING_KEYS,
+  ...WORKSPACE_RESTRICTED_ROOT_SETTINGS,
+]);
+
 /**
  * Refuse a workspace-scope write of a setting the merge strips anyway.
  *
@@ -132,7 +139,7 @@ function rejectWorkspaceRestrictedWrite(
   key: string,
 ): boolean {
   if (scope !== 'workspace') return false;
-  if (WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key)) {
+  if (WORKSPACE_RESTRICTED_KEYS.has(key)) {
     res.status(400).json({
       error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
       code: 'workspace_restricted_setting',
