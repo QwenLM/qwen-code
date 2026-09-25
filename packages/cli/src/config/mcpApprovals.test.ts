@@ -17,6 +17,10 @@ import {
   resetMcpApprovalsForTesting,
   MCP_APPROVALS_FILENAME,
 } from './mcpApprovals.js';
+import {
+  resetProjectMcpLiteralSourceForTesting,
+  setProjectMcpLiteralSource,
+} from './mcpServers.js';
 
 describe('mcpApprovals (hash-bound approval store)', () => {
   let dir: string;
@@ -627,6 +631,143 @@ describe('mcpApprovals (hash-bound approval store)', () => {
       expect(
         getPromptableMcpServers({ ws: workspaceServer }, projectRoot),
       ).toEqual([]);
+    });
+  });
+
+  describe('project `.mcp.json` approval binding (issue #11499)', () => {
+    // Approval hashes for project servers bind to the pre-expansion literal
+    // config, so rotating the secret behind a ${VAR} placeholder must NOT
+    // re-prompt; editing the file must.
+    const savedToken = process.env['MY_MCP_TOKEN'];
+
+    beforeEach(() => {
+      process.env['MY_MCP_TOKEN'] = 'tok-v1';
+      resetProjectMcpLiteralSourceForTesting();
+    });
+
+    afterEach(() => {
+      if (savedToken === undefined) {
+        delete process.env['MY_MCP_TOKEN'];
+      } else {
+        process.env['MY_MCP_TOKEN'] = savedToken;
+      }
+      resetProjectMcpLiteralSourceForTesting();
+    });
+
+    const expandedServer = (): MCPServerConfig =>
+      ({
+        httpUrl: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer tok-v1' },
+        scope: 'project',
+      }) as unknown as MCPServerConfig;
+
+    const literalServer = (): MCPServerConfig =>
+      ({
+        httpUrl: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+        scope: 'project',
+      }) as unknown as MCPServerConfig;
+
+    /** Registers the literal source exactly as assembly from a real dir would. */
+    const registerLiteral = (literal: MCPServerConfig) => {
+      setProjectMcpLiteralSource(projectRoot, { gated: literal });
+    };
+
+    it('keeps an approval stable when the env value behind the placeholder rotates', async () => {
+      registerLiteral(literalServer());
+      const approvals = loadMcpApprovals();
+      await approvals.setState(
+        projectRoot,
+        'gated',
+        expandedServer(),
+        'approved',
+      );
+      expect(approvals.getState(projectRoot, 'gated', expandedServer())).toBe(
+        'approved',
+      );
+
+      // Token rotates — the resolved config changes, the file did not.
+      const rotated: MCPServerConfig = {
+        ...expandedServer(),
+        headers: { Authorization: 'Bearer tok-v2' },
+      };
+      expect(approvals.getState(projectRoot, 'gated', rotated)).toBe(
+        'approved',
+      );
+    });
+
+    it('re-prompts when the literal `.mcp.json` entry is edited', async () => {
+      registerLiteral(literalServer());
+      const approvals = loadMcpApprovals();
+      await approvals.setState(
+        projectRoot,
+        'gated',
+        expandedServer(),
+        'approved',
+      );
+
+      // Same placeholder position, different URL — a real file edit.
+      const editedLiteral: MCPServerConfig = {
+        ...literalServer(),
+        httpUrl: 'https://v2.example.test/mcp',
+      };
+      const editedExpanded: MCPServerConfig = {
+        ...expandedServer(),
+        httpUrl: 'https://v2.example.test/mcp',
+      };
+      registerLiteral(editedLiteral);
+      expect(approvals.getState(projectRoot, 'gated', editedExpanded)).toBe(
+        'pending',
+      );
+    });
+
+    it('binds to the live config when no literal source is registered (settings-scope parity)', async () => {
+      // No literal source ⇒ the live config is the binding, exactly as for
+      // workspace-scoped servers today.
+      const approvals = loadMcpApprovals();
+      await approvals.setState(
+        projectRoot,
+        'gated',
+        expandedServer(),
+        'approved',
+      );
+      const rotated: MCPServerConfig = {
+        ...expandedServer(),
+        headers: { Authorization: 'Bearer tok-v2' },
+      };
+      expect(approvals.getState(projectRoot, 'gated', rotated)).toBe('pending');
+    });
+
+    it('does not bind a workspace-scope override to the same-named .mcp.json literal', async () => {
+      // `assembleMcpServers` lets a `scope: 'workspace'` settings entry
+      // override a same-named `.mcp.json` entry, and the literal map still
+      // holds the overridden project literal. Hashing THAT for the
+      // executing workspace server binds its approval to a config from a
+      // file it does not come from — a behavioral edit then never
+      // re-prompts (fail-open). Only `scope: 'project'` configs may
+      // consult the literal.
+      registerLiteral(literalServer());
+      const workspaceServer: MCPServerConfig = {
+        ...(expandedServer() as object),
+        httpUrl: 'https://workspace.example.test/mcp',
+        scope: 'workspace',
+      } as unknown as MCPServerConfig;
+      const approvals = loadMcpApprovals();
+      await approvals.setState(
+        projectRoot,
+        'gated',
+        workspaceServer,
+        'approved',
+      );
+
+      // A behavioral edit to the EXECUTING workspace entry must re-prompt.
+      const editedWorkspace: MCPServerConfig = {
+        ...workspaceServer,
+        httpUrl: 'https://edited.example.test/mcp',
+      };
+      expect(approvals.getState(projectRoot, 'gated', editedWorkspace)).toBe(
+        'pending',
+      );
     });
   });
 });
