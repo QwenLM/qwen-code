@@ -10,13 +10,22 @@ import {
 } from '../daemon/session/turn-navigation-store';
 import type { MessageListHandle, MessageListProps } from './MessageList';
 import type { Message } from '../adapters/types';
+import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
   props: undefined as MessageListProps | undefined,
+  transcript: { blocks: [] },
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
+}));
+vi.mock('../daemon-react-sdk', () => ({
+  useConnection: () => ({ sessionId: 'session' }),
+  useTranscriptStore: () => ({
+    subscribe: () => () => {},
+    getSnapshot: () => observed.transcript,
+  }),
 }));
 vi.mock('../i18n', () => {
   const t = (key: string) => key;
@@ -26,6 +35,7 @@ vi.mock('./MessageList', () => ({
   MessageList: forwardRef<MessageListHandle, MessageListProps>(
     function List(props, ref) {
       observed.props = props;
+      const open = useOpenTurnCalls();
       useImperativeHandle(
         ref,
         () => ({ scrollToBottom: vi.fn(), scrollToMessage: () => true }),
@@ -33,12 +43,22 @@ vi.mock('./MessageList', () => ({
       );
       return (
         <div data-web-shell-message-list>
+          {!props.hideSessionTimeline && props.timelineAction}
           {props.messages.map((message) => (
             <div
               key={message.id}
               data-source-block-ids={message.sourceBlockIds?.join(',')}
             >
               {message.id}
+              {message.role === 'user' && (
+                <button
+                  onClick={() =>
+                    open?.(message.sourceBlockIds?.[0] ?? message.id)
+                  }
+                >
+                  Open calls
+                </button>
+              )}
               {message.role === 'tool_group' &&
                 message.tools.map((tool) => (
                   <div
@@ -57,6 +77,7 @@ vi.mock('./MessageList', () => ({
 }));
 
 const { TranscriptViewport } = await import('./TranscriptViewport');
+const { ConversationSearch } = await import('./ConversationSearch');
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 afterEach(() => {
@@ -179,6 +200,91 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
 }
 
 describe('TranscriptViewport', () => {
+  it('passes the historical record UUID from its own page to the tool calls handler', async () => {
+    const { props, click } = await setup();
+    const onOpen = vi.fn();
+    act(() =>
+      root!.render(
+        <TurnCallsProvider onOpen={onOpen}>
+          <TranscriptViewport {...props} />
+        </TurnCallsProvider>,
+      ),
+    );
+    await click('history.openEarlier');
+    const historicalUser = observed.props!.messages.find(
+      (message) => message.role === 'user',
+    )!;
+    expect(historicalUser.sourceBlockIds?.[0]).not.toBe('old');
+    act(() =>
+      [...container!.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Open calls')!
+        .click(),
+    );
+    expect(onOpen).toHaveBeenCalledWith(
+      historicalUser.sourceBlockIds![0],
+      'old',
+    );
+  });
+  it('keeps an open search and its query when the navigation host changes', async () => {
+    const { store, props, ref } = await setup(true, false, 4);
+    const renderSearch = (hidden = false, sessionKey = 'session') =>
+      act(async () =>
+        root!.render(
+          <ConversationSearch
+            key={sessionKey}
+            threshold={0}
+            messageListRef={ref}
+          >
+            {(trigger) => (
+              <TranscriptViewport
+                {...props}
+                ref={ref}
+                hideSessionTimeline={hidden}
+                timelineAction={trigger}
+              />
+            )}
+          </ConversationSearch>,
+        ),
+      );
+    await renderSearch();
+    const trigger = container!.querySelector<HTMLButtonElement>(
+      'button[aria-label="chat.searchConversation"]',
+    )!;
+    expect(trigger).not.toBeNull();
+    await act(async () => trigger.click());
+    const input = document.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'typed query');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(input.value).toBe('typed query');
+    await act(async () =>
+      store.configure({ sessionId: 'session', supported: false }),
+    );
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      document.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe('typed query');
+    expect(document.activeElement).not.toBe(document.body);
+    await renderSearch(true);
+    expect(
+      container!.querySelector('button[aria-label="chat.searchConversation"]'),
+    ).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      document.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe('typed query');
+    expect(document.activeElement).not.toBe(document.body);
+    await renderSearch(false, 'other-session');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it.each([0, 3, 4])(
     'requires at least four indexed turns (count=%i)',
     async (count) => {

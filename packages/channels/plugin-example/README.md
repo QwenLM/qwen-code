@@ -33,7 +33,7 @@ Add a channel entry to `~/.qwen/settings.json`:
     "my-plugin-test": {
       "type": "plugin-example",
       "serverWsUrl": "ws://localhost:9201",
-      "senderPolicy": "open",
+      "privatePolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project"
     }

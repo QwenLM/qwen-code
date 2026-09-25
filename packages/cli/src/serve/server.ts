@@ -28,6 +28,7 @@ import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
 } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type {
   ChannelWorkerControlState,
@@ -302,6 +303,7 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
@@ -343,6 +345,7 @@ import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
+import { resolveLiveNativeHostEnabled } from './live/native-host-enabled.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
 import {
@@ -577,6 +580,7 @@ export interface ServeAppDeps {
   maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
   isChannelControlDraining?: () => boolean;
   isChannelControlInitializing?: () => boolean;
@@ -1054,15 +1058,17 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
-  // Live Voice needs a Web Shell to control it. The audio endpoint is either
-  // the native macOS Host (`/live/host`) or the Web Shell page itself
-  // (`/live/web`), so only the native ingress is platform-bound.
+  // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
+  // Shell page itself (`/live/web`) on every platform; the native macOS Host
+  // (`/live/host`) is opt-in through QWEN_SERVE_LIVE_NATIVE_HOST=1.
   const liveVoiceSurfaceAvailable =
     opts.serveWebShell !== false &&
     typeof deps.webShellDir === 'string' &&
     acpHttpEnabledAtBoot;
   const liveNativeHostAvailable =
-    liveVoiceSurfaceAvailable && runtimePlatform === 'darwin';
+    liveVoiceSurfaceAvailable &&
+    runtimePlatform === 'darwin' &&
+    resolveLiveNativeHostEnabled(daemonEnvAtBoot);
   const primaryRuntimeTrustAuthoritative =
     deps.workspaceTrustHotReloadAvailable === true ||
     deps.primaryWorkspaceTrusted !== undefined ||
@@ -1937,6 +1943,7 @@ export function createServeApp(
     onStart: (call) => liveSessionCoordinator.start(call),
     onStop: (call) => liveSessionCoordinator.stop(call),
     onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
+    onScreenFeed: (message) => liveSessionCoordinator.handleScreenFeed(message),
   });
   const publishLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
     const updateDiscovery = (
@@ -2365,6 +2372,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    getChannelRestoreFailures: deps.getChannelRestoreFailures,
     maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
@@ -2609,6 +2617,11 @@ export function createServeApp(
     mutate,
   });
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitWorktreeRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
     mutate,

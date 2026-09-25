@@ -40,7 +40,11 @@ import {
   sanitizeTerminalText,
   truncateToWidth,
 } from '../../ui/utils/textUtils.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 import { listAgentViewSessionSnapshots } from '../../agent-view/supervisor-store.js';
 import {
   managedSessionRows,
@@ -202,6 +206,7 @@ async function readManagedRows(now: number): Promise<SessionRow[]> {
 }
 
 async function handlePs(argv: PsArgs): Promise<void> {
+  ignoreBrokenPipe();
   const now = Date.now();
   // listLiveSessions reports "cannot look" as "no peers" rather than
   // throwing, so there is no failure path to surface here.

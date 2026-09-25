@@ -11,6 +11,7 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 const listLiveSessions = vi.fn();
 const listAgentViewSessionSnapshots = vi.fn();
 const isPidAlive = vi.fn();
+const ignoreBrokenPipe = vi.fn();
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
@@ -39,6 +40,7 @@ const stdout: string[] = [];
 const stderr: string[] = [];
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
+  ignoreBrokenPipe: (...args: unknown[]) => ignoreBrokenPipe(...args),
   writeStdoutLine: (line: string) => stdout.push(line),
   writeStderrLine: (line: string) => stderr.push(line),
 }));
@@ -123,6 +125,7 @@ beforeEach(() => {
   listAgentViewSessionSnapshots.mockResolvedValue([]);
   isPidAlive.mockReset();
   isPidAlive.mockReturnValue(true);
+  ignoreBrokenPipe.mockReset();
 });
 
 afterEach(() => {
@@ -463,6 +466,29 @@ describe('qwen sessions ps', () => {
       qwenVersion: '1.0.0',
     });
     expect(row).not.toHaveProperty('ipcToken');
+  });
+
+  it('installs the output error guard before reading the managed store', async () => {
+    // Both mocks only record that they ran; every expectation is raised
+    // afterwards, in the test body. An expectation thrown from inside a
+    // mock implementation rides out on the rejection that
+    // `readManagedRows` deliberately catches, so it is swallowed along
+    // with the error and the case passes with the guard deleted.
+    const rec = record();
+    const order: string[] = [];
+    ignoreBrokenPipe.mockImplementation(() => {
+      order.push('guard');
+    });
+    listLiveSessions.mockResolvedValue([rec]);
+    listAgentViewSessionSnapshots.mockImplementation(() => {
+      order.push('store');
+      return Promise.reject(new Error('broken store'));
+    });
+
+    await run({ json: true });
+
+    expect(order).toEqual(['guard', 'store']);
+    expect(stdout).toEqual([JSON.stringify({ ...rec, managed: false })]);
   });
 
   it('still lists interactive sessions when the supervisor store cannot be read', async () => {

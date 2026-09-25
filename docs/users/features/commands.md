@@ -881,7 +881,7 @@ rendering them in a terminal.
 # Show the other live sessions
 qwen sessions ps
 
-# Which directories are busy right now?
+# Which directories have a visible session record?
 # Note: `jq -r` renders the raw recorded value in your terminal (see the
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd

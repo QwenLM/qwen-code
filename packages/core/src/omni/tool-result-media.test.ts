@@ -16,7 +16,9 @@ import {
 import os from 'node:os';
 import nodePath from 'node:path';
 import nodeFs from 'node:fs/promises';
+import sharp from 'sharp';
 import type { Part } from '@google/genai';
+import * as imageView from '../utils/image-view.js';
 import type { Config } from '../config/config.js';
 
 const deliverMock = vi.hoisted(() => vi.fn());
@@ -82,6 +84,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
+  vi.unstubAllEnvs();
   gateMock.mockReturnValue(true);
   deliverMock.mockReset();
   deliverMock.mockResolvedValue({
@@ -706,10 +709,14 @@ describe('processToolResultOmniMedia', () => {
     expect(result).toBe(parts);
   });
 
-  it('enforces the aggregate upload-byte budget (over-budget parts stay inline)', async () => {
+  it('enforces the aggregate upload-byte budget (over-budget parts are bounded, not uploaded)', async () => {
     // Two parts: the first consumes nearly the whole 128 MiB budget, the
-    // second no longer fits and must stay inline even though the upload
-    // COUNT budget still has room.
+    // second no longer fits and must not upload even though the upload
+    // COUNT budget still has room. The declined image no longer sails
+    // through unbounded: the renderer's own source cap refuses 127 MiB and
+    // the trailing inline clamp substitutes the placeholder — the bounded
+    // delivery the producer-side pipeline would have made had the funnel
+    // never run.
     const bigBytes = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       Buffer.alloc(127 * 1024 * 1024),
@@ -725,7 +732,144 @@ describe('processToolResultOmniMedia', () => {
     );
     expect(deliverMock).toHaveBeenCalledTimes(1);
     expect(result[0]!.fileData).toBeDefined();
-    expect(result[1]!.inlineData).toBeDefined();
+    expect(result[1]!.text).toContain('[Media omitted: image/png');
+  });
+
+  it('bounds an over-budget image it keeps inline instead of delivering source-resolution bytes', async () => {
+    // Producers skip their inline clamp while omni delivery owns the media,
+    // so an image the funnel DECLINES must still be bounded here — else the
+    // original bytes reach the model inline on every turn. Nine images
+    // exhaust the eight-upload budget; the ninth must come back re-encoded,
+    // not as the server's original 3840x2160 PNG.
+    // Removing the keep-inline bound turns this test red.
+    const oversized = await sharp({
+      create: {
+        width: 3840,
+        height: 2160,
+        channels: 3,
+        background: '#204080',
+      },
+    })
+      .png()
+      .toBuffer();
+    const parts = Array.from({ length: 9 }, () =>
+      inlinePart('image/png', oversized),
+    );
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(deliverMock).toHaveBeenCalledTimes(8);
+    expect(result.filter((p) => p.fileData)).toHaveLength(8);
+    const keptInline = result.filter((p) => p.inlineData);
+    expect(keptInline).toHaveLength(1);
+    expect(keptInline[0]!.inlineData!.mimeType).toBe('image/jpeg');
+    const metadata = await sharp(
+      Buffer.from(keptInline[0]!.inlineData!.data!, 'base64'),
+    ).metadata();
+    expect(
+      Math.max(metadata.width ?? 0, metadata.height ?? 0),
+    ).toBeLessThanOrEqual(1568);
+  });
+
+  it('bounds an image whose upload fails instead of delivering source-resolution bytes inline', async () => {
+    // Same residue, different decline exit: a staging/upload failure keeps
+    // the part inline, and the kept image must be bounded rather than
+    // forwarded at source resolution.
+    deliverMock.mockRejectedValue(new Error('upload exploded'));
+    const oversized = await sharp({
+      create: {
+        width: 3840,
+        height: 2160,
+        channels: 3,
+        background: '#204080',
+      },
+    })
+      .png()
+      .toBuffer();
+    const result = await processToolResultOmniMedia(
+      [inlinePart('image/png', oversized)],
+      cfg({ image: true }),
+      signal,
+    );
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(result[0]!.inlineData!.mimeType).toBe('image/jpeg');
+    const metadata = await sharp(
+      Buffer.from(result[0]!.inlineData!.data!, 'base64'),
+    ).metadata();
+    expect(
+      Math.max(metadata.width ?? 0, metadata.height ?? 0),
+    ).toBeLessThanOrEqual(1568);
+  });
+
+  it('re-encodes a declined image that fits the visual budget but outweighs the inline ceiling', async () => {
+    // The renderer must be handed the caller's byte ceiling, not left to the
+    // visual budget alone. 1200x800 fits visually (long edge 1200, 43x29
+    // patches) but stored uncompressed it outweighs a 1 MiB ceiling, while the
+    // same frame re-encodes to a few KB of JPEG. Deciding "already fits" on
+    // geometry alone returns null here and the trailing clamp then withholds
+    // the part instead of keeping the resized image — the producer-side
+    // pipeline's rule, mirrored on the decline path.
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', String(1024 * 1024));
+    deliverMock.mockRejectedValue(new Error('upload exploded'));
+    const heavy = await sharp({
+      create: {
+        width: 1200,
+        height: 800,
+        channels: 3,
+        background: '#204080',
+      },
+    })
+      .png({ compressionLevel: 0 })
+      .toBuffer();
+
+    const result = await processToolResultOmniMedia(
+      [inlinePart('image/png', heavy)],
+      cfg({ image: true }),
+      signal,
+    );
+
+    const kept = result[0]!;
+    expect(kept.text).toBeUndefined();
+    expect(kept.inlineData!.mimeType).toBe('image/jpeg');
+    expect(Buffer.from(kept.inlineData!.data!, 'base64').length).toBeLessThan(
+      1024 * 1024,
+    );
+  });
+
+  it('holds a declined audio part to the inline ceiling', async () => {
+    // The producer skipped its inline clamp because this funnel takes the
+    // bytes over; a part it declines must get that limit here instead.
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const wav = Buffer.concat([
+      Buffer.from('RIFF\0\0\0\0WAVE', 'latin1'),
+      Buffer.alloc(64),
+    ]);
+    const result = await processToolResultOmniMedia(
+      [inlinePart('audio/wav', wav)],
+      cfg({ audio: false }),
+      signal,
+    );
+    expect(deliverMock).not.toHaveBeenCalled();
+    expect(result[0]!.text).toContain('[Media omitted: audio/wav');
+  });
+
+  it('does not send a declined GIF to the renderer', async () => {
+    const bound = vi.spyOn(imageView, 'boundImageBuffer');
+    const gif = Buffer.concat([
+      Buffer.from('GIF89a', 'latin1'),
+      Buffer.alloc(64),
+    ]);
+    const parts = [inlinePart('image/gif', gif)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: false }),
+      signal,
+    );
+    expect(bound).not.toHaveBeenCalled();
+    expect(result).toBe(parts);
+    bound.mockRestore();
   });
 
   it('propagates an abort instead of degrading the part to inline', async () => {
