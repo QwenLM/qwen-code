@@ -13445,6 +13445,10 @@ describe('useLlmStream', () => {
         });
         await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(1));
         expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+        expect(
+          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(true);
+        expect(hook.commandIdleStateRef.current.activeModelStreams).toBe(0);
 
         mockSendMessageStream.mockImplementationOnce(() =>
           (async function* () {
@@ -13486,6 +13490,7 @@ describe('useLlmStream', () => {
           StreamingState.Responding,
         );
         expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+        expect(hook.commandIdleStateRef.current.activeModelStreams).toBe(1);
 
         await act(async () => {
           releaseToolStream();
