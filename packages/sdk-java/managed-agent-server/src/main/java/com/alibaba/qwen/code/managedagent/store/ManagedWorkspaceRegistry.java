@@ -38,7 +38,7 @@ public class ManagedWorkspaceRegistry {
             return false;
         }
         return !jdbc.queryForList("SELECT 1 FROM managed_workspace_access"
-                + " WHERE CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                + " WHERE tenant_id = ? AND workspace_id = ? AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                 + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                 + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                 + " = CAST(CONCAT(?, '!') AS BINARY(513))"
@@ -67,7 +67,7 @@ public class ManagedWorkspaceRegistry {
         if (selection == null) {
             List<String> defaults = jdbc.queryForList(
                     "SELECT workspace_id FROM managed_workspace_default"
-                            + " WHERE CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                            + " WHERE tenant_id = ? AND workspace_id = ? AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                             + " = CAST(CONCAT(?, '!') AS BINARY(513)) FOR UPDATE",
                     String.class, tenantId);
             if (defaults.isEmpty()) {
