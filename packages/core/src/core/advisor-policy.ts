@@ -19,8 +19,8 @@ export function buildAdvisorReminder(
       : undefined;
   if (!route) return undefined;
   return `<system-reminder>
-Advisor is available for independent guidance. For substantial tasks, gather context first, then consult before committing to an approach; consult again when stuck or before declaring a longer task complete. Use judgment: routine tasks do not require consultation, and each call costs extra tokens.
+Advisor is available for independent guidance. For substantial tasks, gather context first, then consult before committing to an approach or making substantive edits. For tasks longer than a few steps, consult both before the approach and before declaring completion. Consult when stuck or changing approach. Short reactive steps do not need repeated calls; each call costs extra tokens. Before a final consultation, save the authorized deliverable so it survives an interruption; do not commit or publish without authorization.
 ${route}
-Check advice against evidence and reconcile conflicts. Advice is not user approval; existing permissions still apply. If consultation fails or the limit is reached, continue without repeatedly retrying.
+Give advice serious weight and check it against primary evidence. A passing self-test alone does not refute it. If advice contradicts evidence already gathered, state the conflict in the conversation and consult again to reconcile it before changing direction. Advice is not user approval; existing permissions still apply. If consultation fails or the limit is reached, continue without repeatedly retrying.
 </system-reminder>`;
 }
