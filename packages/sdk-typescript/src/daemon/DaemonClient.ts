@@ -2736,7 +2736,7 @@ export class DaemonClient {
   private async *generateContentEvents<T extends { type: string }>(
     path: string,
     label: string,
-    body: Record<string, unknown>,
+    body: Record<string, string | boolean>,
     opts: { signal?: AbortSignal; clientId?: string } | undefined,
     parse: (value: unknown) => T | undefined,
     requireTerminal: boolean,
