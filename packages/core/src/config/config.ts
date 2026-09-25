@@ -3042,7 +3042,7 @@ export class Config {
   private fastModel?: string;
   private advisorModel?: string;
   private readonly advisorMaxUses: number;
-  private advisorUsage = { calls: 0 };
+  private readonly advisorUsage = { calls: 0 };
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -5517,7 +5517,6 @@ export class Config {
       logSessionEnd(this);
     }
     this.sessionId = nextSessionId;
-    if (isSessionTransition) this.advisorUsage = { calls: 0 };
     // Unconditional: startNewSession is only called on the canonical Config
     // instance (the one that already claimed via sessionEnvClaimed), so this
     // correctly updates the env var to reflect the new active session.
@@ -5542,6 +5541,10 @@ export class Config {
       this.permissionManager?.clearSessionAllowRules();
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
+      // So does the Advisor budget, reset in place for the same reason the
+      // counter is an object: a derived Config must mutate this one, not
+      // shadow it with an own property.
+      this.advisorUsage.calls = 0;
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
