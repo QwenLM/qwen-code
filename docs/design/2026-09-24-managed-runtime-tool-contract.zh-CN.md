@@ -2,7 +2,7 @@
 
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
-状态：契约已落地；worker 处理器与 Java transport 在后续切片挂载
+状态：契约与 Java 工具 transport 已实现；worker 处理器及 Broker transport 接入留待后续完成
 
 相关：#12380（Managed Agent 分阶段交付）、[2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md) 的 attestation 契约，以及 #12380 上本契约所答复的对账讨论。
 
@@ -16,9 +16,9 @@ owned Managed Runtime worker 目前只提供 attestation。在工具执行路径
 
 ## 2. 范围
 
-范围内：三个操作在路由清单中的契约声明、共享 schema 与共享 conformance fixtures，由 TypeScript 契约测试与 Java fixture 消费方共同验证。这些声明固定未来的线路契约，但不会让尚未实现的路由变得可访问。
+范围内：三个操作在路由清单中的契约声明、共享 schema 与共享 conformance fixtures，由 TypeScript 契约测试与 Java fixture 消费方共同验证。这些声明固定未来的线路契约，但不会让尚未实现的路由变得可访问。Java `HttpRuntimeTransport` 按本契约实现 `execute`、`status`、`cancel`。
 
-范围外：真正服务这些路由的 worker 处理器、raw HTTP gate 放行、`HttpRuntimeTransport` 的 `execute`/`status`/`cancel` 实现，以及 `not_started_proven` 结果（需要持久回执存储）。每个处理器与对应的 gate 放行必须在后续同一变更中落地。
+范围外：真正服务这些路由的 worker 处理器、raw HTTP gate 放行、将 `HttpRuntimeTransport` 接为 `RuntimeTransport`，以及 `not_started_proven` 结果（需要持久回执存储）。每个处理器与对应的 gate 放行必须在后续同一变更中落地。
 
 ## 3. 设计
 
@@ -48,9 +48,9 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 - `state` 为 `settled` 时必须携带 `result`，其他状态禁止携带；其中包含 `executionStatus`（`not_started`、`success`、`error`、`cancelled`）、`responseParts`，以及可选的 `error`（`message` 必填，`type` 可选）。
 - `status` 可以额外携带 `lastSequence`——Runtime 自己的进度游标。目前 Broker 的查询路径不消费该游标。
 
-本切片只固定 `responseParts` 为数组，有意把元素结构推迟到 worker 提取与 transport 切片。后续必须从实际工具结果路径推导结构（`ToolCallResponseInfo.responseParts` 使用 SDK `Part[]`），并在提供结果之前补齐共享一致性覆盖。fixture 中的文本 part 仅作示例，不定义新的 part 格式。`settled` 下的 `not_started` 是 Runtime 明确给出的终态；记录缺失仍须返回 `unknown`，绝不能据此推导 `not_started`。
+本切片只固定 `responseParts` 为数组，有意把元素结构推迟到 worker 处理器与 Broker 接入切片。后续必须从实际工具结果路径推导结构（`ToolCallResponseInfo.responseParts` 使用 SDK `Part[]`），并在提供结果之前补齐共享一致性覆盖。fixture 中的文本 part 仅作示例，不定义新的 part 格式。`settled` 下的 `not_started` 是 Runtime 明确给出的终态；记录缺失仍须返回 `unknown`，绝不能据此推导 `not_started`。
 
-失败沿用共享分类：401 凭据、400/413 协议、409 身份、404 不兼容。JSON 错误保留共享的稳定错误码；gate 的不兼容 404 为空响应体。错误码中的 attestation 名称不代表工具上限为 16 KiB：后续错误消息必须使用对应路由的上限。
+失败沿用共享分类：401 凭据、400/413 协议、409 身份、404 不兼容。JSON 错误保留共享的稳定错误码；gate 的不兼容 404 为空响应体。错误码中的 attestation 名称不代表工具上限为 16 KiB：错误消息使用对应操作及其上限。
 
 ### 3.4 Conformance fixtures
 
@@ -62,9 +62,19 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts`，并在 `packages/sdk-java/runtime-broker` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`。TypeScript suite 校验共享 fixtures、schema 变异用例，以及 raw gate 对未实现工具路由的拒绝；Java suite 消费同一批契约文件。
 
+### 4.1 Java transport
+
+`HttpRuntimeTransport` 在发送前校验调用方 reference 的键集。`execute` 的调用方 map 包含四个身份字段及 `toolName`、`input`；线上请求将后两者与 `reference` 分开。`status` 和 `cancel` 只发送四个身份字段，也允许复用同一个调用方 map。`session` 参数为未来的服务适配层保留，不发送给 Runtime，也不替换原始调用身份。
+
+这个调用方 map 是 transport 请求，不是新的持久化身份格式。Broker 保存的 reference 仍是四字段身份。接入物理分发之前，服务适配层必须单独取得 `toolName` 和 `input` 并组装 transport 请求，不能把载荷加入 `reference_json` 或改变执行幂等性。
+
+超过对应路由上限的请求在发送前被拒绝：`execute` 为 256 KiB，`status` 与 `cancel` 为 16 KiB。响应上限为 1 MiB，且必须带 `no-store` 与 JSON 响应头。解析强制信封、result、error 为封闭对象，协议版本为 2，状态与执行结局属于契约枚举，错误字符串非空，且仅在 settled 时必须携带 result。`lastSequence` 为可选非负整数，仅允许出现在 `status`。`execute` 要求结算并返回 result map；`status` 与 `cancel` 返回校验后的线上 map。共享错误码保持不变，错误消息标明操作与适用上限。服务端失败可重试，其他 HTTP 失败为终态。
+
+在 `packages/sdk-java/runtime-broker` 运行 `mvn test` 和 `mvn checkstyle:check`。HTTP fixture 回放验证 canonical 请求、成功与 unknown 应答、畸形 reference 和响应、逐路由请求上限，以及超过 16 KiB 直至 1 MiB 的工具结果。worker 在处理器落地前仍拒绝工具路由。
+
 ## 5. 后续工作
 
 - 为三个路由挂载真实的 worker 处理器，并在同一变更中扩展 raw gate admission（execute 提取）。
-- 替换尚未使用、早于本契约的 `HttpRuntimeTransport.execute` 占位实现，并将三个操作实现为 `RuntimeTransport`。该占位实现发送会话信封、丢弃结果、限制响应为 16 KiB，且未接入 Broker dispatch。后续必须提供 `toolName`/`input`、采用本契约仅以 reference 标识调用的信封与逐路由上限，并把 execute 的 settled 信封适配为 Broker 的结果形态。
+- 完成会话操作并将 `HttpRuntimeTransport` 接为 `RuntimeTransport`。按 §4.1 所述从已保存的 reference 之外单独提供 `toolName`/`input`，并端到端覆盖真实 Broker 分发。
 - `UNKNOWN` 执行对账器已在 #12655 落地。其 transport 必须先校验 status 线上信封，再投影为 `{state, result}`（仅 `settled` 携带 `result`）。去掉 `protocolVersion` 与 `lastSequence`；Broker 拒绝额外字段，目前没有游标消费方。
 - 对 Runtime 报告仍在运行的执行是否发送物理取消，有意推迟。

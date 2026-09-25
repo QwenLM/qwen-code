@@ -2,8 +2,8 @@
 
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
-Status: contract landed; the worker handlers and the Java transport mount in
-follow-up slices
+Status: contract and Java tool transport implemented; worker handlers and
+Broker transport wiring remain follow-up work
 
 Related: #12380 (Managed Agent staged delivery), the attestation contract in
 [2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md),
@@ -31,10 +31,12 @@ In scope: contract declarations in the route manifest, the shared schema, and
 the shared conformance fixtures for the three operations, consumed by both the
 TypeScript contract tests and the Java fixture consumer. The declarations fix
 the future wire contract; they do not make an unimplemented route reachable.
+The Java `HttpRuntimeTransport` implements `execute`, `status`, and `cancel`
+against this contract.
 
 Out of scope: the worker handlers that serve these routes, admission through
-the raw HTTP gate, the Java `HttpRuntimeTransport` implementation of
-`execute`/`status`/`cancel`, and a `not_started_proven` outcome, which needs the
+the raw HTTP gate, wiring `HttpRuntimeTransport` into `RuntimeTransport`,
+and a `not_started_proven` outcome, which needs the
 durable receipt store. Each handler and its gate admission land together in a
 follow-up change.
 
@@ -87,7 +89,7 @@ Every success is a closed object carrying `protocolVersion` and a `state` of
   cursor. The current Broker lookup does not consume it.
 
 This slice fixes `responseParts` as an array only. Its element shape is
-deliberately deferred to the worker extraction and transport slice, which must
+deliberately deferred to the worker handler and Broker wiring slices, which must
 derive it from the actual tool-result path (`ToolCallResponseInfo.responseParts`
 uses SDK `Part[]`) and add shared conformance coverage before serving results.
 The text parts in these fixtures are illustrative, not a new part format.
@@ -97,7 +99,7 @@ record must still return `unknown` and never imply `not_started`.
 Failures keep the shared classification: 401 credentials, 400/413 protocol,
 409 identity, 404 incompatible. JSON errors retain the shared stable codes;
 the gate's incompatible 404 has an empty body. The attestation-named codes do
-not imply a 16 KiB tool limit: future error messages must use the route's cap.
+not imply a 16 KiB tool limit: error messages use the operation and its cap.
 
 ### 3.4 Conformance fixtures
 
@@ -129,16 +131,45 @@ Run `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts` in
 fixtures, the schema mutation cases, and raw-gate rejection of unimplemented
 tool routes. The Java suite consumes the same contract files.
 
+### 4.1 Java transport
+
+`HttpRuntimeTransport` validates the caller's reference keys before sending.
+For `execute`, the caller map contains the four identity fields plus
+`toolName` and `input`; the wire request separates those two fields from
+`reference`. `status` and `cancel` send only the four identity fields and may
+reuse that caller map. The `session` parameter remains for the future service
+adapter; it is not sent or substituted for the original call identity.
+
+This caller map is a transport request, not a new persisted identity format.
+The Broker's stored reference remains the four-field identity. Before wiring
+physical dispatch, the service adapter must obtain `toolName` and `input`
+separately and assemble the transport request without adding the payload to
+`reference_json` or changing execution idempotency.
+
+Requests exceeding the route's cap are rejected before sending: 256 KiB for
+`execute`, 16 KiB for `status` and `cancel`. Responses are bounded at 1 MiB and
+must carry `no-store` and JSON headers. Parsing enforces closed envelope,
+result, and error objects; protocol version 2; contract states and execution
+statuses; non-empty error strings; and a result exactly when settled.
+`lastSequence` is an optional non-negative integer on `status` only.
+`execute` requires settlement and returns the result map. `status` and
+`cancel` return the validated wire map. Shared error codes remain unchanged;
+messages identify the operation and applicable limit. Server failures are
+retryable; other HTTP failures are terminal.
+
+Run `mvn test` and `mvn checkstyle:check` in
+`packages/sdk-java/runtime-broker`. HTTP fixture replays verify the canonical
+requests, success and unknown answers, malformed references and responses,
+route-specific request limits, and tool results above 16 KiB through 1 MiB.
+The worker still rejects the tool routes until handlers land.
+
 ## 5. Follow-up work
 
 - Mount the real worker handlers for the three routes and expand raw-gate
   admission in the same change (execute extraction).
-- Replace the unused pre-contract `HttpRuntimeTransport.execute` stub and
-  implement the three operations as a `RuntimeTransport`. The stub sends a
-  session envelope, discards results, and caps responses at 16 KiB; it is not
-  connected to Broker dispatch. The follow-up must supply `toolName`/`input`,
-  use the reference-only identity envelope and the per-route limits here,
-  and adapt execute's settled envelope to the Broker's result shape.
+- Complete the session verbs and wire `HttpRuntimeTransport` into
+  `RuntimeTransport`. Supply `toolName`/`input` separately from the stored
+  reference as described in §4.1, and cover real Broker dispatch end to end.
 - The `UNKNOWN` execution reconciler shipped in #12655. Its transport must
   validate the status wire envelope, then project it to `{state, result}`
   (`result` only for `settled`). Strip `protocolVersion` and `lastSequence`;
