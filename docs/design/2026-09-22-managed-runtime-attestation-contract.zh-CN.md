@@ -2,7 +2,7 @@
 
 [English](2026-09-22-managed-runtime-attestation-contract.md) | [简体中文](2026-09-22-managed-runtime-attestation-contract.zh-CN.md)
 
-状态：契约基础和仅提供身份证明的 worker 外壳已实现；Java Broker 接线仍是后续工作。更新日期：2026-09-23。
+状态：契约基础和仅提供身份证明的 worker 外壳已实现；Java Broker 接线仍是后续工作。更新日期：2026-09-24。
 
 ## 问题
 
@@ -32,7 +32,7 @@ TypeScript worker 和未来 Java transport 还需要一份可共同评审的线�
 
 ## Typed Route Manifest
 
-`OWNED_MANAGED_RUNTIME_ROUTES` 当前只包含本契约切片实际实现的一条路由：
+`OWNED_MANAGED_RUNTIME_ROUTES` 声明该组件持有的线路契约。其中 attestation 条目是当前唯一已经实现并被放行的路由：
 
 ```text
 POST /internal/managed-runtime/v2/attest
@@ -42,9 +42,9 @@ responseBodyLimitBytes = 16384
 cacheControl = no-store
 ```
 
-Express registrar 从该条目读取 method、path、协议版本和 body 限制。raw HTTP gate 使用同一条目对传入 method 与未经修改的 request URL 进行比较。因此，query string、尾随斜杠、大小写变体、其他 method 和未登记 path 都会在进入 Express 前以 404 失败。
+Express registrar 从该条目读取 method、path、协议版本和 body 限制。raw HTTP gate 使用这条已实现路由对传入 method 与未经修改的 request URL 进行比较。因此，query string、尾随斜杠、大小写变体、其他 method 和未放行 path 都会在进入 Express 前以 404 失败。
 
-manifest 刻意不预先加入仅存在于预览分支的 health、v1 Tool、history 或 v2 Tool routes。每个操作都在提取真实 handler 的同一变更中加入。这样可以避免 manifest 声称某条路由存在，而 `main` 实际没有实现。
+声明 manifest 还包含未来 v2 `execute`、`status`、`cancel` 的契约，使 TypeScript 与 Java 能共享线路定义。声明不代表放行：在真实 handler 落地之前，raw gate 会拒绝这些路由。未来每个 handler 与对应的 gate admission 必须在同一变更中加入。仅存在于预览分支的 health、v1 Tool 与 history routes 不会被声明。
 
 ## Attestation 请求与响应
 
@@ -70,7 +70,7 @@ handler 永不返回 bearer token。token 通过等长 `timingSafeEqual` 比较�
 - `managed-runtime-attestation-v2.schema.json` 固定 route metadata、闭合请求与响应形状、大小限制和结果分类。
 - `managed-runtime-attestation-v2.fixtures.json` 包含规范 identity，以及凭据变体、每个不可变身份不一致、非法或空字段、精确错误码、不支持的媒体类型、charset/content encoding、超大 body 与精确路由拒绝等用例。
 
-TypeScript 测试物化每个用例，并通过 `node:http` → raw manifest gate → Express 鉴权与 JSON 解析 → attestation handler 的完整路径发送请求。测试校验 status、分类、`no-store`、精确成功 body 和响应大小。
+TypeScript 测试物化每个用例，并通过 `node:http` → raw route gate → Express 鉴权与 JSON 解析 → attestation handler 的完整路径发送请求。测试校验 status、分类、`no-store`、精确成功 body 和响应大小。
 
 Java attestation client 读取同一批文件，向真实 HTTP endpoint 发送规范请求，并按 status 解析响应。它执行 16 KiB 上限、闭合字段和成功身份全等；404 不可重试。详见[Java client 切片](2026-09-23-java-runtime-attestation-client.zh-CN.md)。该客户端仍不实现 acquire/execute，也不把结果写入 Broker service。
 
@@ -78,9 +78,9 @@ Java attestation client 读取同一批文件，向真实 HTTP endpoint 发送�
 
 隐藏命令 `qwen managed-runtime-worker` 从标准输入接收且只接收一份 JSON boot 文档。这个闭合文档包含 v1 boot 标记和不可变 attestation identity，其中包括每个 generation 独立的 bearer token。输入上限为 32 KiB，且必须在 30 秒内关闭；超时或出现未知字段都会让启动失败。通过标准输入传入 token，可避免它出现在命令参数或长期环境变量中。
 
-进程使用同一个 attestation registrar 校验 identity 后，在操作系统分配的 `127.0.0.1` 端口监听。raw listener 由 `ownedManagedRuntimeRouteGate` 包装，因此唯一放行的操作是 manifest 中精确的 attestation route。进程输出一份闭合的 v1 ready record，其中包含 loopback URL 和 fencing identity，但永不包含 token。收到 `SIGINT` 或 `SIGTERM` 时，进程先关闭 listener 再退出。
+进程使用同一个 attestation registrar 校验 identity 后，在操作系统分配的 `127.0.0.1` 端口监听。raw listener 由 `ownedManagedRuntimeRouteGate` 包装，因此唯一放行的操作是精确的 attestation route。进程输出一份闭合的 v1 ready record，其中包含 loopback URL 和 fencing identity，但永不包含 token。收到 `SIGINT` 或 `SIGTERM` 时，进程先关闭 listener 再退出。
 
-这个外壳为下一步 Java client 和 process provisioner 提供可执行的 ownership boundary。它不加载 model、Harness、tool manifest、Session 或 workspace execution engine。后续增加任何 Tool 操作时，必须在同一个变更中加入真实 handler 和 route manifest 条目。
+这个外壳为下一步 Java client 和 process provisioner 提供可执行的 ownership boundary。它不加载 model、Harness、tool manifest、Session 或 workspace execution engine。后续增加任何 Tool 操作时，必须在同一个变更中加入真实 handler 和 raw gate admission。
 
 ## 安全与失败语义
 
@@ -98,7 +98,7 @@ Hosted Runtime 按以下顺序集成：
 1. 本变更启动仅提供身份证明的进程，使用 `ownedManagedRuntimeRouteGate` 包装 listener，并注册 `registerManagedRuntimeAttestationRoute`；
 2. 让 Java attestation client 按共享 fixture 发送和解析数据，并施加 16 KiB 响应上限；
 3. 发送凭据前先 reconcile 物理身份，然后使用原数据库 operation generation 提交 attestation 结果，最后才能打开本地 ready gate；
-4. 提取每个真实 owned Tool handler，并在同一提交中把它的 route 加入 manifest；
+4. 提取每个真实 owned Tool handler，并在同一提交中让其已声明 route 通过 raw gate；
 5. 增加 Java Broker + TypeScript worker 进程 E2E，并把跨语言 gate 设为 required CI。
 
 ## 验证
@@ -113,7 +113,7 @@ Hosted Runtime 按以下顺序集成：
 - 超过 16 KiB 的 body 返回 413；压缩 body 以及不支持的 JSON charset 或 content encoding 按 JSON 协议错误失败；所有响应都带 `Cache-Control: no-store`。
 - 未知字段、错误协议版本和非法 digest 按协议错误失败；lease 和不可变 identity 差异按冲突失败。
 - TypeScript 与 Java 消费同一个 fixture 文件，并对五种分类达成一致。
-- worker 拒绝非法、超大或非闭合 boot input；绑定 loopback 随机端口；输出不含 token 的 ready record；只暴露 manifest route；并能干净终止。
+- worker 拒绝非法、超大或非闭合 boot input；绑定 loopback 随机端口；输出不含 token 的 ready record；只放行 attestation route；并能干净终止。
 - 不引入 Hosted profile、Runtime provider、Broker transport、公共 API 或普通 daemon 行为变化。
 
 ## 后续边界
