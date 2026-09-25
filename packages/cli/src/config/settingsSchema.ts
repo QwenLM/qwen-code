@@ -1564,6 +1564,49 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  batch: {
+    type: 'object',
+    label: 'Batch',
+    category: 'Model',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Independent model selection for /batch-api and qwen batch. Unset to reuse the main model configuration.',
+    showInDialog: false,
+    properties: {
+      model: {
+        type: 'string',
+        label: 'Batch Model',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Model ID in modelProviders. The selected entry supplies the endpoint, envKey and generationConfig.',
+        showInDialog: false,
+      },
+      authType: {
+        type: 'string',
+        label: 'Batch Auth Type',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Batch protocol. Defaults to openai; only OpenAI-compatible chat-completions is supported.',
+        showInDialog: false,
+      },
+      baseUrl: {
+        type: 'string',
+        label: 'Batch Model Base URL',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Optional exact modelProviders baseUrl to distinguish entries with the same model ID.',
+        showInDialog: false,
+      },
+    },
+  },
+
   advisorModel: {
     type: 'string',
     label: 'Advisor Model',

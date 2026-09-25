@@ -684,6 +684,24 @@
       "type": "string",
       "default": ""
     },
+    "batch": {
+      "description": "Independent model selection for /batch-api and qwen batch. Unset to reuse the main model configuration.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Model ID in modelProviders. The selected entry supplies the endpoint, envKey and generationConfig.",
+          "type": "string"
+        },
+        "authType": {
+          "description": "Batch protocol. Defaults to openai; only OpenAI-compatible chat-completions is supported.",
+          "type": "string"
+        },
+        "baseUrl": {
+          "description": "Optional exact modelProviders baseUrl to distinguish entries with the same model ID.",
+          "type": "string"
+        }
+      }
+    },
     "advisorModel": {
       "description": "Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.",
       "type": "string",

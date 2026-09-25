@@ -13,6 +13,7 @@ import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isTlsVerificationDisabled } from '@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js';
 import { loadSettings } from '../config/settings.js';
 import {
+  collectProviderModelsForProtocol,
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
 } from '../utils/modelConfigUtils.js';
@@ -36,7 +37,7 @@ export interface BatchEndpoint {
   apiKey: string;
   baseUrl: string;
   model: string;
-  /** The realtime generation config, frozen into workflow requests. */
+  /** The selected model generation config, frozen into workflow requests. */
   generationConfig?: GenerationConfigLike;
 }
 
@@ -72,7 +73,45 @@ export function resolveEndpoint(
     warn?: (message: string) => void;
   } = {},
 ): BatchEndpoint {
-  const settings = options.settings ?? loadSettings().merged;
+  let settings = options.settings ?? loadSettings().merged;
+  const batch = settings.batch;
+  if (batch?.model || batch?.authType || batch?.baseUrl) {
+    if (!batch.model?.trim()) {
+      throw new Error('Set batch.model to a modelProviders model ID.');
+    }
+    if (batch.authType && batch.authType !== AuthType.USE_OPENAI) {
+      throw new Error('batch.authType must be "openai" for DashScope Batch.');
+    }
+    const matches = collectProviderModelsForProtocol(
+      settings.modelProviders,
+      settings.providerProtocol,
+      AuthType.USE_OPENAI,
+    ).filter(
+      (provider) =>
+        provider.id === batch.model &&
+        (!batch.baseUrl || provider.baseUrl === batch.baseUrl),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        'batch.model must match exactly one chat-completions modelProviders entry; use batch.baseUrl to disambiguate duplicate IDs.',
+      );
+    }
+    const provider = matches[0];
+    if (!provider.baseUrl || !provider.envKey || !env[provider.envKey]) {
+      throw new Error(
+        'The Batch provider needs baseUrl and an envKey with a non-empty value in settings.env or the environment.',
+      );
+    }
+    // Resolve only the selected route: ordinary chat credentials, endpoint and
+    // generation defaults must never leak into an explicitly selected batch.
+    settings = {
+      ...settings,
+      model: { name: provider.id, baseUrl: provider.baseUrl },
+      modelProviders: { openai: [provider] },
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+    };
+    env = { [provider.envKey]: env[provider.envKey] };
+  }
   const selectedAuthType =
     settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
   if (selectedAuthType !== AuthType.USE_OPENAI) {

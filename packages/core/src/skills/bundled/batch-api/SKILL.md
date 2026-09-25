@@ -51,7 +51,10 @@ Then:
 
 It proves the credentials, endpoint and Batch route work and shows the model,
 thinking mode and output limit a run would freeze from the user's current
-settings — without a billed request. If it fails (for example Qwen OAuth, which has no Batch route),
+settings — without a billed request. `settings.batch.model` can select a
+separate modelProviders entry; its endpoint, envKey and generationConfig are
+used without changing the conversation model. Do not edit authentication or
+settings to work around a failed check. If it fails (for example Qwen OAuth, which has no Batch route),
 relay its message and stop: do not read files or draft a plan the executor
 cannot submit. Pass its `note:` lines on to the user.
 

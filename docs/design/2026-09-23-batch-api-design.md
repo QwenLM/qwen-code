@@ -126,7 +126,7 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   is held as a conflict; an identical one counts as delivered, which makes
   re-collection idempotent. The source is re-hashed before writing; a source
   changed since submission holds its result.
-- **Batch runs the user's realtime settings.** `run` freezes the configured
+- **Batch runs the selected model's settings.** `run` freezes the configured
   `samplingParams` and `extra_body` into the task exactly as realtime sends
   them (verbatim, `extra_body` merged last), and every retry reuses them.
   Disabled reasoning becomes the Qwen wire shape realtime uses
@@ -144,6 +144,20 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   files; a line without usage marks the total incomplete, never a silent
   zero. Preparation in the session is invisible to the executor and every
   report says so. Batch usage stays out of the session's cache statistics.
+
+### Independent Batch model selection
+
+`settings.batch.model` selects an existing `modelProviders` entry independently
+of the conversation model. `batch.authType` defaults to `openai`; optionally
+use `batch.baseUrl` to disambiguate duplicate IDs. The match must be unique,
+use chat-completions, and supply a base URL and populated envKey. Explicit
+selection uses only that route's credentials and generationConfig; errors
+never fall back to conversation settings. With no selection, preserve the
+legacy main-model behavior. All commands and the interactive auto-collector
+share this resolver. Restart after editing the selection. Acceptance: a
+non-OpenAI conversation can check/submit/collect through the selected Batch
+route; changing the main model does not change that route; missing, ambiguous
+or unsupported selections fail before upload.
 
 ## 4. Plan schema (v1)
 

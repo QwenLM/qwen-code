@@ -5,9 +5,45 @@ price, with a completion window of at least 24 hours. Qwen Code uses it
 through `/batch-api`: you describe a bulk task, the agent prepares a plan,
 and `qwen batch` submits it, tracks it and writes the results as files.
 
-It needs an OpenAI-compatible API key: set `OPENAI_API_KEY`,
-`OPENAI_BASE_URL`, and `OPENAI_MODEL` (or `QWEN_MODEL`) — see
-[Authentication](../configuration/auth.md). Qwen OAuth has no Batch route.
+## Configure a Batch model
+
+Declare the endpoint and credential once in `settings.json`, then select it
+with `batch.model`. Your ordinary conversation model and authentication stay
+unchanged, including when the conversation uses Qwen OAuth or another provider.
+
+```json
+{
+  "env": { "DASHSCOPE_API_KEY": "your-key" },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3.7-plus",
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "envKey": "DASHSCOPE_API_KEY"
+      }
+    ]
+  },
+  "batch": { "authType": "openai", "model": "qwen3.7-plus" }
+}
+```
+
+Merge these fields into your existing settings, keeping your other provider
+entries. `envKey` names the key in `settings.env` (or an environment variable);
+no separate shell export is needed. The provider's `generationConfig` controls
+Batch generation. `wireApi` is the request protocol, not a Batch switch: omit
+it or use `"chat-completions"`; `"responses"` is not supported by this executor.
+
+`batch.authType` defaults to `openai`. The model must match exactly one
+OpenAI-compatible chat-completions entry with a `baseUrl` and a populated
+`envKey`. If IDs repeat, set `batch.baseUrl` to the exact configured URL.
+Invalid explicit selections fail before any upload; they never fall back to
+conversation credentials. Restart the interactive session after changing this
+selection so its background collector uses the same settings as child commands.
+
+Without a Batch selection, the previous behavior remains: Batch reuses the
+main model's configuration and requires OpenAI-compatible API-key auth.
+Qwen OAuth credentials themselves have no Batch route. Run `qwen batch check`
+to verify readiness without submitting a paid request.
 
 ## When batch is the right tool
 
