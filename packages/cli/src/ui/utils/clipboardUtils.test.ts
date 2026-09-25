@@ -496,6 +496,16 @@ describe('clipboardUtils', () => {
       expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
         expect.stringContaining('exited with code'),
       );
+      // That latch is also what makes this errno the spawn failure's only
+      // trace, so it is pinned here: reverting the handler to the pre-PR
+      // `child.on('error', () => {` drops the binding and the log together and
+      // would otherwise ship green. `.debug` and not `.error`, because the
+      // synchronous-throw arm logs the byte-identical message at the other
+      // level and is pinned separately.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Failed to spawn wl-paste --list-types:',
+        expect.any(Error),
+      );
     });
 
     it('notifies when the wl-paste query times out', async () => {
@@ -552,6 +562,13 @@ describe('clipboardUtils', () => {
       expect(onUnavailable).toHaveBeenCalledOnce();
       expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
         expect.stringContaining('exited with code'),
+      );
+      // Same reason as the wl-paste twin above: the latch suppresses the close
+      // handler's fabricated exit code, so this errno is the only trace the
+      // spawn failure leaves and dropping it must not ship green.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Failed to spawn xclip:',
+        expect.any(Error),
       );
     });
 
@@ -681,6 +698,13 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+      // This echo is the only record of the wording isEmptyClipboardError()
+      // classified as a real failure rather than an empty clipboard, so
+      // without it the classification decision is not auditable. No trailing
+      // newline: the site trims.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'wl-paste stderr: Failed to connect to a Wayland server: No such file or directory',
+      );
     });
 
     it('still notifies when xclip cannot open the display', async () => {
@@ -695,6 +719,11 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+      // Same as the wl-paste twin above: the only record of the wording that
+      // was classified as a real failure. Trimmed, so no trailing newline.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        "xclip stderr: xclip: Error: Can't open display: :0",
+      );
     });
 
     it('records the exit code and args when a failed query writes no stderr', async () => {
