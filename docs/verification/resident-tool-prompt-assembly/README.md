@@ -33,14 +33,14 @@
 
 ## 1. 预期收益（静态推算，待验证）
 
-被门控的只有两段：`## Using Your Tools` 的部分条目，以及 `# Examples` 中的示例块。以下是第二轮精简（PR #12546）后的 direct 模式口径；文件七件套指 read_file / write_file / edit / glob / grep_search / run_shell_command / skill，加上豁免工具：
+被门控的只有两段：`## Using Your Tools` 的部分条目，以及 `# Examples` 中的示例块。以下是第二轮精简（PR #12546）后、**Todo 关闭**（未设 `tools.todoWrite.enabled`）时的 direct 模式口径；文件七件套指 read_file / write_file / edit / glob / grep_search / run_shell_command / skill，加上豁免工具：
 
 | 对比基线 → 文件七件套白名单              | 节省字符 | 节省 UTF-8 字节 | 移除内容                                                     |
 | ---------------------------------------- | -------: | --------------: | ------------------------------------------------------------ |
 | 无声明快照（假定全部工具可用）           |    1,135 |           1,139 | Subagent Delegation、Codebase Search、Monitor Processes 三条 |
 | 基线已不声明 monitor，其他相关工具均声明 |      818 |             822 | Subagent Delegation、Codebase Search 两条                    |
 
-字符采用 JavaScript `string.length` 口径，字节采用 UTF-8 口径；`wc -c` 量的是字节，不能直接与字符数比较。两种对比都保留全部示例，因为示例只调用文件类工具和 shell。若继续移除 `edit`、`write_file`、`glob` 或 shell，示例也会被裁剪，必须按当前模型模板重新测量，不能沿用旧版范围。
+字符采用 JavaScript `string.length` 口径，字节采用 UTF-8 口径；`wc -c` 量的是字节，不能直接与字符数比较。两种对比都保留全部示例，因为示例只调用文件类工具和 shell。若继续移除 `edit`、`write_file`、`glob` 或 shell，示例也会被裁剪，必须按当前模型模板重新测量，不能沿用旧版范围。若 A/B 两边都开启 Todo，B 还会少 `- **Task Management:**` 一条（228 字符——该条按 `todo_write` 是否被**声明**门控，见 `prompts.ts` 的 `TOOL_GUIDANCE_LINE_GATES`，而 `todo_write` 不在文件七件套内）：无快照行差值变为 1,364 字符 / 1,368 字节，monitor 未声明行变为 1,047 字符 / 1,051 字节。
 
 这些数字不是 token 计费数据，也不是所有真实 CLI 配置的固定收益。默认延迟加载的 `monitor` 若在 A/B 两边均未声明，就不能把它的 317 字符算入 A/B 差值。
 
@@ -68,7 +68,7 @@ wc -c /tmp/prompt-default.md /tmp/prompt-eager.md
 diff /tmp/prompt-default.md /tmp/prompt-eager.md
 ```
 
-**预期：** A/B 必须使用同一构建、模型、output style、Todo 状态及其他配置，并确认实际声明集合。默认 `monitor` 在两边均未声明、A 声明 `agent` 且 B 不声明它时，文件七件套的 B 比 A 少 **818 字符 / 822 字节**，只删除 `- **Subagent Delegation:**` 与 `- **Codebase Search:**` 两条，示例不变。若改用无声明快照的函数渲染作 A，才是 §1 的三条 / 1,135 字符 / 1,139 字节口径。更窄白名单需要逐块检查示例差异，不使用历史总量作通过阈值。
+**预期：** A/B 必须使用同一构建、模型、output style、Todo 状态及其他配置，并确认实际声明集合。Todo 关闭、默认 `monitor` 在两边均未声明、A 声明 `agent` 且 B 不声明它时，文件七件套的 B 比 A 少 **818 字符 / 822 字节**，只删除 `- **Subagent Delegation:**` 与 `- **Codebase Search:**` 两条，示例不变。若两边都开启 Todo，B 还会少 `- **Task Management:**` 一条（228 字符），差值为 **1,047 字符 / 1,051 字节**——「Todo 状态一致」不足以固定该数字，该条按 `todo_write` 是否被**声明**门控，而它不在文件七件套内。若改用无声明快照的函数渲染作 A，才是 §1 的三条 / 1,135 字符 / 1,139 字节口径。更窄白名单需要逐块检查示例差异，不使用历史总量作通过阈值。
 
 **如果 B 和 A 一样大**，说明 `tools.eager` 没被接受（这是最常见的坑，见伞 issue 的交接文档：settings 写漏、scope 覆盖、未知 key 只走 debug 日志），而不是门控没生效。先确认 `/tools` 里那些工具确实变成了按需。
 
@@ -83,7 +83,7 @@ diff /tmp/prompt-default.md /tmp/prompt-eager.md
 
 **预期：** 系统提示词的下降量应与 §2 中实际移除的文本相符，不预设 1,000 token 阈值。`input_token_count` 还包含工具 schema 与其他上下文；不要把 `tools.eager` 裁剪 schema 的收益记到提示词门控头上。
 
-**要分离两者的贡献**，跑三档：默认；只设 `tools.eager`（本 PR 之前的版本）；设 `tools.eager` + 本 PR。第三档相对第二档的差值，才是本改动的收益。
+**要分离两者的贡献**，跑三档：默认；只设 `tools.eager`；只设 `tools.eager` + 门控改动（本节「本 PR」指门控 PR #12145）。第二、三档的构建必须只差门控这一项：本文 §1 已改用第二轮精简（PR #12546）后的口径，若第三档构建同时带有 #12546，差值里会混入它删掉的未门控文本（该提交实测：非 git 1,197 字符 / 含 git 1,422 字符，见 `docs/design/2026-09-23-system-prompt-second-pass.md`），须先减去再与 §1/§2 的 818/822 对比。第三档相对第二档的差值，才是本改动的收益。
 
 ---
 
@@ -103,7 +103,7 @@ for t in agent web_fetch web_search notebook_edit list_directory monitor cron_cr
 done
 ```
 
-**已知残留（不是回归）：** `ask_user_question` 在被门控段落内仍无条件出现（它豁免于 `tools.eager`，且那条文案同时承载 headless 下"不得提问"的策略）。另外， `read_file` 在 persisted-output 条目与 plan mode 提醒里是无条件出现的，位于被门控段落之外；`subagent_type=Explore` 同样保持无条件。设计文档 §4.3 与 §6 有记录。所以上面的检查只针对 `## Using Your Tools` 与 `# Examples` 两段。
+**已知残留（不是回归）：** `ask_user_question` 在被门控段落内仍无条件出现（它豁免于 `tools.eager`，且那条文案同时承载 headless 下"不得提问"的策略）。另外， `read_file` 在 persisted-output 条目与 plan mode 提醒里是无条件出现的，位于被门控段落之外；`subagent_type=Explore` 同样保持无条件；`# Task Management` 小节在 Todo 开启时保留并点名 `todo_write`，也位于被门控段落之外。设计文档 §4.3 与 §6 有记录。所以上面的检查只针对 `## Using Your Tools` 与 `# Examples` 两段。
 
 **第 3 条 · 安全条款一条都没少**
 
@@ -112,7 +112,7 @@ for k in '**UserPromptSubmit Context:**' '**Denied Tool Calls:**' '**Respect Too
          '**Security First:**' '**Explain Critical Commands:**' '**Report outcomes faithfully:**' \
          'did not run a verification step' \
          'Carefully consider the reversibility' '- Destructive operations:'; do
-  grep -qF "$k" /tmp/prompt-eager.md || echo "缺失：$k"
+  grep -qF -- "$k" /tmp/prompt-eager.md || echo "缺失：$k"
 done
 ```
 
@@ -126,8 +126,8 @@ done
 | --- | --------------------- | -------------------------------------------------- | ------------------------------------- | ---------------------------------------------- |
 | 1   | 主会话（交互）        | 提示词内容变了                                     | 裁剪配置下跑几轮真实任务              | 文件类任务正常完成，不出现"调用不存在的工具"   |
 | 2   | `/context`            | 它读同一份快照来生成提示词                         | `/context detail` 的系统提示词一行    | 与请求一致，不报错                             |
-| 3   | Arena                 | 它直接调 `getCoreSystemPrompt`，没有快照           | `/arena --models a,b "简单任务"`      | 各 agent 提示词与改动前一致（无快照 = 不门控） |
-| 4   | 子 agent              | 走 `includeDeferred: true` 另一条路径，本改动不碰  | 跑一次 `agent` 委派                   | 子 agent 提示词与改动前一致                    |
+| 3   | Arena                 | 它直接调 `getCoreSystemPrompt`，没有快照           | `/arena --models a,b "简单任务"`      | 同一构建内门控前后一致（无快照 = 不门控）；跨版本比较时，提示词精简（如 #12546）带来的文案差异属预期 |
+| 4   | 子 agent              | 定义型子 agent 渲染自己的提示词；fork 与恢复的后台 agent 逐字继承父级已渲染（已门控）的指令 | 用 `subagent_type: "fork"` 跑一次委派，与同一构建的父提示词对比 | 定义型子 agent 不受影响；fork / 恢复 agent 同一构建内与父提示词一致（继承是共享缓存前缀的前提），跨版本随父提示词有意变化 |
 | 5   | output style          | `keepCodingInstructions: false` 与门控叠加         | 选一个自定义 style 再看提示词         | 两者各自生效，不互相吃掉                       |
 | 6   | code mode             | 该模式下工具在 `exec` 内调用，实现里**明确不门控** | `tools.codeModeOnly: true` 起一个会话 | `tools.<name>` 那些条目一条不少                |
 | 7   | `QWEN_SYSTEM_MD` 覆盖 | 覆盖分支完全绕过默认提示词                         | 设一个覆盖文件起会话                  | 提示词就是该文件，门控不参与                   |
@@ -146,7 +146,7 @@ done
 能做的弱化验证：
 
 1. 在裁剪配置下，用 10–20 条该部署的真实任务（文件处理为主）各跑一次，记录：是否完成、调用了哪些工具、`tool_search` 被调用几次。
-2. 与"只设 `tools.eager`、不带本 PR"的版本对比。**关注方向而不是绝对值**：本改动删掉的是模型本来就拿不到的工具的说明，因此成功率不应下降；如果下降了，说明删多了（例如某条策略条目对仍然存在的工具也有指导意义）。
+2. 与"只设 `tools.eager`、不带门控改动"的版本对比——两臂同样只能相差门控：第二轮精简（#12546）删改的是模型拿得到的通用规则文本，两臂必须同时带或同时不带它，否则成功率变化无法归因到门控。**关注方向而不是绝对值**：门控删掉的是模型本来就拿不到的工具的说明，因此成功率不应下降；如果下降了，说明删多了（例如某条策略条目对仍然存在的工具也有指导意义）。
 3. `tool_search` 调用次数应当**不增加**。若增加，说明删掉的文本原本在引导模型别去找那些工具。
 
 **待决策：** 这个弱化验证够不够。如果不够，先落一套最小 eval 设施再谈裁剪——这是伞 issue 里 #12054 也遇到的同一道闸门。
@@ -155,7 +155,7 @@ done
 
 ## 7. 请报告回来什么
 
-1. §2 的版本、模型、实际声明集合、`wc -c` 字节数与 diff 摘要（两边均未声明 monitor 时，文件七件套预期差值为 822 字节；见 §1、§2 的适用条件）。
+1. §2 的版本、模型、实际声明集合、Todo 状态、`wc -c` 字节数与 diff 摘要（Todo 关闭且两边均未声明 monitor 时，文件七件套预期差值为 822 字节；Todo 开启时为 1,051 字节。见 §1、§2 的适用条件）。
 2. §3 三档的 `input_token_count` 与 `/context` 系统提示词一行。
 3. §4 三条检查的输出（第 2、3 条预期无输出）。
 4. §5 表格逐行结论，尤其第 6、7 条（必须无变化）。
@@ -168,5 +168,5 @@ done
 
 - **「无快照与声明全集的路径一致」** 依赖"无快照即不门控"这条早退。推翻方式：在同一构建下分别传入无快照与工具全集，渲染出现差异即证伪；这不等于真实会话默认声明全部工具。
 - **「字符减少代表计费 token 减少」** 不能仅靠字符数或粗略换算证明。以 provider 的 `input_token_count` 为准，并按 §3 分离工具 schema 的贡献。
-- **「不影响子 agent 与 Arena」** 依赖它们不读快照。推翻方式：§5 第 3、4 行的提示词 diff 出现差异。
+- **「不影响子 agent 与 Arena」** 依赖它们不读快照。推翻方式：**同一构建内** §5 第 3、4 行的提示词 diff 出现差异（跨版本差异属预期，见 §4 第 1 条）。
 - **「缓存前缀重写频率不变」** 依赖会话中途的揭示不重建提示词。推翻方式：会话中途触发一次 `tool_search`，若系统提示词随之变化即证伪。
