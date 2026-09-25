@@ -1310,6 +1310,12 @@ describe('BackgroundAgentResumeService', () => {
       false,
     ],
     ['lists tools without skill', { tools: ['read_file'] }, false],
+    // Exercises the `tools`-side resolve() in subagentWillHaveSkillTool: the
+    // display name 'Skill' only matches the canonical ToolNames.SKILL after
+    // resolution, so this row goes red if that resolve call is dropped (the
+    // rows above either resolve nothing on the tools side or resolve only the
+    // blocklist).
+    ['lists tools by display name', { tools: ['read_file', 'Skill'] }, true],
   ])(
     'matches the launch-time skill listing when the definition %s',
     async (_label, toolFields, expectListing) => {
