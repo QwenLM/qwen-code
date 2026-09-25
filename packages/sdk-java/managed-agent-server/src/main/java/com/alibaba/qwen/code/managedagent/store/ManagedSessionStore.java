@@ -106,6 +106,7 @@ public class ManagedSessionStore {
         Timestamp initialLeaseUntil = plusMillis(createdAt,
                 request.leaseMillis());
         try {
+            // Add fractions in SQL because some drivers truncate Timestamp nanos.
             jdbc.update("INSERT INTO qwen_managed_session_journal_head"
                             + " (tenant_id, workspace_id, session_id,"
                             + " storage_version, state, writer_generation,"
@@ -114,11 +115,14 @@ public class ManagedSessionStore {
                             + " committed_sequence, activation_epoch,"
                             + " compacted_through_revision, recovery_status,"
                             + " created_at, updated_at) VALUES (?, ?, ?, ?,"
-                            + " 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 'READY',"
+                            + " 'ACTIVE', 1, ?, TIMESTAMPADD(MICROSECOND, ?,"
+                            + " CAST(? AS DATETIME(6))), ?, 0, 0, 0, 0, 'READY',"
                             + " ?, ?)",
                     tenantId, request.workspaceId(), sessionId,
-                    STORAGE_VERSION, request.writerId(), initialLeaseUntil,
-                    tokenHash, createdAt, createdAt);
+                    STORAGE_VERSION, request.writerId(),
+                    initialLeaseUntil.getNanos() / 1_000,
+                    wholeSeconds(initialLeaseUntil), tokenHash, createdAt,
+                    createdAt);
             return new WriterGrant(1, initialLeaseUntil.getTime(), 0, 0,
                     null, 0, false);
         } catch (DuplicateKeyException ignored) {
@@ -147,9 +151,11 @@ public class ManagedSessionStore {
             Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                     plusMillis(now, request.leaseMillis()));
             jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                            + " writer_lease_until = ?, updated_at = ?"
+                            + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
+                            + " CAST(? AS DATETIME(6))), updated_at = ?"
                             + " WHERE tenant_id = ? AND session_id = ?",
-                    leaseUntil, now, tenantId, sessionId);
+                    leaseUntil.getNanos() / 1_000, wholeSeconds(leaseUntil),
+                    now, tenantId, sessionId);
             return grant(head, leaseUntil, true);
         }
         long generation = increment(head.writerGeneration(),
@@ -157,11 +163,12 @@ public class ManagedSessionStore {
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " state = 'ACTIVE', writer_generation = ?,"
-                        + " writer_id = ?, writer_lease_until = ?,"
+                        + " writer_id = ?, writer_lease_until ="
+                        + " TIMESTAMPADD(MICROSECOND, ?, CAST(? AS DATETIME(6))),"
                         + " lease_token_hash = ?, updated_at = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                generation, request.writerId(), leaseUntil, tokenHash, now,
-                tenantId, sessionId);
+                generation, request.writerId(), leaseUntil.getNanos() / 1_000,
+                wholeSeconds(leaseUntil), tokenHash, now, tenantId, sessionId);
         return new WriterGrant(generation, leaseUntil.getTime(),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), false);
@@ -182,9 +189,11 @@ public class ManagedSessionStore {
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                        + " writer_lease_until = ?, updated_at = ?"
+                        + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
+                        + " CAST(? AS DATETIME(6))), updated_at = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                leaseUntil, now, tenantId, sessionId);
+                leaseUntil.getNanos() / 1_000, wholeSeconds(leaseUntil),
+                now, tenantId, sessionId);
         return grant(head, leaseUntil, false);
     }
 
@@ -828,6 +837,12 @@ public class ManagedSessionStore {
         return new WriterGrant(head.writerGeneration(), leaseUntil.getTime(),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), replayed);
+    }
+
+    private static Timestamp wholeSeconds(Timestamp timestamp) {
+        Timestamp result = new Timestamp(timestamp.getTime());
+        result.setNanos(0);
+        return result;
     }
 
     private static Timestamp plusMillis(Timestamp timestamp, long millis) {

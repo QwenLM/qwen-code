@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Acquir
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
@@ -34,6 +35,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -219,11 +222,15 @@ class ManagedAgentMySqlIT {
                                 "managed_session_writer_conflict"));
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"LOCAL", "UTC", "Asia/Shanghai"})
     @Order(2)
-    void shortWriterLeaseKeepsSubsecondDatabasePrecision()
-            throws InterruptedException {
+    void shortWriterLeaseKeepsSubsecondDatabasePrecision(
+            String connectionTimeZone) throws InterruptedException {
         DriverManagerDataSource dataSource = dataSource();
+        String url = required("mysql.url");
+        dataSource.setUrl(url + (url.contains("?") ? "&" : "?")
+                + "connectionTimeZone=" + connectionTimeZone);
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
@@ -268,6 +275,46 @@ class ManagedAgentMySqlIT {
                         + " = ? AND session_id = ?",
                 Long.class, tenant, session);
         assertThat(persistedLeaseMicros).isPositive();
+        assertPersistedLease(jdbc, tenant, session, grant);
+
+        WriterGrant reacquired = inTransaction(transactions,
+                () -> store.acquireWriter(tenant, session,
+                        "cccccccccccccccccccccccccccccccc",
+                        new AcquireWriterRequest("mysql-lease-workspace",
+                                "mysql-lease-writer", 60_000L)));
+        assertThat(reacquired.replayed()).isTrue();
+        assertPersistedLease(jdbc, tenant, session, reacquired);
+
+        WriterGrant renewed = inTransaction(transactions,
+                () -> store.renewWriter(tenant, session,
+                        "cccccccccccccccccccccccccccccccc",
+                        new RenewWriterRequest("mysql-lease-workspace",
+                                "mysql-lease-writer", 1, 120_000L)));
+        assertPersistedLease(jdbc, tenant, session, renewed);
+
+        inTransaction(transactions,
+                () -> store.sealWriter(tenant, session,
+                        "cccccccccccccccccccccccccccccccc",
+                        new SealWriterRequest("mysql-lease-workspace",
+                                "mysql-lease-writer", 1)));
+        WriterGrant takeover = inTransaction(transactions,
+                () -> store.acquireWriter(tenant, session,
+                        "dddddddddddddddddddddddddddddddd",
+                        new AcquireWriterRequest("mysql-lease-workspace",
+                                "mysql-lease-writer-b", 1_000L)));
+        assertThat(takeover.writerGeneration()).isEqualTo(2);
+        assertPersistedLease(jdbc, tenant, session, takeover);
+    }
+
+    private static void assertPersistedLease(JdbcTemplate jdbc,
+            String tenant, String session, WriterGrant grant) {
+        Timestamp persisted = jdbc.queryForObject(
+                "SELECT writer_lease_until FROM"
+                        + " qwen_managed_session_journal_head WHERE tenant_id"
+                        + " = ? AND session_id = ?",
+                Timestamp.class, tenant, session);
+        assertThat(persisted).isNotNull();
+        assertThat(persisted.getTime()).isEqualTo(grant.leaseUntil());
     }
 
     @Test
