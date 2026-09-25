@@ -2300,6 +2300,10 @@ export async function loadCliConfig(
       }
     }
 
+    if (sessionId) {
+      sessionService.assertLegacySessionExecution(sessionId);
+    }
+
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
       const forkedSessionId = randomUUID();

@@ -1023,6 +1023,15 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'session_execution_engine_unavailable') {
+        res.status(409).json({
+          error:
+            'This session cannot be resumed with the current execution engine.',
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
       if (kind === 'untrusted_workspace') {
         res.status(403).json({
           error: errorMessage(err),
