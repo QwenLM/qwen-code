@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -11,6 +12,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -68,17 +70,26 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
-                agentService.lastSequence(tenantId, actorId, sessionId);
+                if (!stillReadable(emitter, closed, tenantId, actorId, sessionId)) {
+                    break;
+                }
                 if (reconcile) {
                     List<PublicEvent> events = agentService.publicEvents(
                             tenantId, actorId, sessionId, sequence, 100);
                     for (PublicEvent event : events) {
-                        agentService.lastSequence(tenantId, actorId,
-                                sessionId);
+                        if (!event.terminal()
+                                && !stillReadable(emitter, closed, tenantId,
+                                        actorId, sessionId)) {
+                            break;
+                        }
                         emitter.send(SseEmitter.event()
                                 .id(Long.toString(event.sequence()))
                                 .name(event.type()).data(event));
                         sequence = event.sequence();
+                        if (event.terminal()) {
+                            complete(emitter, closed);
+                            break;
+                        }
                     }
                     if (events.size() == 100) {
                         continue;
@@ -92,12 +103,20 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
-                    agentService.lastSequence(tenantId, actorId, sessionId);
+                    if (!event.terminal()
+                            && !stillReadable(emitter, closed, tenantId,
+                                    actorId, sessionId)) {
+                        break;
+                    }
                     PublicEvent publicEvent = agentService.publicEvent(event);
                     emitter.send(SseEmitter.event()
                             .id(Long.toString(publicEvent.sequence()))
                             .name(publicEvent.type()).data(publicEvent));
                     sequence = publicEvent.sequence();
+                    if (event.terminal()) {
+                        complete(emitter, closed);
+                        break;
+                    }
                 }
                 if (delivery.events().isEmpty()) {
                     reconcile = true;
@@ -124,17 +143,26 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
-                agentService.lastSequence(tenantId, actorId, sessionId);
+                if (!stillReadable(emitter, closed, tenantId, actorId, sessionId)) {
+                    break;
+                }
                 if (reconcile) {
                     List<WebShellEvent> events = agentService.webShellEvents(
                             tenantId, actorId, sessionId, sequence, 100);
                     for (WebShellEvent event : events) {
-                        agentService.lastSequence(tenantId, actorId,
-                                sessionId);
+                        if (!event.terminal()
+                                && !stillReadable(emitter, closed, tenantId,
+                                        actorId, sessionId)) {
+                            break;
+                        }
                         emitter.send(SseEmitter.event()
                                 .id(Long.toString(event.sequence()))
                                 .name(event.type()).data(event));
                         sequence = event.sequence();
+                        if (event.terminal()) {
+                            complete(emitter, closed);
+                            break;
+                        }
                     }
                     if (events.size() == 100) {
                         continue;
@@ -148,12 +176,20 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
-                    agentService.lastSequence(tenantId, actorId, sessionId);
+                    if (!event.terminal()
+                            && !stillReadable(emitter, closed, tenantId,
+                                    actorId, sessionId)) {
+                        break;
+                    }
                     WebShellEvent webEvent = agentService.webShellEvent(event);
                     emitter.send(SseEmitter.event()
                             .id(Long.toString(webEvent.sequence()))
                             .name(webEvent.type()).data(webEvent));
                     sequence = webEvent.sequence();
+                    if (event.terminal()) {
+                        complete(emitter, closed);
+                        break;
+                    }
                 }
                 if (delivery.events().isEmpty()) {
                     reconcile = true;
@@ -193,6 +229,26 @@ public class ManagedEventStreamService {
         emitter.onTimeout(() -> closed.set(true));
         emitter.onError(error -> closed.set(true));
         return closed;
+    }
+
+    private boolean stillReadable(SseEmitter emitter, AtomicBoolean closed,
+            String tenantId, String actorId, String sessionId) {
+        try {
+            agentService.lastSequence(tenantId, actorId, sessionId);
+            return true;
+        } catch (ApiException error) {
+            if (error.getStatus() != HttpStatus.NOT_FOUND) {
+                throw error;
+            }
+            complete(emitter, closed);
+            return false;
+        }
+    }
+
+    private static void complete(SseEmitter emitter, AtomicBoolean closed) {
+        if (closed.compareAndSet(false, true)) {
+            emitter.complete();
+        }
     }
 
     private static void completeWithError(SseEmitter emitter,
