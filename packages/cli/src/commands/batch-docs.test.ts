@@ -115,7 +115,7 @@ describe('assembleRequests', () => {
         root,
         'qwen-plus',
       ),
-    ).toThrow(/docs\/zh\/gone\.md/);
+    ).toThrow(/docs.zh.gone\.md/);
   });
 
   it('refuses a source that symlinks out of the project', () => {
@@ -388,6 +388,33 @@ describe('deliverResult', () => {
     deliverResult(item(), content, root, sourceHash);
     const outcome = deliverResult(item(), content, root, sourceHash);
     expect(outcome.kind).toBe('delivered');
+  });
+
+  it('removes its own partial write when the write fails after creating the file', () => {
+    const target = path.join(root, 'docs', 'en', 'intro.md');
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    // A write that fails after O_CREAT (disk full mid-write) leaves a
+    // truncated file; delivered as-is it would wedge the target as a
+    // phantom "different content" conflict on every later collect.
+    const write = vi
+      .spyOn(fs, 'writeFileSync')
+      .mockImplementation((file, data, options) => {
+        if (file === target) {
+          writeFileSync(file, '# truncated');
+          const error = new Error('ENOSPC: no space left on device, write');
+          (error as NodeJS.ErrnoException).code = 'ENOSPC';
+          throw error;
+        }
+        return writeFileSync(file, data, options);
+      });
+    try {
+      expect(() => deliverResult(item(), content, root, sourceHash)).toThrow(
+        /ENOSPC/,
+      );
+      expect(fs.existsSync(target)).toBe(false);
+    } finally {
+      write.mockRestore();
+    }
   });
 
   it('holds when the target exists with different content', () => {

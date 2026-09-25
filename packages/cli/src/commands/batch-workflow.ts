@@ -137,6 +137,9 @@ interface AttemptAssembly {
   jsonl: string;
   inputTokens: number;
   outputTokens: number;
+  /** Per-item source hashes; applied to the task only when the attempt
+   * provably becomes a batch (see TaskAttempt.sourceSha256). */
+  sources: Record<string, string>;
 }
 
 function assembleAttempt(
@@ -147,7 +150,6 @@ function assembleAttempt(
 ): AttemptAssembly {
   const wanted = new Set(itemIds);
   const items = task.items.filter((item) => wanted.has(item.id));
-  const itemById = new Map(items.map((item) => [item.id, item]));
   // Output estimate per item: the plan's figure, else the input size, never
   // above the output limit the requests carry (thinking is not included).
   const limit = outputLimitOf(task, maxOutputTokens);
@@ -172,6 +174,7 @@ function assembleAttempt(
   let fileBytes = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  const sources: Record<string, string> = {};
   for (const request of assembled) {
     const encoded = JSON.stringify(request.line) + '\n';
     const bytes = Buffer.byteLength(encoded);
@@ -192,10 +195,9 @@ function assembleAttempt(
     const expected =
       task.plan.expectedOutputTokensPerItem ?? request.inputTokens;
     outputTokens += limit === undefined ? expected : Math.min(expected, limit);
-    const item = itemById.get(request.itemId);
-    if (item) item.sourceSha256 = request.sourceSha256;
+    sources[request.itemId] = request.sourceSha256;
   }
-  return { jsonl, inputTokens, outputTokens };
+  return { jsonl, inputTokens, outputTokens, sources };
 }
 
 function costLine(
@@ -282,6 +284,10 @@ function markSubmitted(task: BatchTask, attempt: TaskAttempt): void {
       item.heldReason = undefined;
       item.truncated = undefined;
       item.sourceChanged = undefined;
+      // The staleness baseline moves only now that the attempt provably
+      // became a batch.
+      const hash = attempt.sourceSha256?.[item.id];
+      if (hash !== undefined) item.sourceSha256 = hash;
     }
   }
 }
@@ -337,6 +343,7 @@ async function submitAttempt(
     `${task.id}-attempt-${attempt.attempt}.jsonl`,
   );
   attempt.inputFileId = uploaded.id;
+  attempt.sourceSha256 = assembly.sources;
   attempt.submitState = 'uploaded';
   store.save(task);
 
@@ -372,6 +379,7 @@ async function submitAttempt(
       await api.deleteFile(deps.ep, uploaded.id).catch(() => undefined);
       attempt.submitState = 'intent';
       attempt.inputFileId = undefined;
+      attempt.sourceSha256 = undefined;
       attempt.error = `create refused by provider: ${error instanceof Error ? error.message : String(error)}`;
       for (const item of task.items) {
         if (attempt.itemIds.includes(item.id)) {
@@ -724,13 +732,27 @@ async function collectLocked(
     // deliveries without asking the provider about a batch it may have
     // forgotten by now.
     let job: BatchJob | undefined;
-    // finalStatus is recorded at the first harvest; a later collect that
+    // finalStatus is recorded only once the harvest completes (with the
+    // usage write below): an aborted pass must not make the pass that
+    // finishes the harvest look like a re-harvest, and a later collect that
     // only retries remote cleanup must not re-announce the batch as newly
-    // settled (auto-collect would repeat the notice every pass).
+    // settled (auto-collect announces only the first).
     const firstHarvest = attempt.finalStatus === undefined;
     if (!attempt.collected) {
-      job = await api.getBatch(deps.ep, batchId);
-      if (!SETTLED_STATUSES.has(job.status)) {
+      try {
+        job = await api.getBatch(deps.ep, batchId);
+      } catch (error) {
+        // The batch record is needed to retry remote cleanup, but the local
+        // result files are enough to finish delivering — a provider hiccup
+        // must not withhold what is already on disk. With no local copies
+        // the batch cannot be collected at all: report it.
+        if (!attempt.outputPath && !attempt.errorPath) throw error;
+        deps.err(
+          `[batch] warning: cannot re-fetch ${batchId} (${error instanceof Error ? error.message : String(error)}); ` +
+            `delivering from the local copies and retrying remote cleanup later.`,
+        );
+      }
+      if (job && !SETTLED_STATUSES.has(job.status)) {
         deps.out(
           `${batchId} is ${job.status} (${job.request_counts?.completed ?? 0}/${job.request_counts?.total ?? attempt.itemIds.length}); ` +
             `re-run \`qwen batch collect ${taskId}\` later or add --wait.`,
@@ -760,8 +782,8 @@ async function collectLocked(
       return;
     }
 
+    const finalStatus = job?.status ?? attempt.finalStatus;
     if (job) {
-      attempt.finalStatus = job.status;
       const errors = jobErrorsOf(job);
       if (errors.length > 0) attempt.jobErrors = errors;
       settledErrors.push(...errors);
@@ -923,42 +945,61 @@ async function collectLocked(
         // A batch rejected as a whole leaves no per-line output: name the
         // provider's reason instead of a bare "no result line".
         item.lastError = attempt.jobErrors?.length
-          ? `batch ${attempt.finalStatus ?? 'failed'}: ${attempt.jobErrors[0]}`
-          : attempt.finalStatus && attempt.finalStatus !== 'completed'
-            ? `batch ${attempt.finalStatus} before this request produced a result`
+          ? `batch ${finalStatus ?? 'failed'}: ${attempt.jobErrors[0]}`
+          : finalStatus && finalStatus !== 'completed'
+            ? `batch ${finalStatus} before this request produced a result`
             : 'no result line for this request in the settled batch';
       }
     }
+    if (job) attempt.finalStatus = job.status;
     attempt.usage = usage;
     refreshTaskStatus(task);
     store.save(task);
 
     if (job) {
-      // Results are safely local now; uploaded files otherwise live on the
-      // provider until somebody deletes them. A failed deletion leaves the
-      // attempt uncollected, so the next collect re-fetches the settled batch
-      // and retries instead of leaking the files; it never fails the collect.
-      let failed = 0;
-      for (const fileId of [
-        job.input_file_id,
-        job.output_file_id,
-        job.error_file_id,
-      ]) {
-        if (!fileId) continue;
-        try {
-          await api.deleteFile(deps.ep, fileId);
-        } catch (error) {
-          // Already gone (deleted by an earlier pass, or expired): done.
-          if ((error as BatchApiError).status === 404) continue;
-          failed += 1;
-          deps.err(
-            `[batch] warning: could not delete remote file ${fileId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
       if (firstHarvest) settledNow += 1;
-      attempt.collected = failed === 0;
-      store.save(task);
+      // Deleting the remote copies is safe only when the local harvest
+      // accounted for everything the provider reports as finished: a
+      // truncated download or an unparsed format leaves lines unaccounted,
+      // and deleting the originals would destroy the only full record while
+      // a retry double-charges the finished requests. Keep them instead.
+      const unaccounted = attempt.itemIds.filter((id) => !seen.has(id));
+      if (
+        unaccounted.length > 0 &&
+        (job.request_counts?.completed ?? 0) > seen.size
+      ) {
+        deps.err(
+          `[batch] warning: the local result files account for ${seen.size} of the ${job.request_counts?.completed} request(s) the provider reports finished ` +
+            `(no line for ${unaccounted.join(', ')}); the remote files are kept — ` +
+            `inspect the batch in the provider console before retrying the missing item(s).`,
+        );
+      } else {
+        // Results are safely local now; uploaded files otherwise live on
+        // the provider until somebody deletes them. A failed deletion leaves
+        // the attempt uncollected, so the next collect re-fetches the
+        // settled batch and retries instead of leaking the files; it never
+        // fails the collect.
+        let failed = 0;
+        for (const fileId of [
+          job.input_file_id,
+          job.output_file_id,
+          job.error_file_id,
+        ]) {
+          if (!fileId) continue;
+          try {
+            await api.deleteFile(deps.ep, fileId);
+          } catch (error) {
+            // Already gone (deleted by an earlier pass, or expired): done.
+            if ((error as BatchApiError).status === 404) continue;
+            failed += 1;
+            deps.err(
+              `[batch] warning: could not delete remote file ${fileId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        attempt.collected = failed === 0;
+        store.save(task);
+      }
     }
   };
   for (const attempt of openAttempts) {
@@ -1265,6 +1306,20 @@ export async function cleanTask(
           `[batch] warning: ${attempt.batchId ?? `attempt ${attempt.attempt}`} was not cancelled; it may still run and bill.`,
         );
       }
+      // A held item's result exists only in this record once the remote
+      // files are deleted: removing it destroys the only copy of a paid
+      // generation, with no way back.
+      const held = task.items.filter((item) => item.state === 'held');
+      if (held.length > 0 && !options.force) {
+        throw new Error(
+          `task ${taskId} still holds ${held.length} undelivered result(s) (${held
+            .map((item) => item.id)
+            .join(
+              ', ',
+            )}); the remote copies are already deleted, so this record is their only one. ` +
+            `Resolve the held targets and re-run \`qwen batch collect ${taskId}\`, or pass --force.`,
+        );
+      }
       store.remove(taskId);
       deps.out(`removed local record of task ${taskId}`);
     },
@@ -1290,17 +1345,25 @@ async function cancelLocked(
   const api = deps.api ?? liveApi;
   const task = store.load(taskId);
   assertSameEndpoint(task, deps.ep);
+  // A lost create answer may be a live, billing batch; reconcile it first
+  // rather than cancel an older, already-collected attempt in its place.
+  if (task.attempts.some(isAmbiguous)) {
+    throw new Error(
+      `task ${taskId} has an ambiguous submission that may exist and be billing; ` +
+        `run \`qwen batch collect ${taskId}\` to reconcile it before cancelling.`,
+    );
+  }
   const attempt = [...task.attempts]
     .reverse()
     .find(
-      (candidate) => candidate.submitState === 'created' && candidate.batchId,
+      (candidate) =>
+        candidate.submitState === 'created' &&
+        candidate.batchId &&
+        !candidate.collected,
     );
   if (!attempt) {
-    const hint = task.attempts.some(isAmbiguous)
-      ? ` A submission is marked ambiguous — run \`qwen batch collect ${taskId}\` to reconcile it first.`
-      : '';
     throw new Error(
-      `task ${taskId} has no submitted batch to cancel (nothing was billed for generation yet).${hint}`,
+      `task ${taskId} has no submitted batch to cancel (nothing was billed for generation yet).`,
     );
   }
   const job = await api.getBatch(deps.ep, attempt.batchId as string);

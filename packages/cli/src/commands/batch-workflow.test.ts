@@ -1033,6 +1033,26 @@ describe('cleanTask', () => {
     // Delivered files are the user's; clean never touches them.
     expect(fs.existsSync(path.join(h.root, 'docs', 'en', 'a.md'))).toBe(true);
   });
+
+  it('refuses to delete the only copy of a held result unless forced', async () => {
+    const h = (harness = setup());
+    fs.mkdirSync(path.join(h.root, 'docs', 'en'), { recursive: true });
+    fs.writeFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'user edits');
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).items[1].state).toBe('held');
+
+    // The remote files are deleted at collect, so the record is the only
+    // copy of the held, already-billed generation.
+    await expect(cleanTask(h.deps, taskId)).rejects.toThrow(/undelivered/);
+    expect(fs.existsSync(h.store.fileOf(taskId))).toBe(true);
+
+    await cleanTask(h.deps, taskId, { force: true });
+    expect(fs.existsSync(h.store.fileOf(taskId))).toBe(false);
+  });
 });
 
 describe('endpoint identity', () => {
@@ -1123,6 +1143,28 @@ describe('cancelTask', () => {
     await expect(cancelTask(h.deps, task.id)).rejects.toThrow(
       /no submitted batch/,
     );
+  });
+
+  it('refuses while an ambiguous submission may exist and be billing', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    // A retry whose create answer never arrived: the batch may exist.
+    const task = h.store.load(taskId);
+    task.attempts.push({
+      attempt: 2,
+      itemIds: ['b'],
+      submitState: 'unknown',
+      inputFileId: 'file-in-2',
+    });
+    h.store.save(task);
+
+    await expect(cancelTask(h.deps, taskId)).rejects.toThrow(/reconcile/);
+    expect(h.api.cancelBatch).not.toHaveBeenCalled();
+    expect(h.out.join('\n')).not.toMatch(/already settled/);
   });
 });
 
@@ -1357,5 +1399,106 @@ describe('review fixes', () => {
       runPlan(h.deps, h.planPath, { expect: digest }),
     ).rejects.toThrow(/changed since it was previewed/);
     expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+  });
+
+  it('counts a batch as settled by the pass that finishes its harvest', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+      error: `${JSON.stringify({ custom_id: 'zzz#1', error: { message: 'unrelated' } })}\n`,
+    });
+    const taskId = taskIdOf(h);
+    // The first pass downloads the output file and then dies fetching the
+    // error file: the harvest never completes.
+    const download = h.api.downloadFile.getMockImplementation();
+    if (!download) throw new Error('expected a download implementation');
+    h.api.downloadFile
+      .mockImplementationOnce(download)
+      .mockRejectedValueOnce(new Error('network down'));
+    await expect(collectTask(h.deps, taskId)).rejects.toThrow(/network down/);
+
+    // The completing pass must still count as the first harvest, or the
+    // auto-collector's notice gate never reports this batch settling.
+    const summary = await collectTask(h.deps, taskId);
+    expect(summary.settled).toBe(1);
+    const task = h.store.load(taskId);
+    expect(task.attempts[0].finalStatus).toBe('completed');
+    expect(task.attempts[0].collected).toBe(true);
+  });
+
+  it('delivers from the local record when the provider cannot be reached for cleanup', async () => {
+    const h = (harness = setup());
+    fs.mkdirSync(path.join(h.root, 'docs', 'en'), { recursive: true });
+    fs.writeFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'user edits');
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    // The harvest succeeds but a remote deletion fails, leaving the attempt
+    // uncollected with the results on disk.
+    h.api.deleteFile.mockRejectedValueOnce(new Error('provider down'));
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).items[1].state).toBe('held');
+
+    // The user resolves the conflict; the next pass cannot reach the batch.
+    fs.rmSync(path.join(h.root, 'docs', 'en', 'b.md'));
+    h.api.getBatch.mockRejectedValueOnce(
+      Object.assign(new Error('HTTP 429'), { status: 429 }),
+    );
+    const summary = await collectTask(h.deps, taskId);
+    expect(summary.delivered.map((item) => item.id)).toEqual(['b']);
+    const task = h.store.load(taskId);
+    expect(task.items[1].state).toBe('delivered');
+    expect(
+      fs.readFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'utf8'),
+    ).toBe('# B\n\nBeta.');
+    // The cleanup retry is not lost: the attempt stays uncollected.
+    expect(task.attempts[0].collected).toBe(false);
+    expect(h.err.join('\n')).toMatch(/cannot re-fetch batch-1/);
+  });
+
+  it('keeps the remote files when the local copy accounts for fewer results than the provider reports', async () => {
+    const h = (harness = setup());
+    // The settled batch reports two finished requests, but the downloaded
+    // output holds only one item's line (e.g. a truncated download).
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items[1].state).toBe('failed');
+    // Deleting the originals would destroy the only full record while a
+    // retry double-charges the finished request — they must be kept.
+    expect(h.api.deleteFile).not.toHaveBeenCalled();
+    expect(task.attempts[0].collected).toBeFalsy();
+    expect(h.err.join('\n')).toMatch(/remote files are kept/);
+  });
+
+  it('does not move the source baseline when a retry dies before its create lands', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    fs.writeFileSync(
+      path.join(h.root, 'docs', 'zh', 'a.md'),
+      '# A\n\n改过了。\n',
+    );
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).items[0]).toMatchObject({
+      state: 'held',
+      sourceChanged: true,
+    });
+
+    // The retry's upload never lands: no batch exists, so its re-read
+    // source hash must not become the baseline collect compares against.
+    h.api.uploadJsonl.mockRejectedValueOnce(new Error('network down'));
+    await expect(retryTask(h.deps, taskId)).rejects.toThrow(/network down/);
+
+    await collectTask(h.deps, taskId);
+    const item = h.store.load(taskId).items[0];
+    expect(item).toMatchObject({ state: 'held', sourceChanged: true });
+    expect(fs.existsSync(path.join(h.root, 'docs', 'en', 'a.md'))).toBe(false);
   });
 });

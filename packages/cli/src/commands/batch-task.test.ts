@@ -306,6 +306,26 @@ describe('BatchTaskStore', () => {
     expect(fs.existsSync(lock)).toBe(false);
   });
 
+  it('takes over a stale lock without leaving a tombstone, and never touches a live one', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const dir = path.dirname(store.fileOf(task.id));
+    const lock = path.join(dir, 'lock');
+    fs.writeFileSync(lock, `2147483646\n${os.hostname()}\nstale\n`);
+    await store.withLock(task.id, async () => {
+      // The takeover moved the stale file aside before deleting it; while
+      // the winner holds its own lock, another acquisition must refuse.
+      await expect(
+        store.withLock(task.id, async () => undefined),
+      ).rejects.toThrow(/in use by another/);
+    });
+    expect(fs.existsSync(lock)).toBe(false);
+    expect(fs.readdirSync(dir)).toEqual(['task.json']);
+  });
+
   it('lists tasks newest first and skips unreadable ones', () => {
     const plan = validatePlan(validPlan, 'plan.json');
     const older = store.create(plan, root, 'qwen-plus');

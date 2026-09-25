@@ -413,7 +413,17 @@ export function deliverResult(
   try {
     fs.writeFileSync(targetPath, content, { flag: 'wx' });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      // The exclusive create means a file left at targetPath is this write's
+      // own partial: remove it, or the next collect reads the truncated
+      // debris as a user edit and wedges the item as a permanent conflict.
+      try {
+        fs.rmSync(targetPath, { force: true });
+      } catch {
+        // The write error is the one to report.
+      }
+      throw error;
+    }
     return {
       kind: 'held',
       reason: `target "${item.target}" appeared while delivering; kept both`,

@@ -170,6 +170,12 @@ export interface TaskAttempt {
   itemIds: string[];
   submitState: SubmitState;
   inputFileId?: string;
+  /** sha256 of each item's source as this attempt submitted it. Recorded
+   * when the upload lands; applied to the items only when the attempt
+   * provably becomes a batch (markSubmitted) — an attempt that never does
+   * (a lost or refused create) must not move the staleness baseline that
+   * delivery compares against. */
+  sourceSha256?: Record<string, string>;
   batchId?: string;
   submittedAt?: string;
   error?: string;
@@ -365,7 +371,17 @@ export class BatchTaskStore {
       const elsewhere = Boolean(holderHost) && holderHost !== host;
       if (!tookOver && wellFormed && !elsewhere && !isPidAlive(pid)) {
         tookOver = true;
-        if (readLock(lock) === content) fs.rmSync(lock, { force: true });
+        // Compare-then-unlink by path could delete a live successor's lock
+        // that replaced the stale one between the two calls. A rename is
+        // atomic: whoever moves the file wins the takeover, and the loser
+        // re-reads the winner's lock on the next pass.
+        const tombstone = `${lock}.stale-${crypto.randomUUID()}`;
+        try {
+          fs.renameSync(lock, tombstone);
+          fs.rmSync(tombstone, { force: true });
+        } catch {
+          // The stale lock was released or taken over first; re-check.
+        }
         continue;
       }
       if (Date.now() < deadline) {
