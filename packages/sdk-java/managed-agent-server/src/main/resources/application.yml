@@ -13,6 +13,7 @@ spring:
     timeout-per-shutdown-phase: '30s'
 
 server:
+  address: '${QWEN_MANAGED_AGENT_SERVER_ADDRESS:127.0.0.1}'
   shutdown: 'graceful'
 
 management:

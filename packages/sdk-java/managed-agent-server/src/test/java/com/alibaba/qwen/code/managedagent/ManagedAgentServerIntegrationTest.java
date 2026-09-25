@@ -142,6 +142,14 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void missingSessionIdReturnsNotFound() throws Exception {
+        mvc.perform(get("/v1/agents/sessions/")
+                        .header(TenantContextFilter.HEADER, "tenant-empty-id"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("not_found"));
+    }
+
+    @Test
     void createsReplaysAndStreamsATenantScopedTurn() throws Exception {
         String tenant = "tenant-create";
         String body = """
