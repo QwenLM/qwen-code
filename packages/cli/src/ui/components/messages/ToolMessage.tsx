@@ -22,6 +22,7 @@ import type {
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutputDisplay,
+  AdvisorReviewDisplay,
   McpToolProgressData,
   FileDiff,
   TerminalImageDisplay,
@@ -32,7 +33,11 @@ import {
   isVisionBridgeNoticeDisplay,
 } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { AGENT_TOOL_NAMES } from '../../utils/agent-tool-names.js';
-import { isTerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
+import {
+  formatAdvisorReview,
+  isAdvisorReviewDisplay,
+  isTerminalImageDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -61,6 +66,7 @@ import {
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
 import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
+import { AdvisorMessage } from './AdvisorMessage.js';
 
 // How many of the subagent's prior tool calls to list above an approval
 // prompt — enough to show what led up to the request without pushing the
@@ -165,6 +171,7 @@ type DisplayRendererResult =
   | { type: 'todo'; data: TodoResultDisplay }
   | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
+  | { type: 'advisor'; data: AdvisorReviewDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
@@ -184,6 +191,13 @@ const useResultDisplayRenderer = (
 
     if (isTerminalImageDisplay(resultDisplay)) {
       return { type: 'image', data: resultDisplay };
+    }
+
+    if (isAdvisorReviewDisplay(resultDisplay)) {
+      return {
+        type: 'advisor',
+        data: resultDisplay,
+      };
     }
 
     // Check for TodoResultDisplay
@@ -1028,6 +1042,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
+              />
+            )}
+            {effectiveDisplayRenderer.type === 'advisor' && (
+              <AdvisorMessage
+                text={formatAdvisorReview(effectiveDisplayRenderer.data)}
+                model={effectiveDisplayRenderer.data.model ?? description}
+                containerWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+                isPending={isPending}
               />
             )}
             {effectiveDisplayRenderer.type === 'task' && config && (
