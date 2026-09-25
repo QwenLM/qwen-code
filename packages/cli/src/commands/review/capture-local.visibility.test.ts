@@ -17,7 +17,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  isLedgerOnlyCandidate,
+  isolateHostGitConfig,
+} from './lib/test-utils.js';
 
 const stderrLines: string[] = [];
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -74,7 +77,16 @@ function capture(): Record<string, unknown> {
   return JSON.parse(readFileSync(out, 'utf8')) as Record<string, unknown>;
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
+  // A candidate anchors only under a published identity (without one it
+  // carries the findings ledger alone), and this suite's control arm asserts
+  // an anchored candidate IS written — so the fixture publishes one, as every real
+  // round has. Without it the arm passes for the wrong reason and the
+  // withhold arms stop discriminating.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
   invisibleScript.length = 0;
   invisibleCalls = 0;
@@ -94,6 +106,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (savedIdentity === undefined) {
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  } else {
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+  }
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();
@@ -122,6 +139,9 @@ describe('capture-local — visibility oracle rides the sampling discipline', ()
     expect(
       existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
     ).toBe(false);
+    // A clean tree has no chunks: the round ends without a verdict, so the
+    // ledger-only candidate is not published and the stable path is empty.
+    expect(plan['cacheCandidatePath']).toBeUndefined();
     expect(
       existsSync(
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
@@ -139,6 +159,9 @@ describe('capture-local — visibility oracle rides the sampling discipline', ()
 
     const plan = capture();
     expect(plan['nothingToReview']).toBeUndefined();
+    // A clean tree has no chunks: the round ends without a verdict, so the
+    // ledger-only candidate is not published and the stable path is empty.
+    expect(plan['cacheCandidatePath']).toBeUndefined();
     expect(
       existsSync(
         join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
@@ -151,10 +174,13 @@ describe('capture-local — visibility oracle rides the sampling discipline', ()
 
     const plan = capture();
     expect(plan['nothingToReview']).toEqual({ reason: 'clean-tree' });
-    expect(
-      existsSync(
-        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
-      ),
-    ).toBe(true);
+    // An ANCHORED candidate: a ledger-only one exists too, so existence
+    // alone no longer tells this arm from the withhold arms above.
+    const candidate = join(
+      repo,
+      '.qwen/tmp/qwen-review-local-cache-candidate.json',
+    );
+    expect(existsSync(candidate)).toBe(true);
+    expect(isLedgerOnlyCandidate(candidate)).toBe(false);
   });
 });

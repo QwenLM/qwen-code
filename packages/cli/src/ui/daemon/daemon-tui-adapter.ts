@@ -339,7 +339,8 @@ function formatToolResultDisplay(
   }
   if (
     isRecord(value) &&
-    value['type'] === 'ask_user_question_answers' &&
+    (value['type'] === 'ask_user_question_answers' ||
+      value['type'] === 'shell_result') &&
     typeof value['text'] === 'string'
   ) {
     return sanitizeDisplayText(value['text']);

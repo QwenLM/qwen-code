@@ -4,9 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vitest/config';
 
+const manifest = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+) as { dependencies: Record<string, string> };
+
 export default defineConfig({
+  // Mirrors build.mjs: the pinned playwright-core version the SDK checks.
+  define: {
+    __QWEN_PLAYWRIGHT_CORE_VERSION__: JSON.stringify(
+      manifest.dependencies['playwright-core'],
+    ),
+  },
   test: {
     include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     environment: 'node',

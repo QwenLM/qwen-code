@@ -11,6 +11,7 @@ import {
   useState,
 } from 'react';
 import type {
+  CSSProperties,
   ReactNode,
   RefObject,
   DragEvent as ReactDragEvent,
@@ -57,6 +58,9 @@ import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
 import { AddMenu } from './composer/AddMenu';
 import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
+import { getShadowAwareActiveElement } from '../utils/dom';
+import { POPOVER_MIN_HEIGHT, popoverTopEdge } from '../utils/popoverRoom';
+import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
   getComposerTagIconUrl,
   isBuiltinComposerTagIconUrl,
@@ -85,9 +89,14 @@ import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderClosedIcon,
+  HistoryIcon,
+  KeyboardIcon,
+  Maximize2Icon,
   LoaderCircleIcon,
   SlashIcon,
   UploadIcon,
@@ -229,6 +238,8 @@ interface ChatEditorProps {
   onOpenGitDiff?: () => void;
   /** Opens the commit dialog. */
   onOpenCommit?: () => void;
+  /** Opens the worktree manager. */
+  onOpenWorktrees?: () => void;
   /** Opens the commit history graph. */
   onOpenLog?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
@@ -244,6 +255,14 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  /**
+   * Where the composer's context chips (workspace selector, git branch) land.
+   * `toolbar` (default) keeps both in the composer toolbar. `below` moves both
+   * to the row directly under the composer box. `header` leaves the workspace
+   * to the chat header, which shows it as a leading icon, and keeps git in the
+   * toolbar.
+   */
+  contextChipPlacement?: 'toolbar' | 'below' | 'header';
   /** Current context-window occupancy for the `contextUsage` toolbar ring. */
   tokenCount?: number;
   contextWindow?: number;
@@ -358,15 +377,6 @@ const CHAT_EDITOR_THEME = {
     borderLeftWidth: '2px',
   },
 };
-
-function isTouchLikeDevice(): boolean {
-  if (typeof window === 'undefined') return false;
-  return (
-    (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) ||
-    (typeof window.matchMedia === 'function' &&
-      window.matchMedia('(hover: none), (pointer: coarse)').matches)
-  );
-}
 
 function formatAttachmentSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -503,24 +513,6 @@ function StopIcon() {
 
 function LoadingIcon() {
   return <span className={styles.loadingIcon} aria-hidden="true" />;
-}
-
-function QuickActionsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      {[7, 12, 17].flatMap((y) =>
-        [7, 12, 17].map((x) => (
-          <circle
-            key={`${x}-${y}`}
-            cx={x}
-            cy={y}
-            r="1.35"
-            fill="currentColor"
-          />
-        )),
-      )}
-    </svg>
-  );
 }
 
 function attachComposerGlow(glowRootEl: HTMLElement, inputEl: HTMLElement) {
@@ -702,84 +694,6 @@ interface DropdownItem extends ToolbarDropdownItem {
   description?: string;
   icon?: ReactNode;
 }
-
-interface QuickActionItem {
-  id: string;
-  label: string;
-  action:
-    | {
-        type: 'run';
-        command: string;
-      }
-    | {
-        type: 'insert';
-        text: string;
-      }
-    | {
-        type: 'shell';
-      }
-    | {
-        type: 'key';
-        item: QuickKeyItem;
-      };
-}
-
-function getQuickActionCommandName(action: QuickActionItem): string | null {
-  const text =
-    action.action.type === 'run'
-      ? action.action.command
-      : action.action.type === 'insert'
-        ? action.action.text
-        : '';
-  const match = text.trimStart().match(/^\/([^\s]+)/);
-  return match?.[1] ?? null;
-}
-
-interface QuickKeyItem {
-  id: string;
-  label: string;
-  descriptionKey: string;
-  event: KeyboardEventInit & { key: string };
-}
-
-const QUICK_KEY_ITEMS: QuickKeyItem[] = [
-  {
-    id: 'tab',
-    label: 'Tab',
-    descriptionKey: 'quickKeys.tab',
-    event: { key: 'Tab', code: 'Tab' },
-  },
-  {
-    id: 'escape',
-    label: 'Esc',
-    descriptionKey: 'quickKeys.escape',
-    event: { key: 'Escape', code: 'Escape' },
-  },
-  {
-    id: 'arrow-up',
-    label: '↑',
-    descriptionKey: 'quickKeys.history',
-    event: { key: 'ArrowUp', code: 'ArrowUp' },
-  },
-  {
-    id: 'arrow-down',
-    label: '↓',
-    descriptionKey: 'quickKeys.history',
-    event: { key: 'ArrowDown', code: 'ArrowDown' },
-  },
-  {
-    id: 'arrow-left',
-    label: '←',
-    descriptionKey: 'quickKeys.cursor',
-    event: { key: 'ArrowLeft', code: 'ArrowLeft' },
-  },
-  {
-    id: 'arrow-right',
-    label: '→',
-    descriptionKey: 'quickKeys.cursor',
-    event: { key: 'ArrowRight', code: 'ArrowRight' },
-  },
-];
 
 function CheckIcon() {
   return (
@@ -1467,93 +1381,6 @@ function SlashCommandPanel({
   );
 }
 
-// The textarea backend cannot receive the CodeMirror keymap, so the arrow
-// hint buttons move the caret directly. An existing selection collapses to
-// its leading edge first, and movement steps whole code points so a caret
-// never lands between an emoji's surrogate halves.
-function moveTextareaCaret(
-  textarea: HTMLTextAreaElement | null,
-  forward: boolean,
-) {
-  if (!textarea) return;
-  const { selectionStart, selectionEnd, value } = textarea;
-  const length = value.length;
-  if (selectionEnd !== selectionStart) {
-    textarea.setSelectionRange(
-      forward ? selectionEnd : selectionStart,
-      forward ? selectionEnd : selectionStart,
-    );
-    return;
-  }
-  let caret = selectionStart;
-  if (forward) {
-    if (caret >= length) return;
-    const next = value.codePointAt(caret) ?? 0;
-    caret += next > 0xffff ? 2 : 1;
-  } else {
-    if (caret <= 0) return;
-    const prev = value.charCodeAt(caret - 1);
-    const beforePrev = caret > 1 ? value.charCodeAt(caret - 2) : 0;
-    const overLowSurrogate =
-      prev >= 0xdc00 &&
-      prev <= 0xdfff &&
-      beforePrev >= 0xd800 &&
-      beforePrev <= 0xdbff;
-    caret -= overLowSurrogate ? 2 : 1;
-  }
-  textarea.setSelectionRange(caret, caret);
-}
-
-function QuickActionsPanel({
-  actions,
-  onRun,
-  onPressKey,
-}: {
-  actions: readonly QuickActionItem[];
-  onRun: (action: QuickActionItem) => void;
-  onPressKey: (item: QuickKeyItem) => void;
-}) {
-  const { t } = useI18n();
-
-  return (
-    <div
-      className={styles.quickActionsPanel}
-      onMouseDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
-    >
-      <div className={styles.quickActionsHeader}>{t('quickActions.title')}</div>
-      <div className={styles.quickActionsLayout}>
-        <div className={styles.quickActionsGrid}>
-          {actions.map((action) => (
-            <button
-              key={action.id}
-              type="button"
-              className={styles.quickAction}
-              onClick={() => onRun(action)}
-            >
-              <span className={styles.quickActionLabel}>{action.label}</span>
-            </button>
-          ))}
-        </div>
-        <div className={styles.quickKeysGrid}>
-          {QUICK_KEY_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={styles.quickKey}
-              title={t(item.descriptionKey)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onPressKey(item)}
-            >
-              <span className={styles.quickKeyLabel}>{item.label}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export const ChatEditor = memo(
   forwardRef<EditorHandle, ChatEditorProps>(function ChatEditor(props, ref) {
     const {
@@ -1592,6 +1419,7 @@ export const ChatEditor = memo(
       gitStatus,
       onOpenGitDiff,
       onOpenCommit,
+      onOpenWorktrees,
       onOpenLog,
       workspaceName,
       workspaceTitle,
@@ -1600,6 +1428,7 @@ export const ChatEditor = memo(
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
+      contextChipPlacement = 'toolbar',
       tokenCount = 0,
       contextWindow = 0,
       contextUsageAlwaysVisible = false,
@@ -2131,9 +1960,16 @@ export const ChatEditor = memo(
       if (modeControlsDisabled) setModeDropdownOpen(false);
     }, [modeControlsDisabled]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
-    const [quickActionsOpen, setQuickActionsOpen] = useState(false);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
-    const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
+    const isMobile = Boolean(core.mobileComposer);
+    const [mobileFocused, setMobileFocused] = useState(false);
+    const [expandedEditor, setExpandedEditor] = useState(false);
+    const expandedSelectionRef = useRef<[number, number]>([0, 0]);
+    const [liveVoiceOpen, setLiveVoiceOpen] = useState(false);
+    const [liveVoiceSupported, setLiveVoiceSupported] = useState(false);
+    useEffect(() => {
+      setExpandedEditor(false);
+    }, [sessionId, atWorkspaceCwd, disabled]);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
     const slashDetailRef = useRef<HTMLDivElement>(null);
@@ -2171,19 +2007,6 @@ export const ChatEditor = memo(
     }, [onSkillsOpenChange, skillsOpen]);
     const hasAtMenu = Boolean(atMenu);
     const editorViewRef = core.viewRef;
-
-    useEffect(() => {
-      if (typeof window === 'undefined' || !window.matchMedia) return;
-      const media = window.matchMedia('(hover: none), (pointer: coarse)');
-      const update = () => setShowQuickActions(isTouchLikeDevice());
-      update();
-      media.addEventListener('change', update);
-      return () => media.removeEventListener('change', update);
-    }, []);
-
-    useEffect(() => {
-      if (!showQuickActions) setQuickActionsOpen(false);
-    }, [showQuickActions]);
 
     useEffect(() => {
       if (!hasSlashMenu && !hasAtMenu) return;
@@ -2274,129 +2097,40 @@ export const ChatEditor = memo(
     const showPlanChip = showPlanInAddMenu && planMode;
     const showPlanSwitch = showPlanAction && !showPlanInAddMenu;
     const showPlanToolbarControl = showPlanChip || showPlanSwitch;
+    // The chip is the one Plan control that unmounts when Plan turns off, and
+    // it can do so while it holds keyboard focus: its own click cannot move
+    // focus into an input that is disabled, and Plan can also end with no
+    // click at all, when the host reports the mode changed. Focus would then
+    // fall to the body and the next Tab would restart at the top of the page,
+    // so it is handed on: to the input, or past a disabled one to a toolbar
+    // control beside where the chip was.
+    const planChipHadFocusRef = useRef(false);
+    useLayoutEffect(() => {
+      if (showPlanChip || !planChipHadFocusRef.current) return;
+      planChipHadFocusRef.current = false;
+      const toolbar = toolbarLeadingRef.current;
+      // Focus that is anywhere but lost is somewhere the user put it.
+      const doc = toolbar?.ownerDocument;
+      const active = getShadowAwareActiveElement(toolbar);
+      if (active && active !== doc?.body) return;
+      // Not the input on a coarse pointer: a focus outside a gesture claims
+      // the active element there without opening the keyboard, and later taps
+      // may then raise no keyboard at all, which is why the Composer gates its
+      // own focus restoration the same way. A button has neither problem.
+      if (!disabled && !isCoarsePointerDevice()) {
+        focusComposer();
+        return;
+      }
+      // The permission control is disabled for as long as a mode change is in
+      // flight, which can outlast the chip; the model control never is.
+      toolbar
+        ?.querySelector<HTMLElement>(
+          '[data-web-shell-mode-button]:not(:disabled), [data-web-shell-model-button]',
+        )
+        ?.focus();
+    }, [showPlanChip, disabled, focusComposer]);
     const showModelAction = showToolbarAction('model');
     const showCommandAction = showToolbarAction('commands');
-    const commandNames = useMemo(
-      () =>
-        new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
-      [commands],
-    );
-    const hasCommand = useCallback(
-      (name: string) => commandNames.has(name),
-      [commandNames],
-    );
-    const quickActions = useMemo(
-      () =>
-        (
-          [
-            {
-              id: 'new',
-              label: t('quickActions.new'),
-              action: { type: 'run', command: '/new' },
-            },
-            {
-              id: 'resume',
-              label: t('quickActions.resume'),
-              action: { type: 'run', command: '/resume' },
-            },
-            {
-              id: 'delete',
-              label: t('quickActions.delete'),
-              action: { type: 'run', command: '/delete' },
-            },
-            {
-              id: 'branch',
-              label: t('quickActions.branch'),
-              action: { type: 'run', command: '/branch' },
-            },
-            {
-              id: 'rewind',
-              label: t('quickActions.rewind'),
-              action: { type: 'run', command: '/rewind' },
-            },
-            {
-              id: 'history-search',
-              label: t('quickActions.historyQuestion'),
-              action: {
-                type: 'key',
-                item: {
-                  id: 'ctrl-r',
-                  label: 'Ctrl+R',
-                  descriptionKey: 'quickKeys.searchHistory',
-                  event: { key: 'r', code: 'KeyR', ctrlKey: true },
-                },
-              },
-            },
-            {
-              id: 'recap',
-              label: t('quickActions.recap'),
-              action: { type: 'run', command: '/recap' },
-            },
-            {
-              id: 'stats',
-              label: t('quickActions.stats'),
-              action: { type: 'run', command: '/stats' },
-            },
-            {
-              id: 'context',
-              label: t('quickActions.context'),
-              action: { type: 'run', command: '/context' },
-            },
-            {
-              id: 'status',
-              label: t('quickActions.status'),
-              action: { type: 'run', command: '/status' },
-            },
-            {
-              id: 'skills',
-              label: t('quickActions.skills'),
-              action: { type: 'run', command: '/skills detail' },
-            },
-            {
-              id: 'tools',
-              label: t('quickActions.tools'),
-              action: { type: 'run', command: '/tools desc' },
-            },
-            {
-              id: 'agents',
-              label: t('quickActions.agents'),
-              action: { type: 'run', command: '/agents' },
-            },
-            {
-              id: 'mcp',
-              label: t('quickActions.mcp'),
-              action: { type: 'run', command: '/mcp' },
-            },
-            {
-              id: 'memory',
-              label: t('quickActions.memory'),
-              action: { type: 'run', command: '/memory' },
-            },
-            {
-              id: 'theme',
-              label: t('quickActions.theme'),
-              action: { type: 'run', command: '/theme' },
-            },
-            {
-              id: 'shell',
-              label: core.shellMode
-                ? t('quickActions.exitShellMode')
-                : t('quickActions.shellMode'),
-              action: { type: 'shell' },
-            },
-            {
-              id: 'goal',
-              label: t('quickActions.setGoal'),
-              action: { type: 'insert', text: '/goal ' },
-            },
-          ] satisfies QuickActionItem[]
-        ).filter((action) => {
-          const commandName = getQuickActionCommandName(action);
-          return !commandName || hasCommand(commandName);
-        }),
-      [core.shellMode, hasCommand, t],
-    );
-
     const modelItems = useMemo<DropdownItem[]>(
       () =>
         availableModels.map((m) => ({
@@ -2436,92 +2170,6 @@ export const ChatEditor = memo(
     const showCancelButton = isRunning && !core.hasContent;
     const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
 
-    const dispatchComposerKey = useCallback(
-      (event: QuickKeyItem['event']) => {
-        if (core.mobileComposer) {
-          // No CodeMirror to dispatch into: apply the desktop keymap effects
-          // directly to the textarea backend.
-          switch (event.key) {
-            case 'ArrowUp':
-              core.navigatePrevHistory();
-              return;
-            case 'ArrowDown':
-              core.navigateNextHistory();
-              return;
-            case 'ArrowLeft':
-            case 'ArrowRight':
-              moveTextareaCaret(
-                core.mobileComposer.textareaRef.current,
-                event.key === 'ArrowRight',
-              );
-              return;
-            case 'Escape':
-              // Mirrors the CodeMirror Escape binding: exit shell mode, then
-              // fall through to canceling an in-flight turn.
-              if (core.shellMode) {
-                core.setShellMode(false);
-              } else if (isRunning && !composerPreparing) {
-                onCancel?.();
-              }
-              return;
-            case 'Tab':
-              // Tab accepts completions, which the textarea backend does not
-              // have; nothing to apply.
-              return;
-            case 'r':
-              if (event.ctrlKey) {
-                core.searchState.openHistorySearch();
-              }
-              return;
-          }
-          return;
-        }
-        const view = core.viewRef.current;
-        if (!view) return;
-        view.focus();
-        view.contentDOM.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            ...event,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-      },
-      [core, composerPreparing, isRunning, onCancel],
-    );
-    const runQuickAction = useCallback(
-      (action: QuickActionItem) => {
-        setQuickActionsOpen(false);
-        setModeDropdownOpen(false);
-        setModelDropdownOpen(false);
-        core.closeSlashMenu();
-        core.closeAtMenu();
-        if (action.action.type === 'insert') {
-          core.insertText(action.action.text, { mode: 'replace' });
-          return;
-        }
-        if (action.action.type === 'shell') {
-          core.toggleShellMode();
-          return;
-        }
-        if (action.action.type === 'key') {
-          dispatchComposerKey(action.action.item.event);
-          return;
-        }
-        onSubmit(action.action.command);
-      },
-      [core, dispatchComposerKey, onSubmit],
-    );
-    const pressQuickKey = useCallback(
-      (item: QuickKeyItem) => {
-        dispatchComposerKey(item.event);
-        if (item.id === 'ctrl-r') {
-          setQuickActionsOpen(false);
-        }
-      },
-      [dispatchComposerKey],
-    );
-
     const {
       searchMode,
       searchQuery,
@@ -2535,6 +2183,61 @@ export const ChatEditor = memo(
       handleSearchInput,
       handleSearchCompositionEnd,
     } = core.searchState;
+
+    // The panel opens upward from the composer; a soft keyboard can leave less
+    // room above it than the panel needs, which would slide the search box
+    // under the header. When the room is smaller than the panel, the panel
+    // overlaps the top of the composer instead. The two custom properties are
+    // written straight to the panel node: they change on every frame the
+    // composer moves, and publishing them through state would re-render the
+    // whole composer each time.
+    useLayoutEffect(() => {
+      const container = containerRef.current;
+      if (!searchMode || !container) return undefined;
+      // The panel is rendered in the same commit, so its ref is already
+      // populated; capture the node because the panel never unmounts while
+      // searchMode stays true.
+      const panel = searchUiRef.current;
+      if (!panel) return undefined;
+      let frame: number | null = null;
+      const update = () => {
+        const room =
+          container.getBoundingClientRect().top - popoverTopEdge(container) - 8;
+        // The panel's height is content-driven — with no matches it is just
+        // the search bar — so measure it instead of always charging the
+        // minimum height. jsdom reports 0, hence the fallback.
+        const panelHeight = panel.offsetHeight || POPOVER_MIN_HEIGHT;
+        panel.style.setProperty(
+          '--chat-editor-search-room',
+          `${Math.max(panelHeight, room)}px`,
+        );
+        panel.style.setProperty(
+          '--chat-editor-search-shift',
+          `${Math.max(0, panelHeight - room)}px`,
+        );
+      };
+      const scheduleUpdate = () => {
+        if (frame !== null) return;
+        frame = window.requestAnimationFrame(() => {
+          frame = null;
+          update();
+        });
+      };
+      update();
+      const resizeObserver = new ResizeObserver(scheduleUpdate);
+      resizeObserver.observe(container);
+      // The panel is absolutely positioned, so a change in match count does
+      // not resize the container; observe it directly to re-fit.
+      resizeObserver.observe(panel);
+      window.addEventListener('resize', scheduleUpdate);
+      window.addEventListener('scroll', scheduleUpdate, true);
+      return () => {
+        if (frame !== null) window.cancelAnimationFrame(frame);
+        resizeObserver.disconnect();
+        window.removeEventListener('resize', scheduleUpdate);
+        window.removeEventListener('scroll', scheduleUpdate, true);
+      };
+    }, [searchMode, searchUiRef]);
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
       const custom = renderComposerTag?.({
@@ -2626,7 +2329,7 @@ export const ChatEditor = memo(
         (workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
-          standaloneTargetSupported),
+          (standaloneTargetSupported && onSelectStandaloneTarget)),
     );
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
@@ -2634,6 +2337,15 @@ export const ChatEditor = memo(
     const gitBranchVisible = Boolean(
       gitBranch && showToolbarAction('gitBranch'),
     );
+    // Both chips say where the prompt goes rather than how it runs, so a caller
+    // can move them out of the toolbar without touching their availability.
+    const workspaceChipInToolbar =
+      workspaceSelectVisible && contextChipPlacement === 'toolbar';
+    const gitChipInToolbar =
+      gitBranchVisible && contextChipPlacement !== 'below';
+    const contextRowVisible =
+      contextChipPlacement === 'below' &&
+      (workspaceSelectVisible || gitBranchVisible);
 
     useLayoutEffect(() => {
       if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
@@ -2641,17 +2353,91 @@ export const ChatEditor = memo(
       }
     }, [currentModelLabel, lastConfirmedModelLabel]);
 
-    const showWorkspaceSelectLabel = toolbarLabelVisibility.workspaceSelect;
-    const showWorkspaceLabel = toolbarLabelVisibility.workspace;
-    const showGitBranchLabel = toolbarLabelVisibility.gitBranch;
+    const showWorkspaceSelectLabel =
+      isMobile || toolbarLabelVisibility.workspaceSelect;
+    const showWorkspaceLabel = isMobile || toolbarLabelVisibility.workspace;
+    const showGitBranchLabel = isMobile || toolbarLabelVisibility.gitBranch;
     const showModeLabel = toolbarLabelVisibility.mode;
     const showPlanLabel = toolbarLabelVisibility.plan;
     const showModelLabel = toolbarLabelVisibility.model;
-    const mobileVoiceActive = showQuickActions && voiceActive;
-
-    useEffect(() => {
-      if (mobileVoiceActive) setQuickActionsOpen(false);
-    }, [mobileVoiceActive]);
+    // One renderer per chip so the toolbar, the row under the composer, and the
+    // mobile row share them: the toolbar drops a label when its width budget is
+    // tight, while the rows have a budget of their own and always keep it.
+    const renderWorkspaceSelector = (compact: boolean) =>
+      workspaces && onSelectWorkspace ? (
+        <WorkspaceSelector
+          workspaces={workspaces}
+          selectedWorkspaceCwd={selectedWorkspaceCwd}
+          disabled={workspaceSelectionDisabled}
+          busy={workspaceMutationBusy}
+          scratchSupported={scratchWorkspaceSupported}
+          existingFolderSupported={existingFolderWorkspaceSupported}
+          standaloneSupported={standaloneTargetSupported}
+          selectedStandalone={selectedStandaloneTarget}
+          className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
+            compact ? styles.workspaceSelectTriggerCompact : ''
+          }`}
+          onSelectWorkspace={onSelectWorkspace}
+          onSelectStandalone={onSelectStandaloneTarget}
+          onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
+          onOpenExistingFolder={onOpenExistingWorkspace ?? (() => {})}
+        />
+      ) : null;
+    const renderGitBranchChip = (compact: boolean) =>
+      gitBranch ? (
+        gitModeIntent && onGitModeIntentChange ? (
+          <GitModePopover
+            branch={gitBranch}
+            compact={compact}
+            intent={gitModeIntent}
+            onIntentChange={onGitModeIntentChange}
+          />
+        ) : (
+          <BranchPickerPopover
+            open={branchPickerOpen}
+            onOpenChange={setBranchPickerOpen}
+            workspaceCwd={selectedWorkspace?.cwd ?? ''}
+            gitCwd={gitCwd}
+            status={gitStatus}
+            onOpenDiff={onOpenGitDiff}
+            onOpenCommit={onOpenCommit}
+            onOpenWorktrees={onOpenWorktrees}
+            onOpenLog={onOpenLog}
+          >
+            <button
+              type="button"
+              className={styles.gitBranchChipButton}
+              aria-label={gitBranchAriaLabel(gitBranch, gitStatus, t)}
+            >
+              <GitBranchIndicator
+                branch={gitBranch}
+                status={gitStatus}
+                compact={compact}
+                worktree={gitWorktree}
+              />
+            </button>
+          </BranchPickerPopover>
+        )
+      ) : null;
+    const mobileVoiceActive = isMobile && voiceActive;
+    const mobileContextRowVisible =
+      isMobile &&
+      !mobileVoiceActive &&
+      (workspaceSelectVisible || workspaceIndicatorVisible || gitBranchVisible);
+    // The workspace/Git row lives inside the capped box and wraps on narrow
+    // viewports, so its measured height is added back to the cap.
+    const mobileContextRowRef = useRef<HTMLDivElement>(null);
+    const [mobileContextRowHeight, setMobileContextRowHeight] =
+      useState<number>();
+    useLayoutEffect(() => {
+      const row = mobileContextRowRef.current;
+      if (!row) return undefined;
+      const update = () => setMobileContextRowHeight(row.offsetHeight);
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(row);
+      return () => resizeObserver.disconnect();
+    }, [mobileContextRowVisible]);
 
     useLayoutEffect(() => {
       const toolbar = toolbarRef.current;
@@ -2678,7 +2464,7 @@ export const ChatEditor = memo(
           );
         };
         const items = [
-          ...(workspaceSelectVisible
+          ...(!isMobile && workspaceChipInToolbar
             ? [
                 {
                   id: 'workspaceSelect',
@@ -2686,7 +2472,7 @@ export const ChatEditor = memo(
                 },
               ]
             : []),
-          ...(workspaceIndicatorVisible
+          ...(!isMobile && workspaceIndicatorVisible
             ? [
                 {
                   id: 'workspace',
@@ -2694,7 +2480,7 @@ export const ChatEditor = memo(
                 },
               ]
             : []),
-          ...(gitBranchVisible
+          ...(!isMobile && gitChipInToolbar
             ? [
                 {
                   id: 'gitBranch',
@@ -2812,9 +2598,10 @@ export const ChatEditor = memo(
       ToolbarStart,
       disabled,
       gitBranch,
-      gitBranchVisible,
+      gitChipInToolbar,
       isRunning,
       modelLabelReady,
+      isMobile,
       modeLabel,
       planLabel,
       normalizedModelChipLabel,
@@ -2823,11 +2610,35 @@ export const ChatEditor = memo(
       showModelAction,
       showModeAction,
       showPlanToolbarControl,
+      workspaceChipInToolbar,
       workspaceIndicatorVisible,
       workspaceName,
-      workspaceSelectVisible,
       selectedWorkspaceLabel,
     ]);
+
+    // One renderer per chip so the toolbar, the row under the composer, and the
+    // mobile row share them. `inToolbar` also picks the visibility gate: a
+    // placement that takes a chip out of the toolbar must not leave the toolbar
+    // rendering it as well.
+    const workspaceControls = (inToolbar: boolean) => (
+      <>
+        {(inToolbar ? workspaceChipInToolbar : workspaceSelectVisible) &&
+          renderWorkspaceSelector(inToolbar && !showWorkspaceSelectLabel)}
+        {workspaceIndicatorVisible && workspaceName && (
+          <WorkspaceIndicator
+            name={workspaceName}
+            title={workspaceTitle ?? workspaceName}
+            color={workspaceColor}
+            compact={!showWorkspaceLabel}
+            ariaLabel={t('workspace.paneLabel', {
+              name: workspaceName,
+            })}
+          />
+        )}
+        {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
+          renderGitBranchChip(inToolbar && !showGitBranchLabel)}
+      </>
+    );
 
     return (
       <div
@@ -2838,6 +2649,7 @@ export const ChatEditor = memo(
         }`}
         data-composer
         data-web-shell-composer
+        data-web-shell-mobile-composer={isMobile || undefined}
         data-web-shell-compact-composer={compactOverlays ? '' : undefined}
         onDragOver={cancelShellFileDrag}
         onDrop={cancelShellFileDrag}
@@ -2934,7 +2746,15 @@ export const ChatEditor = memo(
         <div
           ref={containerRef}
           className={styles.container}
+          style={
+            mobileContextRowHeight === undefined
+              ? undefined
+              : ({
+                  '--chat-editor-context-row-height': `${mobileContextRowHeight}px`,
+                } as CSSProperties)
+          }
           data-web-shell-composer-surface
+          tabIndex={-1}
           data-at-panel-open={hasAtMenu || undefined}
           data-upload-drag-active={uploadDragActive || undefined}
           data-image-drag-active={
@@ -2950,10 +2770,14 @@ export const ChatEditor = memo(
           // script consumes it today, kept as-is to stay faithful to the
           // restored original.
           data-dac-glow
-          onClick={() => {
+          onClick={(event) => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
-            setQuickActionsOpen(false);
+            if (
+              event.target instanceof Element &&
+              event.target.closest('[data-web-shell-mobile-editing-actions]')
+            )
+              return;
             core.focus();
           }}
         >
@@ -2980,18 +2804,34 @@ export const ChatEditor = memo(
             >
               <div className={styles.searchBar}>
                 <span className={styles.searchLabel}>
-                  {t('editor.searchLabel')}
+                  {t(
+                    isMobile ? 'composerMobile.history' : 'editor.searchLabel',
+                  )}
                 </span>
                 <input
                   ref={searchInputRef}
                   className={styles.searchInput}
                   data-web-shell-composer-history-search
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="search"
                   value={searchQuery}
                   onChange={handleSearchInput}
                   onCompositionEnd={handleSearchCompositionEnd}
                   onKeyDown={handleSearchKeyDown}
                   placeholder={t('editor.searchPlaceholder')}
                 />
+                {isMobile && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    aria-label={t('common.close')}
+                    onClick={() => closeSearch(true)}
+                  >
+                    <XIcon />
+                  </button>
+                )}
               </div>
               {searchMatches.length > 0 && (
                 <div className={styles.searchResults}>
@@ -3005,8 +2845,8 @@ export const ChatEditor = memo(
                             ? styles.searchResultActive
                             : ''
                         }`}
-                        onMouseDown={(event) => {
-                          event.preventDefault();
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => {
                           if (restoreSearchMatch) {
                             restoreSearchMatch(match);
                           } else {
@@ -3304,6 +3144,101 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
+            {mobileContextRowVisible && (
+              <div
+                ref={mobileContextRowRef}
+                className={styles.mobileContextRow}
+              >
+                {workspaceControls(false)}
+              </div>
+            )}
+            {core.mobileComposer && !mobileVoiceActive && (
+              <div
+                className={styles.mobileEditingActions}
+                data-web-shell-mobile-editing-actions
+              >
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  disabled={disabled}
+                  aria-label={t('composerMobile.previousInput')}
+                  title={t('composerMobile.previousInput')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={core.navigatePrevHistory}
+                >
+                  <ArrowUpIcon />
+                </button>
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  disabled={disabled}
+                  aria-label={t('composerMobile.nextInput')}
+                  title={t('composerMobile.nextInput')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={core.navigateNextHistory}
+                >
+                  <ArrowDownIcon />
+                </button>
+                {!showAddMenuAction && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.history')}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={core.searchState.openHistorySearch}
+                  >
+                    <HistoryIcon />
+                  </button>
+                )}
+                {(core.shellMode || !showAddMenuAction) && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={core.toggleShellMode}
+                  >
+                    {t(
+                      core.shellMode
+                        ? 'quickActions.exitShellMode'
+                        : 'quickActions.shellMode',
+                    )}
+                  </button>
+                )}
+                <span className={styles.mobileEditingSpacer} />
+                {mobileFocused && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    aria-label={t('composerMobile.hideKeyboard')}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() =>
+                      core.mobileComposer?.textareaRef.current?.blur()
+                    }
+                  >
+                    <KeyboardIcon />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  disabled={disabled}
+                  aria-label={t('composerMobile.expand')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    const textarea = core.mobileComposer?.textareaRef.current;
+                    expandedSelectionRef.current = [
+                      textarea?.selectionStart ?? 0,
+                      textarea?.selectionEnd ?? 0,
+                    ];
+                    setExpandedEditor(true);
+                  }}
+                >
+                  <Maximize2Icon />
+                </button>
+              </div>
+            )}
             <div className={styles.editorArea}>
               {core.shellMode && (
                 <span className={styles.shellPrefix} aria-hidden="true">
@@ -3320,7 +3255,11 @@ export const ChatEditor = memo(
                   className={styles.mobileTextarea}
                   value={core.mobileComposer.value}
                   onChange={core.mobileComposer.onChange}
-                  onBlur={core.mobileComposer.onBlur}
+                  onFocus={() => setMobileFocused(true)}
+                  onBlur={() => {
+                    setMobileFocused(false);
+                    core.mobileComposer?.onBlur();
+                  }}
                   placeholder={core.mobileComposer.placeholder}
                   disabled={core.disabled}
                   rows={1}
@@ -3356,7 +3295,8 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
-                  {showAddMenuAction && (
+                  {(showAddMenuAction ||
+                    (isMobile && showCommandAction && !core.shellMode)) && (
                     <AddMenu
                       key={JSON.stringify([
                         sessionId,
@@ -3364,6 +3304,25 @@ export const ChatEditor = memo(
                         Boolean(disabled),
                       ])}
                       disabled={disabled}
+                      commandsOnly={!showAddMenuAction}
+                      mobileActions={
+                        isMobile
+                          ? {
+                              commands,
+                              categoryOrder: slashCommandCategoryOrder,
+                              onHistory: core.searchState.openHistorySearch,
+                              onToggleShell: () => {
+                                core.toggleShellMode();
+                                core.focus();
+                              },
+                              shellMode: core.shellMode,
+                              onLiveVoice:
+                                liveVoiceSupported && showToolbarAction('voice')
+                                  ? () => setLiveVoiceOpen(true)
+                                  : undefined,
+                            }
+                          : undefined
+                      }
                       availabilityKey={JSON.stringify([
                         fileUploadEnabled === false,
                         attachmentsEnabled,
@@ -3400,91 +3359,13 @@ export const ChatEditor = memo(
                           ? {
                               checked: planMode,
                               disabled: modeControlsDisabled,
-                              disabledReason: t('composerAdd.plan.busy'),
-                              label: t('composerAdd.plan.label'),
-                              description: t('composerAdd.plan.description'),
                               onToggle: handlePlanMenuToggle,
                             }
                           : undefined
                       }
                     />
                   )}
-                  {workspaceSelectVisible &&
-                    workspaces &&
-                    onSelectWorkspace && (
-                      <WorkspaceSelector
-                        workspaces={workspaces}
-                        selectedWorkspaceCwd={selectedWorkspaceCwd}
-                        disabled={workspaceSelectionDisabled}
-                        busy={workspaceMutationBusy}
-                        scratchSupported={scratchWorkspaceSupported}
-                        existingFolderSupported={
-                          existingFolderWorkspaceSupported
-                        }
-                        standaloneSupported={standaloneTargetSupported}
-                        selectedStandalone={selectedStandaloneTarget}
-                        className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
-                          showWorkspaceSelectLabel
-                            ? ''
-                            : styles.workspaceSelectTriggerCompact
-                        }`}
-                        onSelectWorkspace={onSelectWorkspace}
-                        onSelectStandalone={onSelectStandaloneTarget}
-                        onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
-                        onOpenExistingFolder={
-                          onOpenExistingWorkspace ?? (() => {})
-                        }
-                      />
-                    )}
-                  {workspaceIndicatorVisible && workspaceName && (
-                    <WorkspaceIndicator
-                      name={workspaceName}
-                      title={workspaceTitle ?? workspaceName}
-                      color={workspaceColor}
-                      compact={!showWorkspaceLabel}
-                      ariaLabel={t('workspace.paneLabel', {
-                        name: workspaceName,
-                      })}
-                    />
-                  )}
-                  {gitBranchVisible &&
-                    gitBranch &&
-                    (gitModeIntent && onGitModeIntentChange ? (
-                      <GitModePopover
-                        branch={gitBranch}
-                        compact={!showGitBranchLabel}
-                        intent={gitModeIntent}
-                        onIntentChange={onGitModeIntentChange}
-                      />
-                    ) : (
-                      <BranchPickerPopover
-                        open={branchPickerOpen}
-                        onOpenChange={setBranchPickerOpen}
-                        workspaceCwd={selectedWorkspace?.cwd ?? ''}
-                        gitCwd={gitCwd}
-                        status={gitStatus}
-                        onOpenDiff={onOpenGitDiff}
-                        onOpenCommit={onOpenCommit}
-                        onOpenLog={onOpenLog}
-                      >
-                        <button
-                          type="button"
-                          className={styles.gitBranchChipButton}
-                          aria-label={gitBranchAriaLabel(
-                            gitBranch,
-                            gitStatus,
-                            t,
-                          )}
-                        >
-                          <GitBranchIndicator
-                            branch={gitBranch}
-                            status={gitStatus}
-                            compact={!showGitBranchLabel}
-                            worktree={gitWorktree}
-                          />
-                        </button>
-                      </BranchPickerPopover>
-                    ))}
+                  {!isMobile && workspaceControls(true)}
                   {showModeAction && (
                     <div
                       className={`${styles.dropdownWrapper} ${
@@ -3514,7 +3395,6 @@ export const ChatEditor = memo(
                               e.stopPropagation();
                               core.closeSlashMenu();
                               core.closeAtMenu();
-                              setQuickActionsOpen(false);
                             }}
                             aria-label={t('status.mode')}
                           >
@@ -3551,8 +3431,22 @@ export const ChatEditor = memo(
                             aria-pressed={planMode}
                             aria-label={planLabel}
                             aria-describedby={planDescriptionId}
-                            disabled={modeControlsDisabled}
+                            // Not the native attribute: both hosts go busy
+                            // inside the chip's own click, and a focused button
+                            // that becomes disabled loses focus to the body
+                            // there and then.
+                            aria-disabled={modeControlsDisabled || undefined}
+                            onFocus={() => {
+                              planChipHadFocusRef.current = true;
+                            }}
+                            onBlur={() => {
+                              planChipHadFocusRef.current = false;
+                            }}
                             onClick={() => {
+                              // Inert while busy; the click still reaches the
+                              // composer surface, as one on a bare part of the
+                              // toolbar would.
+                              if (modeControlsDisabled) return;
                               onTogglePlan?.();
                               // The chip unmounts once Plan is off, so it
                               // hands focus on rather than dropping it to the
@@ -3689,7 +3583,6 @@ export const ChatEditor = memo(
                               e.stopPropagation();
                               core.closeSlashMenu();
                               core.closeAtMenu();
-                              setQuickActionsOpen(false);
                             }}
                             aria-label={`${t('model.select')}: ${normalizedModelChipLabel}`}
                             title={normalizedModelChipLabel}
@@ -3724,28 +3617,6 @@ export const ChatEditor = memo(
                 </div>
               </div>
               <div ref={toolbarRightRef} className={styles.toolbarRight}>
-                {showQuickActions && quickActions.length > 0 && (
-                  <button
-                    className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
-                    data-hide-during-mobile-voice
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      core.closeSlashMenu();
-                      core.closeAtMenu();
-                      setModeDropdownOpen(false);
-                      setModelDropdownOpen(false);
-                      setQuickActionsOpen((value) => !value);
-                    }}
-                    aria-expanded={quickActionsOpen}
-                    aria-label={t('quickActions.open')}
-                    title={t('quickActions.open')}
-                    data-tooltip={t('quickActions.open')}
-                  >
-                    <span className={styles.toolBtnIcon}>
-                      <QuickActionsIcon />
-                    </span>
-                  </button>
-                )}
                 {ToolbarRight && (
                   <div
                     ref={toolbarRightCustomRef}
@@ -3761,7 +3632,8 @@ export const ChatEditor = memo(
                     />
                   </div>
                 )}
-                {showChatWidthToggle &&
+                {!isMobile &&
+                  showChatWidthToggle &&
                   widthToggleFits &&
                   showToolbarAction('widthMode') && (
                     <button
@@ -3849,7 +3721,7 @@ export const ChatEditor = memo(
                       </button>
                     </ContextUsagePopover>
                   )}
-                {showCommandAction && (
+                {!isMobile && showCommandAction && (
                   <button
                     type="button"
                     className={`${styles.toolBtn} ${styles.toolBtnCompact}`}
@@ -3872,7 +3744,21 @@ export const ChatEditor = memo(
                 )}
                 {showToolbarAction('voice') && (
                   <>
-                    <LiveVoiceButton />
+                    <LiveVoiceButton
+                      hideInactiveTrigger={
+                        isMobile && Boolean(showAddMenuAction)
+                      }
+                      open={liveVoiceOpen}
+                      onOpenChange={setLiveVoiceOpen}
+                      onSupportedChange={setLiveVoiceSupported}
+                      onRequestFocusFallback={() => {
+                        containerRef.current
+                          ?.querySelector<HTMLButtonElement>(
+                            '[data-testid="composer-add-menu-trigger"]',
+                          )
+                          ?.focus();
+                      }}
+                    />
                     <VoiceButton
                       disabled={disabled}
                       onActiveChange={setVoiceActive}
@@ -3887,6 +3773,21 @@ export const ChatEditor = memo(
                       }}
                     />
                   </>
+                )}
+                {isMobile && isRunning && core.hasContent && (
+                  <button
+                    type="button"
+                    className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
+                    disabled={composerPreparing || !onCancel}
+                    data-web-shell-composer-stop
+                    aria-label={t('composerMobile.stop')}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onCancel?.();
+                    }}
+                  >
+                    <StopIcon />
+                  </button>
                 )}
                 <button
                   className={
@@ -3919,13 +3820,17 @@ export const ChatEditor = memo(
                     composerPreparing
                       ? t('common.loading')
                       : showCancelButton
-                        ? cancelArmed
+                        ? cancelArmed && !isMobile
                           ? t('stream.cancelArmed')
-                          : t('stream.cancel')
+                          : t(
+                              isMobile
+                                ? 'composerMobile.stop'
+                                : 'stream.cancel',
+                            )
                         : t('editor.send')
                   }
                   title={
-                    isRunning && cancelArmed
+                    isRunning && cancelArmed && !isMobile
                       ? t('stream.cancelArmed')
                       : undefined
                   }
@@ -3933,7 +3838,7 @@ export const ChatEditor = memo(
                   {composerPreparing ? (
                     <LoadingIcon />
                   ) : showCancelButton ? (
-                    cancelArmed ? (
+                    cancelArmed && !isMobile ? (
                       <span className={styles.escLabel} aria-hidden="true">
                         Esc
                       </span>
@@ -3949,7 +3854,9 @@ export const ChatEditor = memo(
                   aria-live="polite"
                   className={styles.srOnly}
                 >
-                  {isRunning && cancelArmed ? t('stream.cancelArmed') : ''}
+                  {isRunning && cancelArmed && !isMobile
+                    ? t('stream.cancelArmed')
+                    : ''}
                 </span>
               </div>
             </div>
@@ -3958,7 +3865,7 @@ export const ChatEditor = memo(
               className={styles.toolbarMeasurements}
               aria-hidden="true"
             >
-              {workspaceSelectVisible && selectedWorkspace && (
+              {workspaceChipInToolbar && selectedWorkspace && (
                 <>
                   <span
                     data-toolbar-measure="workspaceSelect:collapsed"
@@ -4008,7 +3915,7 @@ export const ChatEditor = memo(
                   </span>
                 </>
               )}
-              {gitBranchVisible && gitBranch && (
+              {gitChipInToolbar && gitBranch && (
                 <>
                   <span
                     data-toolbar-measure="gitBranch:collapsed"
@@ -4130,12 +4037,115 @@ export const ChatEditor = memo(
             </div>
           </div>
         </div>
-        {showQuickActions && quickActionsOpen && quickActions.length > 0 && (
-          <QuickActionsPanel
-            actions={quickActions}
-            onRun={runQuickAction}
-            onPressKey={pressQuickKey}
-          />
+        {/* Mobile voice mode strips the toolbar down to the microphone and
+            send, so the row follows it out of the way. Mobile keeps its own
+            touch-sized row inside the composer, so this one is desktop-only. */}
+        {!isMobile && contextRowVisible && !mobileVoiceActive && (
+          <div
+            className={styles.contextRow}
+            data-web-shell-composer-context-row
+          >
+            {workspaceSelectVisible && renderWorkspaceSelector(false)}
+            {gitBranchVisible && renderGitBranchChip(false)}
+          </div>
+        )}
+        {core.mobileComposer && (
+          <Dialog open={expandedEditor} onOpenChange={setExpandedEditor}>
+            <DialogContent
+              className={styles.mobileExpandedEditor}
+              aria-describedby={undefined}
+              showCloseButton={false}
+              data-web-shell-expanded-editor
+              onOpenAutoFocus={(event) => {
+                event.preventDefault();
+                core.mobileComposer?.expandedTextareaRef.current?.focus();
+                core.mobileComposer?.expandedTextareaRef.current?.setSelectionRange(
+                  ...expandedSelectionRef.current,
+                );
+              }}
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                if (disabled) {
+                  if (document.activeElement === document.body)
+                    containerRef.current?.focus();
+                } else {
+                  const textarea = core.mobileComposer?.textareaRef.current;
+                  textarea?.focus();
+                  textarea?.setSelectionRange(...expandedSelectionRef.current);
+                }
+              }}
+            >
+              <div className={styles.mobileExpandedHeader}>
+                <DialogTitle>{t('composerMobile.expand')}</DialogTitle>
+                <Button
+                  variant="ghost"
+                  className="size-11"
+                  aria-label={t('composerMobile.hideKeyboard')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() =>
+                    core.mobileComposer?.expandedTextareaRef.current?.blur()
+                  }
+                >
+                  <KeyboardIcon />
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="min-h-11"
+                  onClick={() => setExpandedEditor(false)}
+                >
+                  {t('composerMobile.done')}
+                </Button>
+              </div>
+              <textarea
+                ref={core.mobileComposer.expandedTextareaRef}
+                value={core.mobileComposer.value}
+                onChange={core.mobileComposer.onChange}
+                onPasteCapture={core.imageTransferHandlers.onPasteCapture}
+                onBlur={(event) => {
+                  expandedSelectionRef.current = [
+                    event.currentTarget.selectionStart,
+                    event.currentTarget.selectionEnd,
+                  ];
+                  core.mobileComposer?.onBlur();
+                }}
+                disabled={core.disabled}
+                onSelect={(event) => {
+                  expandedSelectionRef.current = [
+                    event.currentTarget.selectionStart,
+                    event.currentTarget.selectionEnd,
+                  ];
+                }}
+                className={styles.mobileExpandedTextarea}
+                aria-label={core.mobileComposer.placeholder}
+                placeholder={core.mobileComposer.placeholder}
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                enterKeyHint="enter"
+              />
+              {core.pastedImages.length + core.pastedFiles.length > 0 && (
+                <div
+                  role="status"
+                  className="text-sm text-muted-foreground"
+                  data-web-shell-expanded-attachments
+                >
+                  {t('composerMobile.attachments', {
+                    count: core.pastedImages.length + core.pastedFiles.length,
+                  })}
+                </div>
+              )}
+              {isRunning && (
+                <Button
+                  variant="outline"
+                  className="min-h-11"
+                  disabled={composerPreparing || !onCancel}
+                  onClick={onCancel}
+                >
+                  {t('composerMobile.stop')}
+                </Button>
+              )}
+            </DialogContent>
+          </Dialog>
         )}
         <Dialog
           open={pendingDropFiles !== null}
