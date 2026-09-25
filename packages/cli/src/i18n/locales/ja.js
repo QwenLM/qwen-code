@@ -1388,6 +1388,9 @@ export default {
     'コンテキストが制限を超えています！/compress または /clear を使用して減らしてください。',
   'No API response yet. Send a message to see actual usage.':
     'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
+  'Estimated usage, including the conversation': '推定使用量（会話を含む）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'プロバイダーの使用量はまだありません。以下は会話を含むローカル推定値です。',
   'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',
   'Context window': 'コンテキストウィンドウ',
   tokens: 'トークン',
@@ -1403,7 +1406,7 @@ export default {
   Messages: 'メッセージ',
   'Startup context': '起動時コンテキスト',
   Unattributed: '未分類',
-  'Cached prefix': 'キャッシュ済みプレフィックス',
+  'Cached prefix': 'プレフィックスキャッシュ',
   'Run /context detail for per-item breakdown.':
     '/context detail を実行すると項目ごとの内訳を表示します。',
   active: '有効',

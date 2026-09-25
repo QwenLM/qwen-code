@@ -29,6 +29,7 @@ vi.mock('node:fs/promises', { spy: true });
 const realFsPromises =
   await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getDefaultReasoningConfig } from './model-configuration.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
@@ -27781,6 +27782,42 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['load', 'resume'] as const)(
+    '%s returns a typed error for a Managed session',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      vi.mocked(loadCliConfig).mockRejectedValueOnce(
+        new SessionExecutionEngineError(
+          'persisted-1',
+          'belongs to managed, cannot execute with legacy',
+        ),
+      );
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        await expect(
+          action === 'load'
+            ? agent.loadSession(params)
+            : agent.unstable_resumeSession(params),
+        ).rejects.toMatchObject({
+          code: -32024,
+          data: {
+            errorKind: 'session_execution_engine_unavailable',
+            sessionId: 'persisted-1',
+          },
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each(['load', 'resume'] as const)(
     '%s binds sessionIdContext while loading the Config',

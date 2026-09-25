@@ -420,7 +420,6 @@ describe('managed session shared field rules', () => {
 describe('managed session per-kind rules', () => {
   it.each([
     ['model.attempt', () => harnessEvent()],
-    ['message.committed', () => eventForKind('message.committed')],
     ['tool.intent', () => eventForKind('tool.intent')],
     ['context.compacted', () => eventForKind('context.compacted')],
     ['checkpoint.committed', () => eventForKind('checkpoint.committed')],
@@ -687,9 +686,9 @@ describe('managed session per-kind rules', () => {
     ).toThrow(/toSequence must not precede payload.fromSequence/);
   });
 
-  it('registers exactly the thirty v1 domains without duplicates', () => {
-    expect(MANAGED_SESSION_DOMAINS).toHaveLength(30);
-    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(30);
+  it('registers the v1 domains including file history and session source', () => {
+    expect(MANAGED_SESSION_DOMAINS).toHaveLength(32);
+    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(32);
   });
 
   it('validates the lifecycle target state', () => {
@@ -735,6 +734,21 @@ describe('managed session per-kind rules', () => {
 });
 
 describe('managed session actor eligibility', () => {
+  it('admits projected input without an activation only from a trusted entry', () => {
+    const input = eventForKind('message.committed');
+    delete input['subject'];
+    const event = parseManagedSessionEvent(input);
+    expect(() =>
+      assertManagedSessionEventActor(event, 'trusted_entry'),
+    ).not.toThrow();
+    expect(() => assertManagedSessionEventActor(event, 'harness')).toThrow(
+      /requires an activation subject/,
+    );
+    expect(() => assertManagedSessionEventActor(event, 'authority')).toThrow(
+      /must not be requested/,
+    );
+  });
+
   it('lets only the coordinator change an activation', () => {
     const event = parseManagedSessionEvent({
       v: 1,
@@ -796,6 +810,7 @@ describe('managed session actor eligibility', () => {
         sessionKey,
         kind: 'action.changed',
         occurredAt: 1,
+        subject: activationSubject,
         payload: {
           requestId: 'req-1',
           kind: 'permission',
@@ -1122,16 +1137,28 @@ describe('managed session transactions', () => {
     );
   });
 
-  it('digests the committed event identities stably', () => {
+  it('digests the complete committed events stably', () => {
     const digest = managedSessionEventsDigest([event(1), event(2)]);
     expect(digest).toBe(
-      'd384980415770708f9dd1ff12495d45c8fdbf8508aac8ddd8359362048398e8a',
+      '0da902e249ff5ba1e2ce05db968cfaa30b51ef1cb089b27b496dfb7765be09b5',
     );
     expect(managedSessionEventsDigest([event(1), event(2)])).toBe(digest);
     expect(managedSessionEventsDigest([event(2), event(1)])).not.toBe(digest);
   });
 
-  it('bounds digest input before encoding event identities', () => {
+  it('covers payloads, scope and timestamps in the commit digest', () => {
+    const original = event(1);
+    const digest = managedSessionEventsDigest([original]);
+    for (const changed of [
+      { ...original, occurredAt: original.occurredAt + 1 },
+      { ...original, sessionKey: { ...sessionKey, tenantId: 'other' } },
+      { ...original, payload: { ...original.payload, source: 'changed' } },
+    ]) {
+      expect(managedSessionEventsDigest([changed])).not.toBe(digest);
+    }
+  });
+
+  it('bounds digest input before encoding event content', () => {
     expect(() => managedSessionEventsDigest([])).toThrow(
       /must contain at least one event/,
     );
