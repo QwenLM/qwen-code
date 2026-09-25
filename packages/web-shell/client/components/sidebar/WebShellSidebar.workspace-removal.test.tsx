@@ -6889,6 +6889,59 @@ describe('WebShellSidebar standalone grouping', () => {
     expect(details?.textContent).not.toContain('/private/standalone');
   });
 
+  it('keeps delete disabled on the current no-workspace row', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'standalone-current';
+    listStandaloneSessionsPage.mockImplementation(
+      async ({ archiveState }: { archiveState: string }) => ({
+        sessions:
+          archiveState === 'archived'
+            ? []
+            : [
+                {
+                  sessionId: 'standalone-current',
+                  displayName: 'Current standalone chat',
+                  context: { kind: 'standalone' },
+                },
+                {
+                  sessionId: 'standalone-other',
+                  displayName: 'Other standalone chat',
+                  context: { kind: 'standalone' },
+                },
+              ],
+      }),
+    );
+
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['delete'], inlineItems: ['delete'] },
+    });
+    await vi.waitFor(() => {
+      expect(
+        inlineSessionAction('Current standalone chat', 'Delete'),
+      ).toBeDefined();
+    });
+
+    // The attached no-workspace session answers `session_busy`, so the row must
+    // not offer a delete that can never succeed (#12619, option A): it stays
+    // disabled, like on main, and says what unblocks it.
+    const current = inlineSessionAction('Current standalone chat', 'Delete')!;
+    expect(current.disabled).toBe(true);
+    expect(current.title).toContain('Open another chat first');
+
+    // The guard is about the attachment, not about standalone sessions: a
+    // no-workspace row this tab is not attached to stays deletable.
+    const other = inlineSessionAction('Other standalone chat', 'Delete');
+    expect(other).toBeDefined();
+    expect(other!.disabled).toBe(false);
+  });
+
   it('puts No workspace in Projects and hides it for a locked workspace', async () => {
     const standaloneCapabilities = {
       ...capabilities,
