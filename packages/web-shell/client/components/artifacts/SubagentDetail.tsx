@@ -216,6 +216,7 @@ function SubagentDetailContent({
       firstTurnMetrics={metrics}
       includeSubagentToolUsageInMetrics={false}
       turnFileChanges={fileChangesByTurn}
+      sourceSessionId={connection.sessionId}
       turnArtifacts={artifactsByTurn}
       onTurnOutputOpen={handleRightPanelOpen}
       onError={onError}

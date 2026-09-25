@@ -162,6 +162,11 @@ import {
   omitSkillDetailsFromReplayArrays,
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import {
+  readSessionToolCalls,
+  SessionToolCallsLimitError,
+  SessionToolCallsReplayError,
+} from '../session-tool-calls.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
   PERSIST_REASONING_SELECTION_META_KEY,
@@ -5953,6 +5958,137 @@ export function registerSessionRoutes(
         .send(serialized);
     } catch (err) {
       sendBridgeError(res, err, { route, sessionId });
+    }
+  });
+
+  app.get('/workspaces/:workspace/session/:id/tool-calls', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/tool-calls';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const qualifiedTarget = resolveQualifiedSessionTarget(req, res, {
+      allowUntrustedSecondary: true,
+    });
+    if (!qualifiedTarget) return;
+    const turnId = req.query['turnId'];
+    if (typeof turnId !== 'string' || !turnId.trim() || turnId.length > 200) {
+      res.status(400).json({
+        error: '`turnId` must be a non-empty persisted turn record id',
+        code: 'invalid_turn_anchor',
+      });
+      return;
+    }
+    try {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const runtime =
+            qualifiedTarget.kind === 'ordinary'
+              ? qualifiedTarget.runtime
+              : await resolveQualifiedSessionRuntime(
+                  req,
+                  res,
+                  route,
+                  [sessionId],
+                  'active',
+                );
+          if (!runtime) return undefined;
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            await assertSessionLoadable(
+              runtime.workspaceCwd,
+              sessionId,
+              runtime.sessionRuntimeBaseDir,
+              {
+                allowActiveConflict: true,
+              },
+            );
+            try {
+              runtime.bridge.getSessionSummary(sessionId);
+              if (runtime.bridge.flushSessionTranscript) {
+                await runtime.bridge.flushSessionTranscript(sessionId);
+              } else {
+                await runtime.bridge.getSessionTranscriptPage({
+                  sessionId,
+                  direction: 'backward',
+                  limit: 1,
+                });
+              }
+            } catch (error) {
+              if (!(error instanceof SessionNotFoundError)) throw error;
+            }
+            const codec = getTranscriptCursorCodec(runtime);
+            const reader = new SessionTranscriptReader(
+              runtime.workspaceCwd,
+              codec,
+            );
+            const hasActivePrompt = () => {
+              try {
+                return runtime.bridge.getSessionSummary(sessionId)
+                  .hasActivePrompt;
+              } catch (error) {
+                if (error instanceof SessionNotFoundError) return false;
+                throw error;
+              }
+            };
+            let events;
+            try {
+              events = await readSessionToolCalls({
+                sessionId,
+                turnId,
+                reader,
+                codec,
+                hasActivePrompt,
+              });
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                throw error;
+              const location =
+                await createWorkspaceRuntimeSessionService(
+                  runtime,
+                ).getSessionLocation(sessionId);
+              if (location === 'archived')
+                throw new SessionArchivedError(sessionId);
+              if (location === 'conflict')
+                throw new SessionConflictError(sessionId);
+              throw new SessionNotFoundError(sessionId);
+            }
+            assertRuntimeGenerationOpen?.();
+            return {
+              v: 1 as const,
+              sessionId,
+              turnId,
+              events: events.map((event) =>
+                redactSdkSurfaceEvent(event, runtime.trusted),
+              ),
+            };
+          });
+        }),
+      );
+      if (result === undefined) return;
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serializeWorkspaceTranscriptResponse(result, sessionId));
+    } catch (error) {
+      if (error instanceof SessionToolCallsLimitError) {
+        res.status(413).json({
+          error: error.message,
+          code: 'tool_calls_limit_exceeded',
+          sessionId,
+        });
+        return;
+      }
+      if (error instanceof SessionToolCallsReplayError) {
+        res.status(500).json({
+          error: error.message,
+          code: 'tool_calls_replay_incomplete',
+          sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, error, { route, sessionId });
     }
   });
 
