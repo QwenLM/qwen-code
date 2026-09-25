@@ -56,19 +56,6 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
-// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value, while
-// delegating every other constant (timeouts, sentinel, resolveRequestTimeout)
-// to the real module so the mock cannot drift from the implementation.
-vi.mock('../constants.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../constants.js')>();
-  return {
-    ...actual,
-    get DASHSCOPE_PROXY_BASE_URL() {
-      return process.env['DASHSCOPE_PROXY_BASE_URL'];
-    },
-  };
-});
-
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
