@@ -111,4 +111,4 @@ Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding r
 
 ## 后续工作
 
-在启用重启恢复前增加显式进程接管和 reconciliation；增加 JDBC Tool execution 持久化以支持多实例 dispatch 收敛；随后通过私有 HTTP adapter 暴露本服务核心。HTTP `status` 路由与 transport 随 execute 处理器提取一起落地。物理 Runtime drain、Hosted Harness 集成和 Qwen 侧 Broker client 继续作为独立可评审切片。
+在启用重启恢复前增加显式进程接管和 reconciliation；增加 JDBC Tool execution 持久化以支持多实例 dispatch 收敛；随后通过私有 HTTP adapter 暴露本服务核心。Java HTTP 工具 transport 已实现，但 worker 路由与服务适配层仍待后续完成。适配层必须从已保存的四字段 reference 之外单独提供 `toolName`/`input`，并在线上校验后将 status 应答投影为 `{state, result}`；参见[工具契约](2026-09-24-managed-runtime-tool-contract.zh-CN.md#41-java-transport)。物理 Runtime drain、Hosted Harness 集成和 Qwen 侧 Broker client 继续作为独立可评审切片。

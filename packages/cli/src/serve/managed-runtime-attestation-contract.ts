@@ -311,9 +311,7 @@ export function isOwnedManagedRuntimeRoute(
   method: string | undefined,
   url: string | undefined,
 ): boolean {
-  return OWNED_MANAGED_RUNTIME_ROUTES.some(
-    (route) => method === route.method && url === route.path,
-  );
+  return method === ATTEST_ROUTE.method && url === ATTEST_ROUTE.path;
 }
 
 export function ownedManagedRuntimeRouteGate(

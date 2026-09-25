@@ -24,13 +24,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
             "bind-history", "checkpoint", "history", "manifest",
             "begin-turn", "prepare", "confirmation", "confirm",
             "preflight");
+    // A cancellation answers with one of these states.
     private static final Set<String> RUNTIME_EXECUTION_STATES = Set.of(
             "prepared", "executing", "cancel_requested", "settled",
             "unknown");
-    // A lookup may also report that the Runtime holds no record at all.
+    // A lookup answers with the same states as a cancellation.
     private static final Set<String> RUNTIME_STATUS_STATES = Set.of(
             "prepared", "executing", "cancel_requested", "settled",
             "unknown");
+    // A lookup answer carries nothing but these fields.
     private static final Set<String> RUNTIME_STATUS_FIELDS = Set.of(
             "state", "result");
     private static final int MAX_CAS_ATTEMPTS = 16;
