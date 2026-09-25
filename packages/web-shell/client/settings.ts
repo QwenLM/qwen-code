@@ -65,6 +65,7 @@ const BUILTIN_IDS = [
   'builtin:browser-notifications',
   'builtin:live-setup',
   'builtin:local-control',
+  'builtin:connections',
   'builtin:model-management',
 ] as const;
 
@@ -78,26 +79,56 @@ export const WEB_SHELL_SETTING_ITEM_IDS: readonly WebShellSettingItemId[] = [
 ];
 
 export interface WebShellSettingsOptions {
-  /** Hide native settings items. Presentation only; other commands/APIs remain available. */
+  /** Show only these eligible native items; an empty list hides all. Presentation only. */
+  includeItems?: readonly WebShellSettingItemId[];
+  /** Hide native items, taking precedence over includeItems. Other commands/APIs remain available. */
   excludeItems?: readonly WebShellSettingItemId[];
 }
 
-export function isItemExcluded(
+// Predicates run once per rendered row, so each unknown id warns once. The
+// library build folds import.meta.env.DEV to false, so gating on it would
+// dead-code the diagnostic out of the only artifact hosts install.
+const warnedUnknownItemIds = new Set<string>();
+
+function warnUnknownItemIds(options?: WebShellSettingsOptions): void {
+  if (!options) return;
+  for (const id of [
+    ...(options.includeItems ?? []),
+    ...(options.excludeItems ?? []),
+  ]) {
+    if (WEB_SHELL_SETTING_ITEM_IDS.includes(id)) continue;
+    if (warnedUnknownItemIds.has(id)) continue;
+    warnedUnknownItemIds.add(id);
+    console.warn(
+      `[web-shell] settings presentation: "${id}" matches no published item id and is ignored; the published ids are exported as WEB_SHELL_SETTING_ITEM_IDS.`,
+    );
+  }
+}
+
+export function isItemVisible(
   id: WebShellSettingItemId,
   options?: WebShellSettingsOptions,
 ): boolean {
-  return options?.excludeItems?.includes(id) ?? false;
+  warnUnknownItemIds(options);
+  return (
+    (options?.includeItems?.includes(id) ?? true) &&
+    !options?.excludeItems?.includes(id)
+  );
 }
 
-export function isSettingExcluded(
+export function isSettingVisible(
   key: string,
   options?: WebShellSettingsOptions,
 ): boolean {
-  return (
-    options?.excludeItems?.some(
-      (id) =>
-        Object.hasOwn(SETTING_KEYS, id) &&
-        SETTING_KEYS[id as keyof typeof SETTING_KEYS] === key,
-    ) ?? false
-  );
+  warnUnknownItemIds(options);
+  // Aliases stay stable across schema renames, so a key may gain a second
+  // alias: match every alias, with exclusion winning over inclusion.
+  const ids = (
+    Object.keys(SETTING_KEYS) as Array<keyof typeof SETTING_KEYS>
+  ).filter((id) => SETTING_KEYS[id] === key);
+  if (ids.length === 0) return options?.includeItems === undefined;
+  if (ids.some((id) => options?.excludeItems?.includes(id))) return false;
+  const includeItems = options?.includeItems;
+  if (includeItems === undefined) return true;
+  return ids.some((id) => includeItems.includes(id));
 }

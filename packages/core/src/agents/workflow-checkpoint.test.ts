@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import {
   checkpointFromTask,
+  claimInterruptedWorkflowRun,
   claimInterruptedWorkflowRuns,
   INTERRUPTED_WORKFLOW_ERROR,
   readWorkflowCheckpoint,
@@ -89,7 +90,7 @@ async function leaveRun(
     path.join(dir, 'journal.jsonl'),
     journalLines.map((line) => JSON.stringify(line) + '\n').join(''),
   );
-  expect(await writeWorkflowCheckpoint(config, cp)).toBe(true);
+  expect(await writeWorkflowCheckpoint(config, cp)).toBe('written');
 }
 
 const stopped = { isProcessRunning: () => false };
@@ -163,6 +164,7 @@ describe('checkpointFromTask', () => {
       startMode: 'retry',
       tokenBudgetTotal: 5000,
       args: { files: ['a.csv'] },
+      argsRecorded: true,
     });
   });
 
@@ -182,7 +184,7 @@ describe('writing and reading a checkpoint', () => {
   it('round-trips, and is gone once removed', async () => {
     await fs.mkdir(path.join(root, RUN_ID));
     const cp = checkpoint({ args: [1, 2] });
-    expect(await writeWorkflowCheckpoint(config, cp)).toBe(true);
+    expect(await writeWorkflowCheckpoint(config, cp)).toBe('written');
     expect(await readWorkflowCheckpoint(config, RUN_ID)).toEqual(cp);
     const mode = (await fs.stat(path.join(root, RUN_ID, 'checkpoint.json')))
       .mode;
@@ -190,6 +192,19 @@ describe('writing and reading a checkpoint', () => {
 
     await removeWorkflowCheckpoint(config, RUN_ID);
     expect(await readWorkflowCheckpoint(config, RUN_ID)).toBeUndefined();
+  });
+
+  // A resume refuses to start on this answer, so it must mean the write did
+  // not happen -- not that there was nowhere to make it.
+  it('reports a write that failed, apart from one it could not attempt', async () => {
+    // No run directory: the write needs its parent to exist.
+    await expect(writeWorkflowCheckpoint(config, checkpoint())).resolves.toBe(
+      'failed',
+    );
+    const noStorage = { storage: undefined } as unknown as Config;
+    await expect(
+      writeWorkflowCheckpoint(noStorage, checkpoint()),
+    ).resolves.toBe('unavailable');
   });
 
   it('ignores a checkpoint that names another run', async () => {
@@ -207,7 +222,10 @@ describe('writing and reading a checkpoint', () => {
       const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-outside-'));
       try {
         await fs.symlink(outside, path.join(root, RUN_ID));
-        expect(await writeWorkflowCheckpoint(config, checkpoint())).toBe(false);
+        // Nowhere a checkpoint could live is not a failed write.
+        expect(await writeWorkflowCheckpoint(config, checkpoint())).toBe(
+          'unavailable',
+        );
         await expect(fs.readdir(outside)).resolves.toEqual([]);
       } finally {
         await fs.rm(outside, { recursive: true, force: true });
@@ -217,6 +235,33 @@ describe('writing and reading a checkpoint', () => {
 });
 
 describe('claimInterruptedWorkflowRuns', () => {
+  // A checkpoint from before `argsRecorded` existed says a run had no args
+  // the only way it could: by carrying neither them nor `argsOmitted`. Read
+  // as "unknown", such a run is refused a retry for want of args it never
+  // had, and its resume notice asks the user for them.
+  it('claims a run that had no args as a run that had none, not as one whose args are unknown', async () => {
+    await leaveRun({ ...checkpoint(), argsRecorded: undefined }, [
+      { type: 'launched', version: 1 },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed[0]!.snapshot.argsRecorded).toBe(true);
+    expect(claimed[0]!.snapshot).not.toHaveProperty('args');
+    expect(claimed[0]!.snapshot.argsOmitted).toBeUndefined();
+  });
+
+  it('keeps a claimed run without args distinct from one whose args were too large', async () => {
+    await leaveRun(checkpoint({ argsOmitted: true }), [
+      { type: 'launched', version: 1 },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed[0]!.snapshot.argsOmitted).toBe(true);
+    expect(claimed[0]!.snapshot.argsRecorded).toBeUndefined();
+  });
+
   it('turns a run whose process is gone into failed history', async () => {
     await leaveRun(
       checkpoint({ args: { files: ['a.csv'] }, resumeName: 'audit' }),
@@ -426,5 +471,68 @@ describe('claimInterruptedWorkflowRuns', () => {
     ).toEqual([]);
     await fs.rm(root, { recursive: true, force: true });
     expect(await claimInterruptedWorkflowRuns(config, stopped)).toEqual([]);
+  });
+});
+
+describe('claimInterruptedWorkflowRun', () => {
+  const OTHER_RUN = 'wf_4567cdef';
+
+  it('claims the one run it is asked about, and no other', async () => {
+    await leaveRun(checkpoint());
+    await leaveRun(checkpoint({ runId: OTHER_RUN }));
+
+    const claimed = await claimInterruptedWorkflowRun(config, RUN_ID, stopped);
+
+    expect(claimed?.snapshot).toMatchObject({
+      runId: RUN_ID,
+      status: 'failed',
+      error: INTERRUPTED_WORKFLOW_ERROR,
+    });
+    expect(await readWorkflowCheckpoint(config, RUN_ID)).toBeUndefined();
+    expect(await readWorkflowCheckpoint(config, OTHER_RUN)).toBeDefined();
+    expect(await readWorkflowSnapshot(config, OTHER_RUN)).toBeUndefined();
+  });
+
+  it('leaves a run alone while the process that wrote it is running', async () => {
+    await leaveRun(checkpoint());
+
+    expect(
+      await claimInterruptedWorkflowRun(config, RUN_ID, {
+        isProcessRunning: () => true,
+      }),
+    ).toBeUndefined();
+    expect(await readWorkflowCheckpoint(config, RUN_ID)).toBeDefined();
+  });
+
+  it('returns nothing for a run with no checkpoint', async () => {
+    expect(
+      await claimInterruptedWorkflowRun(config, RUN_ID, stopped),
+    ).toBeUndefined();
+  });
+
+  // The id reaches here from a client; it is a path segment below.
+  it('touches no path for an id that is not a run id', async () => {
+    const outside = path.join(root, '..', `escape-${path.basename(root)}`);
+    await fs.mkdir(outside, { recursive: true });
+    try {
+      await fs.writeFile(
+        path.join(outside, 'checkpoint.json'),
+        JSON.stringify(checkpoint({ runId: `../${path.basename(outside)}` })),
+      );
+
+      expect(
+        await claimInterruptedWorkflowRun(
+          config,
+          `../${path.basename(outside)}`,
+          stopped,
+        ),
+      ).toBeUndefined();
+      await expect(
+        fs.access(path.join(outside, 'checkpoint.json')),
+      ).resolves.toBeUndefined();
+      expect(await fs.readdir(root)).toEqual([]);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });

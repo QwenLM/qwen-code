@@ -242,13 +242,55 @@ async function saveFromCommand(
 }
 
 /**
+ * Linux clipboard tools report "there is nothing on the clipboard" with the
+ * same non-zero exit code they use for a real query failure, so an exit code
+ * alone cannot separate "clipboard unreachable" from "clipboard legitimately
+ * empty". Their stderr wording can. Verified against upstream sources:
+ * - xclip 0.13, the release Debian/Ubuntu/Fedora ship: `-t TARGETS -o` on a
+ *   selection nobody owns takes the `XCLIB_XCOUT_BAD_TARGET` branch that has
+ *   no fallback left, prints `Error: target TARGETS not available` and returns
+ *   `EXIT_FAILURE` (xclip.c:468).
+ * - xclip git master, unreleased: the same case is routed through
+ *   `errconvsel()` (xcprint.c:136, called from xclip.c:778) and prints
+ *   `xclip: Error: There is no owner for the CLIPBOARD selection`. Released
+ *   0.13 has no `errconvsel()` at all, so this wording on its own classifies
+ *   nothing on a shipped xclip — both markers are needed.
+ * - wl-paste: `bail()` in src/util/misc.h is `fprintf(stderr, ...) + exit(1)`,
+ *   called with `Nothing is copied` from v2.2.0 on (src/wl-paste.c:252) and
+ *   `No selection` in v1.0.0–v2.1.0 (src/wl-paste.c:187) when there is no
+ *   offer. Both markers are needed — the wording split is at v2.2.0, not at
+ *   the 2.x boundary, so v2.0.0/v2.1.0 still print `No selection`.
+ */
+const EMPTY_CLIPBOARD_STDERR_MARKERS = [
+  'target TARGETS not available',
+  'no owner for the',
+  'Nothing is copied',
+  'No selection',
+];
+
+/**
+ * Whether a non-zero exit's stderr says the clipboard is simply empty rather
+ * than that the query failed.
+ */
+function isEmptyClipboardError(stderr: string): boolean {
+  return EMPTY_CLIPBOARD_STDERR_MARKERS.some((marker) =>
+    stderr.includes(marker),
+  );
+}
+
+/**
  * Check if the clipboard contains an image using the specified tool.
  * Merged function replacing checkWlPasteForImage and checkXclipForImage.
  * For wl-paste, caches the result for reuse by saveClipboardImage.
+ * @param onUnavailable Called when the query itself fails (a non-zero exit
+ *   that is not merely an empty clipboard, spawn error/throw, timeout) — as
+ *   opposed to a successful query that simply finds no image, or an empty
+ *   clipboard, both of which stay quiet.
  */
 async function checkClipboardForImage(
   command: string,
   args: string[],
+  onUnavailable?: () => void,
 ): Promise<boolean> {
   // For wl-paste --list-types, cache the result
   if (
@@ -256,45 +298,97 @@ async function checkClipboardForImage(
     args.length === 1 &&
     args[0] === '--list-types'
   ) {
-    const types = await getWlPasteImageTypes();
+    const types = await getWlPasteImageTypes(onUnavailable);
     return types.length > 0;
   }
 
   return new Promise<boolean>((resolve) => {
     try {
       const child = spawn(command, args, {
-        stdio: ['ignore', 'pipe', 'ignore'],
+        // fd 2 is captured so a non-zero exit can be diagnosed rather than
+        // merely reported, and so the benign "clipboard is empty" exit can be
+        // told apart from a real failure that shares its exit code.
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
       let stdout = '';
+      let stderr = '';
+      // Node delivers `close` after a spawn `error` (carrying the negated
+      // errno) and after a timeout `kill()` (with `code === null`). Without a
+      // settle latch the close handler re-enters its non-zero branch for a
+      // query that has already been reported, so the debug log this function
+      // added for diagnosis records an exit code the process never had and
+      // `onUnavailable` fires twice for one failure. Same guard, same reason,
+      // as `resolved` in saveFromCommand above.
+      let settled = false;
 
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         try {
           child.kill();
         } catch {
           /* ignore */
         }
+        debugLogger.debug(`${command} timed out after ${PROCESS_TIMEOUT_MS}ms`);
+        onUnavailable?.();
         resolve(false);
       }, PROCESS_TIMEOUT_MS);
 
       child.stdout.on('data', (data: Buffer) => {
         stdout += data.toString();
       });
+      child.stderr.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
       child.on('close', (code) => {
         clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        if (code !== 0) {
+          // Unconditional, like saveFromCommand's: a tool that exits non-zero
+          // without writing to stderr (xclip does) still has to leave the exit
+          // code and args behind, or the notify carries no diagnosis.
+          debugLogger.debug(
+            `${command} exited with code ${code}. Args: ${args.join(' ')}`,
+          );
+          if (stderr) {
+            debugLogger.debug(`${command} stderr: ${stderr.trim()}`);
+          }
+          if (isEmptyClipboardError(stderr)) {
+            // The tool was reached and answered correctly: there is simply
+            // nothing on the clipboard. That is "no image", not "clipboard
+            // unreachable", so stay quiet — warning here would fire on every
+            // image-paste keystroke made with an empty clipboard.
+            resolve(false);
+            return;
+          }
+          // The query itself failed (e.g. the X server is stale or dead), so
+          // this is "clipboard unreachable", not "clipboard holds no image".
+          onUnavailable?.();
+          resolve(false);
+          return;
+        }
         resolve(
-          code === 0 &&
-            stdout
-              .split('\n')
-              // WSL2 Wayland: Windows clipboard exposes images as BMP (image/bmp),
-              // which we convert to PNG via python3 PIL. Both formats must be detected.
-              .some((line) => line === 'image/png' || line === 'image/bmp'),
+          stdout
+            .split('\n')
+            // WSL2 Wayland: Windows clipboard exposes images as BMP (image/bmp),
+            // which we convert to PNG via python3 PIL. Both formats must be detected.
+            .some((line) => line === 'image/png' || line === 'image/bmp'),
         );
       });
-      child.on('error', () => {
+      child.on('error', (err) => {
         clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        // With the latch suppressing the close handler's fabricated exit code,
+        // this is a spawn failure's only trace — same line saveFromCommand
+        // logs for the same event.
+        debugLogger.debug(`Failed to spawn ${command}:`, err);
+        onUnavailable?.();
         resolve(false);
       });
     } catch {
+      onUnavailable?.();
       resolve(false);
     }
   });
@@ -303,7 +397,12 @@ async function checkClipboardForImage(
 /**
  * Checks if the system clipboard contains an image.
  * Uses platform-native tools (wl-paste/xclip) on Linux.
- * @param onUnavailable Called when the macOS/Windows native module cannot load.
+ * @param onUnavailable Called when no clipboard backend can be reached: the
+ *   macOS/Windows native module cannot load, Linux has no wl-paste/xclip, or
+ *   the detected Linux tool's clipboard query fails. Not called when the
+ *   query succeeds and the clipboard simply holds no image, nor when the tool
+ *   reports an empty clipboard (which exits non-zero but is a correct
+ *   answer).
  * @returns true if clipboard contains an image
  */
 export async function clipboardHasImage(
@@ -314,17 +413,23 @@ export async function clipboardHasImage(
     try {
       const tool = getLinuxClipboardTool();
       if (tool === 'wl-paste') {
-        return checkClipboardForImage('wl-paste', ['--list-types']);
+        return checkClipboardForImage(
+          'wl-paste',
+          ['--list-types'],
+          onUnavailable,
+        );
       }
       if (tool === 'xclip') {
-        return checkClipboardForImage('xclip', [
-          '-selection',
-          'clipboard',
-          '-t',
-          'TARGETS',
-          '-o',
-        ]);
+        return checkClipboardForImage(
+          'xclip',
+          ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+          onUnavailable,
+        );
       }
+      // No usable clipboard tool: either there is no display server to reach
+      // one through, or the wl-paste/xclip probe failed. Report it instead of
+      // failing silently, so callers can tell "no image" from "no tool".
+      onUnavailable?.();
     } catch (error) {
       debugLogger.error('Error checking clipboard for image:', error);
     }
@@ -341,6 +446,9 @@ export async function clipboardHasImage(
     return clipboard.hasFormat('image');
   } catch (error) {
     debugLogger.error('Error checking clipboard for image:', error);
+    // The module resolved but the call threw, so "no image" and "unreachable
+    // clipboard backend" would otherwise be indistinguishable to the caller.
+    onUnavailable?.();
     return false;
   }
 }
@@ -348,36 +456,85 @@ export async function clipboardHasImage(
 /**
  * Get the available image MIME types from wl-paste.
  * Uses cached result if available to avoid redundant calls.
+ * @param onUnavailable Called when the wl-paste query fails (a non-zero exit
+ *   that is not merely an empty clipboard, spawn error, timeout). A
+ *   successful query with no image types stays quiet, and so does an empty
+ *   clipboard.
  */
-async function getWlPasteImageTypes(): Promise<string[]> {
+async function getWlPasteImageTypes(
+  onUnavailable?: () => void,
+): Promise<string[]> {
   // Return cached result if available
   if (cachedWlPasteImageTypes !== null) {
     return cachedWlPasteImageTypes;
   }
 
   return new Promise<string[]>((resolve) => {
-    const child = spawn('wl-paste', ['--list-types'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    let child;
+    try {
+      child = spawn('wl-paste', ['--list-types'], {
+        // fd 2 is captured: an empty clipboard and a real failure share the
+        // same non-zero exit code, and only stderr tells them apart.
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      // Do NOT cache failed result (spawn throw)
+      // Logged, not swallowed: the save path calls this without an
+      // onUnavailable callback, so this is the only trace a throw leaves.
+      debugLogger.error('Failed to spawn wl-paste --list-types:', error);
+      onUnavailable?.();
+      resolve([]);
+      return;
+    }
     let stdout = '';
+    let stderr = '';
+    // Same latch as checkClipboardForImage: `close` follows both a spawn
+    // `error` and a timeout `kill()`, and re-entering the close handler for an
+    // already-reported query would log an exit code the process never had,
+    // notify twice, and — on the timeout/error paths — risk reaching the
+    // `cachedWlPasteImageTypes = types` line that must stay success-only.
+    let settled = false;
 
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       try {
         child.kill();
       } catch {
         /* ignore */
       }
+      debugLogger.debug(
+        `wl-paste --list-types timed out after ${PROCESS_TIMEOUT_MS}ms`,
+      );
       // Do NOT cache failed result (timeout)
+      onUnavailable?.();
       resolve([]);
     }, PROCESS_TIMEOUT_MS);
 
     child.stdout.on('data', (data: Buffer) => {
       stdout += data.toString();
     });
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       if (code !== 0) {
         // Do NOT cache failed result
+        // Unconditional, like saveFromCommand's: an empty stderr still has to
+        // leave the exit code behind, or the notify carries no diagnosis.
+        debugLogger.debug(`wl-paste --list-types exited with code ${code}`);
+        if (stderr) {
+          debugLogger.debug(`wl-paste stderr: ${stderr.trim()}`);
+        }
+        // `wl-paste --list-types` exits 1 with "Nothing is copied" (>= 2.2) or
+        // "No selection" (1.x–2.1) when the clipboard is empty. That is a
+        // correct answer, not an unreachable clipboard, so it stays quiet.
+        if (!isEmptyClipboardError(stderr)) {
+          onUnavailable?.();
+        }
         resolve([]);
         return;
       }
@@ -388,9 +545,16 @@ async function getWlPasteImageTypes(): Promise<string[]> {
       cachedWlPasteImageTypes = types;
       resolve(types);
     });
-    child.on('error', () => {
+    child.on('error', (err) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       // Do NOT cache failed result (error)
+      // Logged for the same reason as checkClipboardForImage's error handler:
+      // the latch removes the close handler's fabricated exit code, so the
+      // errno has to be recorded here or the failure leaves no trace.
+      debugLogger.debug('Failed to spawn wl-paste --list-types:', err);
+      onUnavailable?.();
       resolve([]);
     });
   });

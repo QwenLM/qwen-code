@@ -10,6 +10,7 @@ import type { WebShellResolvedBrand } from './brandContext';
 import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
 
 interface CapturedWorkspaceSessionProps {
+  urlNavigation?: { basePath?: string };
   sessionId?: string;
   workspaceId?: string;
   sessionContext?: DaemonProductSessionContext;
@@ -68,6 +69,8 @@ describe('StandaloneApp', () => {
     testState.throwOnRender = false;
     testState.tokenSurvivesReload = true;
     testState.renderCount = 0;
+    delete (window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean })
+      .__QWEN_CODE_MACOS_TITLEBAR__;
     window.history.replaceState(null, '', '/');
     // jsdom's document is shared across the file; never let one test's
     // document chrome leak into the next test's assertions.
@@ -88,6 +91,11 @@ describe('StandaloneApp', () => {
     // A failing assertion mid-test must not leak the console.error spy into
     // later tests in this file.
     vi.restoreAllMocks();
+  });
+
+  it('enables the tool calls entry in the standalone app', () => {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    expect(testState.props?.webShellProps.showToolCalls).toBe(true);
   });
 
   it('reloads the page when the root error fallback retry is clicked', () => {
@@ -166,21 +174,14 @@ describe('StandaloneApp', () => {
     expect(testState.props?.webShellProps.theme).toBe('light');
     expect(testState.props?.webShellProps.language).toBe('zh-CN');
 
-    act(() => {
-      testState.props?.webShellProps.onSessionIdChange?.(
-        'session-1',
-        'workspace-1',
-      );
-    });
-
+    window.history.replaceState(
+      window.history.state,
+      '',
+      '/session/session-2?workspace=workspace-1',
+    );
     testState.throwOnRender = true;
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    act(() => {
-      testState.props?.webShellProps.onSessionIdChange?.(
-        'session-2',
-        'workspace-1',
-      );
-    });
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
 
     // Stub after the last navigation so the snapshot href is current —
     // the handler builds the reload URL from window.location.href.
@@ -299,134 +300,27 @@ describe('StandaloneApp', () => {
     },
   );
 
-  it('keeps the controlled session target in sync with URL changes', () => {
-    window.history.replaceState(
-      null,
-      '',
-      '/?daemon=https%3A%2F%2Fdaemon.example.com',
-    );
+  it('delegates URL ownership to the shared provider boundary', () => {
+    window.history.replaceState(null, '', '/settings?instanceId=kept');
     act(() => root.render(<StandaloneApp daemonToken="token" />));
-
-    act(() => {
-      testState.props?.webShellProps.onSessionIdChange?.(
-        'session-created',
-        'workspace-1',
-      );
-    });
-
-    expect(testState.props).toMatchObject({
-      sessionId: 'session-created',
-      workspaceId: 'workspace-1',
-    });
-    expect(window.location.pathname).toBe('/session/session-created');
-    expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
-      'workspace-1',
-    );
-    expect(new URLSearchParams(window.location.search).get('daemon')).toBe(
-      'https://daemon.example.com',
-    );
-    expect(
-      testState.props?.webShellProps.composerToolbarAdditionalActions,
-    ).toEqual(['addMenu', 'plan']);
-    expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
-      'artifacts',
-    );
-    expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
-      'attachments',
-    );
-    expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
-      'sources',
-    );
-    expect(testState.props?.webShellProps.header?.items).toContain(
-      'contextUsage',
-    );
-    expect(testState.props?.webShellProps.sidebar).toMatchObject({
-      enabled: true,
-      showLive: true,
-    });
+    expect(testState.props?.urlNavigation).toEqual({ basePath: '' });
+    expect(testState.props?.sessionId).toBeUndefined();
+    expect(testState.props?.webShellProps.onSessionIdChange).toBeUndefined();
+    expect(window.location.pathname).toBe('/settings');
+    expect(window.location.search).toBe('?instanceId=kept');
   });
 
-  it('round-trips standalone context without a workspace selector', () => {
-    window.history.replaceState(
-      null,
-      '',
-      '/session/standalone-a?context=standalone',
-    );
+  it('reserves a draggable title bar only when the macOS shell requests it', () => {
+    (
+      window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean }
+    ).__QWEN_CODE_MACOS_TITLEBAR__ = true;
+
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
-    expect(testState.props).toMatchObject({
-      sessionId: 'standalone-a',
-      sessionContext: { kind: 'standalone' },
-    });
-    expect(testState.props?.workspaceId).toBeUndefined();
-
-    act(() => {
-      testState.props?.webShellProps.onSessionIdChange?.(
-        'standalone-b',
-        undefined,
-        undefined,
-        { kind: 'standalone' },
-      );
-    });
-
-    expect(window.location.pathname).toBe('/session/standalone-b');
-    expect(new URLSearchParams(window.location.search).get('context')).toBe(
-      'standalone',
+    expect(testState.props?.webShellProps.className).toBe(
+      'qwen-code-macos-titlebar',
     );
-    expect(new URLSearchParams(window.location.search).has('workspace')).toBe(
-      false,
-    );
-  });
-
-  it('keeps standalone context out of the URL for an unallocated draft', () => {
-    act(() => root.render(<StandaloneApp daemonToken="token" />));
-
-    act(() => {
-      testState.props?.webShellProps.onSessionIdChange?.(
-        undefined,
-        undefined,
-        undefined,
-        { kind: 'standalone' },
-      );
-    });
-
-    expect(testState.props).toMatchObject({
-      sessionId: undefined,
-      workspaceId: undefined,
-      sessionContext: { kind: 'standalone' },
-    });
-    expect(window.location.pathname).toBe('/');
-    expect(new URLSearchParams(window.location.search).has('context')).toBe(
-      false,
-    );
-  });
-
-  it('round-trips Live context without exposing its internal workspace', () => {
-    window.history.replaceState(null, '', '/session/live-a?context=live');
-    act(() => root.render(<StandaloneApp daemonToken="token" />));
-
-    expect(testState.props).toMatchObject({
-      sessionId: 'live-a',
-      sessionContext: { kind: 'live' },
-    });
-    expect(testState.props?.workspaceId).toBeUndefined();
-
-    act(() => {
-      testState.props?.webShellProps.onSessionIdChange?.(
-        'live-b',
-        undefined,
-        undefined,
-        { kind: 'live' },
-      );
-    });
-
-    expect(window.location.pathname).toBe('/session/live-b');
-    expect(new URLSearchParams(window.location.search).get('context')).toBe(
-      'live',
-    );
-    expect(new URLSearchParams(window.location.search).has('workspace')).toBe(
-      false,
-    );
+    expect(container.querySelector('[data-tauri-drag-region]')).not.toBeNull();
   });
 });
 

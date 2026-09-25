@@ -26,6 +26,49 @@
   gap: 6px;
 }
 
+.workspaceIcon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-right: 2px;
+  border-radius: 10px;
+  color: var(--foreground);
+}
+
+.workspaceIcon:hover {
+  background: var(--accent);
+}
+
+.workspaceIcon svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.7;
+}
+
+/* The tooltip is the only place the workspace behind an icon-only trigger can
+   be read, so it carries the name and the full path. */
+.workspaceTooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The workspace's own name is the tooltip's subject, so it carries the weight
+   and the size; the path below stays a quiet second line. */
+.workspaceTooltipName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.workspaceTooltipPath {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .action {
   display: inline-flex;
   width: 30px;
