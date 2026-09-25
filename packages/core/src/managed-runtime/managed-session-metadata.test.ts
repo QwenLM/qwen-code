@@ -9,7 +9,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionService } from '../services/sessionService.js';
-import { SessionWriterLease } from '../services/session-writer-lease.js';
+import {
+  getSessionWriterLockPath,
+  SessionWriterLease,
+} from '../services/session-writer-lease.js';
 import { Storage } from '../config/storage.js';
 import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
 import {
@@ -489,6 +492,10 @@ describe('legacy maintenance on a managed session', () => {
     expect(isManagedSessionTranscriptSync(harness.transcriptPath)).toBe(true);
     const before = await fs.readFile(harness.transcriptPath, 'utf8');
 
+    expect(() =>
+      harness.service.assertLegacySessionExecution(sessionId),
+    ).toThrow(/belongs to managed/);
+
     await expect(
       harness.service.renameSession(sessionId, 'Renamed by the legacy path'),
     ).rejects.toThrow(/belongs to managed/);
@@ -574,6 +581,9 @@ describe('legacy maintenance on a managed session', () => {
     );
 
     expect(isManagedSessionTranscriptSync(harness.transcriptPath)).toBe(false);
+    expect(() =>
+      harness.service.assertLegacySessionExecution(sessionId),
+    ).not.toThrow();
     await expect(
       harness.service.renameSession(sessionId, 'Legacy rename'),
     ).resolves.toBe(true);
@@ -680,6 +690,90 @@ describe('maintenance on a sealed managed session', () => {
 
     const restored = await harness.service.unarchiveSessions([sessionId]);
     expect(restored.errors).toEqual([]);
+  });
+
+  it('archives and unarchives under a sealed maintenance claim without removing the writer fence', async () => {
+    const harness = await createSealed();
+    const lockPath = getSessionWriterLockPath(
+      harness.runtimeBaseDir,
+      sessionId,
+    );
+    const sealedLock = await fs.readFile(lockPath, 'utf8');
+    const archiveLease =
+      await harness.service.acquireSealedManagedMaintenanceLease(sessionId);
+    expect(archiveLease).toBeDefined();
+    await expect(
+      harness.service.acquireSealedManagedMaintenanceLease(sessionId),
+    ).rejects.toThrow();
+    await expect(
+      LocalManagedSessionAuthority.acquireWriter({
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionId,
+        transcriptPath: harness.transcriptPath,
+      }),
+    ).rejects.toThrow();
+    const archived = await harness.service.archiveSessions([sessionId], {
+      assertStorageUnchanged: () => archiveLease!.assertOwnedAndUnchanged(),
+      assertCleanupOwned: () => archiveLease!.assertCleanupOwned(),
+    });
+    expect(archived.errors).toEqual([]);
+    expect(archived.archived).toEqual([sessionId]);
+    await archiveLease!.release();
+    expect(await fs.readFile(lockPath, 'utf8')).toBe(sealedLock);
+
+    const restoreLease =
+      await harness.service.acquireSealedManagedMaintenanceLease(sessionId);
+    expect(restoreLease).toBeDefined();
+    const restored = await harness.service.unarchiveSessions([sessionId], {
+      assertStorageUnchanged: () => restoreLease!.assertOwnedAndUnchanged(),
+      assertCleanupOwned: () => restoreLease!.assertCleanupOwned(),
+    });
+    expect(restored.errors).toEqual([]);
+    expect(restored.unarchived).toEqual([sessionId]);
+    await restoreLease!.release();
+    expect(await fs.readFile(lockPath, 'utf8')).toBe(sealedLock);
+
+    const writer = await LocalManagedSessionAuthority.acquireWriter({
+      runtimeBaseDir: harness.runtimeBaseDir,
+      sessionId,
+      transcriptPath: harness.transcriptPath,
+    });
+    const authority = await LocalManagedSessionAuthority.open({
+      lease: writer,
+      sessionKey,
+      cwd: harness.projectRoot,
+      version: 'test',
+      resources: harness.store,
+    });
+    await authority.close();
+  });
+
+  it('deletes a sealed Managed session under a maintenance claim', async () => {
+    const harness = await createSealed();
+    const maintenance =
+      await harness.service.acquireSealedManagedMaintenanceLease(sessionId);
+    expect(maintenance).toBeDefined();
+    await expect(
+      harness.service.removeSession(sessionId, {
+        assertStorageUnchanged: () => maintenance!.assertOwnedAndUnchanged(),
+        assertCleanupOwned: () => maintenance!.assertCleanupOwned(),
+      }),
+    ).resolves.toBe(true);
+    await maintenance!.release();
+    await expect(fs.stat(harness.transcriptPath)).rejects.toThrow();
+    await expect(fs.stat(harness.store.sessionRoot)).rejects.toThrow();
+  });
+
+  it('rejects a replaced transcript while a sealed maintenance claim is held', async () => {
+    const harness = await createSealed();
+    const maintenance =
+      await harness.service.acquireSealedManagedMaintenanceLease(sessionId);
+    expect(maintenance).toBeDefined();
+    const replacement = `${harness.transcriptPath}.replacement`;
+    await fs.copyFile(harness.transcriptPath, replacement);
+    await fs.rename(replacement, harness.transcriptPath);
+    await expect(maintenance!.assertOwnedAndUnchanged()).rejects.toThrow();
+    await maintenance!.release();
   });
 
   it('still deletes the session and its resources', async () => {

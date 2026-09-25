@@ -53,7 +53,7 @@ The common key is `(tenantId, workspaceId, sessionId)`. A writer generation fenc
 
 ### 4.1 Session-management ownership
 
-Local `SessionService` may display, archive, unarchive, and delete a closed local Managed session and its private resources. It must reject legacy rename and fork paths that would append uncommitted records or copy session-owned references into another session. Managed renames go through committed `session_metadata` records.
+Local `SessionService` may display, archive, unarchive, and delete a closed local Managed session and its private resources. Daemon maintenance holds a claim against the sealed schema-3 lock while moving or deleting the transcript, then leaves the sealed writer fence intact. Legacy resume and recording must reject a Managed transcript before binding or appending through the old engine; legacy rename and fork must also reject it. Managed renames go through committed `session_metadata` records. Session listings use the already-read first record to skip Managed metadata probes for legacy transcripts.
 
 ### 4.2 Public Session lifecycle protocol
 
@@ -136,6 +136,8 @@ Do not advertise automatic cross-Pod recovery until the integrated failure matri
 | Local seal and takeover                                  | Schema-3 proof verified; older writers refused                                      |
 | Event payload or scope changes under the same identities | Commit digest verification rejects altered bytes                                    |
 | Same-millisecond renewal or cancel/readiness race        | No unreplayable journal event; reopen still succeeds                                |
+| Legacy resume or title recording targets a Managed log   | Reject before a legacy append; Managed reopen remains possible                      |
+| Daemon archives, unarchives, or deletes a sealed log     | Maintenance succeeds without removing its sealed writer fence                       |
 | Approval and Runtime checkpoint mutations overlap        | Preserve accepted work; reject conflicting admission                                |
 | New Agent run observes an old turn-complete boundary     | Refuse handoff until a new safety boundary commits                                  |
 | Checkpoint references staged history                     | Cold HTTP owner reads both checkpoint and history                                   |

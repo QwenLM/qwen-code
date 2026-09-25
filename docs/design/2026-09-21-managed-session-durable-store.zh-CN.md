@@ -53,7 +53,7 @@ Java 负责公共 Session/Turn 生命周期和租户授权，Harness 负责会�
 
 ### 4.1 会话管理所有权
 
-本地 `SessionService` 可以展示、归档、取消归档和删除已关闭的本地 Managed 会话及其私有资源。它必须拒绝旧 rename 和 fork 路径，避免追加未提交记录或将会话私有引用复制到另一会话。Managed 重命名通过已提交的 `session_metadata` 记录完成。
+本地 `SessionService` 可以展示、归档、取消归档和删除已关闭的本地 Managed 会话及其私有资源。daemon 维护在移动或删除 transcript 时持有封存 schema-3 锁上的 claim，完成后保留封存的 writer fence。旧 resume 和录制路径必须在绑定或追加旧引擎记录前拒绝 Managed transcript；旧 rename 和 fork 也必须拒绝。Managed 重命名通过已提交的 `session_metadata` 记录完成。会话列表复用已读取的首条记录，为 legacy transcript 跳过 Managed 元数据探测。
 
 ### 4.2 公共会话生命周期协议
 
@@ -136,6 +136,8 @@ Harness checkpoint 的读取、修改、写入及 handoff 共用一个 handle �
 | 本地 seal 与 takeover                  | 验证 schema-3 proof；拒绝旧 writer                   |
 | 保持事件身份却修改 payload 或作用域    | Commit digest 校验拒绝被修改的字节                   |
 | 同毫秒续租或 cancel/readiness 竞争     | 不产生无法重放事件，reopen 仍成功                    |
+| 旧 resume 或标题录制指向 Managed 日志  | 在旧记录追加前拒绝；Managed 仍可 reopen              |
+| daemon 归档、取消归档或删除已封存日志  | 维护成功，且保留封存 writer fence                    |
 | 审批与 Runtime checkpoint 并发修改     | 保留已接受工作，拒绝冲突 admission                   |
 | 新 Agent run 读取旧 turn-complete 边界 | 新安全边界提交前拒绝 handoff                         |
 | Checkpoint 引用暂存历史                | 冷 HTTP owner 能读取 checkpoint 及历史               |
