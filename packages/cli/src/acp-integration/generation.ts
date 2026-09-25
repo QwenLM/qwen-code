@@ -107,9 +107,11 @@ export async function executeGeneration(
     : null;
   const fixedLanguage =
     language && !isAutoLanguage(language) ? language : undefined;
-  const fallback = isValidOutputLanguageLabel(options?.outputLanguageFallback)
-    ? options.outputLanguageFallback
-    : undefined;
+  const fallback =
+    isValidOutputLanguageLabel(options?.outputLanguageFallback) &&
+    !isAutoLanguage(options?.outputLanguageFallback)
+      ? options.outputLanguageFallback
+      : undefined;
   const systemInstruction = buildOutputLanguageInstruction(
     fixedLanguage,
     fallback,

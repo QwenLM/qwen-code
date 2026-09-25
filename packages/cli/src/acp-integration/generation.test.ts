@@ -269,6 +269,55 @@ describe('executeGeneration', () => {
     }
   });
 
+  it('keeps a supplied fallback when skipping the configured preference', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'qwen-generation-both-'));
+    try {
+      const outputLanguagePath = path.join(dir, 'output-language.md');
+      writeOutputLanguageFile('Russian', outputLanguagePath);
+      const { config, generateContentStream } = createConfig(
+        'fast-model',
+        outputLanguagePath,
+      );
+
+      await executeGeneration(
+        config,
+        'request-skip-with-fallback',
+        'Explain this command.',
+        new AbortController().signal,
+        async () => undefined,
+        {
+          skipOutputLanguagePreference: true,
+          outputLanguageFallback: 'English',
+        },
+      );
+
+      const instruction = String(
+        generateContentStream.mock.calls[0]?.[0].config?.systemInstruction,
+      );
+      expect(instruction).toContain('Use "English" as a fallback');
+      expect(instruction).not.toContain('Russian');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not treat auto as a caller language fallback', async () => {
+    const { config, generateContentStream } = createConfig('fast-model');
+
+    await executeGeneration(
+      config,
+      'request-auto-fallback-label',
+      'Explain this command.',
+      new AbortController().signal,
+      async () => undefined,
+      { outputLanguageFallback: 'auto' },
+    );
+
+    expect(generateContentStream.mock.calls[0]?.[0].config).not.toHaveProperty(
+      'systemInstruction',
+    );
+  });
+
   it('parses a markerless language rule without injecting file instructions', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'qwen-generation-raw-'));
     try {

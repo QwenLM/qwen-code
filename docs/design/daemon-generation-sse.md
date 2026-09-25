@@ -1,5 +1,7 @@
 # Daemon stateless generation SSE
 
+[English](daemon-generation-sse.md) | [简体中文](daemon-generation-sse.zh-CN.md)
+
 ## Goal
 
 Add `POST /session/:id/generate`, a request-scoped SSE endpoint for short,
@@ -63,10 +65,10 @@ Shell approvals also expose an Explain action. It sends the command in a
 stateless prompt, uses the current UI language as a fallback when no fixed
 output-language preference is configured, and honors a fixed session
 preference by default. Translation results are cached in page memory by
-language, message, and content. Explain results are cached for the lifetime of
-their mounted popover, so closing and reopening it does not trigger another
-request; reopening after unmounting generates a fresh explanation. A page
-refresh clears both caches.
+language, message, and content. Explain results are cached on the mounted
+`ThinkingTranslateButton` instance, so closing and reopening its popover does
+not trigger another request; replacing that message or refreshing the page
+creates a fresh explanation. A page refresh clears both caches.
 
 ## Non-goals
 

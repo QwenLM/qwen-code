@@ -274,6 +274,13 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
       currentFileLanguage,
     );
 
+  // A readable file is user-owned, even when its language marker is not one
+  // of the formats understood by the current parser. Preserve it rather than
+  // replacing custom guidance during startup.
+  if (currentFileContent !== null && currentFileLanguage === null) {
+    return;
+  }
+
   // If file exists with valid language, preserve it unless auto needs migration.
   if (currentFileLanguage) {
     if (shouldMigrateFixedFileToAuto) {

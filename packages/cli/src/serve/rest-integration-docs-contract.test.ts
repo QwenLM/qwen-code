@@ -60,6 +60,7 @@ const GUIDE_OPERATIONS: readonly string[] = [
   'GET /stat',
   'GET /list',
   'GET /glob',
+  'POST /workspace/generate',
 ];
 
 const SDK_METHOD_BY_OPERATION: Readonly<Record<string, string>> = {
@@ -89,6 +90,7 @@ const SDK_METHOD_BY_OPERATION: Readonly<Record<string, string>> = {
   'GET /stat': 'DaemonClient.fileStat',
   'GET /list': 'DaemonClient.dirList',
   'GET /glob': 'DaemonClient.glob',
+  'POST /workspace/generate': 'DaemonClient.generateWorkspaceContent',
 };
 
 const HTTP_METHODS = ['get', 'post', 'patch', 'put', 'delete'] as const;

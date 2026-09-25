@@ -5,7 +5,10 @@
  */
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
-import { isValidOutputLanguageLabel } from '@qwen-code/qwen-code-core/utils/output-language.js';
+import {
+  isAutoLanguage,
+  isValidOutputLanguageLabel,
+} from '@qwen-code/qwen-code-core/utils/output-language.js';
 import {
   buildHooksListing,
   type ContentGeneratorConfig,
@@ -11062,7 +11065,8 @@ class QwenAgent implements Agent {
           (skipOutputLanguagePreference !== undefined &&
             typeof skipOutputLanguagePreference !== 'boolean') ||
           (outputLanguageFallback !== undefined &&
-            !isValidOutputLanguageLabel(outputLanguageFallback))
+            (!isValidOutputLanguageLabel(outputLanguageFallback) ||
+              isAutoLanguage(outputLanguageFallback)))
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -12470,7 +12474,8 @@ class QwenAgent implements Agent {
           (skipOutputLanguagePreference !== undefined &&
             typeof skipOutputLanguagePreference !== 'boolean') ||
           (outputLanguageFallback !== undefined &&
-            !isValidOutputLanguageLabel(outputLanguageFallback))
+            (!isValidOutputLanguageLabel(outputLanguageFallback) ||
+              isAutoLanguage(outputLanguageFallback)))
         ) {
           throw RequestError.invalidParams(
             undefined,

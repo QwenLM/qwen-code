@@ -502,6 +502,31 @@ Always use formal tone.
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
+    it('should preserve an existing file when its language label is unfamiliar', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      const customContent =
+        '# Output language preference: Chinese, Simplified\n' +
+        '<!-- qwen-code:llm-output-language: Chinese, Simplified -->\n' +
+        '\nKeep this custom guidance.\n';
+      vi.mocked(fs.readFileSync).mockReturnValue(customContent);
+
+      initializeLlmOutputLanguage('English');
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should preserve a valid marker at the start of an oversized file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      const customContent =
+        '<!-- qwen-code:llm-output-language: Russian -->\n' +
+        'x'.repeat(16 * 1024);
+      vi.mocked(fs.readFileSync).mockReturnValue(customContent);
+
+      initializeLlmOutputLanguage('English');
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
     it('should ignore migration write failures when an existing generated file is still valid', () => {
       writeOutputLanguageFile('Chinese');
       const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock

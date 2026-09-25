@@ -232,7 +232,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
  'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
- 'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
+ 'session_recap', 'session_generation', 'session_generation_options', 'session_btw', 'session_shell_command',
  'standalone_sessions_v1', 'standalone_session_options_v1',
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
@@ -588,8 +588,10 @@ operator diagnostic snapshot documented below.
 | `session_artifacts_persistence`     | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `session_sources`                   | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `session_generation`                | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `session_generation_options`        | session generation accepts request-scoped output-language controls.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `scheduled_task_session_reuse`      | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `workspace_generation`              | workspace-scoped generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `workspace_generation_options`      | workspace generation accepts request-scoped output-language controls.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `rate_limit`                        | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `workspace_reload`                  | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `workspace_trust_hot_reload`        | workspace trust policy monitoring and runtime-generation reconciliation are wired, so trust changes take effect without restarting the daemon and v2 trust status reports convergence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -3542,7 +3544,7 @@ Cancellation: **none in v1**. The route does not listen for HTTP client disconne
 
 ### `POST /session/:id/generate`
 
-Capability tag: `session_generation`.
+Capability tags: `session_generation` and `session_generation_options`.
 
 Run request-scoped text generation from a caller-supplied prompt. The request
 does not read or mutate conversation history and exposes no tools. It prefers
@@ -3566,9 +3568,12 @@ Disconnecting the HTTP client cancels the generation request.
 Optional request fields are additive within `v1`; existing clients may continue
 to send only `prompt`. `skipOutputLanguagePreference` is a boolean that omits
 the runtime's configured output-language preference when `true`. The optional
-`outputLanguageFallback` must be a non-empty single-line string of at most 128
-characters; it is used for explanatory prose when no fixed preference is
-available, including when the configured preference is `auto`. A fixed
+`outputLanguageFallback` must be a trimmed, single-line language label of at
+most 128 characters. It may contain letters, marks, numbers, spaces, commas,
+parentheses, apostrophes, underscores, or hyphens; periods are allowed only
+inside a parenthetical qualifier, and `auto` is not allowed. It is used for
+explanatory prose when no fixed preference is available,
+including when the configured preference is `auto`. A fixed
 preference applies by default, while an explicit output-language request or
 translation target in the task remains authoritative. Both fields are
 validated by the REST route and the ACP child.
@@ -3579,14 +3584,15 @@ and `DaemonSessionClient.generateContent`; workspace generation uses
 
 ### `POST /workspace/generate`
 
-Capability tag: `workspace_generation`.
+Capability tags: `workspace_generation` and `workspace_generation_options`.
 
 Run the same request-scoped, tool-free generation flow against the primary
 workspace runtime without creating or selecting a session. It accepts the same
 `prompt`, `skipOutputLanguagePreference`, and `outputLanguageFallback` fields
 and returns the same SSE event sequence. The output-language preference is
 resolved from the primary workspace runtime. Clients should preflight
-`workspace_generation` before using this route.
+`workspace_generation` before using this route. Preflight
+`workspace_generation_options` before sending either output-language option.
 
 ### Mutation: approval, tools, skills, init, MCP restart
 

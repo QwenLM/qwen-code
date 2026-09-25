@@ -3871,12 +3871,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     expect(extNotification).toHaveBeenCalledTimes(2);
 
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart, {
+        requestId: 'request-invalid-workspace-fallback',
+        prompt: 'say hello',
+        purpose: 'text',
+        outputLanguageFallback: 'auto',
+      }),
+    ).rejects.toThrow('Invalid workspace generation request');
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart, {
+        requestId: 'request-invalid-workspace-skip',
+        prompt: 'say hello',
+        purpose: 'text',
+        skipOutputLanguagePreference: 'true',
+      }),
+    ).rejects.toThrow('Invalid workspace generation request');
+    expect(mockExecuteGeneration).toHaveBeenCalledTimes(1);
+
     mockConnectionState.resolve();
     await agentPromise;
   });
 
   it('passes a session generation language opt-out to the generator', async () => {
-    await setupSessionMocks('language-opt-out-session');
+    const sessionConfig = await setupSessionMocks('language-opt-out-session');
     mockExecuteGeneration.mockResolvedValue({
       model: 'test-fast-model',
       modelSource: 'fast',
@@ -3916,6 +3934,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       skipOutputLanguagePreference: true,
       outputLanguageFallback: 'English',
     });
+    expect(mockExecuteGeneration.mock.calls.at(-1)?.[0]).toBe(sessionConfig);
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationStart, {
         sessionId,

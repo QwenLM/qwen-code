@@ -351,9 +351,12 @@ resets that window, including when the channel was already live.
 
 `POST /session/:id/generate` accepts a non-empty prompt (up to 32 KiB) and the
 optional `skipOutputLanguagePreference` and `outputLanguageFallback` fields.
-The fallback must be a single-line language label of at most 128 characters;
-setting `skipOutputLanguagePreference` omits the configured preference but
-does not suppress a supplied fallback.
+The fallback must be a trimmed, single-line language label of at most 128
+characters. It may contain letters, marks, numbers, spaces, commas, parentheses,
+apostrophes, underscores, or hyphens; periods are allowed only inside a
+parenthetical qualifier, and `auto` is not allowed.
+Setting `skipOutputLanguagePreference` omits the configured preference but does
+not suppress a supplied fallback.
 The configured fixed output-language preference for the session runtime applies
 by default; an explicit output-language request or translation target in the
 prompt remains authoritative. A fallback language is used for explanatory

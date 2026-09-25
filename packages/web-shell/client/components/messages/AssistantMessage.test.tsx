@@ -382,6 +382,50 @@ describe('AssistantMessage thinking logic', () => {
     expect(document.body.textContent).toContain('说明结果');
   });
 
+  it('can retry Explain after a failed forced refresh', async () => {
+    let calls = 0;
+    const generateContent = vi.fn(async function* () {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('temporary failure');
+      }
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-retry',
+        seq: 0,
+        text: '重试后的说明',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-retry',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    });
+    const container = render(
+      <ThinkingTranslateButton
+        content="rm -rf ./build"
+        generateContent={generateContent}
+        mode="explain-shell"
+      />,
+      'zh-CN',
+    );
+    const explainButton = container.querySelector<HTMLButtonElement>('button');
+
+    await act(async () => explainButton?.click());
+    expect(document.body.textContent).toContain('解释失败');
+
+    const retryButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => /重新解释|Explain again/.test(button.textContent ?? ''));
+    await act(async () => retryButton?.click());
+
+    expect(generateContent).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('重试后的说明');
+  });
+
   it('only offers translation when the UI language is Chinese', () => {
     const container = render(
       <ThinkingMessage

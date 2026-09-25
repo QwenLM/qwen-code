@@ -47,7 +47,10 @@ import {
   parseGoalControlRequest,
   readArtifactSnapshot,
 } from '@qwen-code/qwen-code-core';
-import { isValidOutputLanguageLabel } from '@qwen-code/qwen-code-core/utils/output-language.js';
+import {
+  isAutoLanguage,
+  isValidOutputLanguageLabel,
+} from '@qwen-code/qwen-code-core/utils/output-language.js';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CHANNEL_PROMPT_META_KEY,
@@ -7353,10 +7356,12 @@ export function registerSessionRoutes(
         }
         if (
           outputLanguageFallback !== undefined &&
-          !isValidOutputLanguageLabel(outputLanguageFallback)
+          (!isValidOutputLanguageLabel(outputLanguageFallback) ||
+            isAutoLanguage(outputLanguageFallback))
         ) {
           res.status(400).json({
-            error: 'outputLanguageFallback must be a short, single-line string',
+            error:
+              'outputLanguageFallback must be a trimmed language label using letters, marks, numbers, spaces, commas, parentheses, apostrophes, underscores, or hyphens; periods are allowed only inside parentheses, and auto is not allowed',
             code: 'invalid_generation_options',
           });
           return;

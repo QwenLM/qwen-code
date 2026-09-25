@@ -25,14 +25,24 @@ function hasControlCharacters(value: string): boolean {
 }
 
 export function isValidOutputLanguageLabel(value: unknown): value is string {
-  return (
+  if (
     typeof value === 'string' &&
     value.trim().length > 0 &&
     value === value.trim() &&
     value.length <= OUTPUT_LANGUAGE_LABEL_MAX_LENGTH &&
     !hasControlCharacters(value) &&
-    /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ()'’_\-\uFF08\uFF09]*$/u.test(value)
-  );
+    /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ,.()'’_\-\uFF08\uFF09]*$/u.test(value)
+  ) {
+    let parenthesisDepth = 0;
+    for (const character of value) {
+      if (character === '(' || character === '（') parenthesisDepth += 1;
+      if (character === ')' || character === '）') parenthesisDepth -= 1;
+      if (character === '.' && parenthesisDepth === 0) return false;
+      if (parenthesisDepth < 0) return false;
+    }
+    return parenthesisDepth === 0;
+  }
+  return false;
 }
 
 export async function readOutputLanguagePreference(
@@ -56,9 +66,10 @@ export async function readOutputLanguagePreference(
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    if (offset > OUTPUT_LANGUAGE_PREFERENCE_MAX_BYTES) return undefined;
-
-    const preference = buffer.subarray(0, offset).toString('utf8').trim();
+    const preference = buffer
+      .subarray(0, Math.min(offset, OUTPUT_LANGUAGE_PREFERENCE_MAX_BYTES))
+      .toString('utf8')
+      .trim();
     return preference || undefined;
   } catch {
     return undefined;
@@ -70,24 +81,23 @@ export async function readOutputLanguagePreference(
 export function parseOutputLanguagePreference(
   preference: string,
 ): string | null {
-  if (
-    preference.length > OUTPUT_LANGUAGE_PREFERENCE_MAX_BYTES ||
-    Buffer.byteLength(preference, 'utf8') > OUTPUT_LANGUAGE_PREFERENCE_MAX_BYTES
-  ) {
-    return null;
-  }
+  const boundedPreference = Buffer.from(preference, 'utf8')
+    .subarray(0, OUTPUT_LANGUAGE_PREFERENCE_MAX_BYTES)
+    .toString('utf8');
 
-  const marker = /<!--\s*qwen-code:llm-output-language:\s*/iu.exec(preference);
+  const marker = /<!--\s*qwen-code:llm-output-language:\s*/iu.exec(
+    boundedPreference,
+  );
   if (marker) {
     const valueStart = marker.index + marker[0].length;
-    const commentEnd = preference.indexOf('-->', valueStart);
+    const commentEnd = boundedPreference.indexOf('-->', valueStart);
     if (commentEnd !== -1) {
-      const language = preference.slice(valueStart, commentEnd).trim();
+      const language = boundedPreference.slice(valueStart, commentEnd).trim();
       if (isValidOutputLanguageLabel(language)) return language;
     }
   }
 
-  for (const line of preference.split(/\r?\n/u)) {
+  for (const line of boundedPreference.split(/\r?\n/u)) {
     const titlePrefix = '# Output language preference:';
     if (line.toLowerCase().startsWith(titlePrefix.toLowerCase())) {
       const language = line.slice(titlePrefix.length).trim();
