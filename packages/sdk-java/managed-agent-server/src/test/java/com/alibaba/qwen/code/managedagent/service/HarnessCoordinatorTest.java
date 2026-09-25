@@ -10,6 +10,7 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
@@ -23,6 +24,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -36,6 +38,43 @@ import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
 class HarnessCoordinatorTest {
+    @Test
+    void recoveredBoundTurnFailsBeforeAnyLegacyHarnessCall() {
+        String tenantId = "tenant-bound";
+        String sessionId = "session-bound";
+        String turnId = "turn-bound";
+        ContextBinding binding = new ContextBinding(tenantId, "ws-a", 1,
+                "storage-a", ".", "config-a", 1);
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", null, null, 0,
+                0, 1, 1, null, 1, binding);
+        for (String status : List.of("ACCEPTED", "CANCELLING")) {
+            AgentStateStore store = mock(AgentStateStore.class);
+            HarnessConnector harness = mock(HarnessConnector.class);
+            RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+            TurnRecord claimed = turn(tenantId, sessionId, turnId,
+                    "11111111-1111-4111-8111-111111111111", null, 0,
+                    status, false, 0);
+            when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                    anyString(), any(Duration.class)))
+                    .thenReturn(Optional.of(claimed));
+            when(store.requireSession(tenantId, sessionId))
+                    .thenReturn(session);
+            HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                    harness, new HarnessEventProjector(), runtimeWarmer,
+                    directExecutor(), Clock.systemUTC(),
+                    new ManagedAgentProperties());
+            try {
+                coordinator.dispatch(tenantId, sessionId, turnId);
+            } finally {
+                coordinator.close();
+            }
+            verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                    anyString(), eq("workspace_unavailable"), anyString());
+            verifyNoInteractions(harness, runtimeWarmer);
+        }
+    }
+
     @Test
     void cancelsKnownSettledRecoveredRuntimeAndStreamsCancellation() {
         String tenantId = "tenant-recovery-cancel";

@@ -36,20 +36,20 @@ public class ManagedEventStreamService {
         this.streamTimeout = properties.getEvents().getStreamTimeout();
     }
 
-    public SseEmitter publicStream(String tenantId, String sessionId,
-            long afterSequence) {
-        agentService.lastSequence(tenantId, sessionId);
+    public SseEmitter publicStream(String tenantId, String actorId,
+            String sessionId, long afterSequence) {
+        agentService.lastSequence(tenantId, actorId, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> streamPublic(emitter, tenantId, sessionId,
+        executor.execute(() -> streamPublic(emitter, tenantId, actorId, sessionId,
                 afterSequence));
         return emitter;
     }
 
-    public SseEmitter webShellStream(String tenantId, String sessionId,
-            long afterSequence) {
-        agentService.lastSequence(tenantId, sessionId);
+    public SseEmitter webShellStream(String tenantId, String actorId,
+            String sessionId, long afterSequence) {
+        agentService.lastSequence(tenantId, actorId, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> streamWebShell(emitter, tenantId, sessionId,
+        executor.execute(() -> streamWebShell(emitter, tenantId, actorId, sessionId,
                 afterSequence));
         return emitter;
     }
@@ -59,7 +59,7 @@ public class ManagedEventStreamService {
     }
 
     private void streamPublic(SseEmitter emitter, String tenantId,
-            String sessionId, long initialSequence) {
+            String actorId, String sessionId, long initialSequence) {
         AtomicBoolean closed = callbacks(emitter);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
@@ -68,10 +68,13 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
+                agentService.lastSequence(tenantId, actorId, sessionId);
                 if (reconcile) {
                     List<PublicEvent> events = agentService.publicEvents(
-                            tenantId, sessionId, sequence, 100);
+                            tenantId, actorId, sessionId, sequence, 100);
                     for (PublicEvent event : events) {
+                        agentService.lastSequence(tenantId, actorId,
+                                sessionId);
                         emitter.send(SseEmitter.event()
                                 .id(Long.toString(event.sequence()))
                                 .name(event.type()).data(event));
@@ -89,6 +92,7 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
+                    agentService.lastSequence(tenantId, actorId, sessionId);
                     PublicEvent publicEvent = agentService.publicEvent(event);
                     emitter.send(SseEmitter.event()
                             .id(Long.toString(publicEvent.sequence()))
@@ -111,7 +115,7 @@ public class ManagedEventStreamService {
     }
 
     private void streamWebShell(SseEmitter emitter, String tenantId,
-            String sessionId, long initialSequence) {
+            String actorId, String sessionId, long initialSequence) {
         AtomicBoolean closed = callbacks(emitter);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
@@ -120,10 +124,13 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
+                agentService.lastSequence(tenantId, actorId, sessionId);
                 if (reconcile) {
                     List<WebShellEvent> events = agentService.webShellEvents(
-                            tenantId, sessionId, sequence, 100);
+                            tenantId, actorId, sessionId, sequence, 100);
                     for (WebShellEvent event : events) {
+                        agentService.lastSequence(tenantId, actorId,
+                                sessionId);
                         emitter.send(SseEmitter.event()
                                 .id(Long.toString(event.sequence()))
                                 .name(event.type()).data(event));
@@ -141,6 +148,7 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
+                    agentService.lastSequence(tenantId, actorId, sessionId);
                     WebShellEvent webEvent = agentService.webShellEvent(event);
                     emitter.send(SseEmitter.event()
                             .id(Long.toString(webEvent.sequence()))
