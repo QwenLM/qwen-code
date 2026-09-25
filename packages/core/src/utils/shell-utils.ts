@@ -607,11 +607,16 @@ export function stripShellWrapper(command: string): string {
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       const commandToken = takeLeadingToken(token.rest);
       if (!commandToken) return trimmed;
-      const { value: innerCommand, quote } = stripSymmetricQuotes(
-        commandToken.token,
-      );
+      const {
+        value: innerCommand,
+        quote,
+        tail,
+      } = stripSymmetricQuotes(commandToken.token);
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return token.rest.trimStart() || trimmed;
+      }
+      if (tail && trimBashEdgeSeparators(commandToken.rest)) {
+        return trimmed;
       }
       return innerCommand || trimmed;
     }
@@ -1400,6 +1405,68 @@ function takeLeadingToken(
   };
 }
 
+function removeQuoting(command: string): string {
+  let value = '';
+  let activeQuote: '"' | "'" | '' = '';
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!;
+
+    if (activeQuote === "'") {
+      if (char === "'") {
+        activeQuote = '';
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (char === '\\' && activeQuote === '"') {
+      const next = command[i + 1];
+      if (next === '$' || next === '`' || next === '"' || next === '\\') {
+        value += next;
+        i++;
+      } else if (next === '\n') {
+        i++;
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (activeQuote === '"') {
+      if (char === '"') {
+        activeQuote = '';
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (char === '\\' && !activeQuote) {
+      const next = command[i + 1];
+      if (next) {
+        if (next !== '\n') {
+          value += next;
+        }
+        i++;
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      activeQuote = '"';
+    } else if (char === "'") {
+      activeQuote = "'";
+    } else {
+      value += char;
+    }
+  }
+  return value;
+}
+
 function stripSymmetricQuotes(command: string): {
   value: string;
   quote: '"' | "'" | '';
@@ -1410,15 +1477,6 @@ function stripSymmetricQuotes(command: string): {
   if (quote !== '"' && quote !== "'") {
     return { value: trimmed, quote: '', tail: '' };
   }
-  // A token that opens and closes with the same quote: dropping the outer
-  // pair keeps every inner `''` / `""` join, so the result means to bash what
-  // the -c script means, and re-wrapping it reproduces the token exactly.
-  if (trimmed.endsWith(quote)) {
-    return { value: trimmed.slice(1, -1), quote, tail: '' };
-  }
-  // Non-ASCII/control glue after the closing quote remains in the same bash
-  // word. Keep the full tail for analysis and report the boundary separately
-  // so monitor can preserve the original token when reconstructing the spawn.
   let escaped = false;
   for (let i = 1; i < trimmed.length; i++) {
     const char = trimmed[i];
@@ -1428,14 +1486,7 @@ function stripSymmetricQuotes(command: string): {
     }
     if (!escaped && char === quote) {
       const tail = trimmed.slice(i + 1);
-      if (/^[^\x20-\x7e\t\n]/.test(tail)) {
-        return {
-          value: trimmed.slice(1, i) + tail,
-          quote: '',
-          tail,
-        };
-      }
-      break;
+      return { value: removeQuoting(trimmed), quote, tail };
     }
     escaped = false;
   }
@@ -1639,10 +1690,31 @@ export function normalizeMonitorCommand(
     analysisCommand,
     ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
-  const safetyCommand =
+  const dequotedSafetyCommand =
     wrapperTokens && safetyParts.length > 0
       ? trimBashEdgeSeparators(safetyParts.join(' '))
       : analysisCommand;
+  const rawSafetyCommand = [
+    ...(wrapperTokens ? leadingEnvTokens : []),
+    normalizedRawInnerCommandToken,
+    normalizedInnerArgsSuffix,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const innerSafetyCommand = [
+    ...(wrapperTokens ? leadingEnvTokens : []),
+    analysisCommand,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  // A literal quote in the dequoted -c value can swallow an outer-shell
+  // suffix during safety parsing. Preserve both views at that boundary.
+  const safetyCommand =
+    normalizedRawInnerCommandToken &&
+    normalizedInnerArgsSuffix &&
+    /['"]/.test(analysisCommand)
+      ? `${rawSafetyCommand}\n${innerSafetyCommand}`
+      : dequotedSafetyCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix ||

@@ -2611,6 +2611,20 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it.each([
+      ['printable glue', `bash -c 'echo a; rm -rf /tmp/x'z`],
+      ['interior single quotes', `bash -c 'echo a'\u00a0'; rm -rf /tmp/x #'y`],
+      ['interior double quotes', `bash -c 'echo "hi'\u00e9; rm -rf /tmp/x`],
+    ])('denies a monitor command hidden behind %s', async (_name, command) => {
+      shellTypeMock.value = 'bash';
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm.initialize();
+
+      expect(await pm.evaluate({ toolName: 'monitor', command })).toBe('deny');
+    });
+
     // `splitCommandForRules` has to drive every Bash-rule consumer, not just
     // `evaluate()`. Each of the three below re-splits the command on its own
     // path, so reverting any one of them to `splitCompoundCommand` would leave

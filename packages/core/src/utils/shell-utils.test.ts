@@ -1625,8 +1625,8 @@ describe('bash word separators (#12089)', () => {
       expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
     });
 
-    it('does not unquote a token with plain text after the close quote', () => {
-      expect(stripShellWrapper(`bash -c 'echo hi'x`)).toBe(`'echo hi'x`);
+    it('unwraps a token with printable text after the close quote', () => {
+      expect(stripShellWrapper(`bash -c 'echo hi'x`)).toBe('echo hix');
     });
 
     it.each([
@@ -1653,6 +1653,56 @@ describe('bash word separators (#12089)', () => {
         'echo',
       ]);
     });
+
+    it('keeps printable-glue commands visible to monitor analysis', () => {
+      const command = `bash -c 'echo a; rm -rf /tmp/x'z`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized.analysisCommand).toBe('echo a; rm -rf /tmp/xz');
+      expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
+      expect(normalized.spawnCommand).toBe(command);
+    });
+
+    it.each([
+      `bash -c 'pkill -f qwen-code; echo hi'x`,
+      `cmd.exe /c "taskkill /F /IM node.exe & echo hi"\u00a0`,
+    ])('keeps self-kill operations in %j visible', (command) => {
+      expect(detectSelfKillCommand(command)).toBe(true);
+      expect(normalizeMonitorCommand(command).spawnCommand).toBe(command);
+    });
+
+    it.each([
+      ['CJK', '\u4e2d'],
+      ['Latin-1', '\u00e9'],
+      ['zero-width space', '\u200b'],
+      ['escape', '\u001b'],
+    ])('keeps commands after %s glue visible', (_name, char) => {
+      const command = `bash -c 'echo hi'${char}; rm -rf /tmp/x`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized.analysisCommand).toBe(`echo hi${char};`);
+      expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+      expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
+      expect(normalized.spawnCommand).toBe(command);
+    });
+
+    it.each([
+      [
+        `bash -c 'echo a'\u00a0'; rm -rf /tmp/x #'y`,
+        `echo a\u00a0; rm -rf /tmp/x #y`,
+      ],
+      [`bash -c 'echo "hi'\u00e9; rm -rf /tmp/x`, `echo "hi\u00e9;`],
+    ])(
+      'keeps commands after interior quotes in %j visible',
+      (command, analysisCommand) => {
+        const normalized = normalizeMonitorCommand(command);
+
+        expect(normalized.analysisCommand).toBe(analysisCommand);
+        expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+        expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
+        expect(normalized.spawnCommand).toBe(command);
+      },
+    );
   });
 
   describe('stripShellWrapper', () => {
