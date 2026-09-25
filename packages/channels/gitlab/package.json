@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/channel-gitlab",
   "private": true,
-  "version": "0.24.5",
+  "version": "0.24.5-nightly.20260925.c3a4058a0c",
   "description": "GitLab polling channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@gitbeaker/rest": "^42.5.0",
-    "@qwen-code/channel-base": "0.24.5",
+    "@qwen-code/channel-base": "0.24.5-nightly.20260925.c3a4058a0c",
     "zod": "^3.25.0"
   },
   "devDependencies": {
