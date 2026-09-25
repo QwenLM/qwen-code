@@ -4,7 +4,7 @@
   "title": "Managed Workspace binding v1 conformance fixtures",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contractVersion", "digest", "paths", "bindings"],
+  "required": ["contractVersion", "digest", "paths", "bindings", "probes"],
   "properties": {
     "contractVersion": {
       "const": 1
@@ -25,6 +25,9 @@
       "items": {
         "$ref": "#/$defs/bindingCase"
       }
+    },
+    "probes": {
+      "$ref": "#/$defs/probes"
     }
   },
   "$defs": {
@@ -174,6 +177,105 @@
           ]
         }
       }
+    },
+    "codePointRanges": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1114111
+          },
+          {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1114111
+          }
+        ],
+        "items": false,
+        "minItems": 2
+      }
+    },
+    "probeTemplate": {
+      "type": "string",
+      "pattern": "^[^{}]*\\{c\\}[^{}]*$"
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codePoints", "binding", "cases"],
+      "properties": {
+        "codePoints": {
+          "$ref": "#/$defs/codePointRanges",
+          "type": "array",
+          "minItems": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/probeCase"
+          }
+        }
+      }
+    },
+    "probeCase": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "template", "accepted"],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/caseId"
+            },
+            "kind": {
+              "const": "path"
+            },
+            "template": {
+              "$ref": "#/$defs/probeTemplate"
+            },
+            "accepted": {
+              "$ref": "#/$defs/codePointRanges"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "field", "template", "accepted"],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/caseId"
+            },
+            "kind": {
+              "const": "binding"
+            },
+            "field": {
+              "enum": [
+                "tenantId",
+                "workspaceId",
+                "workspaceGeneration",
+                "storageId",
+                "cwdRelative",
+                "contextConfigRef",
+                "contextRevision"
+              ]
+            },
+            "template": {
+              "$ref": "#/$defs/probeTemplate"
+            },
+            "accepted": {
+              "$ref": "#/$defs/codePointRanges"
+            }
+          }
+        }
+      ]
     }
   }
 }

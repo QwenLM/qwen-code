@@ -2,7 +2,7 @@
 
 [English](2026-09-25-managed-workspace-binding-contract.md) | [简体中文](2026-09-25-managed-workspace-binding-contract.zh-CN.md)
 
-状态：已在模块边界实现，尚未接线。更新：2026-09-25。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 中 W0 的第一个切片。模块位置和启动信封的时机，仍在[这条评论](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126)中等待评审。
+状态：已作为独立的包实现，尚未接线。更新：2026-09-25。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 中 W0 的第一个切片。对 [W0a 问题](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126)的[这条答复](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703)确定了代码位置和启动信封的时机。下文的“参考契约”指该提案的 [Workspace 与 Session cwd 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.md)，以及其公开 OpenAPI 中的 [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453)；“参考 schema”指它的 [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql)。三者都取自 #12380 所链接的提交。
 
 ## 问题
 
@@ -12,20 +12,20 @@
 
 ## 现状
 
-以下事实基于 `main` 的 `3413e8cc57`。
+以下事实基于 `main` 的 `73aa65a4b4`。
 
 - **Broker 范围。** `RuntimeScope` 包含 `tenantId`、`workspaceId`、`workspaceGeneration`（字符串）、`canonicalCwd`、`capabilityDigest` 和 `isolationClass`。`HarnessSessionResolver` 为每个 Harness Session 解析一个 scope，Broker 不验证这些值的真实性。`LocalProcessRuntimeProvisioner` 把 `workspaceId`、`workspaceGeneration` 和规范化的 cwd 复制进 worker 的 boot 文档。
 - **Worker 契约。** boot 文档是封闭键的 `version: 1`。v2 attestation 请求重复携带租户和 Workspace 字段：`workspaceId` 是不透明值；`workspaceGeneration` 是非空字符串（数字会被拒绝）；`workspaceCwd` 只检查是否非空。
 - **Daemon 注册表。** daemon 的 TypeScript `WorkspaceRegistry` 负责本地多工作区的路由。它的 `workspaceId` 是规范化 cwd 的 SHA-256 的前 16 个十六进制字符，generation 是内存中的计数器。它有五种状态，没有租户概念。它不是托管侧的 Registry，W0a 不改动它。
 - **Session 记录。** #12302 的 managed session record 位于 TypeScript core。它们以 `{tenantId, workspaceId, sessionId}` 标识一个 Session，不带 cwd 或绑定字段。
 - **缺失的部分。** 上游没有 Java 控制面，没有 `managed_agent_session` 表，也没有 Managed Agent 公共 OpenAPI。没有任何代码定义 Workspace 选择、相对 cwd、context revision 或 ContextBinding。
-- **摘要。** Java 与 TypeScript 之间没有共享的摘要规范化方式。Broker 的 JDBC repository 已经用“长度前缀 + UTF-8 字段”上的 SHA-256 生成键（`JdbcRepositorySupport.digest`）。TypeScript core 为 session record 实现了一个私有的规范化 JSON 摘要。
+- **摘要。** Java 与 TypeScript 之间没有共享的摘要规范化方式。Broker 的 JDBC repository 已经用“长度前缀 + UTF-8 字段”上的 SHA-256 生成键（`JdbcRepositorySupport.digest`）。TypeScript core 的 session record 使用一个私有的规范化 JSON 编码器；导出的 `managedSessionEventsDigest` 只覆盖有序的事件标识。
 
 ## 目标
 
 - 为相对工作目录（`cwdRelative`）制定唯一的词法规则，以参考契约中的 `WorkspaceRelativePath` 规则为基础。由语言无关的 fixtures 固定下来，让 Java 与 TypeScript 拒绝和规范化同样的输入。
 - 定义 Workspace Registry 的记录与读取契约，先由部署配置提供数据。
-- 定义三级的 actor 访问权限。它决定列表可见性、`can_create_session` 提示和创建准入。
+- 定义三级的 actor 访问权限。它决定列表可见性、`canCreateSession` 提示和创建准入。
 - 提供一个纯函数式的解析器：输入 actor 和可选的选择，输出一个已解析的 Workspace，或者恰好一个类型化的错误。它覆盖选择缺省时的租户默认值。
 - 定义 `ContextBinding` 值，Java 与 TypeScript 算出相同的 `contextDigest`，由共享 fixtures 固定。
 - 为调用方的选择提供一个规范化形式（含缺省标记），供 W0b 并入请求摘要。
@@ -35,22 +35,17 @@
 - 持久化 Session 绑定、创建回执或 operation。这属于 W0b。
 - 把存储解析为挂载点；接线 Broker、Harness 或 worker；打开 activation gate。这属于 W0c。
 - 带版本的启动信封 `managed-context/1`，以及任何 attestation 版本升级。见[启动信封](#启动信封)。
-- 公共或 BFF DTO、路由、游标和能力声明。`workspace_context` 保持 false。这属于 Stage D 和 W0d。
+- 公共或 BFF DTO、路由和游标，它们属于 Stage D 和 W0d；以及能力声明：`workspace_context` 在所有 W0 切片通过之前保持 false，由 W0e 决定何时开启。
 - 准入时的 Agent、Bundle 与配置兼容性检查。这属于 W0b。
 - 文件系统检查：是否存在、realpath、符号链接和挂载身份。这些在 W0c 中由 Runtime 负责。
 - Registry 的 JDBC 表。基于配置的 Registry 不需要表，Runtime Broker 的 schema 保持不变。
 - 改动 daemon 的 `WorkspaceRegistry` 或 daemon 路由。
 
-## 模块位置
+## 代码位置
 
-已按方案 A 实现，该选择仍在 #12380 中等待评审。无论选哪个方案，代码都保持不依赖框架：不用 Spring，不依赖 CLI 内部实现，不依赖调度器，也不在持久化数据源失败时退回内存状态。
+代码是现有 `packages/sdk-java/runtime-broker` 模块中的包 `com.alibaba.qwen.code.runtimebroker.managedworkspace`，这是 #12380 的决定。单独建 Maven 模块的方案被放弃了：在任何 Registry 逻辑可以评审之前，它就要先付出单独的 pom、CI lane 和 workflow 守护测试的成本。放在同一模块的包里，改动只集中在领域代码上，W0c 也能在同一模块内经 `HarnessSessionResolver` 接入绑定。如果 Registry 将来需要自己的 schema 生命周期，或者出现不能引入 Broker 的使用方，再把它拆成独立模块。
 
-| 方案      | 位置                                                                                                     | 优点                                                                                                                                                                             | 缺点                                                                                                                                                            |
-| --------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A（推荐） | 新模块 `packages/sdk-java/managed-workspace`（artifact `qwen-managed-workspace`，Java 21，无运行时依赖） | Registry、访问控制和解析属于控制面准入，不属于 Broker 状态。该模块与未合入的 Broker PR（#12627、#12630、#12637）没有重叠。Broker 在 W0c 中依赖其中小巧的 `ContextBinding` 类型。 | SDK Java workflow 是逐个模块显式运行的。self-hosted 与 hosted 的 Java 21 步骤、Checkstyle 步骤以及 `scripts/tests/sdk-java-workflow.test.js` 都需要加入新模块。 |
-| B         | `runtime-broker` 内的一个包                                                                              | 不改 CI。`ContextBinding` 与它的第一个使用方放在一起。                                                                                                                           | 该模块的 README 与 QWEN.md 把它限定为 Broker 状态，并排除公共 Agent 资源。它的 README 也正在被 #12627 修改。                                                    |
-
-两个方案中，共享 fixtures 以及规则和摘要的 TypeScript 实现都放在 `packages/cli/src/serve` 下，与现有的 Runtime 契约相邻。
+这个包保持不依赖框架：只使用 JDK，不依赖其他 Broker 类、Spring、CLI 内部实现或调度器，也不在持久化数据源失败时退回内存状态。共享 fixtures 以及规则和摘要的 TypeScript 实现都放在 `packages/cli/src/serve` 下，与现有的 Runtime 契约相邻。
 
 ## 术语
 
@@ -115,11 +110,11 @@ Registry 记录包含以下字段。记录不可变。
 - 降低某个 Workspace 的 generation。
 - 不提升 generation 就修改它的 `storageId`。
 
-之后可以基于参考 schema 中的 `managed_agent_workspace` 表，提供实现同一接口的 JDBC Registry。
+之后可以基于参考 schema 中的 `managed_agent_workspace` 表，提供实现同一接口的 JDBC Registry。它必须像本包一样精确比较租户 ID：参考 schema 让 `tenant_id` 沿用基表的排序规则，而那可能不区分大小写。
 
 ## 访问控制
 
-嵌入方完成 actor 认证后传入租户 ID 和 actor ID。W0a 从不从请求体读取这两者。策略针对一个 actor 和一条记录返回三种访问级别之一：
+嵌入方完成 actor 认证后传入租户 ID 和 actor ID。W0a 从不从请求体读取这两者。actor ID 遵循 `displayName` 的规则，而不是标识符规则，因此可以是邮箱地址。策略针对一个 actor 和一条记录返回三种访问级别之一：
 
 - `NONE`
 - `READ`
@@ -127,7 +122,7 @@ Registry 记录包含以下字段。记录不可变。
 
 查找始终限定在 actor 所属的租户内。无论策略怎么说，另一个租户的 Workspace 都与不存在的 Workspace 无法区分。每次调用都重新评估策略，从不把结果固化进分页或解析结果。W0a 为测试和单租户部署提供一个显式授权的策略；没有“全部放行”的默认策略。
 
-列表返回 actor 能读取的记录，每条带 `canCreateSession`。这个字段只是权限提示；状态单独给出，由调用方把两者结合起来。记录按 Workspace ID 排序，并附带 `hasMore` 和 `defaultWorkspace`。默认项独立于当前页计算，只有租户默认值存在、处于 `active`、且 actor 拥有 `CREATE` 时才返回。分页基于上一页最后一个 Workspace ID。catalog 无论页面大小如何，都按 1000 条一批读取 Registry，因此 actor 无权读取的记录只会带来很少的往返。与租户、actor 和查询绑定的不透明游标属于 API 层。
+列表返回 actor 能读取的记录，每条带 `canCreateSession`。这个字段只是权限提示；状态单独给出，由调用方把两者结合起来。记录按 Workspace ID 排序，并附带 `hasMore` 和 `defaultWorkspace`。默认项独立于当前页计算，只有租户默认值存在、处于 `active`、且 actor 拥有 `CREATE` 时才返回。分页基于上一页最后一个 Workspace ID。catalog 无论页面大小如何，都按 1000 条一批读取 Registry，不足 1000 条的一批表示已到末尾。为了让 `hasMore` 精确，页满之后它会继续扫描，直到再找到一条可读记录或到达末尾。因此一次列表对 Registry 分页读取的次数至多是：每扫描满 1000 条一次，再加一次；无论 actor 能读的记录有多少都是如此。查找默认项还会另外调用一到两次。与租户、actor 和查询绑定的不透明游标属于 API 层。
 
 ## 工作目录规则
 
@@ -211,22 +206,23 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 
 - 长度前缀让字段边界对任何 Unicode 目录名都没有歧义。
 - 没有 JSON 转义或数字格式问题，fastjson2 与 `JSON.stringify` 之间也就无从分歧。
-- Broker 的 repository 键已经用同样的构造，在 TypeScript 中实现也只需几行。
+- Broker 的 repository 键摘要已经在每个 UTF-8 项前加 4 字节大端长度，只是没有域标签，也没有 `sha256:` 前缀。这种编码在 TypeScript 中实现也只需几行。
 - generation 和 revision 使用十进制字符串，JavaScript 使用方就不会把 64 位值经过 `Number` 处理。
 - `sha256:` 前缀与私有 Runtime 协议中的 `capabilityDigest` 一致。session record 的 `DurableRef` 摘要是不带前缀的十六进制；之后在 session journal 中引用时必须显式转换。
 
 摘要只覆盖 Session 的上下文。Runtime 绑定的 ID 和 generation，以及 Harness owner generation，在执行时由 W0c 的调用封装绑定。`displayName` 不影响执行。`policyRef` 通过 `contextConfigRef` 进入执行。
 
-两种语言共同消费 `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` 中的共享 fixtures，并用旁边的 schema 文件校验。该文件有两组用例：
+两种语言共同消费 `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` 中的共享 fixtures，并用旁边的 schema 文件校验。该文件有三组用例：
 
 - **路径：** 一个输入，以及规范化结果或 `invalid_cwd`。
 - **绑定：** 各字段，以及编码后字节的十六进制加 `contextDigest`，或者一个拒绝结果。
+- **字符探针：** 一个带 `{c}` 占位的目录或绑定字段模板，以及规则在该位置接受的码点的精确范围。每个探针都会代入基本多文种平面（U+0000 到 U+FFFF）的每个码点，其中包含所有控制字符、空白分隔符和代理项；还会代入模仿 ASCII 的星体区块：数学字母数字符号、带圈字母数字补充和标签字符，以及 U+10000、U+1D11E、U+1F600、U+F0000 和 U+10FFFF。字符类只要多接受或少接受其中任何一个码点，就会有探针失败；其余星体码点不受探测。
 
-用例覆盖每条规则边界的两侧，包括非 ASCII 名称、仅由空格组成的段，以及大于 2^53 的 generation。期望值由一个独立于两种语言的实现计算得出。
+用例覆盖每条规则边界的两侧，包括非 ASCII 名称、仅由空格组成的段、大于 2^53 的 generation，以及等于 2^63−1 的 generation。期望值由一个独立于两种语言的实现计算得出。
 
 ## 启动信封
 
-启动信封是一个单独的切片（W0a-2），等待 #12380 中的答复。本切片先固定信封将要携带的内容：ContextBinding 的字段、它们的规范化方式和摘要。W0a-2 随后需要完成以下工作：
+启动信封是一个单独的切片（W0a-2）。#12380 要求现在就定下它的形状，叠在 execute 契约（#12630，现已合入）之上；它会在本切片之后单独提交。本切片先固定信封将要携带的内容：ContextBinding 的字段、它们的规范化方式和摘要。W0a-2 随后需要完成以下工作：
 
 - 协商 `managed-context/1`。
 - 新增一个 boot 文档版本，携带 ContextBinding 以及计算挂载根和实际 cwd 所需的输入。daemon 式的路径哈希只作为兼容别名保留。
@@ -250,28 +246,26 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 ## 安全与租户隔离
 
 - 租户和 actor 只来自嵌入方的认证。
-- 错误码不区分另一个租户的 Workspace、无权读取的 Workspace 和不存在的 Workspace。
-- workspace generation、storage ID 和配置引用只来自 Registry。调用方最多提供一个 Workspace ID 和一个相对目录。不接受调用方提供的绝对路径、挂载点、storage ID 或 generation，它们也不会出现在错误或列表项中。
+- 错误不区分另一个租户的 Workspace、无权读取的 Workspace 和不存在的 Workspace：三者的错误码、消息和抛出位置都相同。API 层必须只返回 `WorkspaceException` 的状态码、错误码和消息，不得返回它的栈轨迹。响应时间没有做成一致：无权读取的 Workspace 会调用访问策略，不存在的 Workspace 则不会。
+- workspace generation、storage ID 和配置引用只来自 Registry。调用方最多提供一个 Workspace ID 和一个相对目录。不接受调用方提供的绝对路径、挂载点、storage ID 或 generation，它们也不会出现在错误或列表项中。W0b 必须根据已解析的 Workspace 或自己持久化的绑定构建 ContextBinding，绝不能根据请求字段构建。W0a 不强制这一点：ContextBinding 保留公开的构造函数，是因为恢复路径需要它。
 - 解析从不回退。显式选择不会得到默认值，缺省选择也不会得到启动时的 cwd 或 daemon 的主 Workspace。
 - 每次调用都重新评估访问权限。任何结果都不携带超出本次调用的授权。
 - 工作目录规则只做词法检查。Runtime 仍会在安装时和工具边界处强制检查包含关系、realpath 和符号链接安全。
 
 ## 涉及文件
 
-方案 A 的实现如下。
-
-- `packages/sdk-java/managed-workspace/`（新增）：
+- `packages/sdk-java/runtime-broker` 中的包 `com.alibaba.qwen.code.runtimebroker.managedworkspace`（新增）：
   - Registry 的记录与状态、Registry 接口，以及配置快照及其后继检查。
   - actor、访问级别与策略，以及显式授权策略。
   - 负责列表与解析的 catalog。
   - 选择与已解析的 Workspace、工作目录规则、`ContextBinding`，以及异常类型。
-  - 测试，包括 fixtures 的消费方。另有 README 和 QWEN.md。
+  - 对应测试包中的测试，包括 fixtures 的消费方。
+- `packages/sdk-java/runtime-broker/README.md` 与 `QWEN.md`：新增一节介绍这个包。
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` 与 `.schema.json`（新增）。
 - `packages/cli/src/serve/managed-workspace-binding.ts` 及其测试（新增）。这是工作目录规则和摘要的 TypeScript 实现，暂不接入 worker。
-- `.github/workflows/sdk-java.yml` 与 `scripts/tests/sdk-java-workflow.test.js`：在 Java 21 任务中运行新模块。
 - 本设计文档的中英文两个版本。
 
-`runtime-broker`、daemon 的 `WorkspaceRegistry`、worker 的 boot 文档和 attestation 契约都不变。
+现有的 Broker 类、Broker schema、daemon 的 `WorkspaceRegistry`、worker 的 boot 文档、attestation 契约和所有 CI workflow 都不变。SDK Java workflow 本来就会运行 `runtime-broker` 的测试和 Checkstyle，它的路径过滤也同时覆盖了 `packages/sdk-java/**` 和 `packages/cli/src/serve/**`。
 
 ## 验证计划
 
@@ -281,28 +275,26 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
   - 列表：过滤、排序、分页，以及不在当前页的默认项。
   - 解析表的每一行，显式和缺省两种选择都要覆盖。
   - 工作目录规则，以及 ContextBinding 的校验与摘要。
-- **Fixtures 消费方：** Java 与 TypeScript 都运行全部路径用例和绑定用例。TypeScript 用严格模式的 Ajv 按 schema 校验 fixtures 文件。
-- **变异检查：** 逐一回退每道守卫，确认有测试失败。
-- **命令：** 在 JDK 21 上运行 `mvn test` 和 `mvn checkstyle:check`；运行 `npm run build && npm run typecheck`；运行相关的 Vitest 用例。
-- **CI：** 新模块在 Linux、macOS 和 Windows 的 Java 21 任务中运行。
+- **Fixtures 消费方：** Java 与 TypeScript 都运行全部路径用例、绑定用例和字符探针用例。TypeScript 用严格模式的 Ajv 按 schema 校验 fixtures 文件。
+- **变异检查：** 逐一回退或削弱每道守卫。这包括让每个字符类多接受或少接受任意一个被探测的码点、豁免单个控制字符、给正则表达式加标志、改为忽略大小写比较、去掉 `equals` 中的类型检查，以及把构造函数改为 public。改变行为的变异必须让测试失败，存活的变异必须证明是等价的。
+- **命令：** 在 JDK 21 上于 `packages/sdk-java/runtime-broker` 中运行 `mvn test` 和 `mvn checkstyle:check`；运行 `npm run build && npm run typecheck`；运行相关的 Vitest 用例。
+- **CI：** 现有的 `runtime-broker` 步骤会在 Linux、macOS 和 Windows 的 Java 21 任务中运行这个包的测试，并在 Linux 上运行 Checkstyle。该模块的 Checkstyle 配置只检查 main 源码，不检查测试。
 
 ## 验收标准
 
-- 对每一个 fixture，Java 与 TypeScript 得出相同的规范化路径和 `contextDigest`。这包括非 ASCII 名称、仅由空格组成的段，以及大于 2^53 的 generation。
+- 对每一个 fixture，Java 与 TypeScript 得出相同的规范化路径和 `contextDigest`。这包括非 ASCII 名称、仅由空格组成的段，以及大于 2^53 的 generation。TypeScript 在每个字符探针中恰好接受所列的码点，Java 也是如此；Java 用 `long` 表示 generation 和 revision，因此它的十进制探针检验的是其线上解码器必须遵守的规则。
 - 缺省选择只会解析到一个处于 active、且 actor 可以在其中创建 Session 的租户默认值。其余所有缺省情况都是 `workspace_required`。
 - 显式选择永远不回退到默认值。
 - 另一个租户的 Workspace 和无权读取的 Workspace 得到同样的 `workspace_not_found`。
-- 调用方提供的绝对路径、storage ID 或 generation 都无法进入已解析的 Workspace 或 ContextBinding。
+- 调用方提供的绝对路径、storage ID 或 generation 都无法进入已解析的 Workspace。
 - 替换快照不能删除 Workspace、降低它的 generation，也不能在不提升 generation 的情况下修改它的 storage ID。
-- Java 模块不依赖 Spring、CLI 内部实现、`runtime-broker` 或调度器。
+- Java 包只使用 JDK，不依赖其他 Broker 类、Spring、CLI 内部实现或调度器。
 - 文档不声称已实现持久化、接线或能力声明。
 
 ## 待决问题
 
-1. 模块位置选方案 A 还是 B。已在 #12380 中提问。
-2. 启动信封是等 worker 处理器切片（F1-b）落地，还是现在就商定它的形状。已在 #12380 中提问。
-3. `cwdRelative` 应按现有实现拒绝所有控制字符（C0、DEL 和 C1），还是按参考契约只拒绝 NUL？目录名中的换行或转义序列会进入日志、UI 和 shell 提示符。
-4. `removed` 的 Workspace 是否应出现在列表中，还是只出现在 Session 视图中？
+1. `cwdRelative` 应按现有实现拒绝所有控制字符（C0、DEL 和 C1），还是按参考契约只拒绝 NUL？目录名中的换行或转义序列会进入日志、UI 和 shell 提示符。同样的顾虑也适用于目前被接受、但不可见或会断行的字符：格式字符（Cf 类），例如双向控制符（U+202E、U+2066）和零宽字符（U+200B、U+FEFF），以及行分隔符和段分隔符 U+2028、U+2029（Zl 类和 Zp 类）。如果拒绝所有格式字符，也会误伤合法的连接符，例如表情名称中的 U+200D。
+2. `removed` 的 Workspace 是否应出现在列表中，还是只出现在 Session 视图中？
 
 ## 后续工作
 

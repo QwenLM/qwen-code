@@ -54,7 +54,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('runs the Java 21 sibling modules on self-hosted Java 21', () => {
+  it('runs Runtime Broker tests from the sibling module on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
@@ -63,35 +63,8 @@ describe('SDK Java self-hosted workflow guards', () => {
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            cd ../runtime-broker\n' +
         '            mvn --batch-mode --no-transfer-progress clean test\n' +
-        '            cd ../managed-workspace\n' +
-        '            mvn --batch-mode --no-transfer-progress clean test\n' +
         '          fi',
     );
-  });
-
-  it('runs the Managed Workspace module in the hosted Java 21 jobs', () => {
-    const block = job('test');
-    const tests = step(block, 'Run Managed Workspace tests');
-    expect(tests).toContain(
-      "if: \"${{ runner.environment == 'github-hosted' && matrix.java == '21' }}\"",
-    );
-    expect(tests).toContain(
-      "working-directory: 'packages/sdk-java/managed-workspace'",
-    );
-    expect(tests).toContain(
-      "run: 'mvn --batch-mode --no-transfer-progress clean test'",
-    );
-    const checkstyle = step(block, 'Run Managed Workspace Checkstyle');
-    expect(checkstyle).toContain(
-      "if: \"${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}\"",
-    );
-    expect(checkstyle).toContain(
-      "working-directory: 'packages/sdk-java/managed-workspace'",
-    );
-    expect(checkstyle).toContain(
-      "run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'",
-    );
-    expect(block).toContain('packages/sdk-java/managed-workspace/pom.xml');
   });
 
   it.each(['test', 'daemon-e2e'])(
@@ -105,7 +78,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         block.match(
           /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
         ),
-      ).toHaveLength(name === 'test' ? 8 : 1);
+      ).toHaveLength(name === 'test' ? 6 : 1);
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },

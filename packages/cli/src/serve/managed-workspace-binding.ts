@@ -6,8 +6,9 @@
 
 import { createHash } from 'node:crypto';
 
-// TypeScript half of the W0a Workspace binding contract; the Java half lives
-// in packages/sdk-java/managed-workspace. The shared fixtures in
+// TypeScript half of the W0a Workspace binding contract; the Java half is the
+// com.alibaba.qwen.code.runtimebroker.managedworkspace package in
+// packages/sdk-java/runtime-broker. The shared fixtures in
 // contracts/managed-workspace-binding-v1.fixtures.json keep both byte for
 // byte identical. Nothing wires this into the Runtime worker yet.
 
@@ -91,26 +92,39 @@ export function normalizeWorkspaceRelativePath(value: string): string {
 export function encodeManagedContextBinding(
   binding: ManagedContextBinding,
 ): Buffer {
+  if (typeof binding !== 'object' || binding === null) {
+    throw new Error('Managed context binding is invalid.');
+  }
+  // Each field is read once, so the value checked is the value encoded.
+  const {
+    tenantId,
+    workspaceId,
+    workspaceGeneration,
+    storageId,
+    cwdRelative,
+    contextConfigRef,
+    contextRevision,
+  } = binding;
   if (
-    !matches(IDENTIFIER_PATTERN, binding.tenantId) ||
-    !matches(IDENTIFIER_PATTERN, binding.workspaceId) ||
-    !isCanonicalDecimal(binding.workspaceGeneration) ||
-    !matches(STORAGE_ID_PATTERN, binding.storageId) ||
-    !isNormalized(binding.cwdRelative) ||
-    !matches(REFERENCE_PATTERN, binding.contextConfigRef) ||
-    !isCanonicalDecimal(binding.contextRevision)
+    !matches(IDENTIFIER_PATTERN, tenantId) ||
+    !matches(IDENTIFIER_PATTERN, workspaceId) ||
+    !isCanonicalDecimal(workspaceGeneration) ||
+    !matches(STORAGE_ID_PATTERN, storageId) ||
+    !isNormalized(cwdRelative) ||
+    !matches(REFERENCE_PATTERN, contextConfigRef) ||
+    !isCanonicalDecimal(contextRevision)
   ) {
     throw new Error('Managed context binding is invalid.');
   }
   const items = [
     CONTEXT_BINDING_DOMAIN_TAG,
-    binding.tenantId,
-    binding.workspaceId,
-    binding.workspaceGeneration,
-    binding.storageId,
-    binding.cwdRelative,
-    binding.contextConfigRef,
-    binding.contextRevision,
+    tenantId,
+    workspaceId,
+    workspaceGeneration,
+    storageId,
+    cwdRelative,
+    contextConfigRef,
+    contextRevision,
   ];
   const parts: Buffer[] = [];
   for (const item of items) {

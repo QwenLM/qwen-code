@@ -2,7 +2,7 @@
 
 [English](2026-09-25-managed-workspace-binding-contract.md) | [简体中文](2026-09-25-managed-workspace-binding-contract.zh-CN.md)
 
-Status: implemented at the module boundary; nothing is wired yet. Updated: 2026-09-25. This is the first W0 slice of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). The module placement and the timing of the boot envelope remain open for review in [this comment](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126).
+Status: implemented as a standalone package; nothing is wired yet. Updated: 2026-09-25. This is the first W0 slice of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). [This reply](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703) to [the W0a questions](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126) settled the placement and the timing of the boot envelope. Below, "the reference contract" is the proposal's [Workspace and Session cwd design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) together with the [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453) of its public OpenAPI, and "the reference schema" is its [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql), all at the commit that #12380 links.
 
 ## Problem
 
@@ -12,20 +12,20 @@ Today no layer defines the choice. The Broker receives whatever `RuntimeScope` i
 
 ## Current state
 
-The facts below are from `main` at `3413e8cc57`.
+The facts below are from `main` at `73aa65a4b4`.
 
 - **Broker scope.** `RuntimeScope` carries `tenantId`, `workspaceId`, `workspaceGeneration` (a string), `canonicalCwd`, `capabilityDigest` and `isolationClass`. `HarnessSessionResolver` resolves one scope per Harness Session, and the Broker does not authenticate these values. `LocalProcessRuntimeProvisioner` copies `workspaceId`, `workspaceGeneration` and the canonical cwd into the worker's boot document.
 - **Worker contract.** The boot document is closed-key `version: 1`. The v2 attestation request repeats the tenant and Workspace fields: `workspaceId` is opaque, `workspaceGeneration` is a non-empty string (numbers are rejected), and `workspaceCwd` is only checked for being non-empty.
 - **Daemon registry.** The daemon's TypeScript `WorkspaceRegistry` routes local multi-workspace traffic. Its `workspaceId` is the first 16 hex characters of SHA-256 over the canonical cwd, and its generation is an in-memory counter. It has five states and no tenant. It is not the hosted Registry, and W0a does not change it.
 - **Session records.** The managed session records from #12302 live in TypeScript core. They key a Session by `{tenantId, workspaceId, sessionId}` and carry no cwd or binding fields.
 - **Missing pieces.** Upstream has no Java control plane, no `managed_agent_session` table and no Managed Agent public OpenAPI. Nothing defines a Workspace selection, a relative cwd, a context revision or a ContextBinding.
-- **Digests.** Java and TypeScript share no digest canonicalization. The Broker's JDBC repositories already derive keys as SHA-256 over length-prefixed UTF-8 fields (`JdbcRepositorySupport.digest`). TypeScript core has a private canonical-JSON digest for session records.
+- **Digests.** Java and TypeScript share no digest canonicalization. The Broker's JDBC repositories already derive keys as SHA-256 over length-prefixed UTF-8 fields (`JdbcRepositorySupport.digest`). TypeScript core session records use a private canonical-JSON encoder; the exported `managedSessionEventsDigest` covers only the ordered event identities.
 
 ## Goals
 
 - One lexical rule for the relative working directory (`cwdRelative`), based on the `WorkspaceRelativePath` rule of the reference contract. Language-neutral fixtures pin it, so Java and TypeScript reject and normalize the same inputs.
 - A Workspace Registry record and a read contract, backed first by deployment configuration.
-- Actor-scoped access with three levels. It drives list visibility, the `can_create_session` hint and creation admission.
+- Actor-scoped access with three levels. It drives list visibility, the `canCreateSession` hint and creation admission.
 - A pure resolver that turns an actor and an optional selection into either a resolved Workspace or exactly one typed error. It covers the tenant default for an omitted selection.
 - A `ContextBinding` value whose `contextDigest` Java and TypeScript compute identically, pinned by shared fixtures.
 - A normalized form of the caller's selection, including an omission marker, that W0b can fold into its request digest.
@@ -35,22 +35,17 @@ The facts below are from `main` at `3413e8cc57`.
 - Persisting Session bindings, creation receipts or operations. That is W0b.
 - Resolving storage to a mount; wiring the Broker, Harness or worker; opening an activation gate. That is W0c.
 - The versioned boot envelope `managed-context/1` and any attestation version bump. See [Boot envelope](#boot-envelope).
-- Public or BFF DTOs, routes, cursors and capability advertisement. `workspace_context` stays false. That is Stage D and W0d.
+- Public or BFF DTOs, routes and cursors, which belong to Stage D and W0d, and capability advertisement: `workspace_context` stays false until every W0 slice has passed, which W0e decides.
 - Agent, Bundle and configuration compatibility checks at admission. That is W0b.
 - Filesystem checks: existence, realpath, symlinks and mount identity. Those belong to the Runtime in W0c.
 - JDBC tables for the Registry. The configuration-backed Registry needs none, and the Runtime Broker schema stays unchanged.
 - Changes to the daemon `WorkspaceRegistry` or to daemon routes.
 
-## Module placement
+## Placement
 
-Option A is implemented, and the choice remains open for review in #12380. Either way the code stays framework-neutral: no Spring, no CLI internals, no scheduler, and no fallback to in-memory state behind a failing durable source.
+The code is the package `com.alibaba.qwen.code.runtimebroker.managedworkspace` inside the existing `packages/sdk-java/runtime-broker` module, as #12380 decided. A separate Maven module was set aside: it would have needed its own pom, CI lane and workflow-guard tests before any Registry logic was reviewable. A package keeps the change to the domain code and lets W0c wire the binding through `HarnessSessionResolver` in the same module. If the Registry later needs its own schema lifecycle, or a consumer that must not pull in the Broker, it can move to a module of its own then.
 
-| Option          | Location                                                                                                                 | For                                                                                                                                                                                                                        | Against                                                                                                                                                                              |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A (recommended) | A new module `packages/sdk-java/managed-workspace` (artifact `qwen-managed-workspace`, Java 21, no runtime dependencies) | The Registry, access and resolution are control-plane admission, not Broker state. The module does not overlap the open Broker PRs (#12627, #12630, #12637). The Broker depends on its small `ContextBinding` type in W0c. | The SDK Java workflow runs modules explicitly. The self-hosted and hosted Java 21 steps, the Checkstyle step and `scripts/tests/sdk-java-workflow.test.js` each need the new module. |
-| B               | A package inside `runtime-broker`                                                                                        | No CI change. `ContextBinding` sits next to its first consumer.                                                                                                                                                            | The module's README and QWEN.md limit it to Broker state and exclude public Agent resources. Its README is also being edited by #12627.                                              |
-
-In both options, the shared fixtures and the TypeScript twin of the rule and the digest live under `packages/cli/src/serve`, next to the existing Runtime contracts.
+The package stays framework-neutral: it uses only the JDK and no other Broker class, no Spring, no CLI internals and no scheduler, and nothing falls back to in-memory state behind a failing durable source. The shared fixtures and the TypeScript twin of the rule and the digest live under `packages/cli/src/serve`, next to the existing Runtime contracts.
 
 ## Vocabulary
 
@@ -115,11 +110,11 @@ The embedding service applies a change by replacing the snapshot. A successor ch
 - Lower a Workspace's generation.
 - Change its `storageId` without raising its generation.
 
-A later JDBC Registry, backed by the reference `managed_agent_workspace` table, can implement the same interface.
+A later JDBC Registry, backed by the reference `managed_agent_workspace` table, can implement the same interface. It must compare tenant IDs exactly, as this package does: the reference schema leaves `tenant_id` in the base table's collation, which may ignore case.
 
 ## Actor access
 
-The embedding service authenticates the actor and passes in a tenant ID and an actor ID. W0a never reads either from a request body. A policy returns one of three access levels for an actor and a record:
+The embedding service authenticates the actor and passes in a tenant ID and an actor ID. W0a never reads either from a request body. The actor ID follows the `displayName` rule rather than the identifier rule, so an e-mail address works. A policy returns one of three access levels for an actor and a record:
 
 - `NONE`
 - `READ`
@@ -127,7 +122,7 @@ The embedding service authenticates the actor and passes in a tenant ID and an a
 
 Lookups are always scoped to the actor's tenant. A Workspace in another tenant cannot be told apart from a missing one, whatever the policy says. The policy is evaluated on every call and is never baked into a page or a result. W0a ships one explicit-grant policy for tests and single-tenant deployments; there is no allow-all default.
 
-Listing returns the records the actor can read, each with `canCreateSession`. That field is a permission hint only; the state is reported separately and the caller combines the two. Records come in Workspace ID order, with `hasMore` and a `defaultWorkspace`. The default is computed independently of the page and is present only when the tenant default exists, is `active`, and the actor has `CREATE`. Paging is by the last Workspace ID seen. The catalog reads the Registry in batches of 1000 whatever the page size, so records the actor cannot read cost few round trips. Opaque cursors bound to tenant, actor and query belong to the API layer.
+Listing returns the records the actor can read, each with `canCreateSession`. That field is a permission hint only; the state is reported separately and the caller combines the two. Records come in Workspace ID order, with `hasMore` and a `defaultWorkspace`. The default is computed independently of the page and is present only when the tenant default exists, is `active`, and the actor has `CREATE`. Paging is by the last Workspace ID seen. The catalog reads the Registry in batches of 1000 whatever the page size, and a batch shorter than 1000 ends the scan. To keep `hasMore` exact, it scans past a full page until it finds one more readable record or reaches that end. A listing therefore makes at most one Registry page read for every full 1000 records it scans, plus one, however few of them the actor can read; looking up the default adds one or two more calls. Opaque cursors bound to tenant, actor and query belong to the API layer.
 
 ## Working-directory rule
 
@@ -211,22 +206,23 @@ Reasons for this encoding:
 
 - Length prefixes keep field boundaries unambiguous for any Unicode directory name.
 - There is no JSON escaping or number formatting for fastjson2 and `JSON.stringify` to disagree on.
-- The Broker's repository keys already use the same construction, and it takes a few lines in TypeScript.
+- The Broker's repository-key digests already prefix each UTF-8 item with a 4-byte big-endian length, though without a domain tag or the `sha256:` prefix. The encoding takes a few lines in TypeScript.
 - Generations and revisions are decimal strings, so a JavaScript consumer never routes a 64-bit value through `Number`.
 - The `sha256:` prefix matches `capabilityDigest` in the private Runtime protocol. Session-record `DurableRef` digests are bare hex; a later journal reference must convert explicitly.
 
 The digest covers the Session's context only. The Runtime binding ID and generation, and the Harness owner generation, are bound at execution by the invocation wrapper in W0c. `displayName` does not affect execution. `policyRef` reaches execution through `contextConfigRef`.
 
-Both languages consume shared fixtures in `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`, validated against a schema file next to them. The file has two case lists:
+Both languages consume shared fixtures in `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`, validated against a schema file next to them. The file has three case lists:
 
 - **Paths:** an input, and either the normalized result or `invalid_cwd`.
 - **Bindings:** the fields, and either the hex of the encoded bytes with `contextDigest`, or a rejection.
+- **Character probes:** a directory or binding-field template with one `{c}` slot, and the exact ranges of code points the rule accepts in that slot. Each probe is run with every code point of the Basic Multilingual Plane (U+0000 to U+FFFF), which holds every control character, space separator and surrogate, and with the astral blocks that mimic ASCII: the mathematical alphanumeric symbols, the enclosed alphanumeric supplement and the tag characters, plus U+10000, U+1D11E, U+1F600, U+F0000 and U+10FFFF. A class that gains or loses any of these code points fails a probe; other astral code points are not probed.
 
-The cases cover both sides of each rule's boundaries, including non-ASCII names, a segment of spaces only and a generation above 2^53. The expected values were computed by an implementation independent of both languages.
+The cases cover both sides of each rule's boundaries, including non-ASCII names, a segment of spaces only, a generation above 2^53 and a generation of 2^63−1. The expected values were computed by an implementation independent of both languages.
 
 ## Boot envelope
 
-The boot envelope is a separate slice (W0a-2), pending the answer in #12380. This slice fixes what the envelope will carry: the ContextBinding fields, their normalization and the digest. W0a-2 must then do the following:
+The boot envelope is a separate slice (W0a-2). #12380 asked for its shape to be decided now, on top of the execute contract (#12630, since merged); it follows this slice as a change of its own. This slice fixes what the envelope will carry: the ContextBinding fields, their normalization and the digest. W0a-2 must then do the following:
 
 - Negotiate `managed-context/1`.
 - Add a new boot-document version that carries the ContextBinding and the inputs for the mount root and effective cwd. The daemon-style path hash survives only as a compatibility alias.
@@ -250,28 +246,26 @@ None of these succeeds on an unchanged retry. W0a raises them as one exception t
 ## Security and tenancy
 
 - The tenant and actor come only from the embedding service's authentication.
-- The error codes do not distinguish another tenant's Workspace, an unreadable Workspace and a missing one.
-- Workspace generations, storage IDs and configuration references come only from the Registry. A caller supplies at most a Workspace ID and a relative directory. No absolute path, mount, storage ID or generation is accepted from a caller, and none appears in an error or a list entry.
+- Errors do not distinguish another tenant's Workspace, an unreadable Workspace and a missing one: all three fail with the same code, message and throw site. The API layer must return only the status, code and message of a `WorkspaceException`, never its stack trace. Timing is not made uniform: an unreadable Workspace consults the access policy, and a missing one does not.
+- Workspace generations, storage IDs and configuration references come only from the Registry. A caller supplies at most a Workspace ID and a relative directory. No absolute path, mount, storage ID or generation is accepted from a caller, and none appears in an error or a list entry. W0b must build each ContextBinding from a resolved Workspace or from its own persisted binding, never from request fields. W0a does not enforce this: ContextBinding keeps a public constructor because the restore path needs one.
 - Resolution never falls back. An explicit selection gets no default, and an omitted selection never gets a launch cwd or the daemon's primary Workspace.
 - Access is evaluated on every call. No result carries authorization that outlives the call.
 - The working-directory rule is lexical. The Runtime still enforces containment, realpath and symlink safety at installation and at tool boundaries.
 
 ## Files affected
 
-Option A is implemented as follows.
-
-- `packages/sdk-java/managed-workspace/` (new):
+- The package `com.alibaba.qwen.code.runtimebroker.managedworkspace` in `packages/sdk-java/runtime-broker` (new):
   - The Registry record and state, the Registry interface and the configuration snapshot with its successor check.
   - The actor, the access levels and policy, and the explicit-grant policy.
   - The catalog that lists and resolves.
   - The selection and resolved Workspace, the working-directory rule, `ContextBinding` and the exception type.
-  - Tests, including the fixture consumer. Also a README and a QWEN.md.
+  - Tests in the matching test package, including the fixture consumer.
+- `packages/sdk-java/runtime-broker/README.md` and `QWEN.md`: a section on the package.
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` and `.schema.json` (new).
 - `packages/cli/src/serve/managed-workspace-binding.ts` and its test (new). This is the TypeScript twin of the working-directory rule and the digest. It is not wired into the worker yet.
-- `.github/workflows/sdk-java.yml` and `scripts/tests/sdk-java-workflow.test.js`: run the new module in the Java 21 jobs.
 - This design document, in both languages.
 
-`runtime-broker`, the daemon `WorkspaceRegistry`, the worker boot document and the attestation contract do not change.
+No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the worker boot document, the attestation contract or any CI workflow changes. The SDK Java workflow already runs the `runtime-broker` tests and Checkstyle, and its path filters cover both `packages/sdk-java/**` and `packages/cli/src/serve/**`.
 
 ## Validation plan
 
@@ -281,28 +275,26 @@ Option A is implemented as follows.
   - Listing: filtering, order, paging, and a default outside the current page.
   - Every resolution row, for both explicit and omitted selections.
   - The working-directory rule, and ContextBinding validation and digest.
-- **Fixture consumers:** Java and TypeScript both run every path and binding case. TypeScript validates the fixture file against its schema with strict Ajv.
-- **Mutation check:** revert each guard and confirm that a test fails.
-- **Commands:** `mvn test` and `mvn checkstyle:check` on JDK 21; `npm run build && npm run typecheck`; focused Vitest runs.
-- **CI:** the new module runs in the Java 21 jobs on Linux, macOS and Windows.
+- **Fixture consumers:** Java and TypeScript both run every path, binding and character-probe case. TypeScript validates the fixture file against its schema with strict Ajv.
+- **Mutation check:** revert or weaken each guard. This includes widening or narrowing each character class by any probed code point; exempting one control character; adding regular-expression flags; comparing case-insensitively; dropping the type check from `equals`; and making a constructor public. A mutant that changes behavior must fail a test, and a surviving mutant must be shown to be equivalent.
+- **Commands:** `mvn test` and `mvn checkstyle:check` in `packages/sdk-java/runtime-broker` on JDK 21; `npm run build && npm run typecheck`; focused Vitest runs.
+- **CI:** the existing `runtime-broker` steps run the package's tests in the Java 21 jobs on Linux, macOS and Windows, and Checkstyle on Linux. The module's Checkstyle configuration checks the main sources only, not the tests.
 
 ## Acceptance criteria
 
-- Java and TypeScript produce identical normalized paths and `contextDigest` values for every fixture. This includes non-ASCII names, a segment of spaces only and a generation above 2^53.
+- Java and TypeScript produce identical normalized paths and `contextDigest` values for every fixture. This includes non-ASCII names, a segment of spaces only and a generation above 2^53. TypeScript accepts exactly the listed code points in every character probe, and so does Java; Java carries generations and revisions as `long`, so its decimal probes check the rule its wire decoders must follow.
 - An omitted selection resolves only to an active tenant default in which the actor can create Sessions. Every other omitted case is `workspace_required`.
 - An explicit selection never falls back to the default.
 - Another tenant's Workspace and an unreadable Workspace produce the same `workspace_not_found`.
-- No caller-supplied absolute path, storage ID or generation can reach a resolved Workspace or a ContextBinding.
+- No caller-supplied absolute path, storage ID or generation can reach a resolved Workspace.
 - A replacement snapshot cannot drop a Workspace, lower its generation, or change its storage ID without a new generation.
-- The Java module does not depend on Spring, CLI internals, `runtime-broker` or a scheduler.
+- The Java package uses only the JDK: no other Broker class, Spring, CLI internals or scheduler.
 - The documentation does not claim persistence, wiring or capability advertisement.
 
 ## Open questions
 
-1. Module placement, option A or B. This is asked in #12380.
-2. Whether the boot envelope waits for the worker handler slice (F1-b), or its shape is agreed now. This is asked in #12380.
-3. Should `cwdRelative` reject every control character (C0, DEL and C1), as implemented, or only NUL, as the reference contract says? A newline or an escape sequence in a directory name reaches logs, UI and shell prompts.
-4. Should `removed` Workspaces appear in listings at all, or only in Session views?
+1. Should `cwdRelative` reject every control character (C0, DEL and C1), as implemented, or only NUL, as the reference contract says? A newline or an escape sequence in a directory name reaches logs, UI and shell prompts. The same concern applies to characters that are accepted today but are invisible or break lines: format characters (category Cf) such as bidirectional controls (U+202E, U+2066) and zero-width characters (U+200B, U+FEFF), and the line and paragraph separators U+2028 and U+2029 (categories Zl and Zp). Rejecting every format character would also reject legitimate joiners such as U+200D in emoji names.
+2. Should `removed` Workspaces appear in listings at all, or only in Session views?
 
 ## Follow-up work
 
