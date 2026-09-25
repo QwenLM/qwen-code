@@ -659,6 +659,30 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it.each([-1, 1.5, '5'])(
+      'warns that an invalid advisorMaxUses %s is ignored',
+      (advisorMaxUses) => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            p === USER_SETTINGS_PATH
+              ? JSON.stringify({
+                  [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                  advisorMaxUses,
+                })
+              : '{}',
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(getSettingsWarnings(settings)).toEqual([
+          expect.stringContaining('advisorMaxUses must be a non-negative'),
+        ]);
+      },
+    );
+
     it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,

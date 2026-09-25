@@ -404,6 +404,10 @@ function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
 }
 
+export function isValidAdvisorMaxUses(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
 function normalizeAdvisorModel(model: string | undefined): string | undefined {
   const trimmed = model?.trim();
   if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
@@ -3636,12 +3640,13 @@ export class Config {
         : undefined;
     this.fastModel = params.fastModel || undefined;
     this.advisorModel = normalizeAdvisorModel(params.advisorModel);
-    this.advisorMaxUses = params.advisorMaxUses ?? 0;
-    if (!Number.isSafeInteger(this.advisorMaxUses) || this.advisorMaxUses < 0) {
-      throw new Error(
-        'advisorMaxUses must be a non-negative integer (0 means unlimited).',
-      );
-    }
+    // Nothing validates settings.json on the load path, so a hand-edited
+    // -1, 1.5 or "5" reaches this constructor. Fall back to the default
+    // (unlimited) like the neighbouring numeric settings instead of refusing
+    // to start; the CLI surfaces a settings warning for the ignored value.
+    this.advisorMaxUses = isValidAdvisorMaxUses(params.advisorMaxUses)
+      ? params.advisorMaxUses
+      : 0;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;

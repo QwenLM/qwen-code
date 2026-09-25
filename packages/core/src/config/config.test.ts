@@ -6993,6 +6993,31 @@ describe('Server Config (config.ts)', () => {
       expect(config.getAdvisorUseCount()).toBe(1);
     });
 
+    it('treats an Advisor limit of 0 as unlimited', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 0,
+      });
+      for (let i = 0; i < 3; i++) {
+        expect(config.tryConsumeAdvisorUse()).toBe(true);
+      }
+      expect(config.getAdvisorUseCount()).toBe(3);
+    });
+
+    it('resets the Advisor count when a new session starts', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      config.startNewSession('next-advisor-session');
+      expect(config.getAdvisorUseCount()).toBe(0);
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+    });
+
     it('registers configured Advisor for ordinary subagent registries', async () => {
       const config = new Config({
         ...baseParams,
@@ -7008,12 +7033,14 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
-    it.each([-1, 1.5, NaN, Infinity])(
-      'rejects invalid Advisor limit %s',
+    it.each([-1, 1.5, NaN, Infinity, '5'])(
+      'falls back to unlimited for invalid Advisor limit %s',
       (advisorMaxUses) => {
-        expect(() => new Config({ ...baseParams, advisorMaxUses })).toThrow(
-          'advisorMaxUses',
-        );
+        const config = new Config({
+          ...baseParams,
+          advisorMaxUses: advisorMaxUses as number,
+        });
+        expect(config.getAdvisorMaxUses()).toBe(0);
       },
     );
 
