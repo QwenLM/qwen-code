@@ -69,6 +69,52 @@ test('persists collapsed session groups across reload @smoke', async ({
   );
 });
 
+test('keeps an observed completion unread across page reload until opened @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createOrganizedScenario();
+  const background = scenario.sessions.find(
+    (session) => session.sessionId === 'session-api-review',
+  )!;
+  background.hasActivePrompt = true;
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const section = page.locator('section[aria-label="Backend"]');
+  await expect(
+    section.locator('[data-web-shell-session-running]'),
+  ).toBeVisible();
+  background.hasActivePrompt = false;
+  const marker = section.locator('[data-web-shell-session-completed-unread]');
+  await expect(marker).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('before-reload.png') });
+
+  await page.reload();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  await completeReplay(
+    page,
+    daemon,
+    scenario.sessionId,
+    scenario.events.length,
+  );
+  await expect(marker).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('after-reload.png') });
+
+  await section.getByText('API review', { exact: true }).click();
+  await expect(section.getByText('API review', { exact: true })).toBeVisible();
+  await expect(marker).toHaveCount(0);
+  await completeReplay(page, daemon, background.sessionId);
+  await page.reload();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  await completeReplay(page, daemon, background.sessionId);
+  await expect(section.getByText('API review', { exact: true })).toBeVisible();
+  await expect(marker).toHaveCount(0);
+});
+
 test('keeps long session details inside a constrained WebShell @smoke', async ({
   page,
 }, testInfo) => {

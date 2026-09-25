@@ -7,6 +7,11 @@ import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
 import sidebarStyles from './WebShellSidebar.module.css';
 import {
+  getCompletedUnreadStorageKey,
+  readCompletedUnreadIds,
+  writeCompletedUnreadIds,
+} from './completedUnreadSessions';
+import {
   clickSidebarElement as click,
   flushSidebar,
   installSidebarDomShims,
@@ -46,6 +51,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
           | undefined,
       },
       workspace: {
+        baseUrl: 'http://daemon-a.test',
         capabilities: undefined as
           | {
               qwenCodeVersion: string;
@@ -247,6 +253,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   connection.sessionId = null;
+  workspace.baseUrl = 'http://daemon-a.test';
   connection.workspaceCwd = '/tmp/project';
   connection.capabilities = organizationCapabilities;
   workspace.capabilities = organizationCapabilities;
@@ -405,6 +412,176 @@ describe('WebShellSidebar collapsed session group persistence', () => {
         '[data-web-shell-collapsed-session-status="approval"]',
       ),
     ).not.toBeNull();
+  });
+
+  it('keeps a completed unread marker across remount until the session is opened', async () => {
+    const session = makeSession('completed-background', {
+      displayName: 'Completed background task',
+      hasActivePrompt: true,
+    });
+    active.sessions = [session];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelectorAll('[data-web-shell-session-completed-unread]'),
+    ).toHaveLength(1);
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    renderSidebar();
+    await flushSidebar();
+    const marker = container.querySelector(
+      '[data-web-shell-session-completed-unread]',
+    );
+    expect(marker).not.toBeNull();
+
+    const row = marker!.closest<HTMLElement>('[role="button"]');
+    expect(row).not.toBeNull();
+    act(() => click(row!));
+    await flushSidebar();
+    expect(loadSession).toHaveBeenCalledWith(
+      'completed-background',
+      '/tmp/project',
+    );
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+  });
+
+  it('keeps restored markers isolated when switching daemons without remounting', async () => {
+    const storageKey = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identity = '/tmp/project\0same-session';
+    writeCompletedUnreadIds(storageKey, new Set([identity]));
+    active.sessions = [makeSession('same-session')];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelectorAll('[data-web-shell-session-completed-unread]'),
+    ).toHaveLength(1);
+
+    workspace.baseUrl = 'http://daemon-b.test';
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(readCompletedUnreadIds(storageKey)).toEqual(new Set([identity]));
+    expect(
+      readCompletedUnreadIds(getCompletedUnreadStorageKey(workspace.baseUrl)),
+    ).toEqual(new Set());
+
+    workspace.baseUrl = 'http://daemon-a.test';
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelectorAll('[data-web-shell-session-completed-unread]'),
+    ).toHaveLength(1);
+  });
+
+  it('does not interpret another daemon idle session as completion of a running session', async () => {
+    active.sessions = [makeSession('same-session', { hasActivePrompt: true })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    workspace.baseUrl = 'http://daemon-b.test';
+    active.sessions = [makeSession('same-session', { hasActivePrompt: false })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(
+      readCompletedUnreadIds(getCompletedUnreadStorageKey(workspace.baseUrl)),
+    ).toEqual(new Set());
+  });
+
+  it('clears restored running and currently open markers on the first snapshot', async () => {
+    const storageKey = getCompletedUnreadStorageKey(workspace.baseUrl);
+    writeCompletedUnreadIds(
+      storageKey,
+      new Set(['/tmp/project\0running', '/tmp/project\0opened']),
+    );
+    connection.sessionId = 'opened';
+    active.sessions = [
+      makeSession('running', { hasActivePrompt: true }),
+      makeSession('opened'),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(readCompletedUnreadIds(storageKey)).toEqual(new Set());
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    connection.sessionId = null;
+    active.sessions = [makeSession('running'), makeSession('opened')];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+  });
+
+  it('preserves unseen workspace and source markers without marking the same id in another workspace', async () => {
+    const storageKey = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identities = new Set([
+      '/tmp/project\0same-session',
+      '/tmp/other\0other-unread',
+      '/tmp/project\0channel-unread',
+    ]);
+    writeCompletedUnreadIds(storageKey, identities);
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: ['session_organization', 'session_source_metadata'],
+    };
+    connection.workspaceCwd = '/tmp/other';
+    active.sessions = [
+      makeSession('same-session', { workspaceCwd: '/tmp/other' }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(container.textContent).toContain('Session same-session');
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(readCompletedUnreadIds(storageKey)).toEqual(identities);
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    connection.workspaceCwd = '/tmp/project';
+    active.sessions = [makeSession('same-session')];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelectorAll('[data-web-shell-session-completed-unread]'),
+    ).toHaveLength(1);
+    expect(readCompletedUnreadIds(storageKey)).toEqual(identities);
   });
 
   it('prioritizes the prompt spinner over the background icon and clears it on completion', async () => {
