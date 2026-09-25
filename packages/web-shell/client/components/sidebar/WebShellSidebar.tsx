@@ -37,6 +37,7 @@ import {
   ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
+  LoaderCircleIcon,
   ListTodoIcon,
   MessageCircleIcon,
   EllipsisVerticalIcon,
@@ -107,6 +108,7 @@ import {
   sessionMatchesSource as matchesSessionSource,
 } from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
+import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
@@ -428,7 +430,16 @@ interface WebShellSidebarProps {
     sessionId: string,
     displayName: string,
   ) => void;
-  onSessionsDeleted?: (sessionIds: string[]) => void;
+  /**
+   * `attachedSessionId` is the session this client was attached to when the
+   * delete was confirmed. The daemon publishes the terminal `session_closed`
+   * frame before the delete request resolves, so the attachment is no longer
+   * readable off the connection by the time this callback runs (#12619).
+   */
+  onSessionsDeleted?: (
+    sessionIds: string[],
+    meta?: { attachedSessionId?: string },
+  ) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -984,6 +995,7 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const livePresence = useLivePresence(workspace.client);
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -1142,7 +1154,10 @@ export function WebShellSidebar({
   const liveStateWorkspaceCwds = useMemo(
     () =>
       displayedWorkspaces
-        .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+        .filter(
+          (entry) =>
+            entry.kind !== 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+        )
         .map((entry) => entry.cwd),
     [displayedWorkspaces],
   );
@@ -1968,7 +1983,12 @@ export function WebShellSidebar({
   );
   const canDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
-      !isCurrentSession(session) && canShowDeleteSession(session),
+      // The current session is deletable too (issue #12619), but deleting the
+      // session the client is attached to tears its runtime down — match the
+      // Session Overview's idle-only policy for that case.
+      (!isCurrentSession(session) ||
+        (!session.hasActivePrompt && session.activeWorkState !== 'active')) &&
+      canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
   );
   const canOrganizeSession = useCallback(
@@ -2817,6 +2837,37 @@ export function WebShellSidebar({
     ],
   );
 
+  const livePendingContent = livePresence ? (
+    <>
+      <LoaderCircleIcon aria-hidden="true" />
+      <span>{t('sidebar.liveVoicePending')}</span>
+    </>
+  ) : null;
+  const liveCoordinator = livePresence?.coordinator;
+  const livePendingRow = liveCoordinator ? (
+    <button
+      type="button"
+      className={styles.livePendingSession}
+      data-live-pending-session
+      onClick={() =>
+        handleLoadSession(
+          liveCoordinator.sessionId,
+          liveCoordinator.workspaceCwd,
+        )
+      }
+    >
+      {livePendingContent}
+    </button>
+  ) : livePresence ? (
+    <div
+      className={styles.livePendingSession}
+      role="status"
+      data-live-pending-session
+    >
+      {livePendingContent}
+    </div>
+  ) : null;
+
   const startRename = useCallback(
     (session: DaemonSessionSummary) => {
       if (!canRenameSession(session)) return;
@@ -3064,6 +3115,12 @@ export function WebShellSidebar({
       setDeleteCandidate(null);
       return;
     }
+    // Captured before the request: the daemon's terminal `session_closed`
+    // frame clears `connection.sessionId` before the delete resolves, so this
+    // is the last point where the attachment is still readable (#12619).
+    const attachedSessionId = isCurrentSession(deleteCandidate)
+      ? sessionId
+      : undefined;
     const scope = resolveSessionWorkspaceScope(deleteCandidate);
     const isArchived = Boolean(deleteCandidate.isArchived);
     const removeSession =
@@ -3088,7 +3145,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
-        onSessionsDeleted?.([sessionId]);
+        onSessionsDeleted?.([sessionId], { attachedSessionId });
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
@@ -3107,6 +3164,7 @@ export function WebShellSidebar({
     deleteCandidate,
     deleteSession,
     getIdentityForSession,
+    isCurrentSession,
     onError,
     onSessionsDeleted,
     primaryWorkspaceCwd,
@@ -4193,6 +4251,11 @@ export function WebShellSidebar({
         standalone,
       } = options;
       const sessionIdentity = getIdentityForSession(session);
+      const liveStarting =
+        livePresence?.state === 'starting' &&
+        (livePresence.coordinator?.sessionId === session.sessionId ||
+          (livePresence.callId !== undefined &&
+            session.sourceId === `realtime_voice:${livePresence.callId}`));
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
       // Rows stay text-only; the precise date lives in the hover popover.
@@ -4438,6 +4501,21 @@ export function WebShellSidebar({
       const showDelete = standalone
         ? sessionActionItems.has('delete')
         : canShowDeleteSession(session);
+      // `showDelete` already applied the workspace-scope gate — standalone rows
+      // bypass it on purpose — so the disabled state only carries #12619's rule:
+      // the session this client is attached to is deletable once it goes idle.
+      // The no-workspace row is the exception: its delete route answers
+      // `session_busy` while this tab is still attached, so offering it would be
+      // a button that can never succeed. Keep it disabled until the user opens
+      // another chat (leaving first, then deleting, is tracked separately).
+      const currentStandalone = Boolean(standalone?.active);
+      const deleteDisabled =
+        busy || currentStandalone || (isCurrent && running);
+      const deleteDisabledTitle = currentStandalone
+        ? t('sidebar.currentStandaloneDeleteDisabled')
+        : isCurrent && running
+          ? t('sidebar.currentDeleteDisabled')
+          : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
@@ -4486,14 +4564,21 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {completedUnread && !backgroundRunning ? (
+            {liveStarting ? (
+              <LoaderCircleIcon
+                className={styles.liveSessionSpinner}
+                aria-label={t('live.state.starting')}
+                data-live-starting-session
+              />
+            ) : null}
+            {!liveStarting && completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
-            {backgroundRunning && (
+            {!liveStarting && backgroundRunning && (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4505,7 +4590,7 @@ export function WebShellSidebar({
                 title={t('background.running')}
               />
             )}
-            {session.hasActivePrompt && !completedUnread ? (
+            {!liveStarting && session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4514,7 +4599,10 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !completedUnread && !backgroundRunning ? (
+            ) : !liveStarting &&
+              sessionWorkActive &&
+              !completedUnread &&
+              !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
@@ -4656,11 +4744,9 @@ export function WebShellSidebar({
                           key: 'delete',
                           icon: <Trash2Icon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.delete'),
-                          disabled: busy || isCurrent,
+                          disabled: deleteDisabled,
                           destructive: true,
-                          title: isCurrent
-                            ? t('sidebar.currentDeleteDisabled')
-                            : undefined,
+                          title: deleteDisabledTitle,
                           visible:
                             showDelete && inlineActionItems.has('delete'),
                           onClick: () => {
@@ -4792,12 +4878,8 @@ export function WebShellSidebar({
                             {showDelete && !inlineActionItems.has('delete') && (
                               <DropdownMenuItem
                                 variant="destructive"
-                                disabled={busy || isCurrent}
-                                title={
-                                  isCurrent
-                                    ? t('sidebar.currentDeleteDisabled')
-                                    : undefined
-                                }
+                                disabled={deleteDisabled}
+                                title={deleteDisabledTitle}
                                 onSelect={() => {
                                   if (standalone) standalone.onDelete();
                                   else handleDeleteSession(session);
@@ -4853,6 +4935,7 @@ export function WebShellSidebar({
       searchQuery,
       sessionActionItems,
       inlineActionItems,
+      livePresence,
       startRename,
       t,
     ],
@@ -5726,6 +5809,22 @@ export function WebShellSidebar({
                   )}
                 </>
               )}
+            {showLive && livePresence && liveWorkspaces.length === 0 && (
+              <div
+                className={styles.livePendingWorkspace}
+                data-live-pending-workspace
+              >
+                <div className={styles.livePendingHeader}>
+                  <RadioTowerIcon
+                    size={16}
+                    strokeWidth={1.2}
+                    aria-hidden="true"
+                  />
+                  <span>{t('sidebar.live')}</span>
+                </div>
+                {livePendingRow}
+              </div>
+            )}
             {liveWorkspaces.map((ws) => (
               <WorkspaceSection
                 key={ws.id}
@@ -5756,6 +5855,20 @@ export function WebShellSidebar({
                   </>
                 )}
                 client={workspace.client}
+                pendingSession={
+                  livePresence &&
+                  (!livePresence.coordinator ||
+                    livePresence.coordinator.workspaceCwd === ws.cwd)
+                    ? {
+                        key: livePresence.callId ?? 'connecting',
+                        sessionId: livePresence.coordinator?.sessionId,
+                        sourceId: livePresence.callId
+                          ? `realtime_voice:${livePresence.callId}`
+                          : undefined,
+                        node: livePendingRow,
+                      }
+                    : undefined
+                }
                 reloadToken={workspaceSessionsReloadToken}
                 untrustedLabel={t('sidebar.workspaceUntrusted')}
                 readOnlyLabel={t('sidebar.workspaceReadOnly')}
@@ -5776,10 +5889,15 @@ export function WebShellSidebar({
                 limitSessions={editingSessionIdentity === null}
                 isPinnedSectionMember={isPinnedSectionMember}
                 autoExpandKey={
-                  autoExpandWorkspace?.id === ws.id
-                    ? autoExpandWorkspace.key
-                    : undefined
+                  livePresence &&
+                  (!livePresence.coordinator ||
+                    livePresence.coordinator.workspaceCwd === ws.cwd)
+                    ? `live:${livePresence.callId ?? 'connecting'}`
+                    : autoExpandWorkspace?.id === ws.id
+                      ? autoExpandWorkspace.key
+                      : undefined
                 }
+                forceAutoExpand={Boolean(livePresence)}
                 renderSession={(session, options) =>
                   renderSessionRow(
                     { ...session, workspaceCwd: ws.cwd },

@@ -10,6 +10,8 @@ import express from 'express';
 import type { Application, ErrorRequestHandler, RequestHandler } from 'express';
 
 export const MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES = 16 * 1024;
+export const MANAGED_RUNTIME_TOOL_REQUEST_BODY_LIMIT_BYTES = 256 * 1024;
+export const MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES = 1024 * 1024;
 
 export const OWNED_MANAGED_RUNTIME_ROUTES = Object.freeze([
   Object.freeze({
@@ -19,6 +21,33 @@ export const OWNED_MANAGED_RUNTIME_ROUTES = Object.freeze([
     protocolVersion: 2,
     requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
     responseBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
+  Object.freeze({
+    key: 'execute',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/execute',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_TOOL_REQUEST_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
+  Object.freeze({
+    key: 'status',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/status',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
+  Object.freeze({
+    key: 'cancel',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/cancel',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
     cacheControl: 'no-store',
   }),
 ] as const);
@@ -282,9 +311,7 @@ export function isOwnedManagedRuntimeRoute(
   method: string | undefined,
   url: string | undefined,
 ): boolean {
-  return OWNED_MANAGED_RUNTIME_ROUTES.some(
-    (route) => method === route.method && url === route.path,
-  );
+  return method === ATTEST_ROUTE.method && url === ATTEST_ROUTE.path;
 }
 
 export function ownedManagedRuntimeRouteGate(

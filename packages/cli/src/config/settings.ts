@@ -22,6 +22,7 @@ import type {
 import stripJsonComments from 'strip-json-comments';
 import {
   parseExecutionSandboxSettings,
+  readBareModeOperatorSettings,
   readOperatorSandboxSettings,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
@@ -39,6 +40,7 @@ import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver
 import {
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
@@ -385,6 +387,12 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   // the strip that produces it.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
   if (workspaceFile.rawJson !== undefined) {
+    for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+      if (workspaceFile.originalSettings[key] === undefined) continue;
+      warningSet.add(
+        `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+      );
+    }
     for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
       const sectionValue = workspaceFile.originalSettings[section] as
         | Record<string, unknown>
@@ -496,7 +504,13 @@ function stripSettingKeys(
  * cannot opt the user into those capabilities.
  */
 function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
-  return stripSettingKeys(settings, WORKSPACE_RESTRICTED_SETTINGS);
+  let stripped = settings;
+  for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+    if (stripped[key] === undefined) continue;
+    const { [key]: _restricted, ...rest } = stripped;
+    stripped = rest as Settings;
+  }
+  return stripSettingKeys(stripped, WORKSPACE_RESTRICTED_SETTINGS);
 }
 
 /**
@@ -914,20 +928,22 @@ export class LoadedSettings {
  * Used in stream-json mode where settings are ignored.
  */
 export function createMinimalSettings(): LoadedSettings {
-  const operator = readOperatorSandboxSettings();
+  const operator = readBareModeOperatorSettings();
   const executionSandbox = parseExecutionSandboxSettings(
     operator.tools?.executionSandbox,
   );
   const legacy = operator.tools?.sandbox;
-  const operatorSettings: Settings =
-    executionSandbox || legacy === 'bwrap'
+  const operatorSettings: Settings = {
+    ...(executionSandbox || legacy === 'bwrap'
       ? {
           tools: {
             executionSandbox,
             sandbox: legacy as boolean | string | undefined,
           },
         }
-      : {};
+      : {}),
+    ...(operator.privacy ? { privacy: operator.privacy } : {}),
+  };
   const emptySettingsFile: SettingsFile = {
     path: '',
     settings: {},

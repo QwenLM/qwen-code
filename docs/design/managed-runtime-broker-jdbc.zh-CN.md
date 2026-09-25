@@ -53,7 +53,7 @@ Schema 初始化会对四张 Broker 私有表执行幂等的 `CREATE TABLE IF NO
 
 ## 恢复边界
 
-持久化的 Binding 或 Session 行只能证明 Broker 状态仍然存在，不能证明它引用的 Runtime 进程仍然存活。同样，`UNKNOWN` Tool Execution 记录的是不确定性，不能证明副作用是否已经发生。进程对账、传输健康检查和权威执行对账仍属于后续 Runtime 集成的职责。
+持久化的 Binding 或 Session 行只能证明 Broker 状态仍然存在，不能证明它引用的 Runtime 进程仍然存活。同样，`UNKNOWN` Tool Execution 记录的是不确定性，不能证明副作用是否已经发生。进程对账和传输健康检查仍属于后续 Runtime 集成的职责。按需执行对账会询问原 Runtime，只在其给出终态证据时经 `resolveUnknown` 结算；参见 `managed-runtime-broker-service-core.zh-CN.md` 的 UNKNOWN 对账一节。
 
 ## 安全与租户隔离
 
@@ -94,4 +94,4 @@ Repository 契约覆盖：
 
 ## 后续工作
 
-服务端装配、进程对账、权威 `UNKNOWN` 解决、Schema migration 部署和多进程端到端验证仍属于后续工作。
+服务端装配、进程对账、`UNKNOWN` 执行的接管扫描、Schema migration 部署和多进程端到端验证仍属于后续工作。
