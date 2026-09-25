@@ -1099,8 +1099,17 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
       params: Record<string, unknown> = {},
       allowDraining = false,
     ): Promise<T> => {
-      const { managedToolDigest, MANAGED_TOOL_FILE_HISTORY_MAX_BYTES } =
-        await import('@qwen-code/qwen-code-core');
+      // Leaf modules, not the core barrel: a dynamic import of the barrel
+      // keeps every core export, and with it the encoding tables and other
+      // runtime the serve fast path must not load
+      // (scripts/check-serve-fast-path-bundle.js).
+      const [{ managedToolDigest }, { MANAGED_TOOL_FILE_HISTORY_MAX_BYTES }] =
+        await Promise.all([
+          import('@qwen-code/qwen-code-core/tools/managed-tool-protocol.js'),
+          import(
+            '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js'
+          ),
+        ]);
       this.lifetime.signal.throwIfAborted();
       if (this.entries.get(entry.request.sessionId) !== entry) {
         throw new ManagedRuntimeProviderError(
@@ -1189,11 +1198,18 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
     return {
       fileHistory: {
         bind: async (binding) => {
-          const {
-            parseManagedToolFileHistoryBinding,
-            parseManagedToolFileHistoryState,
-            ManagedToolProtocolError,
-          } = await import('@qwen-code/qwen-code-core');
+          const [
+            {
+              parseManagedToolFileHistoryBinding,
+              parseManagedToolFileHistoryState,
+            },
+            { ManagedToolProtocolError },
+          ] = await Promise.all([
+            import(
+              '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js'
+            ),
+            import('@qwen-code/qwen-code-core/tools/managed-tool-protocol.js'),
+          ]);
           const parsed = parseManagedToolFileHistoryBinding(binding);
           const state = parseManagedToolFileHistoryState(
             await call('bind-history', { binding: parsed }),
@@ -1208,7 +1224,9 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
           const {
             parseManagedToolFileHistoryPromptId,
             parseManagedToolFileHistoryState,
-          } = await import('@qwen-code/qwen-code-core');
+          } = await import(
+            '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js'
+          );
           return parseManagedToolFileHistoryState(
             await call('checkpoint', {
               promptId: parseManagedToolFileHistoryPromptId(promptId),
@@ -1217,7 +1235,7 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
         },
         snapshot: async () => {
           const { parseManagedToolFileHistoryState } = await import(
-            '@qwen-code/qwen-code-core'
+            '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js'
           );
           return parseManagedToolFileHistoryState(
             await call('history', {}, true),

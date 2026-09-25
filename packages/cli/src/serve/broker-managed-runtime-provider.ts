@@ -6,10 +6,13 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import {
-  type ManagedToolExecutionResult,
-  type ManagedToolInvocationStatus,
-  type ManagedToolV2Client,
+// Type-only: under verbatimModuleSyntax an `import { type X }` still loads the
+// module, and managed-tool-runtime pulls the whole Config graph into the
+// serve fast path (scripts/check-serve-fast-path-bundle.js).
+import type {
+  ManagedToolExecutionResult,
+  ManagedToolInvocationStatus,
+  ManagedToolV2Client,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
 import {
   managedToolDigest,

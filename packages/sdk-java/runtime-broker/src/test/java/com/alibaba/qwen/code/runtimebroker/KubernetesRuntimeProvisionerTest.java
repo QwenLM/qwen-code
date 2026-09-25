@@ -207,6 +207,33 @@ class KubernetesRuntimeProvisionerTest {
                 observation.getOutcome());
     }
 
+    @Test
+    void checksContainerPathsAsPosixWhateverTheHostOs() {
+        FakeClient client = new FakeClient();
+        for (String accepted : List.of("/", "/usr/bin/node",
+                "/app/dist/cli.js")) {
+            new KubernetesRuntimeProvisioner(client, "cluster-a",
+                    "qwen-runtimes", "registry/qwen-runtime:test", 4190,
+                    accepted, "/app/dist/cli.js", "/app/dist/cli.js",
+                    null, null);
+        }
+        for (String rejected : List.of("usr/bin/node", "C:\\node.exe",
+                "//usr/bin/node", "/usr//bin/node", "/usr/./bin/node",
+                "/usr/../bin/node", "/usr/bin/", "/usr/bin/node/.",
+                "/usr/bin/\u0000node")) {
+            IllegalArgumentException error = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new KubernetesRuntimeProvisioner(client,
+                            "cluster-a", "qwen-runtimes",
+                            "registry/qwen-runtime:test", 4190, rejected,
+                            "/app/dist/cli.js", "/app/dist/cli.js", null,
+                            null),
+                    rejected);
+            assertEquals("nodeExecutable must be an absolute normalized path",
+                    error.getMessage());
+        }
+    }
+
     private static KubernetesRuntimeProvisioner provisioner(
             FakeClient client) {
         return new KubernetesRuntimeProvisioner(client, "cluster-a",

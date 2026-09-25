@@ -20,8 +20,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
+// The provisioner manages POSIX process groups and refuses to start on
+// Windows; LocalProcessRuntimeProvisionerPlatformTest pins that refusal.
+@DisabledOnOs(OS.WINDOWS)
 class LocalProcessRuntimeProvisionerTest {
     @TempDir
     Path temporary;

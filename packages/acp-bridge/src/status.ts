@@ -6,7 +6,7 @@
 
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
 import type { HookEventName } from '@qwen-code/qwen-code-core';
-import { SkillError } from '@qwen-code/qwen-code-core';
+import { SkillError } from '@qwen-code/qwen-code-core/skills/types.js';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 

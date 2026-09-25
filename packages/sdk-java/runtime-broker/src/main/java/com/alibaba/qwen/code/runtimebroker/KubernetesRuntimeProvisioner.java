@@ -5,7 +5,6 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -450,9 +449,8 @@ public final class KubernetesRuntimeProvisioner
             throw conflict("Kubernetes placement identity conflicts.");
         }
         String workspace = request.getScope().getCanonicalCwd();
-        if (!workspace.startsWith("/")
-                || !Path.of(workspace).normalize().toString()
-                        .equals(workspace)
+        if (!workspace.startsWith("/") || workspace.indexOf('\u0000') >= 0
+                || !normalizedPosixPath(workspace)
                 || !request.getScope().getWorkspaceId().equals(
                         digest(workspace).substring(0, 16))) {
             throw conflict("Kubernetes workspace identity conflicts.");
@@ -589,12 +587,27 @@ public final class KubernetesRuntimeProvisioner
 
     private static String absoluteContainerPath(String value, String name) {
         String path = required(value, name);
-        if (!path.startsWith("/")
-                || !Path.of(path).normalize().toString().equals(path)) {
+        // A container path is POSIX whatever OS the Broker runs on, so it is
+        // checked as a string rather than through the host's Path rules.
+        if (!path.startsWith("/") || path.indexOf('\u0000') >= 0
+                || !normalizedPosixPath(path)) {
             throw new IllegalArgumentException(
                     name + " must be an absolute normalized path");
         }
         return path;
+    }
+
+    private static boolean normalizedPosixPath(String path) {
+        if (path.equals("/")) {
+            return true;
+        }
+        for (String segment : path.substring(1).split("/", -1)) {
+            if (segment.isEmpty() || segment.equals(".")
+                    || segment.equals("..")) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String dnsLabel(String value, String name) {

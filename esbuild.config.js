@@ -181,6 +181,7 @@ const BUNDLE_CHUNK_DIR = 'chunks';
 const mainBuild = esbuild.build({
   entryPoints: {
     cli: 'packages/cli/src/cli.ts',
+    'execution-worker': 'packages/core/src/services/execution-worker-main.ts',
     'managed-runtime-worker':
       'packages/cli/src/serve/managed-runtime-worker-entry.ts',
   },

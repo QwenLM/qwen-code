@@ -20,7 +20,7 @@ import {
   getShellConfiguration,
   type ShellConfiguration,
 } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
-import { type CliArgs } from '../config/config.js';
+import type { CliArgs } from '../config/config.js';
 import { loadProjectMcpServers } from '../config/mcpJson.js';
 import { readSettingsSnapshot } from '../config/settings.js';
 import { createManagedAgentChannelFactory } from './managed-agent-channel.js';
