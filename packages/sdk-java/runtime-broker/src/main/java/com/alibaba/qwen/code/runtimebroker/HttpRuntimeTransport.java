@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
-import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import java.math.BigDecimal;
 import java.net.URI;
@@ -9,7 +8,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -264,12 +262,8 @@ public final class HttpRuntimeTransport {
             String operation) {
         Map<String, Object> fields;
         try {
-            // Keep fractional cursors exact before validating integer fields.
-            fields = BrokerValues.immutableMap(JSON.parseObject(
-                    new String(bytes, StandardCharsets.UTF_8),
-                    JSONReader.Feature.DisableReferenceDetect,
-                    JSONReader.Feature.UseBigDecimalForDoubles,
-                    JSONReader.Feature.UseBigDecimalForFloats));
+            fields = JsonCodec.parseObject(bytes,
+                    "Managed Runtime " + operation + " response");
         } catch (RuntimeException exception) {
             throw protocol("Managed Runtime " + operation
                     + " response is invalid.");

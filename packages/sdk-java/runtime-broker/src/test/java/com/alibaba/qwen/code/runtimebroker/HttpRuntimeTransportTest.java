@@ -138,8 +138,9 @@ class HttpRuntimeTransportTest {
         String body = new String(JSON.writeValueAsBytes(successBody()),
                 StandardCharsets.UTF_8)
                 .replace("\"protocolVersion\":2",
-                        "\"protocolVersion\":0.2E+1")
-                .replace("\"epoch\":4", "\"epoch\":0.4E+1");
+                        "\"protocolVersion\":0.20000000000000000000E+1")
+                .replace("\"epoch\":4",
+                        "\"epoch\":0.40000000000000000000E+1");
         reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
 
         RuntimeAttestation proof = attest().toCompletableFuture()
@@ -582,6 +583,13 @@ class HttpRuntimeTransportTest {
         byte[] exponentialEpoch = validJson.replace(
                 "\"epoch\":4", "\"epoch\":0.40000000000000001E+1")
                 .getBytes(StandardCharsets.UTF_8);
+        byte[] misScaledProtocol = validJson.replace(
+                "\"protocolVersion\":2",
+                "\"protocolVersion\":0.020000000000000000000E1")
+                .getBytes(StandardCharsets.UTF_8);
+        byte[] misScaledEpoch = validJson.replace(
+                "\"epoch\":4", "\"epoch\":0.040000000000000000000E1")
+                .getBytes(StandardCharsets.UTF_8);
         ObjectNode unknownField = successBody();
         unknownField.put("debug", true);
         ObjectNode newerProtocol = successBody();
@@ -599,6 +607,10 @@ class HttpRuntimeTransportTest {
         ObjectNode roundedUpEpoch = successBody();
         roundedUpEpoch.put("epoch",
                 new BigDecimal("4.0000000000000001"));
+        ObjectNode stringEpoch = successBody();
+        stringEpoch.put("epoch", "4");
+        ObjectNode booleanProtocol = successBody();
+        booleanProtocol.put("protocolVersion", true);
         Map<String, Reply> replies = new LinkedHashMap<>();
         replies.put("cache", new Reply(200, valid, "private",
                 "application/json"));
@@ -617,12 +629,19 @@ class HttpRuntimeTransportTest {
                 json(200, JSON.writeValueAsBytes(roundedUpProtocol)));
         replies.put("exponential rounded-up version",
                 json(200, exponentialProtocol));
+        replies.put("mis-scaled version",
+                json(200, misScaledProtocol));
+        replies.put("boolean version",
+                json(200, JSON.writeValueAsBytes(booleanProtocol)));
         replies.put("epoch",
                 json(200, JSON.writeValueAsBytes(fractionalEpoch)));
         replies.put("rounded-up epoch",
                 json(200, JSON.writeValueAsBytes(roundedUpEpoch)));
         replies.put("exponential rounded-up epoch",
                 json(200, exponentialEpoch));
+        replies.put("mis-scaled epoch", json(200, misScaledEpoch));
+        replies.put("string epoch",
+                json(200, JSON.writeValueAsBytes(stringEpoch)));
         for (Map.Entry<String, Reply> planned : replies.entrySet()) {
             reply.set(planned.getValue());
 
@@ -697,6 +716,7 @@ class HttpRuntimeTransportTest {
         String result = "{\"executionStatus\":\"success\","
                 + "\"responseParts\":[]}";
         for (String body : new String[] {
+                "{not valid json",
                 "{\"protocolVersion\":2,\"state\":\"unknown\",\"x\":1}",
                 "{\"protocolVersion\":1,\"state\":\"unknown\"}",
                 "{\"protocolVersion\":2,\"state\":\"unknown\","
@@ -715,8 +735,11 @@ class HttpRuntimeTransportTest {
                         + "\"error\":{\"message\":\"x\",\"type\":5}}}"}) {
             reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
 
-            assertEquals(400, awaitToolFailure("status").getStatusCode(),
-                    body);
+            RuntimeBrokerException failure = awaitToolFailure("status");
+            assertEquals(400, failure.getStatusCode(), body);
+            assertEquals("managed_runtime_attestation_invalid",
+                    failure.getCode(), body);
+            assertFalse(failure.isRetryable(), body);
         }
     }
 
