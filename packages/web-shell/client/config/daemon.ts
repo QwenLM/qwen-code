@@ -253,8 +253,9 @@ export function getAllowedDaemonOrigin(raw: string): string {
       return '';
     }
     // A bracketed IPv6 literal is not a valid CSP host-source (CSP3 host-part
-    // excludes '[', ']' and ':'), so a remote http://[::1]:4170 target would
-    // be served a connect-src every browser drops, and the gate would loop on
+    // excludes '[', ']' and ':'). The invalid source expression is ignored
+    // while the rest of connect-src stays in effect, so a remote
+    // http://[::1]:4170 target remains blocked and the gate would loop on
     // "unreachable" with only a console violation as evidence. Exempt the
     // page's own origin: 'self' covers it, and qwen serve --hostname '[::1]'
     // is a documented deployment.
