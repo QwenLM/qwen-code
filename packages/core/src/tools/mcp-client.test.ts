@@ -138,18 +138,21 @@ function mockAppOnlyMcpServer(): void {
 function legacyOptionalMethodTransportError(
   status = 400,
   code = -32601,
+  responseBody?: string,
 ): Error {
   const methodMessage =
     code === -32601 ? 'Method not found' : 'Session not found';
-  const responseBody = JSON.stringify({
-    jsonrpc: '2.0',
-    error: { code, message: methodMessage },
-    id: 1,
-  });
+  const body =
+    responseBody ??
+    JSON.stringify({
+      jsonrpc: '2.0',
+      error: { code, message: methodMessage },
+      id: 1,
+    });
   return new ClientLib.SdkHttpError(
     ClientLib.SdkErrorCode.ClientHttpNotImplemented,
-    `Error POSTing to endpoint: ${responseBody}`,
-    { status, statusText: `HTTP ${status}`, text: responseBody },
+    `Error POSTing to endpoint: ${body}`,
+    { status, statusText: `HTTP ${status}`, text: body },
   );
 }
 
@@ -2775,6 +2778,28 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       } as unknown as ClientLib.Client;
       const result = await listMcpPrompts('flaky', mockClient);
       expect(result).toEqual([]);
+    });
+
+    it('swallows a transport-wrapped -32601 body regardless of message wording', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(
+          legacyOptionalMethodTransportError(
+            400,
+            -32601,
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32601, message: 'Unsupported method' },
+              id: 1,
+            }),
+          ),
+        ),
+      } as unknown as ClientLib.Client;
+
+      await expect(listMcpPrompts('localized', mockClient)).resolves.toEqual(
+        [],
+      );
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
     });
 
     it('retries on transient ECONNRESET and succeeds on second attempt', async () => {

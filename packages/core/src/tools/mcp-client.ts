@@ -1741,16 +1741,21 @@ async function discoverToolsWithMetadata(
  * precise check. The message fallback (for transports that drop the code)
  * keeps the original case-sensitive exact substring `'Method not found'` —
  * deliberately NOT a broad `/method not found/i`, which would also swallow
- * unrelated errors like "Error in method not found handler: ...".
+ * unrelated errors like "Error in method not found handler: ...". Transport
+ * wrappers use the stricter JSON-RPC body/status predicate below; a wrapper
+ * that fails that gate is not treated as a method-not-found message.
  */
 function isMethodNotFound(error: unknown): boolean {
-  if (
-    error instanceof SdkHttpError ||
-    (error instanceof Error && LEGACY_MCP_SSE_ERROR_PATTERN.test(error.message))
-  ) {
-    return isBenignMcpMethodNotFound(error);
-  }
+  // Use the same JSON-RPC body predicate as the status callback. This keeps
+  // transport-wrapped -32601 responses quiet even when their message wording
+  // is not the literal "Method not found".
+  if (isBenignMcpMethodNotFound(error)) return true;
+  // A recognized transport error that fails the body/status gate must not
+  // fall through to the message substring, which could hide a 401 or 503.
+  if (isLegacyMcpTransportError(error)) return false;
   const code = (error as { code?: unknown } | null)?.code;
+  // Direct protocol errors reach discovery as request rejections rather than
+  // transport callbacks, so retain the numeric JSON-RPC fallback for them.
   if (code === -32601) return true;
   return error instanceof Error && error.message.includes('Method not found');
 }
@@ -1758,13 +1763,25 @@ function isMethodNotFound(error: unknown): boolean {
 const LEGACY_MCP_SSE_ERROR_PATTERN =
   /^Error POSTing to endpoint(?: \(HTTP (\d{3})\))?:\s*([\s\S]*)$/u;
 
+function isLegacyMcpTransportError(error: unknown): boolean {
+  return (
+    error instanceof SdkHttpError ||
+    (error instanceof Error && LEGACY_MCP_SSE_ERROR_PATTERN.test(error.message))
+  );
+}
+
+const LEGACY_MCP_METHOD_NOT_FOUND_STATUSES = new Set([400, 404, 405, 422, 501]);
+
 /**
  * Legacy HTTP transports may surface JSON-RPC method-not-found as a structured
  * HTTP error or as a plain error message containing `(HTTP nnn): {body}`.
- * Only allow known method-not-found status mappings with a valid JSON-RPC body;
- * unrelated HTTP and transport errors must still retire the connection.
+ * Only allow HTTP 400, 404, 405, 422, or 501 with a valid JSON-RPC body;
+ * 401, 403, missing/other statuses, and unrelated transport errors must still
+ * retire the connection.
  */
 function isBenignMcpMethodNotFound(error: unknown): boolean {
+  if (!isLegacyMcpTransportError(error)) return false;
+
   const sdkHttpError = error instanceof SdkHttpError ? error : undefined;
   const legacySseResponse =
     error instanceof Error
@@ -1789,7 +1806,10 @@ function isBenignMcpMethodNotFound(error: unknown): boolean {
   // Legacy servers and gateways use more than HTTP 400 for this JSON-RPC
   // response. Keep the accepted mappings explicit so authentication errors
   // and unrelated server failures still retire the connection.
-  if (status === undefined || ![400, 404, 405, 422, 501].includes(status)) {
+  if (
+    status === undefined ||
+    !LEGACY_MCP_METHOD_NOT_FOUND_STATUSES.has(status)
+  ) {
     return false;
   }
   if (responseText === undefined) return false;
@@ -1840,8 +1860,9 @@ function canUseModernTypedHelper(
  * helper returns `[]` without a request in that case. Modern sessions
  * therefore use the helper only when the capability is declared;
  * otherwise we issue the same raw `prompts/list` request as the legacy
- * path. A server that truly lacks prompts answers `-32601 Method not
- * found`, which the catch below swallows silently.
+ * path. A server that truly lacks prompts answers with JSON-RPC error code
+ * `-32601`, which the catch below swallows silently; legacy HTTP wrappers are
+ * accepted only when their status and response body pass the transport gate.
  */
 export async function listMcpPrompts(
   mcpServerName: string,
