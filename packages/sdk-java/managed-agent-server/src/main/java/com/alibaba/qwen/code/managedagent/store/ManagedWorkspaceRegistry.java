@@ -43,7 +43,8 @@ public class ManagedWorkspaceRegistry {
                 + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                 + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                 + " AND actor_id = ? AND can_read = TRUE",
-                Integer.class, tenantId, workspaceId, key).isEmpty();
+                Integer.class, tenantId, workspaceId, tenantId, workspaceId,
+                key).isEmpty();
     }
 
     public ResolvedBinding resolveForCreation(String tenantId,
@@ -67,9 +68,10 @@ public class ManagedWorkspaceRegistry {
         if (selection == null) {
             List<String> defaults = jdbc.queryForList(
                     "SELECT workspace_id FROM managed_workspace_default"
-                            + " WHERE tenant_id = ? AND workspace_id = ? AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                            + " WHERE tenant_id = ?"
+                            + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                             + " = CAST(CONCAT(?, '!') AS BINARY(513)) FOR UPDATE",
-                    String.class, tenantId);
+                    String.class, tenantId, tenantId);
             if (defaults.isEmpty()) {
                 throw workspaceRequired();
             }
@@ -80,13 +82,14 @@ public class ManagedWorkspaceRegistry {
         List<WorkspaceRecord> records = jdbc.query(
                 "SELECT workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state FROM"
-                        + " managed_workspace_registry WHERE"
-                        + " CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " managed_workspace_registry WHERE tenant_id = ?"
+                        + " AND workspace_id = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513)) FOR UPDATE",
                 (result, row) -> workspaceRow(tenantId, workspaceId,
-                        result), tenantId, workspaceId);
+                        result), tenantId, workspaceId, tenantId, workspaceId);
         if (records.isEmpty()) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -96,14 +99,15 @@ public class ManagedWorkspaceRegistry {
         }
         List<AccessRow> access = jdbc.query(
                 "SELECT can_read, can_create FROM managed_workspace_access"
-                        + " WHERE CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " WHERE tenant_id = ? AND workspace_id = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND actor_id = ? FOR UPDATE",
                 (result, row) -> new AccessRow(result.getBoolean("can_read"),
                         result.getBoolean("can_create")), tenantId,
-                workspaceId, key);
+                workspaceId, tenantId, workspaceId, key);
         if (access.isEmpty() || !access.getFirst().canRead()) {
             if (selection == null) {
                 throw workspaceRequired();
