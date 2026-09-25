@@ -481,10 +481,10 @@ describe('createAcpSessionBridge', () => {
     // admission and queue callbacks had no test — the existing busy-guard
     // table only ever produced the busy state with an in-flight prompt. An
     // admitted background notification turn is a different way to reach the
-    // same guard. The pins are per-arm: rewind's admission disjunct and the
-    // queued-cd table below pin branch and fork admission individually. The
-    // branch/fork queue-callback disjuncts (`session-control-plane.ts:10836`,
-    // `:13674`) remain masked by their own admission checks and are the
+    // same guard. The queued-cd table below pins branch, fork and rewind
+    // admission individually, including rejection before entering the queue.
+    // The branchSession and launchSessionForkAgent queue-callback disjuncts
+    // remain masked by their own admission checks and are the
     // residual R1-17 gap. The side-task term (`concurrentSideTask` in
     // `session-control-plane.ts`) is a concurrent-release decision and is not
     // pinned here.
@@ -583,8 +583,14 @@ describe('createAcpSessionBridge', () => {
           bridge.launchSessionForkAgent(sessionId, 'review this'),
         errorType: SessionBusyError,
       },
+      {
+        operation: 'rewind',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+        errorType: SessionBusyError,
+      },
     ])(
-      'rejects $operation synchronously before a queued cd can dispatch during a background turn',
+      'rejects $operation synchronously while an in-flight cd holds the queue during a background turn',
       async ({ invoke, errorType }) => {
         const hangingCd = deferred<Record<string, unknown>>();
         const handle = makeChannel({
@@ -682,6 +688,9 @@ describe('createAcpSessionBridge', () => {
       await new Promise((resolve) => setTimeout(resolve, 40));
       expect(conditionalCloseCalls).toBe(0);
       expect(bridge.sessionCount).toBe(1);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'active',
+      );
 
       await handle.agentConnection.extNotification('_qwencode/end_turn', {
         sessionId: session.sessionId,
