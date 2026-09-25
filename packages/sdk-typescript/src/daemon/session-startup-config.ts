@@ -21,6 +21,9 @@ const REASONING_EFFORTS = DAEMON_REASONING_SELECTIONS.filter(
  * `TypeError` (an argument-shape violation) while carrying the daemon's
  * stable `code`, so one `code`-based catch covers both this local
  * rejection and the daemon's `400 invalid_startup_config` response.
+ * Where that daemon response carries the code depends on the transport:
+ * REST puts it at `body.code`, while the ACP transports synthesize the
+ * error body as `{ error, data }` with the code at `body.data.errorKind`.
  */
 export class DaemonStartupConfigError extends TypeError {
   readonly code = 'invalid_startup_config' as const;
