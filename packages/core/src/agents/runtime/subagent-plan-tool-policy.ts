@@ -104,8 +104,17 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  *   it. A list holding only inline declarations does NOT inherit: that is the
  *   explicit branch of `prepareTools()`, which declares no registry tool.
  * - An explicit list must name `skill` — or, under CodeModeOnly, name `exec`,
- *   which admits every code-mode-callable tool, the Skill tool included.
- * - `disallowedTools` removes it at declaration.
+ *   which binds every code-mode-callable tool that survived `prepareTools()`'
+ *   own filters, the Skill tool included.
+ * - `disallowedTools` removes it at declaration. Under CodeModeOnly it also
+ *   removes `exec`, and with it the only route to a code-mode-callable tool:
+ *   `prepareTools()` declares nothing at all for such an agent, so naming
+ *   `skill` there — or inheriting the registry — buys no way to load one.
+ * - `options.skillEagerHidden` answers what the declarations cannot: a
+ *   `settings.tools.eager` allowlist that omits `skill` demotes it to
+ *   permission-deferred, and `prepareTools()` then drops it from both the
+ *   declaration list and, under CodeModeOnly, `exec`'s bindings. Only a caller
+ *   that can see the registry knows this, so it arrives as an input.
  *
  * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
  * agent cannot follow, a wrong `false` takes skills away from an agent that
@@ -116,13 +125,26 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
-  options: { codeModeOnly?: boolean } = {},
+  options: { codeModeOnly?: boolean; skillEagerHidden?: boolean } = {},
 ): boolean {
   if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
     return false;
   }
+  if (options.skillEagerHidden === true) {
+    return false;
+  }
   if (!toolConfig) {
     return true;
+  }
+  const isDisallowed = (toolName: string): boolean =>
+    toolConfig.disallowedTools?.some((pattern) =>
+      matchesToolPattern(pattern, toolName),
+    ) === true;
+  if (isDisallowed(ToolNames.SKILL)) {
+    return false;
+  }
+  if (options.codeModeOnly === true && isDisallowed(ToolNames.EXEC)) {
+    return false;
   }
   const names = toolConfig.tools.filter(
     (tool): tool is string => typeof tool === 'string',
@@ -141,13 +163,6 @@ export function toolConfigAllowsSkill(
     !inheritsRegistry &&
     !names.includes(ToolNames.SKILL) &&
     !reachesSkillThroughExec
-  ) {
-    return false;
-  }
-  if (
-    toolConfig.disallowedTools?.some((pattern) =>
-      matchesToolPattern(pattern, ToolNames.SKILL),
-    )
   ) {
     return false;
   }

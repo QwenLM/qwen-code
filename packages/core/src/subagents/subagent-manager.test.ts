@@ -4134,15 +4134,28 @@ bad`);
         mockAgentHeadlessCreate.mockReset();
       });
 
+      async function launchHandle(
+        config: Partial<SubagentConfig>,
+        parent: Config = mockConfig,
+      ): Promise<{ context: Config; dispose: () => Promise<void> }> {
+        mockAgentHeadlessCreate.mockClear();
+        const { dispose } = await manager.createAgentHeadless(
+          { ...baseConfig, ...config },
+          parent,
+        );
+        return {
+          context: destructureAgentHeadlessCall(
+            mockAgentHeadlessCreate.mock.calls[0],
+          ).runtimeContext as Config,
+          dispose,
+        };
+      }
+
       async function launch(
         config: Partial<SubagentConfig>,
         parent: Config = mockConfig,
       ): Promise<Config> {
-        mockAgentHeadlessCreate.mockClear();
-        await manager.createAgentHeadless({ ...baseConfig, ...config }, parent);
-        return destructureAgentHeadlessCall(
-          mockAgentHeadlessCreate.mock.calls[0],
-        ).runtimeContext as Config;
+        return (await launchHandle(config, parent)).context;
       }
 
       it('keeps the session manager and the wrapper registry for an unrestricted agent', async () => {
@@ -4205,6 +4218,92 @@ bad`);
         );
         expect(grandchild.getSkillManager()).toBeNull();
         expect(grandchild.getToolRegistry()).toBe(child.getToolRegistry());
+      });
+
+      it('withholds the manager when an eager allowlist hides the Skill tool', async () => {
+        // `settings.tools.eager` without `skill` leaves it permission-deferred
+        // in the session registry, and prepareTools() then drops it from the
+        // declarations and from exec's bindings. The declarations alone still
+        // look permissive here, so the registry is what has to be consulted.
+        (
+          mockToolRegistry as unknown as {
+            isPermissionDeferred: (name: string) => boolean;
+          }
+        ).isPermissionDeferred = (name) => name === ToolNames.SKILL;
+        expect(mockConfig.getVisibleTools().has(ToolNames.SKILL)).toBe(false);
+
+        const context = await launch({});
+        expect(context.getSkillManager()).toBeNull();
+        expect(resolveAgentDelegationSurface(context)).toBe('inline');
+      });
+
+      it('keeps the manager when tools.visible re-exposes an eager-hidden Skill tool', async () => {
+        // The pointer is followable through a reveal, so the manager must not
+        // be withheld (tool-registry.ts `isDeferredAndHidden` semantics).
+        (
+          mockToolRegistry as unknown as {
+            isPermissionDeferred: (name: string) => boolean;
+          }
+        ).isPermissionDeferred = (name) => name === ToolNames.SKILL;
+        vi.spyOn(mockConfig, 'getVisibleTools').mockReturnValue(
+          new Set([ToolNames.SKILL]),
+        );
+
+        const context = await launch({});
+        expect(context.getSkillManager()).toBe(sessionManager);
+      });
+
+      // The rebuilt registry's tools are per-subagent instances: the nested
+      // Agent tool subscribes to the *shared session* SubagentManager in its
+      // constructor and releases only in dispose(), which is what
+      // ToolRegistry.stop() calls. Without the cleanup wiring every
+      // skill-withholding launch leaves a listener behind for the rest of the
+      // process.
+      it.each([
+        ['an allowlist without skill', { tools: [ToolNames.READ_FILE] }],
+        ['a blocklist naming skill', { disallowedTools: [ToolNames.SKILL] }],
+      ])(
+        'stops the registry it rebuilt to withhold the manager for %s',
+        async (_label, config) => {
+          const { context, dispose } = await launchHandle(config);
+          expect(context.getToolRegistry()).not.toBe(mockToolRegistry);
+          const stop = vi
+            .spyOn(context.getToolRegistry(), 'stop')
+            .mockResolvedValue(undefined);
+
+          await dispose();
+
+          expect(stop).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it('stops the registry it rebuilt to restore a nested agent manager', async () => {
+        const child = await launch({ tools: [ToolNames.READ_FILE] });
+        const { context: grandchild, dispose } = await launchHandle({}, child);
+        expect(grandchild.getToolRegistry()).not.toBe(child.getToolRegistry());
+        const stop = vi
+          .spyOn(grandchild.getToolRegistry(), 'stop')
+          .mockResolvedValue(undefined);
+
+        await dispose();
+
+        expect(stop).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not stop the parent registry for an unrestricted agent', async () => {
+        // The control for the two cases above: nothing was rebuilt, so
+        // `getToolRegistry()` still resolves to the session's registry and
+        // the cleanup slot must stay empty.
+        const parentStop = vi.fn().mockResolvedValue(undefined);
+        (mockToolRegistry as unknown as { stop: () => Promise<void> }).stop =
+          parentStop;
+
+        const { context, dispose } = await launchHandle({});
+        expect(context.getToolRegistry()).toBe(mockToolRegistry);
+
+        await dispose();
+
+        expect(parentStop).not.toHaveBeenCalled();
       });
     });
   });

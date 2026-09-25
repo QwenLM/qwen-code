@@ -258,6 +258,70 @@ describe('subagent plan tool policy', () => {
       expect(toolConfigAllowsSkill(execOnly)).toBe(false);
     });
 
+    it.each([
+      ['the exec route under CodeModeOnly', { tools: [ToolNames.EXEC] }],
+      ['a wildcard', { tools: ['*'] }],
+      ['an explicit list naming skill', { tools: [ToolNames.SKILL] }],
+      ['no tool config', undefined],
+    ])(
+      'withholds skills when an eager allowlist hides the Skill tool: %s',
+      (_label, toolConfig) => {
+        // `settings.tools.eager` omitting `skill` demotes it to
+        // permission-deferred, and prepareTools() then drops it from the
+        // declarations AND from exec's bindings — so no declaration shape
+        // leaves a route to a skill.
+        expect(
+          toolConfigAllowsSkill(toolConfig, {
+            codeModeOnly: true,
+            skillEagerHidden: true,
+          }),
+        ).toBe(false);
+      },
+    );
+
+    it('answers as before when the Skill tool is not eager-hidden', () => {
+      // Control for the flag above: same input, flag absent.
+      expect(
+        toolConfigAllowsSkill(
+          { tools: [ToolNames.EXEC] },
+          { codeModeOnly: true, skillEagerHidden: false },
+        ),
+      ).toBe(true);
+    });
+
+    it.each([
+      ['a wildcard', { tools: ['*'] }],
+      ['an exec-only list', { tools: [ToolNames.EXEC] }],
+      [
+        'an explicit list naming skill',
+        { tools: [ToolNames.READ_FILE, ToolNames.SKILL] },
+      ],
+    ])(
+      'withholds skills under CodeModeOnly when exec itself is disallowed: %s',
+      (_label, toolConfig) => {
+        // exec is the only route to a code-mode-callable tool, so denying it
+        // leaves prepareTools() declaring nothing at all — including for an
+        // agent that inherits the registry or names `skill` outright.
+        expect(
+          toolConfigAllowsSkill(
+            { ...toolConfig, disallowedTools: [ToolNames.EXEC] },
+            { codeModeOnly: true },
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('keeps skills for a disallowed exec outside CodeModeOnly', () => {
+      // Only under CodeModeOnly is exec the sole route; elsewhere the Skill
+      // tool keeps its own declaration.
+      expect(
+        toolConfigAllowsSkill({
+          tools: ['*'],
+          disallowedTools: [ToolNames.EXEC],
+        }),
+      ).toBe(true);
+    });
+
     it('ignores the execution allowlist', () => {
       // A fork's `fork_tools` narrowing; see the predicate's docblock.
       expect(

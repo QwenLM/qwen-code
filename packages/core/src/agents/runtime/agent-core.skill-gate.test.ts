@@ -136,8 +136,13 @@ describe('AgentCore skill-gate inputs', () => {
     });
 
     it('refuses when executable but not declared', async () => {
-      // The other term. Reverting the gate to `willHaveSkillTool()` — which
-      // reads `toolConfig` and says true here — is caught by this.
+      // The other term: `disallowedTools` removes SKILL at declaration, so
+      // the gate refuses what the registry could still execute. This case no
+      // longer distinguishes the gate from `willHaveSkillTool()` — the shared
+      // predicate reads the blocklist too, so both now answer false for this
+      // input. Snapshot-versus-gate independence is pinned by 'announces at
+      // startup and refuses at the gate' below, which re-points the snapshot
+      // at a registry that never held the tool.
       const core = makeCore({
         tools: ['*'],
         disallowedTools: [ToolNames.SKILL],

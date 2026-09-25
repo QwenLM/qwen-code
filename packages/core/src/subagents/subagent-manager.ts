@@ -1195,6 +1195,20 @@ export class SubagentManager {
 
       const skillsAvailable = toolConfigAllowsSkill(toolConfig, {
         codeModeOnly: runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
+        // A `settings.tools.eager` allowlist that omits `skill` leaves it
+        // permission-deferred, and `prepareTools()` then drops it from the
+        // declarations and — under CodeModeOnly — from `exec`'s bindings, so
+        // the agent has no route to any skill. Probed the way
+        // `skills/bundled-reference.ts` probes deferral, NOT via
+        // `isDeferredAndHidden`: that answers false for a tool that is still
+        // only a lazy factory, which is the state the registry is in here.
+        // A `tools.visible` entry naming `skill` keeps the pointer followable,
+        // so it must not withhold the manager.
+        skillEagerHidden:
+          runtimeContext
+            .getToolRegistry()
+            ?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
+          !runtimeContext.getVisibleTools?.()?.has(ToolNames.SKILL),
       });
       const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(
@@ -1310,11 +1324,16 @@ export class SubagentManager {
   ): Promise<{
     context: Config;
     /**
-     * Set only when this call force-rebuilt the registry to land per-agent
-     * MCP server connections. The freshly built registry owns stdio child
-     * processes / sockets that the parent's `Config.shutdown` cannot reach,
-     * so the caller (`createAgentHeadless`) carries this callback through
-     * to its `dispose` closure and runs it when the subagent terminates.
+     * Set whenever this call rebuilt the registry — to land per-agent MCP
+     * server connections, to move lazily built tools above a re-anchored
+     * SkillManager, or because `runtimeContext` was unstamped. The freshly
+     * built registry owns stdio child processes / sockets and per-subagent
+     * tool instances (whose listeners sit on managers shared with the
+     * session) that the parent's `Config.shutdown` cannot reach, so the
+     * caller (`createAgentHeadless`) carries this callback through to its
+     * `dispose` closure and runs it when the subagent terminates. Absent
+     * when nothing was rebuilt: there is then no registry of this call's own
+     * to stop, and the one `getToolRegistry()` resolves to is the parent's.
      *
      * Field name matches the `cleanup` field on
      * `ApprovalModeOverrideHandle` (the sibling override-builder return
@@ -1409,11 +1428,11 @@ export class SubagentManager {
     // inherited manager, not the one this agent should hold. Rebuilding is the
     // only re-anchoring that moves tools above the wrapper; see the
     // `markRebuilt` note on `rebuildToolRegistryOnOverride`.
-    if (
+    const rebuiltToolRegistry =
       hasAgentMcpServers ||
       reanchorSkillManager ||
-      !hasRebuiltToolRegistry(runtimeContext)
-    ) {
+      !hasRebuiltToolRegistry(runtimeContext);
+    if (rebuiltToolRegistry) {
       await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
     }
 
@@ -1456,7 +1475,22 @@ export class SubagentManager {
         cleanup: () => subagentRegistry.stop(),
       };
     }
-    return { context: subagentContext };
+    // The cleanup slot follows the rebuild, not the MCP branch: a registry
+    // this call rebuilt is this call's to stop, whichever condition forced
+    // it. Its tools are per-subagent instances — the nested Agent tool among
+    // them subscribes to the *shared session* SubagentManager in its
+    // constructor and releases only in `dispose()`, which is what
+    // `ToolRegistry.stop()` calls — and neither `Config.shutdown` nor the
+    // Agent tool's own teardown (which stops the parent approval-override
+    // registry) reaches them. Not rebuilt ⇒ no cleanup: `getToolRegistry()`
+    // would then resolve to the parent's registry, and stopping that would
+    // take the session's tools down with this subagent.
+    return {
+      context: subagentContext,
+      cleanup: rebuiltToolRegistry
+        ? () => subagentContext.getToolRegistry().stop()
+        : undefined,
+    };
   }
 
   /**
