@@ -2793,7 +2793,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                 }
             });
-            return release;
+            // A release that already failed has just cleared the field on
+            // this thread; the caller still gets its failure.
+            return requested;
         }
 
         private RuntimeSessionRecord transitionState(
@@ -3135,6 +3137,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                     }
                 });
+                // A cancellation that already failed has just cleared the
+                // field on this thread; the caller still gets its failure.
+                return requested;
             }
             return cancellation;
         }

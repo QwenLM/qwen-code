@@ -928,6 +928,51 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void anInvalidCancellationAnswerFailsTheReturnedStage() throws Exception {
+        FakeTransport transport = new FakeTransport();
+        transport.cancelResponse = Map.of("state", "vanished");
+        RuntimeBrokerService service = readyService(transport);
+        service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                .toCompletableFuture().get(1, TimeUnit.SECONDS);
+        Map<String, Object> created = service.createExecution("key-1",
+                HARNESS_SESSION, RUNTIME_SESSION, "turn-1", "tool-1",
+                "args-1", reference("args-1"));
+        String executionCallId = (String) created.get("executionCallId");
+
+        CompletionStage<Map<String, Object>> cancellation =
+                service.cancelExecution(HARNESS_SESSION, RUNTIME_SESSION,
+                        executionCallId);
+
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> cancellation.toCompletableFuture()
+                        .get(1, TimeUnit.SECONDS));
+        assertEquals("runtime_broker_cancel_failed",
+                ((RuntimeBrokerException) failure.getCause()).getCode());
+    }
+
+    @Test
+    void aReleaseTheRuntimeRejectsFailsTheReturnedStage() throws Exception {
+        FakeTransport transport = new FakeTransport();
+        transport.releaseResponse = CompletableFuture.failedFuture(
+                new RuntimeBrokerException(503, "managed_runtime_unavailable",
+                        "unavailable", true));
+        RuntimeBrokerService service = readyService(transport);
+        service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                .toCompletableFuture().get(1, TimeUnit.SECONDS);
+
+        CompletionStage<Boolean> release = service.release(HARNESS_SESSION,
+                RUNTIME_SESSION);
+
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> release.toCompletableFuture().get(1, TimeUnit.SECONDS));
+        assertEquals("managed_runtime_unavailable",
+                ((RuntimeBrokerException) failure.getCause()).getCode());
+        transport.releaseResponse = null;
+        assertTrue(service.release(HARNESS_SESSION, RUNTIME_SESSION)
+                .toCompletableFuture().get(1, TimeUnit.SECONDS));
+    }
+
+    @Test
     void cancellationBeforeRuntimeReadinessPreventsPhysicalDispatch()
             throws Exception {
         CompletableFuture<RuntimeLease> delayed = new CompletableFuture<>();
@@ -1760,6 +1805,7 @@ class RuntimeBrokerServiceTest {
         private final CompletableFuture<Map<String, Object>> execution =
                 new CompletableFuture<>();
         private volatile Map<String, Object> cancelResponse;
+        private volatile CompletableFuture<Boolean> releaseResponse;
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease,
@@ -1808,7 +1854,9 @@ class RuntimeBrokerServiceTest {
         public CompletionStage<Boolean> release(RuntimeLease lease,
                 RuntimeSession session) {
             releases.incrementAndGet();
-            return CompletableFuture.completedFuture(true);
+            CompletableFuture<Boolean> response = releaseResponse;
+            return response == null ? CompletableFuture.completedFuture(true)
+                    : response;
         }
     }
 
