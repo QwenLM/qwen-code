@@ -133,11 +133,9 @@ export interface OpenTuiDialogMountProps {
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
   /** Row budget for the dialog bodies that window themselves (model, theme,
-   * approval mode) and for the help overlay's body rows. The settings dialog
-   * receives it and reads no height: its window is a constant, recorded among
-   * the unwindowed bodies the parity doc defers. Required so a caller cannot
-   * budget the overlay from the raw terminal height — five rows more than the
-   * region holds — by forgetting it. */
+   * approval mode, settings) and for the help overlay's body rows. Required
+   * so a caller cannot budget the overlay from the raw terminal height —
+   * five rows more than the region holds — by forgetting it. */
   availableTerminalHeight: number;
 }
 

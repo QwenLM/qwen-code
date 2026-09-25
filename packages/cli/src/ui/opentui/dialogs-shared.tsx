@@ -363,6 +363,23 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       );
       numberBuffer.current = result.buffer;
       if (result.activeIndex !== undefined) {
+        // A digit may only address a row the painted window shows: on a short
+        // terminal the window is narrower than the list, and moving to (or
+        // committing) an unpainted row would persist a choice the user never
+        // saw — on a highlight-driven step like the scope one, the highlight
+        // move alone already retargets what the next Enter writes.
+        const painted = selectionWindow(
+          scrollOffset,
+          items.length,
+          maxItemsToShow,
+        );
+        if (
+          result.activeIndex < painted.start ||
+          result.activeIndex >= painted.end
+        ) {
+          numberBuffer.current = '';
+          return;
+        }
         moveCursor(result.activeIndex);
         const item = items[result.activeIndex];
         if (item) onHighlight?.(item.value, result.activeIndex);

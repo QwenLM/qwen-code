@@ -103,6 +103,37 @@ describe('useDialogSelect numeric quick-select', () => {
     expect(onSelect).toHaveBeenCalledWith('item-0');
   });
 
+  it('rejects a digit whose row falls outside the painted window', () => {
+    const onSelect = vi.fn();
+    const { result } = renderHook(() =>
+      useDialogSelect({ items, numbers: true, maxItemsToShow: 3, onSelect }),
+    );
+    // Row 5 is beyond the three-row window: the keystroke is ignored entirely
+    // rather than committing a row the user was never shown.
+    press({ name: '5', sequence: '5' });
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(result.current.activeIndex).toBe(0);
+
+    // A row inside the window still quick-selects.
+    press({ name: '3', sequence: '3' });
+    expect(onSelect).toHaveBeenCalledWith('item-2');
+  });
+
+  it('disarms the pending flush when a follow-up digit leaves the window', () => {
+    const onSelect = vi.fn();
+    renderHook(() =>
+      useDialogSelect({ items, numbers: true, maxItemsToShow: 3, onSelect }),
+    );
+    press({ name: '1', sequence: '1' });
+    // '12' addresses row twelve, outside the three-row window: the buffer
+    // resets and the pending timer must not fire a stale commit.
+    press({ name: '2', sequence: '2' });
+    act(() => {
+      vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+    });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it('disarms the pending flush when a follow-up digit is invalid', () => {
     const onSelect = vi.fn();
     renderHook(() => useDialogSelect({ items, numbers: true, onSelect }));

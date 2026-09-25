@@ -203,7 +203,7 @@ export function wrappedRows(text: string, width: number): number {
     let lineRows = 1;
     let used = 0;
     for (const word of line.split(' ')) {
-      const wordWidth = getCachedStringWidth(word);
+      const wordWidth = renderWidth(word);
       if (used > 0) {
         if (used + 1 + wordWidth > width) {
           lineRows += 1;
@@ -219,7 +219,7 @@ export function wrappedRows(text: string, width: number): number {
       // A word wider than the space left to it is broken across rows, cell by
       // cell; a two-cell glyph that would straddle the boundary moves whole.
       for (const char of toCodePoints(word)) {
-        const charWidth = getCachedStringWidth(char);
+        const charWidth = renderWidth(char);
         if (used > 0 && used + charWidth > width) {
           lineRows += 1;
           used = 0;
@@ -231,6 +231,12 @@ export function wrappedRows(text: string, width: number): number {
   }
   return rows;
 }
+
+// The renderer's own width table paints the warning sign in one column where
+// string-width counts two, so the row charge is measured with it painted as
+// one — otherwise the shipped warning is overcharged a row at narrow widths.
+const renderWidth = (text: string): number =>
+  getCachedStringWidth(text.replaceAll('\u26A0', ' '));
 
 /** One margin row plus the wrapped text rows of a notice below the list. */
 function noticeRows(text: string | null, contentWidth: number): number {
@@ -283,14 +289,34 @@ function modeListBudget(
     1,
     constrainedHeight - chromeWithoutFooter,
   );
-  const footerWouldHideScrollArrows =
-    warningRows === 0 &&
-    preferredShowFooterHint &&
-    rowsWithPreferredFooter <= 2 &&
-    rowsWithoutFooter > 2 &&
-    rowsWithoutFooter < itemCount;
+  // What a row count leaves the list once the arrows that count would raise
+  // are paid for — the comparison the footer decision is made with.
+  const itemsFor = (rows: number): number => {
+    const arrows = rows > 2 && rows < itemCount;
+    return Math.max(
+      1,
+      Math.min(DEFAULT_MAX_ITEMS_TO_SHOW, itemCount, rows - (arrows ? 2 : 0)),
+    );
+  };
+  // Deliberate divergence: ink gates the hint-shedding guard on
+  // `!showWorkspacePriorityWarning`, which its flat three-row warning made
+  // safe. This port's notices are variable, so with the warning up the hint
+  // stays only while dropping it could not buy another mode row — at region
+  // fourteen the warning's way keeps one mode between two arrows beside the
+  // hint, while dropping the hint shows all five. Either way the hint goes
+  // whenever the chrome alone leaves no room for it beside a single list
+  // row: ink's fixed chrome never let that happen, so its thresholds never
+  // had to check.
   const showFooterHint =
-    preferredShowFooterHint && !footerWouldHideScrollArrows;
+    preferredShowFooterHint &&
+    constrainedHeight - chromeWithoutFooter - FOOTER_HINT_ROWS >= 1 &&
+    (warningRows > 0
+      ? itemsFor(rowsWithoutFooter) <= itemsFor(rowsWithPreferredFooter)
+      : !(
+          rowsWithPreferredFooter <= 2 &&
+          rowsWithoutFooter > 2 &&
+          rowsWithoutFooter < itemCount
+        ));
   const listRows = Math.max(
     1,
     constrainedHeight -
@@ -359,16 +385,40 @@ export function OpenTuiApprovalModeDialog(props: {
   // and on a short terminal the unsized rows shrink to zero and overpaint
   // each other while the keys still commit a mode the user cannot read.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  // The notices are paid out of the same region the list windows into, so
+  // their charge is capped at what the region can give it after the
+  // mandatory chrome and the one-row list floor — and the boxes below are
+  // clipped to the same figure, since a capped charge beside an unclipped
+  // notice would still overpaint the rows the budget just took back. The
+  // warning is charged first: its three-row floor is the ink parity a wide
+  // enough region keeps.
+  const noticeCap =
+    regionHeight === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(
+          0,
+          regionHeight -
+            MODE_LIST_CHROME_ROWS -
+            (regionHeight >= MIN_HEIGHT_WITH_MODE_SPACER ? 1 : 0) -
+            1,
+        );
   const warningRows = warningText
-    ? Math.max(
-        WORKSPACE_PRIORITY_WARNING_ROWS,
-        noticeRows(warningText, contentWidth),
+    ? Math.min(
+        noticeCap,
+        Math.max(
+          WORKSPACE_PRIORITY_WARNING_ROWS,
+          noticeRows(warningText, contentWidth),
+        ),
       )
     : 0;
+  const errorRows = Math.min(
+    noticeRows(error, contentWidth),
+    Math.max(0, noticeCap - warningRows),
+  );
   const budget = modeListBudget(
     regionHeight,
     warningRows,
-    noticeRows(error, contentWidth),
+    errorRows,
     modeItems.length,
   );
   const modeList = useDialogSelect<LabeledItem<ApprovalMode>>({
@@ -383,7 +433,14 @@ export function OpenTuiApprovalModeDialog(props: {
     // The scope step's close remounts this list; the highlighted mode is what
     // survives that trip, and the scope is what changes on it.
     resyncKey: selectedScope,
-    onHighlight: (mode) => setHighlightedMode(mode),
+    onHighlight: (mode) => {
+      setHighlightedMode(mode);
+      // A highlight move is what invalidates the trust-gate refusal — the
+      // gate reads the mode, never the scope — so the message (whose rows are
+      // charged to the list window) is cleared here, not only on a scope
+      // move that cannot invalidate it.
+      setError(null);
+    },
     onSelect: (mode) => {
       try {
         // Do not persist a privileged mode that this workspace cannot use;
@@ -472,13 +529,13 @@ export function OpenTuiApprovalModeDialog(props: {
             maxItemsToShow={budget.maxItemsToShow}
             showScrollArrows={budget.showScrollArrows}
           />
-          {warningText ? (
-            <box marginTop={1}>
+          {warningText && warningRows > 0 ? (
+            <box marginTop={1} height={warningRows - 1} overflow="hidden">
               <text fg={C.yellow}>{warningText}</text>
             </box>
           ) : null}
-          {error ? (
-            <box marginTop={1}>
+          {error && errorRows > 0 ? (
+            <box marginTop={1} height={errorRows - 1} overflow="hidden">
               <text fg={C.red}>{error}</text>
             </box>
           ) : null}

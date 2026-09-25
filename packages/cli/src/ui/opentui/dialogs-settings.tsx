@@ -66,6 +66,7 @@ import {
   useDialogSelect,
 } from './dialogs-shared.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 export type SettingsTab = 'settings' | 'status' | 'stats';
 
@@ -76,6 +77,14 @@ export const SETTINGS_TAB_ORDER: readonly SettingsTab[] = [
 ];
 
 export const SETTINGS_LIST_MAX_ITEMS = 8;
+
+// Rows the dialog spends outside the settings list: the frame's border and
+// padding (4), the tab bar and its spacer (2), the bordered search box and
+// its spacer (4), the two scroll arrows (2), the description row and its
+// margin (2), and the footer hint's (2) — ink's SettingsDialog charges the
+// same items (its footer is one row; this port's FooterHint carries a margin
+// row) before windowing its list to what is left.
+const SETTINGS_LIST_CHROME_ROWS = 16;
 
 /** Parity of configTabLabel in SettingsDialog.tsx. */
 export function settingsTabLabel(tab: SettingsTab): string {
@@ -255,8 +264,14 @@ export interface OpenTuiSettingsDialogProps {
 }
 
 export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
-  const { settings, onSelect, onRestartRequest, onSettingApplied, config } =
-    props;
+  const {
+    settings,
+    onSelect,
+    onRestartRequest,
+    onSettingApplied,
+    config,
+    availableTerminalHeight,
+  } = props;
 
   const [mode, setMode] = useState<'settings' | 'scope'>('settings');
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
@@ -334,7 +349,24 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     getScopeMessageForSetting(key, selectedScope, settings),
   );
 
-  const maxItemsToShow = SETTINGS_LIST_MAX_ITEMS;
+  // Window the list to the region the mount hands over, like ink's
+  // SettingsDialog does with the same charge-out: an unsized frame inside the
+  // fixed-height region is squeezed, and a list that still asks for eight
+  // rows there overpaints its neighbours into illegibility while Enter keeps
+  // committing the row under the cursor.
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const maxItemsToShow =
+    regionHeight === undefined
+      ? SETTINGS_LIST_MAX_ITEMS
+      : Math.max(
+          1,
+          Math.min(
+            SETTINGS_LIST_MAX_ITEMS,
+            regionHeight -
+              SETTINGS_LIST_CHROME_ROWS -
+              (showRestartPrompt ? 1 : 0),
+          ),
+        );
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
   const showScrollUp = scrollOffset > 0;
   const showScrollDown = scrollOffset + maxItemsToShow < items.length;

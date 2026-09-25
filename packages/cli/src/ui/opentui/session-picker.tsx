@@ -45,6 +45,7 @@ import {
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { resumeEventsFromSession } from './resume-session.js';
 import { foldLiveEvent, type LiveHistoryItem } from './live-session-model.js';
@@ -127,7 +128,11 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   } = props;
 
   const { width, height } = useTerminalDimensions();
-  const boxWidth = Math.max(0, width - 4);
+  // The popup region is dialogAreaWidth wide (capped at 100 columns) and
+  // clips what overruns it, so the box must size from the same cap — the raw
+  // terminal width would lose the right border and every row's tail on a
+  // terminal wider than 104 columns.
+  const boxWidth = Math.max(0, dialogAreaWidth(width));
   const maxVisibleItems = Math.max(
     1,
     Math.floor((height - RESERVED_LINES) / ITEM_HEIGHT),

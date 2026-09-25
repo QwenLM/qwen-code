@@ -90,9 +90,14 @@ vi.mock('@opentui/core', () => ({
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 vi.mock('./key-map.js', () => ({
-  toOriginalKey: (key: { name?: string; shift?: boolean }) => ({
+  toOriginalKey: (key: {
+    name?: string;
+    shift?: boolean;
+    sequence?: string;
+  }) => ({
     name: key.name ?? '',
     shift: key.shift ?? false,
+    sequence: key.sequence ?? '',
   }),
 }));
 vi.mock('./theme.js', () => ({
@@ -113,6 +118,11 @@ import {
   OpenTuiOutputStyleDialog,
   wrappedRows,
 } from './dialogs-modes.js';
+import {
+  buildSettingsListItems,
+  OpenTuiSettingsDialog,
+  SETTINGS_LIST_MAX_ITEMS,
+} from './dialogs-settings.js';
 
 const CONCISE = BUILT_IN_OUTPUT_STYLES.find(
   (style) => style.name === 'Concise',
@@ -125,7 +135,9 @@ function press(name: string, shift = false) {
   }
   act(() => {
     for (const handler of [...mocks.state.keyboardHandlers]) {
-      handler({ name, shift });
+      // A digit's identity is its sequence: the quick-select path matches on
+      // it, and a bare name would fall through as a non-numeric key.
+      handler({ name, shift, sequence: name.length === 1 ? name : '' });
     }
   });
 }
@@ -384,6 +396,44 @@ describe('OpenTuiApprovalModeDialog', () => {
     expect(queryRow('auto-accept edits - ')).not.toBeNull();
   });
 
+  it('refuses a digit that addresses a row the window did not paint', () => {
+    // At region twelve the list windows to two rows. A digit still addressed
+    // the full list, so pressing 5 committed YOLO — a mode the user was never
+    // shown — and closed the dialog.
+    const harness = renderModeDialog({ availableTerminalHeight: 12 });
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(2);
+
+    press('5');
+
+    expect(harness.setValue).not.toHaveBeenCalled();
+    expect(harness.onClose).not.toHaveBeenCalled();
+
+    // A row inside the painted window still quick-selects.
+    press('2');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.approvalMode',
+      ApprovalMode.DEFAULT,
+    );
+    expect(harness.onClose).toHaveBeenCalled();
+  });
+
+  it('refuses a digit that addresses an unpainted scope row', () => {
+    // The scope step windows to one row at region six. The same keystroke
+    // there ran adoptScope through onHighlight — retargeting the scope the
+    // next Enter writes to, on a row the user never saw.
+    renderModeDialog({ availableTerminalHeight: 6 });
+    press('tab');
+    expect(screen.getByText(/^> Apply To/)).not.toBeNull();
+    expect(queryRow('Workspace Settings')).toBeNull();
+
+    press('2');
+
+    // Still on the scope step, still on the painted row.
+    expect(screen.getByText(/^> Apply To/)).not.toBeNull();
+    expect(isSelected('User Settings')).toBe(true);
+  });
+
   it('clips every mode label to the columns its row leaves, like ink', () => {
     // ink gives the labels `wrap="truncate"`; at 60 columns the content width
     // is 52 and the row's own indicator and number boxes take 5, so a label
@@ -430,24 +480,24 @@ describe('OpenTuiApprovalModeDialog', () => {
 
   it('pays for the warning rows a narrow terminal wraps it into', () => {
     // ink wraps the warning and reserves a flat three rows for it. At 40
-    // columns the same text needs more, and the extra rows have to come out of
+    // columns the same text needs four, and the extra row has to come out of
     // the list rather than out of the frame: without that, the region's last
     // rows are overpainted.
     mocks.state.width = 40;
     const narrow = renderModeDialog({
-      availableTerminalHeight: 16,
+      availableTerminalHeight: 14,
       workspaceModified: true,
     });
 
+    expect(queryRow('plan mode - ')).not.toBeNull();
     expect(queryRow('Ask permissions - ')).not.toBeNull();
-    expect(queryRow('YOLO mode - ')).toBeNull();
-    expect(screen.getByText('▼')).not.toBeNull();
+    expect(queryRow('auto-accept edits - ')).toBeNull();
     narrow.unmount();
 
     // The same region at a width where the warning fits its ink row count
     // keeps the whole list, so the narrowing above is the wrap being paid for.
     mocks.state.width = 100;
-    renderModeDialog({ availableTerminalHeight: 16, workspaceModified: true });
+    renderModeDialog({ availableTerminalHeight: 14, workspaceModified: true });
     expect(queryRow('YOLO mode - ')).not.toBeNull();
   });
 
@@ -455,12 +505,18 @@ describe('OpenTuiApprovalModeDialog', () => {
     // At a hundred columns the warning text fits one wrapped row, so the width
     // derivation alone would hand the budget two rows — margin plus text — and
     // show a fifth mode ink does not. ink's flat three is the floor; the
-    // derivation only adds to it.
+    // derivation only adds to it. The charged figure is the clip height the
+    // warning box declares: one margin row plus two, not one.
     renderModeDialog({ availableTerminalHeight: 15, workspaceModified: true });
 
-    expect(queryRow('Ask permissions - ')).not.toBeNull();
-    expect(queryRow('YOLO mode - ')).toBeNull();
-    expect(screen.getByText('▼')).not.toBeNull();
+    const warning = screen.getByText(/Workspace approval mode exists/);
+    expect(layoutOf(warning.parentElement)).toMatchObject({
+      marginTop: 1,
+      height: 2,
+      overflow: 'hidden',
+    });
+    // The region affords the whole list beside the floored warning.
+    expect(queryRow('YOLO mode - ')).not.toBeNull();
   });
 
   it.each([
@@ -487,7 +543,9 @@ describe('OpenTuiApprovalModeDialog', () => {
     [11, 1, false, false, 2],
     [12, 1, true, false, 1],
     [13, 1, true, false, 2],
-    [14, 1, true, true, 1],
+    // Dropping the hint here buys the list back from one row between arrows
+    // to all five modes, so the hint is what sheds.
+    [14, 1, false, false, 5],
   ])(
     'windows the mode list around the workspace warning (h=%i)',
     (height, spacer, footerHint, arrows, rowCount) => {
@@ -498,6 +556,41 @@ describe('OpenTuiApprovalModeDialog', () => {
       expectBudget({ spacer, footerHint, arrows, rowCount });
     },
   );
+
+  it('sheds the footer hint before letting the warning overrun the region', () => {
+    // At 40 columns the wrapped warning costs four rows and the footer hint
+    // two more; keeping both at region twelve paints fourteen rows into a
+    // twelve-row region. The budget sheds the hint — dropping it buys the
+    // list a second row back as well.
+    mocks.state.width = 40;
+    renderModeDialog({ availableTerminalHeight: 12, workspaceModified: true });
+    expectBudget({ spacer: 1, footerHint: false, arrows: false, rowCount: 2 });
+  });
+
+  it('caps the warning charge at what the region can pay, and clips the paint to match', () => {
+    // Region ten leaves the notices three rows after the mandatory chrome and
+    // the one-row list floor. The warning would charge four at this width, so
+    // the budget pays three and the painted box is clipped to the same three —
+    // charging three while painting four would overrun the region anyway.
+    mocks.state.width = 40;
+    renderModeDialog({ availableTerminalHeight: 10, workspaceModified: true });
+
+    const warning = screen.getByText(/Workspace approval mode exists/);
+    expect(layoutOf(warning.parentElement)).toMatchObject({
+      marginTop: 1,
+      height: 2,
+      overflow: 'hidden',
+    });
+    expect(
+      screen.queryByText('(Use Enter to select, Tab to configure scope)'),
+    ).toBeNull();
+    expectBudget({
+      spacer: 1,
+      footerHint: false,
+      arrows: false,
+      rowCount: 1,
+    });
+  });
 
   it('sheds the spacer and windows the Tab step on a short terminal', () => {
     // Deliberate divergence from ink's ScopeSelector, which keeps an
@@ -622,6 +715,68 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     expect(screen.getByText('▼')).not.toBeNull();
     expect(queryRow('plan mode - ')).toBeNull();
     expect(queryRow('YOLO mode - ')).not.toBeNull();
+  });
+
+  it('caps the refusal charge at what the region can pay, and clips the paint to match', () => {
+    // At 40 columns the refusal wraps to three text rows — four charged — but
+    // region ten leaves the notices three rows after the chrome and the list
+    // floor, so the budget pays three and the painted box is clipped to them.
+    mocks.state.width = 40;
+    renderUntrusted(10);
+    press('return');
+
+    const refusal = screen.getByText(
+      /Cannot enable privileged approval modes in an untrusted folder/,
+    );
+    expect(layoutOf(refusal.parentElement)).toMatchObject({
+      marginTop: 1,
+      height: 2,
+      overflow: 'hidden',
+    });
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
+  });
+
+  it('clears the refusal when the highlight moves to a mode the gate allows', () => {
+    // The gate reads the mode, never the scope, so the highlight move is the
+    // transition that invalidates the refusal: while it stayed up beside a
+    // row the gate allows, its two charged rows kept the list windowed to one.
+    renderUntrusted(13);
+    press('return');
+    expect(
+      screen.getByText(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      ),
+    ).not.toBeNull();
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
+
+    press('up');
+
+    expect(
+      screen.queryByText(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      ),
+    ).toBeNull();
+    // The refusal's rows are no longer charged, so the window grows back —
+    // it follows the highlight, so more than the single refused row shows.
+    expect(screen.queryAllByText(/^\d+\.$/).length).toBeGreaterThan(1);
+  });
+
+  it('pays for the refusal without overrunning a ten-row region', () => {
+    // The refusal charges two rows at this width; a footer hint on top paints
+    // eleven rows into a ten-row region, so the hint sheds and the list keeps
+    // the two rows the region actually leaves.
+    renderUntrusted(10);
+    press('return');
+
+    expect(
+      screen.getByText(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      ),
+    ).not.toBeNull();
+    expect(
+      screen.queryByText('(Use Enter to select, Tab to configure scope)'),
+    ).toBeNull();
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(2);
   });
 
   it('clears the refusal when the scope moves, and the list window grows back', () => {
@@ -1247,6 +1402,46 @@ describe('OpenTuiEffortDialog', () => {
   });
 });
 
+describe('OpenTuiSettingsDialog region budget', () => {
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  it('windows the settings list to the region the mount hands it', () => {
+    // The mount forwards the popup region's row budget, but the dialog read
+    // no height and always asked for eight rows: inside the fixed-height
+    // region the unsized frame is squeezed, and on a 24-row terminal three
+    // rows overpainted into illegibility while Enter kept committing the row
+    // under the cursor. The list windows to the region like ink's
+    // SettingsDialog does.
+    const items = buildSettingsListItems();
+    expect(items.length).toBeGreaterThan(SETTINGS_LIST_MAX_ITEMS);
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={19}
+      />,
+    );
+
+    // Region 19 minus the dialog's chrome (frame 4, tab bar and spacer 2,
+    // search box and spacer 4, scroll arrows 2, description 2, footer hint 2)
+    // leaves the list three rows: the first three settings paint, the fourth
+    // does not, and the row under the cursor is on screen.
+    expect(screen.getByText(items[0]!.label)).not.toBeNull();
+    expect(screen.getByText(items[1]!.label)).not.toBeNull();
+    expect(screen.getByText(items[2]!.label)).not.toBeNull();
+    expect(screen.queryByText(items[3]!.label)).toBeNull();
+  });
+});
+
 describe('DialogFrame fill flag (Decision 66)', () => {
   // ink stretches only the approval-mode dialog to the region it is given;
   // the effort and output-style dialogs stay content-height, so their frames
@@ -1318,5 +1513,18 @@ describe('wrappedRows (the row count a wrapped notice pays for)', () => {
 
   it('counts a newline as a row break', () => {
     expect(wrappedRows('a\nb', 40)).toBe(2);
+  });
+
+  it('measures the warning glyph the one column the renderer paints it in', () => {
+    // string-width counts the warning sign as two columns; this renderer's
+    // width table paints it in one. Charging two wraps the shipped English
+    // warning onto a fourth row at a 32-column content width and the budget
+    // overpays the list a row it never gets back.
+    expect(
+      wrappedRows(
+        '⚠ Workspace approval mode exists and takes priority. User-level change will have no effect.',
+        32,
+      ),
+    ).toBe(3);
   });
 });

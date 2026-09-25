@@ -117,6 +117,7 @@ vi.mock('./key-map.js', () => ({
 }));
 
 import { OpenTuiSessionPicker } from './session-picker.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 
 function press(key: RawKey) {
   if (mocks.state.keyboardHandlers.length === 0) {
@@ -656,6 +657,22 @@ describe('OpenTuiSessionPicker under one stdin read', () => {
 describe('OpenTuiSessionPicker inside the popup region', () => {
   const layoutOf = (node: Element | null): Record<string, unknown> =>
     JSON.parse(node?.getAttribute('data-p') ?? '{}') as Record<string, unknown>;
+
+  it('caps the box at the region width on wide terminals', () => {
+    // The popup region is dialogAreaWidth wide and clips what overruns it.
+    // Sizing the box from the raw terminal width instead (width - 4) asks for
+    // 116 columns on a 120-column terminal, and the region's clip cuts the
+    // right border and the tail of every row — invisible to the parity matrix,
+    // whose widest arm is the 100 columns both formulas agree on.
+    mocks.state.width = 120;
+    const { container } = renderPicker([session(1), session(2)]);
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      width: dialogAreaWidth(120),
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
 
   it('lets the region press the box down instead of pushing the composer out', () => {
     // ink asks for `height - 1` too and lets its fixed-height popup wrapper
