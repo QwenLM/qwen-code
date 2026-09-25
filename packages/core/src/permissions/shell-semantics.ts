@@ -2290,26 +2290,22 @@ interface CwdCandidate {
 }
 
 /**
- * Candidates double at every undecided `cd`, so cap the walk. Past the cap the
- * most recent candidates are kept and reported as cwd-unknown.
+ * Candidates double at every undecided `cd`, so cap them. Two are never
+ * dropped: the cwd from reading every operator at face value (`&` leaves the
+ * cwd, anything else moves it), which keeps the operations a superset of that
+ * reading's, and the cwd from skipping every undecided `cd`, which is where
+ * bash stays when each of them ran in a subshell.
  */
 const MAX_CWD_CANDIDATES = 8;
 
 function dedupeCwdCandidates(candidates: CwdCandidate[]): CwdCandidate[] {
   const seen = new Set<string>();
-  const unique = candidates.filter((candidate) => {
+  return candidates.filter((candidate) => {
     const key = `${candidate.cwd}\u0000${candidate.cwdUnknown}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
-  if (unique.length <= MAX_CWD_CANDIDATES) return unique;
-  shellSemanticsDebugLogger.warn(
-    `More than ${MAX_CWD_CANDIDATES} candidate cwds; reporting later paths as cwd-unknown.`,
-  );
-  return unique
-    .slice(-MAX_CWD_CANDIDATES)
-    .map((candidate) => ({ ...candidate, cwdUnknown: true }));
 }
 
 function dedupeOps(ops: ShellOperation[]): ShellOperation[] {
@@ -2332,7 +2328,10 @@ function walkCompoundCommand(
 
   const ops: ShellOperation[] = [];
   let candidates: CwdCandidate[] = [{ cwd, cwdUnknown: initialCwdUnknown }];
+  let faceValue = candidates[0]!;
+  let undecidedSkipped = candidates[0]!;
   let branched = false;
+  let capped = false;
   // Past a boundary only one reading found, the split may have cut through
   // what bash reads as one word (a wrapper body, say), and a later boundary
   // both readings agree on does not re-align them. Paths from there on are
@@ -2359,25 +2358,51 @@ function walkCompoundCommand(
     const backgrounded = terminator === '&';
 
     // `cd`-ness does not depend on the cwd, only the target it resolves to.
-    const resolved = candidates.map((candidate) =>
-      resolveCdTargetCwd(sub, candidate.cwd, candidate.cwdUnknown),
+    const first = resolveCdTargetCwd(
+      sub,
+      candidates[0]!.cwd,
+      candidates[0]!.cwdUnknown,
     );
-    if (resolved[0]!.kind !== 'not-cd') {
+    if (first.kind !== 'not-cd') {
       // bash opens a `cd`'s own redirections before running it, in the cwd it
       // starts from, whether the `cd` then succeeds or runs in a subshell.
       for (const candidate of candidates) {
         pushOps(extractRedirectOperations(sub, candidate.cwd), sub, candidate);
       }
       if (!backgrounded || terminatorAmbiguous) {
-        const moved = resolved.map((target, i) =>
-          target.kind === 'static'
+        const move = (from: CwdCandidate): CwdCandidate => {
+          const target = resolveCdTargetCwd(sub, from.cwd, from.cwdUnknown);
+          return target.kind === 'static'
             ? { cwd: target.cwd, cwdUnknown: target.cwdUnknown }
-            : { cwd: candidates[i]!.cwd, cwdUnknown: true },
-        );
+            : { cwd: from.cwd, cwdUnknown: true };
+        };
+        const moved = candidates.map(move);
         branched ||= Boolean(terminatorAmbiguous);
-        candidates = dedupeCwdCandidates(
-          terminatorAmbiguous ? [...candidates, ...moved] : moved,
-        );
+        if (!backgrounded) {
+          faceValue = move(faceValue);
+          if (!terminatorAmbiguous) undecidedSkipped = move(undecidedSkipped);
+        }
+        const next = dedupeCwdCandidates([
+          faceValue,
+          undecidedSkipped,
+          ...(terminatorAmbiguous ? [...candidates, ...moved] : moved),
+        ]);
+        // Undecided `cd`s already mark every later path cwd-unknown, so the
+        // candidates the cap drops only lose paths that would escalate anyway.
+        if (next.length > MAX_CWD_CANDIDATES) {
+          if (!capped) {
+            shellSemanticsDebugLogger.warn(
+              `More than ${MAX_CWD_CANDIDATES} candidate cwds; keeping the face-value, the undecided-skipped and the latest ones.`,
+            );
+          }
+          capped = true;
+          candidates = [
+            ...next.slice(0, 2),
+            ...next.slice(2 - MAX_CWD_CANDIDATES),
+          ];
+        } else {
+          candidates = next;
+        }
       }
       splitUnverified ||= Boolean(terminatorAmbiguous);
       continue;
