@@ -25,10 +25,11 @@ import java.util.concurrent.TimeUnit;
  * HTTP client for the private Managed Runtime v2 routes.
  *
  * <p>Attestation plus the tool operations execute, status, and cancel, keyed
- * by the original call reference. Prepare, acquire, control, and release stay
- * on a later transport slice.
+ * by the original call reference. Status and cancel answers are projected to
+ * the Broker's closed state and result. Acquire, control, and release are
+ * not part of the v2 tool contract and fail closed.
  */
-public final class HttpRuntimeTransport {
+public final class HttpRuntimeTransport implements RuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
     static final int TOOL_REQUEST_LIMIT_BYTES = 256 * 1024;
     static final int TOOL_RESULT_LIMIT_BYTES = 1024 * 1024;
@@ -194,7 +195,8 @@ public final class HttpRuntimeTransport {
         body.put("afterSequence", afterSequence);
         byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
         return post(lease, STATUS_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
-                .thenApply(bytes -> parseToolResponse(bytes, "status"));
+                .thenApply(bytes -> projectClosedStatus(
+                        parseToolResponse(bytes, "status"), "status"));
     }
 
     /** Asks the Runtime to cancel one call by its original reference. */
@@ -209,7 +211,62 @@ public final class HttpRuntimeTransport {
         body.put("reference", referenceIdentity(reference));
         byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
         return post(lease, CANCEL_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
-                .thenApply(bytes -> parseToolResponse(bytes, "cancel"));
+                .thenApply(bytes -> projectClosedStatus(
+                        parseToolResponse(bytes, "cancel"), "cancel"));
+    }
+
+    /**
+     * Session verbs are not on the v2 tool contract. Fail closed instead of
+     * inventing a route the worker does not serve.
+     */
+    @Override
+    public CompletionStage<Void> acquire(RuntimeLease lease,
+            RuntimeSession session) {
+        return unsupportedSessionVerb();
+    }
+
+    @Override
+    public CompletionStage<Object> control(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> operation) {
+        return unsupportedSessionVerb();
+    }
+
+    @Override
+    public CompletionStage<Boolean> release(RuntimeLease lease,
+            RuntimeSession session) {
+        return unsupportedSessionVerb();
+    }
+
+    private static <T> CompletionStage<T> unsupportedSessionVerb() {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_session_verb_unsupported",
+                "Runtime transport does not support session verbs.", false));
+    }
+
+    /**
+     * The Broker accepts only {@code state}, plus {@code result} when the
+     * state is {@code settled}. Wire fields such as {@code protocolVersion}
+     * and {@code lastSequence} stay on the HTTP response and are validated
+     * before this projection.
+     */
+    private static Map<String, Object> projectClosedStatus(
+            Map<String, Object> response, String operation) {
+        Object state = response.get("state");
+        if (!(state instanceof String text) || !TOOL_STATES.contains(text)) {
+            throw protocol("Managed Runtime " + operation
+                    + " returned an invalid state.");
+        }
+        boolean settled = "settled".equals(text);
+        if (settled != response.containsKey("result")) {
+            throw protocol("Managed Runtime " + operation
+                    + " result does not match its state.");
+        }
+        Map<String, Object> projected = new LinkedHashMap<>();
+        projected.put("state", text);
+        if (settled) {
+            projected.put("result", response.get("result"));
+        }
+        return Map.copyOf(projected);
     }
 
     private static Map<String, Object> referenceIdentity(
