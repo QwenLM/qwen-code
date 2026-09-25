@@ -178,13 +178,14 @@ async function smokeTest(prefix: string): Promise<void> {
   );
 }
 
-// npm/pnpm pack preserves the exec bit only for `bin` entries, so the
-// published tarball ships every `vendor/ripgrep/*/rg` as 0644 (#12668). The
-// published manifest intentionally carries no postinstall to restore it
-// (#6164 removed that surface), so heal the staged install here before it is
-// activated. Best-effort like the source-tree postinstall: a failure must not
-// block the update — the runtime ripgrep probe still falls back to a system
-// rg or the JS grep tool.
+// pnpm pack preserves the exec bit only for `bin` entries, so the published
+// tarball ships every `vendor/ripgrep/*/rg` as 0644 (#12668). The published
+// manifest intentionally carries no postinstall to restore it (#6164 removed
+// that surface), so heal the install here instead. Best-effort like the
+// source-tree postinstall: a failure must not block the update — the runtime
+// ripgrep probe still falls back to a system rg or the JS grep tool. It is
+// metadata-only (chmod, never copies or replaces a binary), so it is also safe
+// on a version directory a live older session may still be importing.
 async function restoreVendoredRipgrepExecBits(prefix: string): Promise<void> {
   const ripgrepDir = path.join(packageDir(prefix), 'vendor', 'ripgrep');
   let entries: fs.Dirent[];
@@ -366,10 +367,16 @@ export async function activateManagedNpmUpdate(
     });
     if (activeVersion && semver.gt(activeVersion, version)) {
       try {
-        await validateInstallation(
-          path.join(update.launcherRoot, 'versions', activeVersion),
+        const activeDir = path.join(
+          update.launcherRoot,
+          'versions',
           activeVersion,
         );
+        await validateInstallation(activeDir, activeVersion);
+        // Heal the payload that stays active, not only the staged one: the
+        // existing pointer keeps this version in use, and it may have been
+        // activated by a build without the heal.
+        await restoreVendoredRipgrepExecBits(activeDir);
         await cleanupManagedNpmUpdate(update);
         return;
       } catch {
@@ -382,6 +389,9 @@ export async function activateManagedNpmUpdate(
     } catch (error) {
       if (!fs.existsSync(update.versionDir)) throw error;
       await validateInstallation(update.versionDir, version);
+      // The healed staging tree is discarded here, so heal the payload that
+      // survives the collision instead.
+      await restoreVendoredRipgrepExecBits(update.versionDir);
       await cleanupManagedNpmUpdate(update);
     }
 

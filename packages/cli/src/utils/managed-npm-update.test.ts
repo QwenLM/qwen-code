@@ -8,6 +8,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+// The heal reports a chmod failure through the debug logger, which writes
+// nowhere unless a session is bound — and the update worker binds none. Spy on
+// it so both halves of the contract ("did not block the update" and "was
+// reported") are assertable.
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 import {
   activateManagedNpmUpdate,
   cleanupManagedNpmUpdate,
@@ -64,8 +82,57 @@ function writeBaseInstallation(root: string, version = '1.0.0'): string {
   return bootstrap;
 }
 
+function vendoredRipgrepDir(prefix: string): string {
+  return path.join(
+    prefix,
+    'node_modules',
+    '@qwen-code',
+    'qwen-code',
+    'vendor',
+    'ripgrep',
+  );
+}
+
+// Mirror the published tarball: pnpm pack normalizes every non-`bin` file to
+// 0644, including the vendored ripgrep binaries (#12668). The win32 directory
+// ships rg.exe instead of rg and must not fail activation, and COPYING is the
+// non-directory entry the real tree carries beside the platform directories.
+function writeVendoredRipgrep(prefix: string): string {
+  const ripgrepDir = vendoredRipgrepDir(prefix);
+  for (const platform of ['x64-linux', 'arm64-darwin', 'x64-win32']) {
+    fs.mkdirSync(path.join(ripgrepDir, platform), { recursive: true });
+  }
+  for (const binary of ['x64-linux/rg', 'arm64-darwin/rg']) {
+    const filePath = path.join(ripgrepDir, binary);
+    fs.writeFileSync(filePath, 'fake rg');
+    fs.chmodSync(filePath, 0o644);
+  }
+  fs.writeFileSync(path.join(ripgrepDir, 'x64-win32', 'rg.exe'), 'fake');
+  fs.writeFileSync(path.join(ripgrepDir, 'COPYING'), 'license');
+  return ripgrepDir;
+}
+
+// Windows has no POSIX mode bits; stat reports 0o666 for a writable regular
+// file, so the exec-bit assertion is only meaningful on the POSIX installs
+// this heals. Guarding the assertion rather than the case keeps the win32
+// fixture above — the only coverage of the ENOENT swallow — running everywhere.
+function expectExecBit(filePath: string): void {
+  if (process.platform !== 'win32') {
+    expect(fs.statSync(filePath).mode & 0o111).not.toBe(0);
+  }
+}
+
+// Rewind an activated payload to the state a build without the heal leaves it
+// in, so the heal of an already-adopted version directory is observable.
+function clearVendoredRipgrepExecBits(prefix: string): void {
+  for (const binary of ['x64-linux/rg', 'arm64-darwin/rg']) {
+    fs.chmodSync(path.join(vendoredRipgrepDir(prefix), binary), 0o644);
+  }
+}
+
 beforeEach(() => {
   vi.stubEnv('NPM_CONFIG_GLOBALCONFIG', '/global/npmrc');
+  mockDebugLogger.warn.mockClear();
 });
 
 afterEach(() => {
@@ -140,46 +207,116 @@ describe('managed npm update', () => {
       path.join(root, 'updates'),
     );
     writeInstallation(update.stagingDir, '2.0.0');
-    // Mirror the published tarball: npm pack normalizes every non-`bin` file
-    // to 0644, including the vendored ripgrep binaries (#12668). The win32
-    // directory ships rg.exe instead of rg and must not fail activation.
-    const stagedRipgrep = path.join(
-      update.stagingDir,
-      'node_modules',
-      '@qwen-code',
-      'qwen-code',
-      'vendor',
-      'ripgrep',
-    );
-    fs.mkdirSync(path.join(stagedRipgrep, 'x64-linux'), { recursive: true });
-    fs.mkdirSync(path.join(stagedRipgrep, 'arm64-darwin'), {
-      recursive: true,
-    });
-    fs.mkdirSync(path.join(stagedRipgrep, 'x64-win32'), { recursive: true });
-    for (const binary of ['x64-linux/rg', 'arm64-darwin/rg']) {
-      const filePath = path.join(stagedRipgrep, binary);
-      fs.writeFileSync(filePath, 'fake rg');
-      fs.chmodSync(filePath, 0o644);
-    }
-    fs.writeFileSync(path.join(stagedRipgrep, 'x64-win32', 'rg.exe'), 'fake');
+    writeVendoredRipgrep(update.stagingDir);
 
     await activateManagedNpmUpdate(update, '2.0.0', bootstrap);
 
-    const activatedRipgrep = path.join(
-      update.versionDir,
-      'node_modules',
-      '@qwen-code',
-      'qwen-code',
-      'vendor',
-      'ripgrep',
-    );
+    const activatedRipgrep = vendoredRipgrepDir(update.versionDir);
     for (const binary of ['x64-linux/rg', 'arm64-darwin/rg']) {
-      // Windows synthesizes modes without an exec bit concept; the assertion
-      // is vacuous there and meaningful on the POSIX installs this fixes.
-      expect(
-        fs.statSync(path.join(activatedRipgrep, binary)).mode & 0o111,
-      ).not.toBe(0);
+      expectExecBit(path.join(activatedRipgrep, binary));
     }
+    // COPYING is the non-directory entry the published tree carries beside the
+    // platform directories, and the heal must skip it: chmod'ing `COPYING/rg`
+    // fails ENOTDIR, which is not the ENOENT the win32 layout produces, so it
+    // takes the reporting branch.
+    expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'still activates when restoring the exec bit fails with a non-ENOENT error',
+    async () => {
+      const root = makeTemporaryDirectory();
+      const bootstrap = writeBaseInstallation(root);
+      const update = prepareManagedNpmUpdate(
+        '2.0.0',
+        bootstrap,
+        path.join(root, 'updates'),
+      );
+      writeInstallation(update.stagingDir, '2.0.0');
+      const stagedRipgrep = writeVendoredRipgrep(update.stagingDir);
+      // A self-referential symlink makes chmod fail ELOOP: a non-ENOENT errno
+      // that needs neither a read-only mount nor a non-root uid, so it behaves
+      // the same on a laptop and on CI.
+      const looped = path.join(stagedRipgrep, 'x64-linux', 'rg');
+      fs.rmSync(looped);
+      fs.symlinkSync('rg', looped);
+
+      // A binary that cannot be chmod'ed must not turn into a failed
+      // self-update: a non-zero worker exit is reported as `update-failed`.
+      await expect(
+        activateManagedNpmUpdate(update, '2.0.0', bootstrap),
+      ).resolves.toBeUndefined();
+
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(update.launcherRoot, 'active.json'),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ version: '2.0.0' });
+      const activatedRipgrep = vendoredRipgrepDir(update.versionDir);
+      // Reported rather than swallowed, and the loop still heals the rest.
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to chmod'),
+        expect.objectContaining({ code: 'ELOOP' }),
+      );
+      expectExecBit(path.join(activatedRipgrep, 'arm64-darwin', 'rg'));
+    },
+  );
+
+  it('heals the payload it adopts when the rename collides', async () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const updateRoot = path.join(root, 'updates');
+    const adopted = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    writeInstallation(adopted.versionDir, '2.0.0');
+    writeVendoredRipgrep(adopted.versionDir);
+    const staged = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    writeInstallation(staged.stagingDir, '2.0.0');
+    writeVendoredRipgrep(staged.stagingDir);
+
+    await activateManagedNpmUpdate(staged, '2.0.0', bootstrap);
+
+    // The freshly healed staging tree is discarded, so the surviving payload
+    // has to be healed in its place — otherwise the pointer keeps naming a
+    // 0644 tree and no further update fires for this version.
+    expect(staged.versionDir).toBe(adopted.versionDir);
+    expect(fs.existsSync(staged.stagingDir)).toBe(false);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(staged.launcherRoot, 'active.json'), 'utf8'),
+      ),
+    ).toMatchObject({ version: '2.0.0' });
+    expectExecBit(
+      path.join(vendoredRipgrepDir(staged.versionDir), 'x64-linux', 'rg'),
+    );
+  });
+
+  it('heals the higher version it keeps pointing at', async () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const updateRoot = path.join(root, 'updates');
+    const newer = prepareManagedNpmUpdate('3.0.0', bootstrap, updateRoot);
+    writeInstallation(newer.stagingDir, '3.0.0');
+    writeVendoredRipgrep(newer.stagingDir);
+    await activateManagedNpmUpdate(newer, '3.0.0', bootstrap);
+    clearVendoredRipgrepExecBits(newer.versionDir);
+
+    const older = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    writeInstallation(older.stagingDir, '2.0.0');
+    await activateManagedNpmUpdate(older, '2.0.0', bootstrap);
+
+    // The pointer stays on 3.0.0 and that directory is what the launcher runs,
+    // so it is the one that has to come out healed.
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(older.launcherRoot, 'active.json'), 'utf8'),
+      ),
+    ).toMatchObject({ version: '3.0.0' });
+    expectExecBit(
+      path.join(vendoredRipgrepDir(newer.versionDir), 'x64-linux', 'rg'),
+    );
   });
 
   it('still activates when the lock is compromised during activation', async () => {
