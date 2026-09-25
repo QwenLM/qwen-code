@@ -50,13 +50,40 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // compile before the transcript renders. The CSS is a separate, parallel,
 // year-cached asset and is logged rather than budgeted.
 //
-// Last measured at 1,806,361 bytes of JS on this branch with the MCP Apps
-// document stub engaged. A control with that substitution removed measured
-// 2,111,566 bytes, so keep the warning and hard ceiling close to the healthy
-// measurement; slack large enough for a dependency family to return defeats
-// the ratchet.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_830_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 1_870_000;
+// Last measured at 1,931,934 bytes of JS with 2,332,167 bytes of CSS moved
+// out, by the Lint & Static lane on main at cc9bb98847 — #12199 and #12050
+// grew only transcript-reachable first-party code (the third-party input mix
+// is unchanged) past the old 1,930,000 cap (#12295), so the budget follows
+// the measurement. Before the split that lane measured the combined bundle at
+// 4,133,282 bytes on main at c3023b3e6d — the measurement #11372 raised these
+// two constants for, and which the CSS extraction superseded because the CSS
+// it counted is no longer in the JS.
+//
+// The bundle pulls web-shell's built transcript entry, which carries the
+// whole i18n table, so every string the Web Shell adds anywhere lands here.
+// Measured for #12154 by building this bundle twice against the same tree,
+// once with its dictionary and once with main's: 2,021,942 against
+// 2,013,739, so +8,203 bytes for forty-two keys across two locales,
+// which the cap above has room for. Both figures are local and both are
+// higher than the lane's; it is the difference between them that is
+// comparable, and the lane's absolute number is what these constants
+// track.
+//
+// This branch then substituted the daemon-only MCP Apps document bridge:
+// 1,806,361 bytes measured with the stub engaged against a 2,111,566-byte
+// control with it removed, so the merged tree sits below the lane figure
+// above. The lane has not re-measured it, so these two constants keep the
+// lane's values rather than the tighter pair this branch had set; lower them
+// here once it does. The slack cannot let the MCP family back in unnoticed —
+// the `@modelcontextprotocol` entry in FORBIDDEN_DOCUMENT_INPUTS and the
+// stub-engagement assertion below fail the build first — but it can still
+// hide first-party growth, which is what the re-measurement is for.
+//
+// Keep the warning close to the measurement and the hard ceiling close above
+// it: a cap left far above the measurement is a ratchet with enough slack for
+// a whole dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

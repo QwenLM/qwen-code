@@ -53,6 +53,9 @@ export function formatDateForContext(date: Date = new Date()): string {
 export async function getDirectoryContextString(
   config: Config,
 ): Promise<string> {
+  if (config.getExecutionEnvironment?.()) {
+    return 'Project files and commands use an isolated execution environment. Use workspace tools to inspect its working directory and operating system.';
+  }
   const workspaceContext = config.getWorkspaceContext();
   const workspaceDirectories = workspaceContext.getDirectories();
 
@@ -88,14 +91,15 @@ ${folderStructure}`;
  */
 export async function getEnvironmentContext(config: Config): Promise<Part[]> {
   const today = formatDateForContext();
-  const platform = process.platform;
+  const platform = config.getExecutionEnvironment?.()
+    ? ''
+    : `My operating system is: ${process.platform}\n`;
   const directoryContext = await getDirectoryContextString(config);
 
   const context = `
 This is the Qwen Code. We are setting up the context for our chat.
 Today's date is ${today}.
-My operating system is: ${platform}
-${directoryContext}
+${platform}${directoryContext}
         `.trim();
 
   return [{ text: context }];
@@ -212,9 +216,28 @@ export function buildDeferredToolsReminder(
     .getDeferredToolSummary()
     .filter((tool) => !toolRegistry.isDeferredToolRevealed(tool.name));
 
+  // Nothing to advertise — return before touching the registry's tool lookup,
+  // which callers with minimal registry stubs (e.g. fork-resume tests) may not
+  // implement.
+  if (deferredTools.length === 0) {
+    return null;
+  }
+
+  // Without both bridge halves there is no discovery or invocation path for
+  // hidden deferred tools: the incomplete-bridge fallback in client.ts eagerly
+  // reveals ordinary deferred tools into the declarations and reports
+  // tools.eager-demoted ones as unreachable, so advertising them here would
+  // send the model to tools it cannot invoke.
+  if (
+    !toolRegistry.getTool(ToolNames.TOOL_SEARCH) ||
+    !toolRegistry.getTool(ToolNames.TOOL_CALL)
+  ) {
+    return null;
+  }
+
   return buildDeferredToolsReminderForSummary(
     deferredTools,
-    `The following tools are reachable via \`${ToolNames.TOOL_SEARCH}\`. Call with \`select:<name>\` or a keyword query.`,
+    `The following tools are reachable through \`${ToolNames.TOOL_SEARCH}\` and \`${ToolNames.TOOL_CALL}\`. Review a schema with \`select:<name>\` or a keyword query, then invoke it with \`${ToolNames.TOOL_CALL}\`.`,
   );
 }
 
@@ -237,7 +260,7 @@ export function buildChangedMcpToolsReminder(
   if (removed.length === 0) {
     return buildDeferredToolsReminderForSummary(
       mcpTools,
-      `The following MCP tools became available after startup and are reachable via \`${ToolNames.TOOL_SEARCH}\`. Call with \`select:<name>\` or a keyword query.`,
+      `The following MCP tools became available after startup and are reachable through \`${ToolNames.TOOL_SEARCH}\` and \`${ToolNames.TOOL_CALL}\`. Review a schema, then invoke it through the bridge.`,
     );
   }
 
@@ -248,7 +271,7 @@ export function buildChangedMcpToolsReminder(
   if (mcpTools.length > 0) {
     const addedBody = buildDeferredToolsReminderBody(
       mcpTools,
-      `The following MCP tools are now available and are reachable via \`${ToolNames.TOOL_SEARCH}\`. Call with \`select:<name>\` or a keyword query.`,
+      `The following MCP tools are now available and are reachable through \`${ToolNames.TOOL_SEARCH}\` and \`${ToolNames.TOOL_CALL}\`. Review a schema, then invoke it through the bridge.`,
     );
     if (addedBody) {
       bodyParts.push(addedBody);
@@ -518,8 +541,8 @@ export async function getInitialChatHistory(
     : null;
 
   // Stable parts first (MCP, skills, startup) so prefix-caching servers
-  // retain the KV-cache for the shared prefix. Deferred-tools is last
-  // because tool_search revelations change it — only the tail recomputes.
+  // retain the KV-cache for the shared prefix. Deferred-tools is last because
+  // progressive MCP discovery can change it — only the tail recomputes.
   const reminderParts = [
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,

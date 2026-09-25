@@ -753,3 +753,18 @@ export class McpAuthenticationInProgressError extends Error {
     this.name = 'McpAuthenticationInProgressError';
   }
 }
+
+export class WorkspaceRuntimeStopError extends Error {
+  constructor(
+    readonly code:
+      | 'workspace_runtime_stop_stale'
+      | 'workspace_runtime_stop_blocked',
+  ) {
+    super(
+      code === 'workspace_runtime_stop_stale'
+        ? 'The workspace changed. Refresh and confirm the affected sessions again.'
+        : 'The workspace cannot be stopped while other runtime work is pending.',
+    );
+    this.name = 'WorkspaceRuntimeStopError';
+  }
+}

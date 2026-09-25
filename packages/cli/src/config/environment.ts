@@ -103,6 +103,65 @@ if (inheritedProvenance) {
   Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
+// Model credentials and endpoints that the docs name for each auth type
+// (docs/users/configuration/auth.md). Providers read them when a request is
+// made, never while a module loads.
+const DOCUMENTED_MODEL_ENV_KEYS = [
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_MODEL',
+  'QWEN_MODEL',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_MODEL',
+  'GEMINI_API_KEY',
+  'GEMINI_MODEL',
+  'GOOGLE_API_KEY',
+  'GOOGLE_MODEL',
+];
+// Keys whose values are only read per request: the documented ones above plus
+// the `envKey` of every configured model provider, which is what `/auth` writes
+// to `settings.env`. Filled by loadEnvironment().
+const requestTimeEnvKeys = new Set<string>();
+
+function rememberRequestTimeEnvKeys(settings: Settings): void {
+  requestTimeEnvKeys.clear();
+  for (const key of DOCUMENTED_MODEL_ENV_KEYS) requestTimeEnvKeys.add(key);
+  for (const models of Object.values(settings.modelProviders ?? {})) {
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      const envKey = model?.envKey;
+      // A provider entry may name any variable; never let it exempt a key
+      // that Node or the loader treats specially.
+      if (
+        typeof envKey === 'string' &&
+        envKey &&
+        !isHardcodedProjectEnvExclusion(envKey) &&
+        !isLoaderEnvKey(envKey)
+      ) {
+        requestTimeEnvKeys.add(envKey);
+      }
+    }
+  }
+}
+
+/**
+ * Whether `.env` files or `settings.env` put a value into this process's
+ * environment that something may have read before those files loaded. Modules
+ * imported earlier captured the old values (and Node itself reads variables
+ * such as `NODE_EXTRA_CA_CERTS` only at boot), so only a fresh image sees
+ * such values. Model credentials and endpoints do not count: providers read
+ * them per request, so a process that keeps running sees them too.
+ */
+export function hasLoadedEnvironmentValues(): boolean {
+  for (const keys of [dotEnvSourcedKeys, settingsEnvSourcedKeys]) {
+    for (const key of keys) {
+      if (!requestTimeEnvKeys.has(key)) return true;
+    }
+  }
+  return false;
+}
+
 export function getRelaunchEnvProvenance(): Record<string, string> {
   return {
     [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
@@ -211,6 +270,7 @@ export function resetEnvironmentTrackingForTesting(): void {
   settingsEnvSourcedKeys.clear();
   inheritedDotEnvKeys.clear();
   inheritedSettingsEnvKeys.clear();
+  requestTimeEnvKeys.clear();
   delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
   lastReloadSnapshotSeeded = false;
@@ -305,10 +365,18 @@ export function getHomeEnvFallbackVars(
 /**
  * Finds the .env files to load, respecting workspace trust settings.
  *
- * When workspace is untrusted, only allow user-level .env files at:
+ * When workspace is untrusted (or has no recorded trust decision yet), only
+ * allow user-level .env files at:
  * - ~/.qwen/.env
  * - ~/.env
  * - <QWEN_HOME>/.env (when set)
+ *
+ * When the workspace IS trusted, the upward walk also accepts ancestor .env
+ * files: trust is a decision about the workspace, and re-resolving it per
+ * ancestor would reject every ancestor above a `TRUST_FOLDER` rule (the rule
+ * is keyed on the workspace path, so it cannot match a directory above it).
+ * An ancestor carrying its own explicit `DO_NOT_TRUST` rule still blocks its
+ * own .env.
  *
  * Exported so `settings-cache.ts` can re-run the exact same discovery when
  * validating its fingerprint; keep the discovery semantics in this single
@@ -333,19 +401,29 @@ export function findEnvFiles(
   const found: string[] = [];
   const seen = new Set<string>();
 
+  // Resolve the workspace's own decision once. An ancestor .env is inside the
+  // workspace's trust boundary: re-resolving trust against the ancestor itself
+  // would return `undefined` for every directory above a TRUST_FOLDER rule and
+  // silently drop values the user's explicit decision was meant to keep.
+  const workspaceIsTrusted =
+    workspaceTrusted ??
+    isWorkspaceTrusted(settings, undefined, realStartDir).isTrusted === true;
+
   const canUseEnvFile = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (userLevelPaths.has(normalized)) return true;
+    if (!workspaceIsTrusted) return false;
     const dirPath = path.dirname(normalized);
     const workspaceDir =
       path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
         ? path.dirname(dirPath)
         : dirPath;
-    const trusted =
-      workspaceTrusted !== undefined && workspaceDir === realStartDir
-        ? workspaceTrusted
-        : isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted;
-    return trusted !== false;
+    if (workspaceDir === realStartDir) return true;
+    // Ancestor: honour an explicit untrusted rule of its own, but do not treat
+    // "no rule recorded for this directory" as a refusal.
+    return (
+      isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted !== false
+    );
   };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
@@ -646,6 +724,7 @@ export function loadEnvironment(
   startDir: string = process.cwd(),
 ): void {
   captureEnvironmentBeforeLoad();
+  rememberRequestTimeEnvKeys(settings);
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);

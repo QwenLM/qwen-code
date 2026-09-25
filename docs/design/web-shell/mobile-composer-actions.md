@@ -1,0 +1,148 @@
+# Mobile composer actions
+
+[English](mobile-composer-actions.md) | [简体中文](mobile-composer-actions.zh-CN.md)
+
+## Problem and scope
+
+The touch composer exposes a grid of up to 18 actions and six keyboard keys.
+Several actions duplicate navigation and settings; Tab does nothing on the
+textarea backend. The stop button disappears when a running session has a
+draft. Small controls and horizontal add-menu submenus make phone use harder.
+
+This change is confined to Web Shell UI. Desktop editing, daemon routes,
+permissions, attachment limits, and host toolbar opt-ins retain their existing
+contracts. Mobile means the existing touch textarea backend, including its URL
+override; narrow desktop windows keep desktop editing.
+
+## Design
+
+### Toolbar and editing
+
+Remove the legacy touch action grid and simulated Tab/Esc/left/right keys. Keep add,
+model, approval, dictation, and send controls. Hide the width toggle on touch;
+retain the context-usage control when enabled by the host. Put workspace
+selection and Git controls
+in a separate context row so starting a task in a particular workspace or
+branch remains possible. The row's measured height, two lines when it wraps,
+is added to the composer's height cap, so it does not come out of the
+attachments' room when a soft keyboard shrinks the viewport. The rows stack
+without overlapping touch targets.
+Preserve host-provided toolbar slots.
+
+Use 44px touch targets and wrap controls on very narrow viewports rather than
+clip them. Keep Plan as an active-state chip. While a turn runs, stop remains
+available alongside send when there is a draft; stopping never clears that
+draft. Voice capture retains its existing reduced toolbar and hides the context and
+editing rows.
+
+Add a small editing row with previous/next input history on the left, expand,
+and, while the textarea is focused, hide keyboard. The history arrows call the
+existing navigation actions directly: up recalls older inputs, down recalls
+newer inputs and then restores the draft saved before browsing. They never
+submit. History search in Add remains available for finding a specific input.
+The row wraps on extra-narrow screens and its history controls are disabled with the
+composer. Hide keyboard blurs without returning focus through the composer
+surface click handler. A modal expanded editor edits the same controlled draft,
+preserves its selection when returning, and does not submit when closed. Its
+Done and keyboard controls are touch sized. Shell mode gets an explicit exit
+action. Session/workspace changes and disabled state close expanded editing.
+
+### Touch add menu
+
+Keep the existing desktop dropdown. On touch, use the shared portal-aware
+bottom Drawer with one visible page at a time, a Back button, and a Close
+button. Reuse provider searches, availability checks, attachment destinations,
+skill prefix insertion, and session/workspace invalidation.
+
+Offer photos, camera, message files, and upload to workspace as explicit
+actions. Photos use an image-only file picker; camera requests rear capture.
+Native file-picker cancellation preserves the draft. Browser/device support
+determines how the native picker presents capture.
+
+File references, extensions, MCP server references, and skills have dedicated
+pages with scrolling. Reference search remains workspace-wide. Plan stays a
+checked row. Add input history and a searchable command page: choosing a
+command prefixes its invocation to the existing draft for review, and never
+automatically runs it. This keeps Shell, Goal, and infrequent session commands
+available without independent shortcuts or draft replacement. A labelled Live
+voice entry moves into the drawer, with an active-call indicator retained in
+the toolbar.
+
+## Implementation and constraints
+
+Changes affect ChatEditor, AddMenu, their CSS and tests, Git popover sizing,
+the shared paste handler, LiveVoiceButton, and English/Chinese strings.
+Reuse the existing Dialog and Drawer primitives and
+Web Shell portal root. No new dependency or public customization API is needed.
+The add control remains host opt-in. A host that explicitly enables a command
+button retains a reachable command picker on mobile outside Shell mode.
+Hosts without Add retain Shell and history-search buttons in the editing row;
+this fallback does not enable file ingestion or references.
+
+The history search must have a visible close action and remain touch usable.
+It opens upward from the composer, so its height is also capped by the room
+between the composer and the top of the visible chat area. When even its
+minimum height does not fit, it overlaps the top of the composer instead of
+going under the header, so its search field and close action stay on screen
+with a soft keyboard open. The same positioning applies to desktop history
+search: when a short window leaves insufficient room above the composer,
+the panel overlaps its top so the search field stays visible. Desktop editing
+and keyboard shortcuts retain their existing behavior.
+The bound is the top of the lowest ancestor that
+clips overflow. A host whose own header overlays the shell without clipping
+it must declare `--web-shell-popover-safe-top`; that variable is also how a
+host opts out of the default clearance, and a declared `0px` is honoured
+rather than swallowed.
+File selection must stay in a user gesture, and deferred insertions must run
+after the drawer releases focus. Expanded editing must preserve attachment
+and reference state in the shared composer, including IME input. Image/file
+paste uses the existing ingestion lane; long-text paste uses the active
+editor's selection when deciding whether to fold it into an attachment.
+All imperative text insertion and focus target the expanded textarea while it
+is mounted. The dialog retains the input placeholder and mobile text settings,
+shows the shared attachment/image count, and returns focus without stealing it
+from a newly opened approval dialog. Closing idle Live voice returns to Add.
+
+The command page uses shared completion labels, sections, priority, hints and
+subcommand results (up to 50 matches), normalizes a leading slash and surrounding
+whitespace, and retains description search as a fallback. Search stays visible
+while scrolling. Commands and skills are unavailable in Shell mode. Skills only
+announce an empty catalog after loading has completed.
+
+## Validation and acceptance
+
+Use the global qwen CLI for a baseline attempt and the repository browser
+harness for deterministic UI coverage. Verify local bundled UI when available.
+Record any runtime limitations separately from mocked browser results.
+
+- At phone widths, the old action grid and simulated keyboard keys are absent;
+  labelled history arrows remain in the editing row. Toolbar
+  actions are reachable with no horizontal overflow. Desktop toolbar behavior
+  remains.
+- Desktop Ctrl+R keeps the search field visible and focused in a short window
+  (1280x300), overlapping the composer when necessary. Escape preserves the
+  draft and returns focus to the editor. With enough room, the panel remains
+  above the composer.
+- With a soft keyboard open at a Pixel 7 keyboard height (about 412x450),
+  attachments stay reachable beside the context row, and the history search
+  field and close action stay reachable below the header. Below roughly 430px
+  of viewport height the composer is already at its cap, so the attachments
+  strip shrinks toward a sliver.
+- Stop works with a pending draft and keeps the draft; send still queues it.
+- Hide keyboard blurs the editor; expand/edit/Done preserves text, selection,
+  attachments, and references. Switching sessions cannot leak expanded drafts.
+- Drawer pages support tap/back/close; native photos/camera/files choose the
+  correct destination; cancel leaves text intact. Provider errors and disabled
+  actions remain honest, and Plan toggles exactly once.
+- Commands and skills preserve existing drafts and tags; history can be opened,
+  selected, or dismissed. Live voice remains accessible.
+- History arrows recall older/newer inputs and restore a multiline draft
+  without submitting. Empty history is inert, and both arrows remain reachable
+  with 44px targets at 390px and 240px widths.
+- Run focused unit/browser tests, build, typecheck, bundle, and two clean
+  self-audit passes plus independent review.
+
+## Open questions
+
+None for implementation. Real-device iOS/Android keyboard and camera behavior
+must be distinguished from browser emulation in the verification report.
