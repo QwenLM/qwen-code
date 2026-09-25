@@ -2777,6 +2777,28 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(result).toEqual([]);
     });
 
+    it('silently accepts a legacy -32601 envelope with alternate wording', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(
+          legacyOptionalMethodSseTransportError(
+            400,
+            -32601,
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32601, message: 'Unsupported method' },
+              id: null,
+            }),
+          ),
+        ),
+      } as unknown as ClientLib.Client;
+
+      await expect(
+        listMcpPrompts('legacy-wording', mockClient),
+      ).resolves.toEqual([]);
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
     it('retries on transient ECONNRESET and succeeds on second attempt', async () => {
       const mockClient = {
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
