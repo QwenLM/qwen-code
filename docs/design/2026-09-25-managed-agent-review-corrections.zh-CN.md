@@ -10,6 +10,7 @@
 
 - Managed 面板要求显式传入 provider。普通 daemon 面板继续使用原有路由。本次拆分没有 daemon Managed Session SDK 或端点，因此移除不可用的适配器及仅靠 mock 的测试，浏览器测试改为覆盖 Java HTTP 契约。
 - 新私有 Session 先尝试严格创建；已有权威记录冲突或创建结果不确定时再 load。已知存在的 Session 只 load，避免在新权威记录存在之前就要求通过所有权校验的加载。
+- 新 Managed Agent 表的 SQL migration 统一设置大小写敏感的 `utf8mb4_bin` 默认排序规则。即使数据库默认不区分大小写，tenant、Session、命令和资源标识也保持 API 定义的大小写语义。MySQL 集成测试验证仅大小写不同的两个租户相互隔离。
 - 生命周期事件身份使用命令幂等键，而非仅使用语义摘要。第二轮 archive/unarchive 是新操作；重放同一命令键仍保持幂等。
 - 公共文本 Part 只聚合相邻且同类的 delta；工具与思考事件切分 Part，保证快照还原后的显示顺序。
 - continuation 回退只清除指定 Harness boot 和 event epoch 的输出。在同一事务中失效派生投影、重置物化进度，提交后发布 `stream.reconciled`，使浏览器重新读取保留的历史。这修复投影一致性，不代表缺失的私有 checkpoint 恢复协议已被证明。

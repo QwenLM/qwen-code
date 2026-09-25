@@ -13,7 +13,7 @@ CREATE TABLE qwen_runtime_binding_slot (
     last_generation BIGINT NOT NULL,
     active_binding_id VARCHAR(512),
     CONSTRAINT uq_runtime_binding_isolation UNIQUE (isolation_key)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE qwen_runtime_binding (
     binding_id VARCHAR(512) PRIMARY KEY,
@@ -53,7 +53,7 @@ CREATE TABLE qwen_runtime_binding (
     last_active_at DATETIME(6) NOT NULL,
     CONSTRAINT uq_runtime_binding_generation
         UNIQUE (request_key, runtime_generation)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX idx_runtime_binding_scope
     ON qwen_runtime_binding (scope_key, isolation_key, binding_state);
@@ -74,7 +74,7 @@ CREATE TABLE qwen_runtime_session (
     session_state VARCHAR(32) NOT NULL,
     record_version BIGINT NOT NULL,
     last_active_at DATETIME(6) NOT NULL
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX idx_runtime_session_scope
     ON qwen_runtime_session (scope_key);
@@ -112,7 +112,7 @@ CREATE TABLE qwen_tool_execution (
         UNIQUE (execution_call_id_hash),
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX idx_tool_execution_session
     ON qwen_tool_execution (runtime_session_key, execution_state);

@@ -16,6 +16,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -67,8 +68,29 @@ public final class ManagedSessionStoreProcessFixtureMain {
                                 1_000L)));
         require(grant.writerGeneration() == 1,
                 "the first writer did not receive generation one");
-        CommitReceipt receipt = inTransaction(transactions,
-                () -> store.commit(TENANT, SESSION, TOKEN_A, genesis()));
+        CommitReceipt receipt;
+        try {
+            receipt = inTransaction(transactions,
+                    () -> store.commit(TENANT, SESSION, TOKEN_A, genesis()));
+        } catch (ApiException error) {
+            JdbcTemplate jdbc = new JdbcTemplate(new DriverManagerDataSource(
+                    required("D1_MYSQL_URL"), required("D1_MYSQL_USER"),
+                    System.getenv().getOrDefault("D1_MYSQL_PASSWORD", "")));
+            Map<String, Object> head = jdbc.queryForMap(
+                    "SELECT state, writer_generation, writer_id,"
+                            + " writer_lease_until,"
+                            + " CURRENT_TIMESTAMP(6) AS observed_now,"
+                            + " lease_token_hash = ? AS token_matches,"
+                            + " TIMESTAMPDIFF(MICROSECOND,"
+                            + " CURRENT_TIMESTAMP(6), writer_lease_until)"
+                            + " AS lease_remaining_micros FROM"
+                            + " qwen_managed_session_journal_head WHERE"
+                            + " tenant_id = ? AND session_id = ?",
+                    sha256(TOKEN_A.getBytes(StandardCharsets.UTF_8)),
+                    TENANT, SESSION);
+            System.err.println("Writer diagnostic: " + head);
+            throw error;
+        }
         require(receipt.journalRevision() == 1 && !receipt.replayed(),
                 "the genesis transaction did not commit exactly once");
         Runtime.getRuntime().halt(23);

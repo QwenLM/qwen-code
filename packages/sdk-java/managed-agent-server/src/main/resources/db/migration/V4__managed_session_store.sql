@@ -19,7 +19,7 @@ CREATE TABLE qwen_managed_session_journal_head (
     created_at DATETIME(6) NOT NULL,
     updated_at DATETIME(6) NOT NULL,
     PRIMARY KEY (tenant_id, session_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE qwen_managed_session_journal_tx (
     tenant_id VARCHAR(128) NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE qwen_managed_session_journal_tx (
     PRIMARY KEY (tenant_id, session_id, journal_revision),
     CONSTRAINT uq_managed_session_command
         UNIQUE (tenant_id, session_id, command_key_hash)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE qwen_managed_session_resource (
     session_scope_key CHAR(64) NOT NULL,
@@ -73,7 +73,7 @@ CREATE TABLE qwen_managed_session_resource (
     last_verified_at DATETIME(6),
     retention_until DATETIME(6),
     PRIMARY KEY (session_scope_key, resource_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE qwen_managed_session_resource_ref (
     session_scope_key CHAR(64) NOT NULL,
@@ -84,7 +84,7 @@ CREATE TABLE qwen_managed_session_resource_ref (
     resource_id VARCHAR(512) NOT NULL,
     created_at DATETIME(6) NOT NULL,
     PRIMARY KEY (session_scope_key, journal_revision, resource_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX idx_managed_session_resource_ref_resource
     ON qwen_managed_session_resource_ref (session_scope_key, resource_id);

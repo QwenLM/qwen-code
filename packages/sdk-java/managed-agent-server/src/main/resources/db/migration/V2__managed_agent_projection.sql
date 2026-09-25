@@ -15,7 +15,7 @@ CREATE TABLE managed_agent_item (
     PRIMARY KEY (tenant_id, session_id, item_id),
     FOREIGN KEY (tenant_id, session_id)
         REFERENCES managed_agent_session (tenant_id, session_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX managed_agent_item_history_idx
     ON managed_agent_item (tenant_id, session_id, first_sequence);
@@ -35,7 +35,7 @@ CREATE TABLE managed_agent_item_part (
     PRIMARY KEY (tenant_id, session_id, item_id, part_id),
     FOREIGN KEY (tenant_id, session_id, item_id)
         REFERENCES managed_agent_item (tenant_id, session_id, item_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE managed_agent_snapshot (
     tenant_id VARCHAR(128) NOT NULL,
@@ -48,7 +48,7 @@ CREATE TABLE managed_agent_snapshot (
     PRIMARY KEY (tenant_id, session_id),
     FOREIGN KEY (tenant_id, session_id)
         REFERENCES managed_agent_session (tenant_id, session_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE managed_agent_consumer_progress (
     tenant_id VARCHAR(128) NOT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE managed_agent_consumer_progress (
     PRIMARY KEY (tenant_id, session_id, consumer_name),
     FOREIGN KEY (tenant_id, session_id)
         REFERENCES managed_agent_session (tenant_id, session_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 INSERT INTO managed_agent_consumer_progress (
     tenant_id, session_id, consumer_name, covered_sequence, updated_at
