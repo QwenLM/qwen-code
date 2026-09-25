@@ -4,42 +4,102 @@
 
 ## Goal and reference
 
-Complete the executor/advisor behavior introduced by #9636 and the acceptance contract in #9036. Baseline: merged main `90232f0eb0c0`. Reference: Claude Code `2.1.282`, verified against npm on 2026-09-25. The older local source is a structural reference only; the matching released native binary contains the consultation-policy and model-pairing anchors. No upstream implementation is copied.
+Complete the executor/advisor behavior introduced by #9636 and the acceptance contract in #9036. The product goal is autonomous consultation during ordinary work after the user enables an Advisor, without requiring the user to request consultation in each prompt. The executor remains responsible for actions and the final answer.
 
-Confirmed from the released binary: the executor receives detailed guidance about consulting after orientation, before a substantial approach, when stuck, and before completion, and reconciling conflicting evidence. Confirmed by the [CLI documentation](https://code.claude.com/docs/en/advisor): consultation timing is model-driven, ordinary subagents inherit Advisor, usage costs extra, and the CLI exposes no call-count limit. The [API contract](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool) separately supports optional usage limits and returns advice to the executor.
+Reference: Claude Code **2.1.282**, verified against its released binary on 2026-09-25. The older local source is a structural reference, not current implementation evidence. No upstream implementation is copied. The binary confirms consultation guidance and model-pairing gates. The [Claude Code documentation](https://code.claude.com/docs/en/advisor) describes model-driven timing, ordinary subagent inheritance, additional usage, and no CLI call-count setting. The [API documentation](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool) separately describes the server tool, returned advice, and optional limits.
 
-## Decisions
+Matching the control pattern does not establish identical model behavior or server internals. The cached reference executable was terminated with signal 9 even for `--version`; a paired live Claude/Qwen task comparison has not been completed.
 
-- Keep the no-argument schema and a short searchable description. Advisor is deferred by default and discovered with `tool_search`, then invoked with `tool_call`; explicit visibility and the existing no-bridge fallback still apply. A separate task reminder tells the executor when to consult before discovery. Ordinary subagents receive the same guidance subject to their declared tools and execution permissions. Consultation is model-driven, never mandatory per turn, and advice does not grant approval.
-- Native consultation returns readable text or Markdown with no required JSON fields and no tools, including no schema tool. Manual `/advisor review` retains its structured contract. Removing the native parser eliminates the duplication concern without changing the manual parser or reserving case variants of valid model IDs.
-- Bind the current agent chat to the existing asynchronous agent context. Both normal execution and approval continuations re-enter that binding. An agent with no bound chat fails closed instead of consulting on the parent's transcript. Subagents inherit registration but their explicit tool allowlists, disallowed tools, safe/bare modes, and permissions still apply. Internal single-turn side queries and Advisor inference have no executable tools, preventing consultation recursion there.
-- Add `advisorMaxUses`, a non-negative integer in user/system settings: `0` means unlimited. A session shares one counter across its executor and derived subagent configs; attempted requests, including failures, consume a slot before awaiting inference. Disabling or switching models does not reset it. A new runtime session gets a new counter. Workspace settings cannot raise or override this cost boundary. This is a Qwen issue-contract extension, not a Claude CLI setting.
-- Preserve the full current transcript, system instruction, and tool declarations with the existing reasoning/binary filtering. Do not silently truncate evidence to meet a speculative payload budget. Explain the repeated token cost and expose the configured limit/current count in the non-picker command output. Existing model/source telemetry attributes inference to `advisor`.
-- Render free-form advice in the existing Advisor card; retain rendering of persisted structured reviews. Non-interactive `/advisor` reports the current model and budget; configuration and off follow the existing command policy.
+## Entry points and ownership
 
-## Intentional differences
+| Entry                            | Trigger                                                                                                | Destination of advice                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| Native Advisor                   | The executor chooses a tool call after Advisor is enabled through `/advisor`, `--advisor`, or settings | A tool result in the calling executor's conversation, also displayed to the user           |
+| Legacy `/advisor review [focus]` | The user explicitly requests a review                                                                  | A structured review displayed to the user; it is not the native executor continuation loop |
 
-Qwen makes a separate cross-provider inference instead of using Anthropic's server tool. Model eligibility follows Qwen's configured model capabilities, not a hard-coded ranking of Anthropic model families. This does not promise identical prompt caching, billing, server-side refusal signals, or vendor-specific model pairing. Off removes the Qwen tool, which can change the executor's tool prefix. These differences are documented rather than hidden behind a claim of identical implementation.
+Enabling Advisor selects a capability. It does not start a background observer or require a call on every user turn. The client supplies consultation guidance automatically on user/cron tasks and at eligible subagent task entry. The model chooses when to follow it. Advisor inference itself has no execution tools and cannot recursively consult another Advisor.
 
-## Acceptance
+## Automatic consultation flow
 
-1. Native plain-text advice is returned to the executor, displayed, and followed by task continuation. The request uses the selected model and no tools, and includes all transcript categories.
-2. Empty advice, provider failure, limit exhaustion, and cancellation have their declared behavior. Limits prevent another network request and are shared across subagents.
-3. Subagent evidence comes from its own chat, including tool results, and missing agent context never falls back to the parent. Existing tool/permission policies remain enforced.
-4. User/system configuration wins over workspace input. Off avoids Advisor requests. Historical structured cards and new free-text cards both render.
-5. Focused unit and bundled CLI integration tests pass, along with build and typecheck. A bounded real-model task must demonstrate autonomous consultation and subsequent executor behavior; exit status alone is insufficient. Record provider errors and unverified scenarios explicitly.
+```mermaid
+flowchart TD
+    A["User enables a configured Advisor"] --> B["User submits an ordinary task"]
+    B --> C["Client adds consultation guidance"]
+    C --> D["Executor gathers context"]
+    D --> E{"Executor chooses its next action"}
+    E -->|Work| F["Read, edit, or test under existing permissions"]
+    F --> E
+    E -->|Finish| Z["Return the final answer"]
+    E -->|Consult| G["Discover Advisor with tool_search by default"]
+    G --> H["Invoke through tool_call; no Advisor arguments"]
+    H --> I{"Permission, model availability, and session limit"}
+    I -->|Allowed| J["Capture the caller's current conversation evidence"]
+    J --> K["Independent request to the selected model; no tools"]
+    K --> L["Free-text advice"]
+    L --> M["Render advice and return it to the executor"]
+    M --> N["Check claims against evidence; adopt, qualify, or reconcile"]
+    N --> E
+    I -->|Unavailable or exhausted| X["Return a non-fatal result and continue"]
+    K -->|Failure| X
+    X --> E
+```
 
-## Validation status
+The decision diamond is a model decision, not a hard-coded checkpoint. Guidance asks the executor to consult after orientation but before substantive work, when stuck or changing approach, and before completing longer tasks. If advice contradicts observed evidence, the executor should state the conflict and consult again. Routine reactive steps do not require repeated calls. Before final consultation, save already-authorized deliverables; advice never grants commit, publish, or other permission.
 
-Focused tests and six bundled CLI scenarios passed. Real tmux sessions exercised default discovery, bridge consultation, readable advice, continuation, usage attribution, exhaustion, and off in both Ink and strict OpenTUI. This exposed a bridge-card label defect and a transient Ink executor-model label defect; both were fixed and retested. The initial live-model check missed credentials in user `settings.env`; that lookup was corrected. A subsequent real Max run autonomously discovered and consulted Advisor and continued with the returned advice, but its final answer exceeded the initial 120-second test budget. Individual live-run results, including failures and longer-budget verification, are recorded separately in the PR acceptance report rather than treating mock success as autonomous efficacy.
+`advisor` is deferred by default and has a short description and an empty-object schema. `tool_search` returns its declaration; `tool_call` executes it without expanding the executor's declared tool list. Explicit visibility and the existing no-bridge fallback still apply. Ordinary subagents retain the shared runtime's tool-loading rules, including eager inclusion of ordinary deferred tools where that runtime already uses it. They are not forced through a new Advisor-specific discovery mechanism.
 
-## Remaining differences from Claude Code 2.1.282
+## Evidence, runtime, and failure boundaries
 
-| Area                            | Qwen behavior and disposition                                                                                                                                                                                                                                                         |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Consultation policy             | Consult before substantial work and before finishing longer tasks; consult when stuck or changing approach, and reconcile conflicting evidence with a further consultation. Save authorized deliverables before the final consultation, without granting commit or publish authority. |
-| Discovery                       | Qwen uses deferred discovery and its existing invocation bridge. This is intentional to fit Qwen's tool-loading architecture.                                                                                                                                                         |
-| Inference and model eligibility | Client-managed cross-provider requests and user-selected model pairs. No portable cross-provider capability ranking is available; do not invent one or silently replace the chosen model.                                                                                             |
-| Evidence and caching            | Qwen serializes the current conversation as evidence, filters reasoning and binary data, and uses an independent request. It does not reproduce Anthropic server-side history transport, cache accounting, or billing.                                                                |
-| Limits                          | Qwen's optional shared session attempt cap implements the Qwen issue contract; it is not claimed as a Claude CLI setting.                                                                                                                                                             |
-| Acceptance                      | Terminal capture tests exercise discovery, readable output, continuation, exhaustion, off, and usage attribution. Real-model tests separately measure autonomous decisions; mock success is not evidence of decision quality.                                                         |
+- Capture the calling agent's **current active conversation**, including its task, tool calls/results, system instruction, and declarations, up to the consultation call. Existing compaction may already have summarized older turns; this is not an archive export.
+- Use the asynchronous agent context to bind ordinary subagent consultations to their own chat, including approval continuations. A subagent with no bound chat fails closed rather than using its parent's transcript. Existing tool allowlists, disabled tools, safe/bare modes, and permissions remain effective.
+- Serialize evidence for an independent cross-provider request. Filter private reasoning/signatures and replace binary content with metadata/placeholders. This does not provide pixel- or audio-level evidence to the Advisor and is not claimed equivalent to Anthropic server-side context transport.
+- Native advice is text or Markdown, with no mandatory JSON fields and no execution tools. Preserve the legacy manual-review format and historical cards. Do not silently fall back to a different model or endpoint when consultation fails.
+- Advisor instructions ask for evidence-grounded findings, causal steps, and explicit assumptions. Executor instructions require checking a claim's causal path before adopting it and distinguishing present behavior from proposed-change risks. These are model instructions, not a correctness oracle.
+- `advisorMaxUses` is a non-negative user/system setting: `0` is unlimited. The main executor and derived subagents share an in-memory counter per runtime session. An attempted inference reserves a slot before awaiting the request; failures count. Off/model switches do not reset it; a new runtime session does. Workspace settings cannot raise or override this boundary.
+- Provider errors and exhaustion return a non-fatal result so the executor can continue without retry loops. Cancellation propagates through the existing abort path. Render native advice in Ink/OpenTUI and retain structured-history compatibility; attribute model usage to Advisor separately.
+
+## Alignment and deliberate differences
+
+“Aligned” below means the observable control contract is the same. It does not mean identical prompts, server internals, timing, or output quality.
+
+| Area                      | Claude reference                                                               | Qwen decision                                                            | Reason and tradeoff                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Trigger ownership         | Executor model decides when to consult                                         | Aligned: automatically supplied guidance, model-chosen calls             | Preserves autonomy; no guarantee that every model follows each checkpoint                                                      |
+| Consultation lifecycle    | Advice returns to the executor, which continues                                | Aligned: tool-result reinjection and continued execution                 | The executor owns verification and actions; Advisor is not an approval authority                                               |
+| Ordinary subagents        | Advisor inheritance subject to model eligibility                               | Same capability; caller-local evidence and existing Qwen tool policies   | Prevents parent-history substitution and recursive internal side queries                                                       |
+| Tool discovery            | Native Advisor capability; Qwen's bridge is not part of the reference contract | Default `tool_search` → `tool_call`, with existing visibility overrides  | Fits Qwen's schema-loading design and limits resident schemas; adds a discovery step. Not claimed to improve reasoning quality |
+| Request execution         | Anthropic-managed server tool                                                  | Client-managed independent request, including cross-provider pairs       | Needed for Qwen's provider portability; does not reproduce provider-side latency/cache/billing behavior                        |
+| Model pairing             | Catalog eligibility/ranking gates                                              | User-selected configured models, without invented cross-provider ranking | No reliable common capability scale; users can choose a weaker Advisor, and equal model names do not guarantee equal quality   |
+| Context transport         | Server tool operates on the available conversation context                     | Filtered serialization of the current caller evidence                    | Portable and respects reasoning/binary boundaries; modality evidence and cache reuse differ                                    |
+| Limits                    | Optional API limit; not a Claude CLI setting                                   | Optional shared session attempt cap                                      | Satisfies #9036 and bounds attempts, not monetary cost or payload size                                                         |
+| Durable work and approval | Reference guidance asks for durable work before final consultation             | Save authorized deliverables; no implicit commit/publish permission      | Required by Qwen's permission model and the user's authority; not a claim of better model behavior                             |
+| Legacy manual review      | Not the reference for the native loop                                          | Keep `/advisor review` as a separate compatibility path                  | Avoids changing a user-triggered workflow while completing autonomous consultation                                             |
+
+These differences are portability constraints, compatibility decisions, or explicit Qwen extensions. They are not collectively described as “better than Claude.” Replacing model choice with mandatory consultations would be a separate product/architecture decision and is outside this alignment.
+
+## Acceptance contract
+
+| Contract                         | Required evidence                                                                                                                                                                         |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Discover without resident schema | Initial request excludes Advisor; discovery and bridge call succeed; declarations remain stable                                                                                           |
+| Consult and continue             | Selected model/endpoint receives caller evidence with no tools; readable advice returns to the executor, which continues                                                                  |
+| Caller and authority isolation   | Ordinary child uses its own transcript; unavailable child chat cannot fall back; permissions and no-recursion constraints remain effective                                                |
+| Failure and budget               | Provider failure, cancellation, exhaustion, off, and attempted-call accounting follow their declared paths; exhausted/off cases issue no further Advisor request                          |
+| Terminal behavior                | Actual Ink and strict OpenTUI tmux captures show readable Advisor identity/results, executor model identity, continuation, and separate usage                                             |
+| Autonomous timing                | A real simple task avoids consultation; a real multi-step implementation consults before substantive work and before final completion, without the user requesting Advisor                |
+| Evidence reconciliation          | A real executor checks a controlled incorrect suggestion against executable primary evidence, does not propagate the false finding, and presents the conflict in a follow-up consultation |
+| Actual deliverable               | Implementation artifacts exist and the requested regression command succeeds; model self-report or process exit alone is insufficient                                                     |
+
+Unit/integration tests protect deterministic boundaries. Real-model cases evaluate the instructions and task behavior. Record prompts, configuration provenance, tool/consultation order, elapsed time, usage, and failures; do not repeat unchanged cases until one passes. A finite acceptance sample does not guarantee all future advice is correct.
+
+For live diagnosis, isolate the test home from its workspace, preserve configured model generation parameters, explicitly permit the intended scratch writes/commands in headless mode, and verify those rules before inference. Record upstream response headers timing, byte counts, SSE reasoning/text/tool-call counts, stream end/abort, and CLI events without recording credentials. A proxy deadline must not be shorter than the case budget. Distinguish provider silence, streamed reasoning, buffered tool arguments, client processing, and harness failure.
+
+## Current evidence and open work
+
+Deterministic native/deferred tests and six bundled CLI scenarios passed. Real tmux sessions in Ink and strict OpenTUI exercised discovery, consultation, readable results, continuation, exhaustion, off, and usage attribution. The bridge-card identity and transient Ink executor-model label defects were fixed and retested.
+
+Real Max/Max and Flash/Max review samples completed with autonomous consultation and continuation; the simple control made no consultation. One Max sample propagated an unsupported Advisor concurrency claim, while Flash and another Max sample corrected a similar claim. Evidence instructions now require causal checks and explicit assumptions. A real Flash executor with controlled incorrect Advisor feedback actually executed primary evidence, rejected the false race diagnosis, and consulted again to reconcile the conflict, both before and after this guidance change. This is non-regression evidence, not proof of improved reliability. Both runs fixed before testing; only an independent test-engineer reproduced the original failure. The after run still made an unsupported generalization about async mutexes, so explanation correctness remains a model-quality limitation.
+
+The first implementation lifecycle attempts exposed two harness defects: a proxy deadline shorter than the case budget, and missing headless write permissions. A subsequent valid 300-second run produced no implementation or consultation after orientation. Earlier logs had no response-byte telemetry, so its cause cannot be inferred retroactively. New instrumented runs observed fast HTTP responses followed by long streams of reasoning, rather than transport silence. Max consulted twice before writing, including evidence reconciliation, then saved the implementation and passed 10/10 actual checks before its 600-second budget expired. Flash saved an implementation and passed 6/6 checks, but made no consultation and exhausted its 16-tool budget on additional mutation checks. Independent reruns confirmed both artifacts. Neither case demonstrates the complete two-stage consultation lifecycle. The new bundle demonstrably sends the consultation reminder and discovery route; that capture cannot retroactively establish the old Flash request content.
+
+Runtime evidence and all failed attempts are recorded in the [PR acceptance discussion](https://github.com/QwenLM/qwen-code/pull/12688#issuecomment-5831380864). The PR remains draft until the bounded acceptance work above is completed or a concrete external blocker is documented. Neither a passing mock nor one successful model response establishes full Claude equivalence.
