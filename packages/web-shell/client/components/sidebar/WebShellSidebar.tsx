@@ -126,6 +126,11 @@ import {
 } from './collapsedSessionSections';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import {
+  getCompletedUnreadStorageKey,
+  readCompletedUnreadIds,
+  writeCompletedUnreadIds,
+} from './completedUnreadSessions';
+import {
   collectScheduledTaskSession,
   getScheduledTaskSessionGroup,
   type ScheduledTaskSessionSection,
@@ -1490,9 +1495,22 @@ export function WebShellSidebar({
     `${workspaceSessionsReloadToken}:${sessionMembershipKey}`,
   );
   const [isResizing, setIsResizing] = useState(false);
-  const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
-    () => new Set(),
+  const completedUnreadStorageKey = getCompletedUnreadStorageKey(
+    workspace.baseUrl,
   );
+  const [unreadStorageKey, setUnreadStorageKey] = useState(
+    completedUnreadStorageKey,
+  );
+  const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
+    () => readCompletedUnreadIds(completedUnreadStorageKey),
+  );
+  if (unreadStorageKey !== completedUnreadStorageKey) {
+    setUnreadStorageKey(completedUnreadStorageKey);
+    setCompletedUnreadIds(readCompletedUnreadIds(completedUnreadStorageKey));
+  }
+  useEffect(() => {
+    writeCompletedUnreadIds(completedUnreadStorageKey, completedUnreadIds);
+  }, [completedUnreadStorageKey, completedUnreadIds]);
   const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
@@ -1529,6 +1547,13 @@ export function WebShellSidebar({
     Record<SidebarSessionSource, Map<string, boolean> | null>
   >({ default: null, channel: null });
   const lastTrackedSessionSourceRef = useRef(sessionSource);
+  useEffect(() => {
+    previousRunningBySourceRef.current = { default: null, channel: null };
+    previousSecondaryRunningBySourceRef.current = {
+      default: null,
+      channel: null,
+    };
+  }, [completedUnreadStorageKey]);
   const autoOpenedContextRef = useRef<string | null>(null);
   const resizeTeardownRef = useRef<((updateState: boolean) => void) | null>(
     null,
@@ -2465,13 +2490,13 @@ export function WebShellSidebar({
     const previousRunningBySessionId =
       previousRunningBySourceRef.current[sessionSource];
     previousRunningBySourceRef.current[sessionSource] = runningBySessionId;
-    if (previousRunningBySessionId === null) return;
 
     setCompletedUnreadIds((current) => {
       const next = new Set(current);
       let changed = false;
 
-      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId) {
+      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId ??
+        []) {
         const isRunning = runningBySessionId.get(sessionIdentity);
         if (
           wasRunning &&
@@ -2487,9 +2512,9 @@ export function WebShellSidebar({
       for (const sessionIdentity of next) {
         if (
           sessionIdentity === currentSessionIdentity ||
-          (previousRunningBySessionId.has(sessionIdentity) &&
-            (!runningBySessionId.has(sessionIdentity) ||
-              runningBySessionId.get(sessionIdentity)))
+          runningBySessionId.get(sessionIdentity) === true ||
+          (previousRunningBySessionId?.has(sessionIdentity) &&
+            !runningBySessionId.has(sessionIdentity))
         ) {
           next.delete(sessionIdentity);
           changed = true;
@@ -2499,6 +2524,7 @@ export function WebShellSidebar({
       return changed ? next : current;
     });
   }, [
+    completedUnreadStorageKey,
     currentSessionIdentity,
     error,
     getIdentityForSession,
@@ -2532,12 +2558,12 @@ export function WebShellSidebar({
       previousSecondaryRunningBySourceRef.current[sessionSource];
     previousSecondaryRunningBySourceRef.current[sessionSource] =
       runningBySessionId;
-    if (previousRunningBySessionId === null) return;
 
     setCompletedUnreadIds((current) => {
       const next = new Set(current);
       let changed = false;
-      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId) {
+      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId ??
+        []) {
         const isRunning = runningBySessionId.get(sessionIdentity);
         if (
           wasRunning &&
@@ -2547,11 +2573,14 @@ export function WebShellSidebar({
         ) {
           next.add(sessionIdentity);
           changed = true;
-        } else if (
-          next.has(sessionIdentity) &&
-          (sessionIdentity === currentSessionIdentity ||
-            !runningBySessionId.has(sessionIdentity) ||
-            isRunning)
+        }
+      }
+      for (const sessionIdentity of next) {
+        if (
+          sessionIdentity === currentSessionIdentity ||
+          runningBySessionId.get(sessionIdentity) === true ||
+          (previousRunningBySessionId?.has(sessionIdentity) &&
+            !runningBySessionId.has(sessionIdentity))
         ) {
           next.delete(sessionIdentity);
           changed = true;
@@ -2561,6 +2590,7 @@ export function WebShellSidebar({
     });
   }, [
     collapsed,
+    completedUnreadStorageKey,
     currentSessionIdentity,
     getIdentityForSession,
     secondaryActiveQueries.length,
