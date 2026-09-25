@@ -60,25 +60,6 @@ function ensureDirectoryAndGetRealPath(dir: string): string {
   return fs.realpathSync(dir);
 }
 
-// Every value spelling the forwarded argv carries for the managed root, in
-// both `--managed-extensions <value>` and `--managed-extensions=<value>`
-// forms. These are the same raw tokens the child re-parses, so a lookalike
-// in a value position (e.g. a piped prompt) is indistinguishable here;
-// callers must verify each spelling before acting on it.
-function managedExtensionsArgvSpellings(cliArgs: string[]): string[] {
-  const spellings: string[] = [];
-  for (let index = 0; index < cliArgs.length; index++) {
-    const token = cliArgs[index];
-    if (token === '--managed-extensions') {
-      const value = cliArgs[index + 1];
-      if (value !== undefined) spellings.push(value);
-    } else if (token?.startsWith('--managed-extensions=')) {
-      spellings.push(token.slice('--managed-extensions='.length));
-    }
-  }
-  return spellings;
-}
-
 const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'qwen-code-sandbox';
 const SANDBOX_NETWORK_NAME = 'qwen-code-sandbox';
 const SANDBOX_PROXY_NAME = 'qwen-code-sandbox-proxy';
@@ -648,24 +629,37 @@ export async function start_sandbox(
     // and /tmp this way by default — the spelling diverges from the pinned
     // canonical path above: inside the container it then resolves through a
     // read-write mount (voiding the :ro guard) or fails to resolve at all.
-    // Cover each argv spelling that resolves to this same root with its own
-    // read-only mount. A lookalike token in a value position resolves
-    // somewhere else and is skipped, so it can neither shadow container
-    // paths nor widen what the container sees.
-    for (const spelling of managedExtensionsArgvSpellings(cliArgs)) {
-      const containerSpelling = getContainerPath(
-        path.resolve(workdir, spelling),
-      );
-      if (mountedDestinations.has(containerSpelling)) continue;
-      let resolved: string;
-      try {
-        resolved = fs.realpathSync.native(path.resolve(workdir, spelling));
-      } catch {
-        continue;
+    // Cover every argv token that resolves to this same root with its own
+    // read-only mount. No flag grammar is parsed: yargs accepts more
+    // spellings than the two dashed ones (--managedExtensions included), and
+    // raw argv carries user content in value positions, so a hand-listed
+    // flag name both misses real spellings and misreads value-position
+    // tokens. A token that resolves somewhere else is skipped, so it can
+    // neither shadow container paths nor widen what the container sees.
+    for (const token of cliArgs) {
+      if (!token) continue;
+      // A `--flag=value` token carries the path in its value half; the
+      // separate-token form carries it as a token of its own.
+      const candidates = token.includes('=')
+        ? [token, token.slice(token.indexOf('=') + 1)]
+        : [token];
+      for (const candidate of candidates) {
+        const resolvedCandidate = path.resolve(workdir, candidate);
+        let resolved: string;
+        try {
+          resolved = fs.realpathSync.native(resolvedCandidate);
+        } catch {
+          continue;
+        }
+        if (resolved !== managedExtensionsDir) continue;
+        const containerSpelling = getContainerPath(resolvedCandidate);
+        if (mountedDestinations.has(containerSpelling)) continue;
+        args.push(
+          '--volume',
+          `${managedExtensionsDir}:${containerSpelling}:ro`,
+        );
+        mountedDestinations.add(containerSpelling);
       }
-      if (resolved !== managedExtensionsDir) continue;
-      args.push('--volume', `${managedExtensionsDir}:${containerSpelling}:ro`);
-      mountedDestinations.add(containerSpelling);
     }
   }
 

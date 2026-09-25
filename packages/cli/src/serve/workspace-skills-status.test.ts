@@ -581,6 +581,63 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'answers a read-only store-only home without creating state directories',
+    async () => {
+      const managedExtensionsDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-catalog-managed-'),
+      );
+      const skillDir = path.join(
+        managedExtensionsDir,
+        'bundle',
+        'skills',
+        'example',
+      );
+      await fsp.mkdir(skillDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+        JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+      );
+      await fsp.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: example\ndescription: A managed example\n---\nBuiltin instructions',
+      );
+      // The store-only layout: extension-store/ exists (a deployment that
+      // pre-seeds activation prefs, or a home whose extensions/ was cleaned)
+      // but extensions/ does not. The probe must read the store without
+      // materializing the missing directories.
+      const store = new ExtensionStore();
+      await store.ensureInitialized([]);
+      await fsp.rm(path.join(qwenHome, 'extensions'), {
+        recursive: true,
+        force: true,
+      });
+      await fsp.chmod(qwenHome, 0o555);
+      try {
+        const provider = createWorkspaceSkillsStatusProvider({
+          managedExtensionsDir,
+        });
+        const status = await provider(qwenHome);
+        expect(status.initialized).toBe(true);
+        expect(status.skills).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: 'review', level: 'bundled' }),
+            expect.objectContaining({
+              name: 'bundle:example',
+              level: 'extension',
+            }),
+          ]),
+        );
+        await expect(
+          fsp.stat(path.join(qwenHome, 'extensions')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await fsp.chmod(qwenHome, 0o755);
+        await fsp.rm(managedExtensionsDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('lists active and inactive extension Skills without a runtime Config', async () => {
     const active = await writeExtension('active', ['active-skill']);
     await writeExtension('inactive', ['inactive-skill']);

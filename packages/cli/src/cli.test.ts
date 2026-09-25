@@ -1467,7 +1467,9 @@ describe('bootstrap import boundaries', () => {
         expect(JSON.parse(output)).toEqual({
           args: ['--prompt', 'a&b'],
           skip: 'true',
-          hasLauncherPid: true,
+          // Outside Windows the CLI runs inside the launcher process, so
+          // there is no separate launcher pid to wait for.
+          hasLauncherPid: false,
         });
       } finally {
         rmSync(tempDir, { recursive: true, force: true });

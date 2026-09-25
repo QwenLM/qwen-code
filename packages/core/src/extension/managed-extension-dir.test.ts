@@ -138,6 +138,38 @@ it('rejects a symlink alias whose target does not exist yet', () => {
   }
 });
 
+// Windows cannot create directory symlinks without extra privileges.
+it.skipIf(process.platform === 'win32')(
+  'resolves a relative symlink target against the physical parent of the link',
+  () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-link-'));
+    const home = path.join(root, 'home');
+    // home/.qwen -> home/dotfiles/qwen, and inside the real directory a
+    // relative link whose '..' legs only land correctly when resolved
+    // against the link's physical parent, not its lexical one.
+    fs.mkdirSync(path.join(home, 'dotfiles', 'qwen'), { recursive: true });
+    fs.mkdirSync(path.join(home, 'shared', 'themes'), { recursive: true });
+    fs.symlinkSync(path.join('dotfiles', 'qwen'), path.join(home, '.qwen'));
+    fs.symlinkSync(
+      path.join('..', '..', 'shared', 'themes'),
+      path.join(home, '.qwen', 'themes'),
+    );
+    try {
+      expect(fs.realpathSync.native(path.join(home, '.qwen', 'themes'))).toBe(
+        path.join(home, 'shared', 'themes'),
+      );
+      expect(() =>
+        assertManagedExtensionStateSeparation(
+          path.join(home, 'shared', 'themes'),
+          [path.join(home, '.qwen', 'themes')],
+        ),
+      ).toThrow('must not overlap');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 it.skipIf(process.platform === 'win32')(
   'accepts the container translation of a Windows drive spelling',
   () => {

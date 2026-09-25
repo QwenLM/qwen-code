@@ -522,6 +522,55 @@ describe('managed extensions', () => {
     },
   );
 
+  it('does not reserve the name of a managed directory whose only manifest is an unrelated plugin.json', async () => {
+    writeExtension(user, 'staging', { name: 'staging', version: 'user' });
+    // A plugin.json without the agent-plugins $schema is unrelated: the
+    // loader reads qwen-extension.json for this directory, so the managed
+    // probe must answer from the same governing manifest instead of the
+    // filename alone.
+    const entry = path.join(managed, 'staging');
+    fs.mkdirSync(entry);
+    fs.writeFileSync(
+      path.join(entry, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({ name: 'staging', version: '1.0.0' }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({
+        name: 'staging',
+        source: 'user',
+        version: 'user',
+      }),
+    ]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).not.toContain('shadowed');
+    expect(writes).not.toContain(entry);
+  });
+
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'moves the source fingerprint when a name-reserving managed entry is removed',
+    async () => {
+      writeExtension(user, 'dangling', { name: 'dangling', version: 'user' });
+      const entry = path.join(managed, 'dangling');
+      fs.symlinkSync(path.join(managed, 'missing-target'), entry, 'dir');
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const subject = manager();
+      await subject.refreshCache();
+      expect(subject.getLoadedExtensions()).toEqual([]);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(false);
+      // Removing the broken entry withdraws the reservation: the same-name
+      // user extension must come back on the next source check.
+      fs.rmSync(entry);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(subject.getLoadedExtensions()).toEqual([
+        expect.objectContaining({ name: 'dangling', source: 'user' }),
+      ]);
+    },
+  );
+
   it('does not reserve the name of a managed directory that holds no manifest', async () => {
     writeExtension(user, 'mine', { name: 'docs', version: 'user' });
     // An asset-only directory in the managed root — a staging dir, a .git
@@ -811,6 +860,31 @@ describe('managed extensions', () => {
       manager().uninstallExtensionById(managedId, false),
     ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
     expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
+  it('refuses to release a retained managed policy while an unnamed failing entry could still be that package', async () => {
+    // The deployed directory name differs from the declared name, so the
+    // basename reservation cannot cover it; once the manifest is corrupted
+    // the failing entry cannot be proven not to be the retained package.
+    const extensionPath = writeExtension(managed, 'acme-toolkit-1.4.0', {
+      name: 'acme-toolkit',
+    });
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    fs.writeFileSync(path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME), '{');
+    await expect(
+      manager().uninstallExtensionById(managedId, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+    // Once the deployment is genuinely cleaned up, the release proceeds.
+    fs.rmSync(extensionPath, { recursive: true });
+    await manager().uninstallExtensionById(managedId, false);
+    expect(
+      (await subject.getExtensionStoreSnapshot()).extensions[managedId],
+    ).toBeUndefined();
   });
 
   it('skips a dangling symlink in the managed root instead of aborting discovery', async () => {

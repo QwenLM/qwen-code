@@ -17,6 +17,7 @@ import {
   ExtensionStoreCorruptError,
 } from './extension-store.js';
 import { ExtensionSettingScope, updateSetting } from './extensionSettings.js';
+import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
@@ -3497,7 +3498,7 @@ describe('ExtensionStore', () => {
     ).toMatchObject({ effective: 'disabled', source: 'legacy_path_rule' });
   });
 
-  it('drops the preserved managed-era stash when an explicit scope change replaces it', async () => {
+  it('keeps the preserved pre-managed stash through a managed-era scope change', async () => {
     const store = makeStore();
     const identity = { id: 'd1'.repeat(32), name: 'scoped' };
     const rule = `!${legacyWorkspaceRule(workspacePath())}*`;
@@ -3525,14 +3526,20 @@ describe('ExtensionStore', () => {
     await store.setDefaultActivations([identity], 'enabled', {
       clearLegacyPathRulesForManaged: true,
     });
-    // The explicit scope decision supersedes the stashed pre-managed state;
-    // keeping the stash would resurrect the replaced rule at the hand-back.
+    // The scope decision is made about the *managed* package, so it re-bases
+    // the managed-era surface only; the user package's pre-claim baseline
+    // must survive to the hand-back, or withdrawing the deployment would
+    // re-enable a package the user explicitly disabled.
     await store.setActivationScope(identity, { scope: 'user' });
 
     const handedBack = await store.ensureInitialized([identity]);
     const policy = handedBack.extensions[identity.id]!;
     expect(policy.managed).toBeUndefined();
-    expect(policy.legacyPathRules).toBeUndefined();
+    expect(policy.legacyPathRules).toEqual([rule]);
+    expect(policy.workspaceOverrides).toEqual({
+      [workspacePath('a')]: 'disabled',
+    });
+    // The stash is spent by the restore, not dropped by the scope change.
     expect(policy.preservedLegacyPathRules).toBeUndefined();
     expect(policy.preservedWorkspaceOverrides).toBeUndefined();
     expect(policy.preservedSkillWorkspaceOverrides).toBeUndefined();
@@ -3543,7 +3550,7 @@ describe('ExtensionStore', () => {
         'scoped',
         workspacePath('a'),
       ),
-    ).toMatchObject({ effective: 'enabled', source: 'default' });
+    ).toMatchObject({ effective: 'disabled' });
   });
 
   it('refuses to adopt a managed settings directory while the backend still holds its secrets', async () => {
@@ -3647,6 +3654,92 @@ describe('ExtensionStore', () => {
     expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
       'SAVED=old\n',
     );
+  });
+
+  it('refuses to adopt a retained managed policy with stored secrets and no settings directory', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'e9'.repeat(32),
+      name: 'directoryless',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ea'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    // No settings directory under extensionsDir: `settings set` wrote the
+    // sensitive value straight to the backend, which is the common
+    // withdrawal layout — the gate must not wait for a directory to exist.
+    const destination = path.join(extensionsDir, managed.name);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    expect(await fsp.stat(destination).catch(() => undefined)).toBeUndefined();
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+  });
+
+  it('fails closed when an available secret backend cannot be enumerated during adoption', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'eb'.repeat(32),
+      name: 'unenumerable',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ec'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    // An available backend whose enumeration fails is an unknown, not an
+    // empty: the gate must treat it as secret-bearing rather than adopt and
+    // orphan credentials it cannot see.
+    const isAvailable = vi
+      .spyOn(KeychainTokenStorage.prototype, 'isAvailable')
+      .mockResolvedValue(true);
+    const listSecrets = vi
+      .spyOn(KeychainTokenStorage.prototype, 'listSecrets')
+      .mockRejectedValue(new Error('findCredentials failed'));
+    try {
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      await expect(
+        store.commitArtifact({
+          operation: 'install',
+          identity: user,
+          destinationDirectory: destination,
+          stagingDirectory: staging,
+          initialActivation: { scope: 'user' },
+          allowManagedPolicyAdoption: true,
+        }),
+      ).rejects.toBeInstanceOf(ExtensionConflictError);
+      expect(await store.readSnapshot()).toEqual(before);
+    } finally {
+      isAvailable.mockRestore();
+      listSecrets.mockRestore();
+    }
   });
 
   it('fails closed when current and previous state are corrupt', async () => {

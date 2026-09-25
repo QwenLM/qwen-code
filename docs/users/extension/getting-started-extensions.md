@@ -367,8 +367,11 @@ Managed extensions default to enabled and obey trust, safe mode, tool approval,
 and the existing `-e/--extensions` name filter. Names use the existing validation
 and case-insensitive comparison. Managed wins a conflict with a user extension,
 with a warning; disabling it does not activate the shadowed user copy. A
-managed package that fails to load reserves its directory name and warns, so a
-same-name user copy cannot silently take its place. Duplicate
+managed package that fails to load warns and keeps its name reserved — the
+declared manifest name when it can still be read, otherwise its directory name —
+so a same-name user copy cannot silently take its place. Name package
+directories after their packages so the reservation holds even when a manifest
+becomes unreadable. Duplicate
 managed names are an error. Activation preferences use the existing name-based
 user state and survive manifest version changes and relocation of the root.
 

@@ -845,6 +845,26 @@ export class ExtensionStore {
         input.allowManagedPolicyAdoption &&
         retainedPolicy?.managed
       ) {
+        // A managed package's sensitive settings live in the secret backend
+        // under the managed identity and leave no selector metadata behind
+        // (`settings set` never writes one), so a retained policy can be
+        // secret-bearing with no directory under extensionsDir at all.
+        // Stored secrets stay a conflict regardless of whether a settings
+        // directory survives, instead of being silently orphaned by the
+        // adoption.
+        const retainedIdentityId = currentPolicy
+          ? input.identity.id
+          : nameConflict![0];
+        if (
+          await hasStoredExtensionSecrets(
+            retainedPolicy.name,
+            retainedIdentityId,
+          )
+        ) {
+          throw new ExtensionConflictError(
+            `Extension "${input.identity.name}" cannot adopt the retained managed policy while stored credentials exist for it.`,
+          );
+        }
         const stats = await fsp
           .lstat(destinationDirectory)
           .catch((error: unknown) => {
@@ -875,21 +895,6 @@ export class ExtensionStore {
             (entry) =>
               entry.name === EXTENSION_SETTINGS_FILENAME && entry.isFile(),
           );
-          if (adoptManagedSettingsDirectory) {
-            // A managed package's sensitive settings live in the secret
-            // backend under the managed identity and leave no selector
-            // metadata behind (`settings set` never writes one), so a
-            // settings-only directory can still be secret-bearing. Stored
-            // secrets stay a conflict, like the selector file, instead of
-            // being silently orphaned by the adoption.
-            const retainedIdentityId = currentPolicy
-              ? input.identity.id
-              : nameConflict![0];
-            adoptManagedSettingsDirectory = !(await hasStoredExtensionSecrets(
-              retainedPolicy.name,
-              retainedIdentityId,
-            ));
-          }
           if (adoptManagedSettingsDirectory && entries.length > 0) {
             retainedEnv = await fsp.readFile(
               path.join(destinationDirectory, EXTENSION_SETTINGS_FILENAME),
@@ -1164,6 +1169,18 @@ export class ExtensionStore {
     });
   }
 
+  /**
+   * Lock-free, write-free snapshot read for read-only status probes:
+   * `readSnapshot` takes the store lock, and acquiring it materializes the
+   * store directories — a write a status GET must not perform (and cannot,
+   * on a read-only home). Snapshots are written atomically, so a concurrent
+   * writer cannot tear this read; a corrupt state.json still surfaces as
+   * ExtensionStoreCorruptError.
+   */
+  async peekSnapshot(): Promise<ExtensionStoreSnapshot | null> {
+    return await this.readSnapshotUnlocked();
+  }
+
   getActivation(
     snapshot: ExtensionStoreSnapshot,
     extensionId: string,
@@ -1266,11 +1283,16 @@ export class ExtensionStore {
       // An explicit scope decision re-bases the policy's activation, so the
       // pre-managed snapshot no longer applies: keeping the stash would
       // resurrect the replaced rules and default at the next hand-back.
+      // A scope change made *while managed* re-bases only the managed-era
+      // surface — the stash is the user package's pre-claim baseline, and
+      // the hand-back (its only consumer) must still find it intact.
       delete policy.legacyPathRules;
-      delete policy.preservedLegacyPathRules;
-      delete policy.preservedDefaultActivation;
-      delete policy.preservedWorkspaceOverrides;
-      delete policy.preservedSkillWorkspaceOverrides;
+      if (!policy.managed) {
+        delete policy.preservedLegacyPathRules;
+        delete policy.preservedDefaultActivation;
+        delete policy.preservedWorkspaceOverrides;
+        delete policy.preservedSkillWorkspaceOverrides;
+      }
     });
   }
 

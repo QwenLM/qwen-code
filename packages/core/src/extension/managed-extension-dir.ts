@@ -124,7 +124,22 @@ function canonicalDirectory(directory: string): string {
       // like a missing component and its target would escape the overlap
       // check. Resolve the link — existent or not — against its parent.
       const target = fs.readlinkSync(current);
-      current = path.resolve(path.dirname(current), target);
+      if (path.isAbsolute(target)) {
+        current = target;
+      } else {
+        // Resolve relative targets against the link's real parent: an
+        // unresolved directory symlink above it would mis-resolve the
+        // target lexically (the rule utils/paths.ts applies too). A missing
+        // ancestor keeps the lexical parent; the walk then descends into
+        // the missing-component branch as before.
+        let parent = path.dirname(current);
+        try {
+          parent = fs.realpathSync.native(parent);
+        } catch {
+          // Keep the lexical parent.
+        }
+        current = path.resolve(parent, target);
+      }
       if (--symlinkHops < 0) return path.join(current, ...missing);
       continue;
     }

@@ -432,6 +432,12 @@ describe('managed extension activation migration', () => {
     );
     expect(fs.readdirSync(userDirectory)).toEqual(['.env']);
     expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
+    // Lifetime preferences accumulate against the retained managed identity;
+    // they must leave with the release, or a same-name user package would
+    // inherit a favorite/scope decision made about the deployment package.
+    deployed.toggleFavorite(name);
+    deployed.setExtensionScope(name, 'project');
+    expect(deployed.isFavorite(name)).toBe(true);
 
     fs.rmSync(managedPackage, { recursive: true });
     await deployed.refreshCache();
@@ -443,6 +449,8 @@ describe('managed extension activation migration', () => {
     expect(released.extensions[managed.id]).toBeUndefined();
     expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(false);
     expect(fs.existsSync(userDirectory)).toBe(false);
+    expect(deployed.isFavorite(name)).toBe(false);
+    expect(deployed.getExtensionScope(name)).toBeUndefined();
 
     // The name is free again: a user install of it no longer dead-ends in a
     // conflict with the retained managed policy or its settings directory.

@@ -155,10 +155,11 @@ const getKeychainStorageName = (
   extensionName: string,
   extensionId: string,
   scope: ExtensionSettingScope,
+  cwd: string = process.cwd(),
 ): string => {
   const base = `Qwen Code Extensions ${extensionName} ${extensionId}`;
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return `${base} ${process.cwd()}`;
+    return `${base} ${cwd}`;
   }
   return base;
 };
@@ -551,10 +552,32 @@ export async function hasStoredExtensionSecrets(
     ExtensionSettingScope.USER,
     ExtensionSettingScope.WORKSPACE,
   ]) {
-    const storage = new HybridTokenStorage(
-      getKeychainStorageName(extensionName, extensionId, scope),
+    const serviceName = getKeychainStorageName(
+      extensionName,
+      extensionId,
+      scope,
     );
-    if ((await storage.listSecrets()).length > 0) return true;
+    // Probe both backends: which one HybridTokenStorage would pick depends on
+    // this process's keychain availability, not on where the value was
+    // written, so a single-backend probe can miss a value that exists.
+    for (const storage of [
+      new KeychainTokenStorage(serviceName),
+      new FileTokenStorage(serviceName),
+    ]) {
+      if (!(await storage.isAvailable())) continue;
+      let keys: string[];
+      try {
+        keys = await storage.listSecrets();
+      } catch (error) {
+        // An available-but-unenumerable backend is treated as secret-bearing:
+        // a gate that cannot prove the negative must fail closed.
+        debugLogger.warn(
+          `Could not enumerate stored secrets for extension "${extensionName}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return true;
+      }
+      if (keys.length > 0) return true;
+    }
   }
   return false;
 }
@@ -568,16 +591,36 @@ export async function hasStoredExtensionSecrets(
 export async function clearStoredExtensionSecrets(
   extensionName: string,
   extensionId: string,
+  workspaceCwds: readonly string[] = [],
 ): Promise<void> {
   for (const scope of [
     ExtensionSettingScope.USER,
     ExtensionSettingScope.WORKSPACE,
   ]) {
-    await clearKeychainSettings(
-      new HybridTokenStorage(
-        getKeychainStorageName(extensionName, extensionId, scope),
-      ),
-    );
+    // The workspace-scope service name folds the writing process's cwd, and
+    // the releasing process (a daemon route) is not necessarily it: clear
+    // every workspace spelling the caller can name.
+    const cwds =
+      scope === ExtensionSettingScope.WORKSPACE
+        ? new Set([process.cwd(), ...workspaceCwds])
+        : new Set<string>([process.cwd()]);
+    for (const cwd of cwds) {
+      const serviceName = getKeychainStorageName(
+        extensionName,
+        extensionId,
+        scope,
+        cwd,
+      );
+      // Clear in both backends: which one HybridTokenStorage picked at write
+      // time depended on that process's keychain availability, not this
+      // one's.
+      for (const storage of [
+        new KeychainTokenStorage(serviceName),
+        new FileTokenStorage(serviceName),
+      ]) {
+        await clearKeychainSettings(storage);
+      }
+    }
   }
 }
 
@@ -615,7 +658,7 @@ function getSettingsChanges(
   };
 }
 
-async function clearKeychainSettings(keychain: HybridTokenStorage) {
+async function clearKeychainSettings(keychain: SecretStorage) {
   if (!(await keychain.isAvailable())) {
     return;
   }

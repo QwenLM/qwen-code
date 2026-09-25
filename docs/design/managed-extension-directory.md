@@ -43,7 +43,7 @@ extension/state directories to preserve the read-only boundary. Discovery and lo
 names using existing rules, reject duplicate managed names case-insensitively,
 then give managed precedence over user packages and diagnose shadowing. Resolve
 ownership before activation so disabling managed never activates a shadowed copy.
-An individual invalid managed manifest reserves its directory name with an stderr warning, so a same-name user package cannot silently take its place. The daemon catalog uses the same source precedence and identities while reading manifests only. Re-reading an unchanged catalog preserves existing policies and store generation without hydrating extension contributions.
+An individual invalid managed manifest reserves its declared name when the manifest still yields one, and otherwise its directory name, with an stderr warning, so a same-name user package cannot silently take its place; for an unreadable manifest the reservation covers only the directory name, so deployments should name package directories after their packages. The daemon catalog uses the same source precedence and identities while reading manifests only. Re-reading an unchanged catalog preserves existing policies and store generation without hydrating extension contributions.
 
 Loaded extensions expose `source` (`managed` or `user`). Managed identity is derived
 from normalized name, not version or deployment path. Manageds default enabled;

@@ -304,6 +304,73 @@ describe('start_sandbox', () => {
     },
   );
 
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'covers the camelCase flag spelling of the managed root read-only',
+    async () => {
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      execSyncMock.mockReturnValue(Buffer.from(''));
+
+      const base = fs.realpathSync.native(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sandbox-managed-')),
+      );
+      try {
+        const realRoot = path.join(base, 'real');
+        const linkRoot = path.join(base, 'link');
+        const canonical = path.join(realRoot, 'deploy', 'managed');
+        fs.mkdirSync(canonical, { recursive: true });
+        fs.symlinkSync(realRoot, linkRoot, 'dir');
+        const launchSpelling = path.join(linkRoot, 'deploy', 'managed');
+
+        const cliConfig = {
+          getManagedExtensionsDir: () => canonical,
+        } as unknown as Config;
+
+        const imageCheck = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+        });
+        const child = new EventEmitter();
+        spawnMock
+          .mockImplementationOnce(() => {
+            queueMicrotask(() => {
+              imageCheck.stdout.emit('data', Buffer.from('image-id'));
+              imageCheck.emit('close', 0);
+            });
+            return imageCheck;
+          })
+          .mockReturnValueOnce(child);
+
+        // yargs' camel-case-expansion accepts --managedExtensions for the
+        // reserved flag, so the child honors this spelling too; a mount
+        // keyed on the dashed spelling alone would leave the launch
+        // spelling resolving through a read-write mount.
+        const result = start_sandbox(
+          { command: 'docker', image: 'example.com/qwen-code:latest' },
+          [],
+          cliConfig,
+          [
+            process.execPath,
+            '/path/to/cli.js',
+            '--managedExtensions',
+            launchSpelling,
+          ],
+        );
+
+        await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+        const args = spawnMock.mock.calls[1]?.[1] as string[];
+        const volumes = args.filter(
+          (_, index) => args[index - 1] === '--volume',
+        );
+        expect(volumes).toContain(`${canonical}:${launchSpelling}:ro`);
+
+        child.emit('close', 0);
+        await expect(result).resolves.toBe(0);
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('does not mount the managed extensions root twice when it is the workspace', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);

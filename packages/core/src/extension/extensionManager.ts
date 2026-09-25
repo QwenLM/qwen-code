@@ -1422,6 +1422,7 @@ export class ExtensionManager {
 
   async refreshCacheWithSnapshot(options?: {
     names?: string[];
+    createDataDir?: boolean;
   }): Promise<ExtensionStoreSnapshot> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     // Captured before the load, not after: an install landing mid-refresh must
@@ -1433,6 +1434,7 @@ export class ExtensionManager {
       await this.extensionStore.readConsistent(async () => {
         const discovered = await this.loadDiscoveredExtensions(
           this.workspaceDir,
+          { createDataDir: options?.createDataDir },
         );
         const requested = new Set(
           requestedNames.map((name) => name.toLowerCase()),
@@ -1607,11 +1609,24 @@ export class ExtensionManager {
         manifestPath,
         followManifestSymlink,
       );
+      if (stamp === '-') {
+        // A managed entry whose manifest cannot be stated still reserves its
+        // name (a dangling link, an unsearchable directory): its presence and
+        // removal must move the fingerprint or a self-healing refresh never
+        // notices the withdrawal. lstat the entry itself — one extra stat,
+        // only for entries that already failed their manifest stat. The
+        // user-dir case the comment below protects (the lazily created
+        // enablement file) stays skipped.
+        if (source === 'managed') {
+          const entryStamp = ExtensionManager.stampPath(extensionRoot, false);
+          if (entryStamp !== '-') parts.push(`ext:${entry}:${entryStamp}`);
+        }
+        continue;
+      }
       // Entries with no manifest are not extensions — notably the enablement
       // file, which lives in this directory and is created lazily by the store.
       // Counting them would make the store's own bookkeeping look like an
       // install and cost one spurious refresh.
-      if (stamp === '-') continue;
       parts.push(`ext:${entry}:${stamp}`);
     }
     // Sorted so directory iteration order cannot make an unchanged set look
@@ -1739,7 +1754,7 @@ export class ExtensionManager {
 
   private async loadDiscoveredExtensions(
     workspaceDir: string,
-    options: { manifestOnly?: boolean } = {},
+    options: { manifestOnly?: boolean; createDataDir?: boolean } = {},
   ): Promise<Extension[]> {
     const failedManaged: Array<{
       directory: string;
@@ -2045,29 +2060,33 @@ export class ExtensionManager {
       // managed root — a staging dir, a .git checkout — must be skipped
       // silently. Routing it through onLoadFailure would reserve its
       // basename as a FAILED package and shadow a valid same-name user
-      // extension. lstat, not existsSync: a manifest that exists but cannot
-      // be read still fails below and keeps its reservation.
+      // extension. Probe only the manifest the loader will actually read:
+      // an unrelated plugin.json (no agent-plugins $schema) does not make
+      // the directory an extension when qwen-extension.json is absent.
+      // lstat, not existsSync: a manifest that exists but cannot be read
+      // still fails below and keeps its reservation.
+      const governingManifest =
+        getAgentPluginSchemaStatus(extensionDir) === 'unrelated'
+          ? EXTENSIONS_CONFIG_FILENAME
+          : AGENT_PLUGIN_MANIFEST;
       let hasManifest: boolean;
       try {
-        hasManifest = [EXTENSIONS_CONFIG_FILENAME, AGENT_PLUGIN_MANIFEST].some(
-          (file) => {
-            try {
-              return !!fs.lstatSync(path.join(extensionDir, file));
-            } catch (error) {
-              const code = (error as NodeJS.ErrnoException).code;
-              if (code === 'ENOENT' || code === 'ENOTDIR') return false;
-              throw error;
-            }
-          },
+        hasManifest = !!fs.lstatSync(
+          path.join(extensionDir, governingManifest),
         );
       } catch (error) {
-        // A non-absence error (e.g. EACCES on a listable but unsearchable
-        // package directory) is a failing package, not a missing one: route
-        // it to the failing-load path so the basename reservation and its
-        // warning still fire. Throwing out of here would reject the whole
-        // refresh and lose every other extension.
-        options.onLoadFailure?.(extensionDir, error);
-        return null;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+          hasManifest = false;
+        } else {
+          // A non-absence error (e.g. EACCES on a listable but unsearchable
+          // package directory) is a failing package, not a missing one:
+          // route it to the failing-load path so the basename reservation
+          // and its warning still fire. Throwing out of here would reject
+          // the whole refresh and lose every other extension.
+          options.onLoadFailure?.(extensionDir, error);
+          return null;
+        }
       }
       if (!hasManifest) return null;
     }
@@ -3524,10 +3543,39 @@ export class ExtensionManager {
         );
       if (policy && extensionId === getManagedExtensionId(policy.name)) {
         if (extension) throw new ManagedExtensionReadOnlyError(policy.name);
-        // A still-deployed package that fails to load keeps its name
-        // reserved (discovery reserves the failing entry), so it rejects
-        // here exactly like a loaded one.
-        await this.assertUserManagedExtension({ name: policy.name });
+        // The release below is destructive, so absence must be proven, not
+        // assumed: a root that cannot be listed, or a failing entry whose
+        // declared name could not be recovered, can still be the retained
+        // package. A still-deployed package that fails to load with a
+        // recoverable name keeps its name reserved (discovery reserves the
+        // failing entry), so it rejects here exactly like a loaded one.
+        const failedManaged: Array<{ directory: string; name?: string }> = [];
+        let managedRootUnreadable = false;
+        const manageds = await this.loadManagedExtensions(
+          this.workspaceDir,
+          {
+            onListFailure: () => {
+              managedRootUnreadable = true;
+            },
+          },
+          (directory, _error, name) => {
+            failedManaged.push({ directory, name });
+          },
+        );
+        const managedNames = new Set(
+          manageds.map((managed) => managed.name.toLowerCase()),
+        );
+        for (const failed of failedManaged) {
+          managedNames.add(path.basename(failed.directory).toLowerCase());
+          if (failed.name) managedNames.add(failed.name.toLowerCase());
+        }
+        if (
+          managedRootUnreadable ||
+          failedManaged.some((failed) => failed.name === undefined) ||
+          managedNames.has(policy.name.toLowerCase())
+        ) {
+          throw new ManagedExtensionReadOnlyError(policy.name);
+        }
         // The package has genuinely left the deployment root. An explicit
         // uninstall releases the retained policy rather than reporting an
         // idempotent no-op that leaves the name blocked forever — and no
@@ -3536,7 +3584,9 @@ export class ExtensionManager {
         // user-scope settings directory when it holds nothing but settings
         // (a real artifact directory — e.g. a shadowed user copy — is never
         // touched here).
-        await clearStoredExtensionSecrets(policy.name, extensionId);
+        await clearStoredExtensionSecrets(policy.name, extensionId, [
+          this.workspaceDir,
+        ]);
         const settingsDirectory = path.join(this.configDir, policy.name);
         const entries = await fs.promises
           .readdir(settingsDirectory, { withFileTypes: true })
@@ -3556,10 +3606,21 @@ export class ExtensionManager {
             force: true,
           });
         }
-        return await this.extensionStore.removePolicy({
+        const released = await this.extensionStore.removePolicy({
           id: extensionId,
           name: policy.name,
         });
+        // Mirror the regular uninstall: the retained managed policy's
+        // lifetime preferences (favorites, scope, disabled MCP servers)
+        // leave with it. A failure here must not abort the release.
+        try {
+          this.preferencesStore.clear(policy.name);
+        } catch (error) {
+          debugLogger.warn(
+            `Managed extension "${policy.name}" was released, but preference cleanup failed: ${getErrorMessage(error)}`,
+          );
+        }
+        return released;
       }
       if (extension) await this.assertUserManagedExtension(extension);
       if (!policy || policy.declarationOnly) return snapshot;

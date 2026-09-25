@@ -39,7 +39,12 @@ import {
   authoredSkillName,
   qualifySkillName,
 } from '@qwen-code/qwen-code-core';
-import type { Config, Extension, SkillLevel } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  Extension,
+  ExtensionStoreSnapshot,
+  SkillLevel,
+} from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import * as fs from 'node:fs/promises';
@@ -193,35 +198,62 @@ async function buildWorkspaceSkillsStatus(
             }
             return states;
           };
-          let storeRead = false;
-          if (entry || storeEntry) {
-            if (entry) await fs.readdir(extensionStore.extensionsDir);
-            try {
-              const snapshot =
-                await extensionManager.refreshCacheWithSnapshot();
-              extensions = extensionManager.getLoadedExtensions();
-              for (const extension of extensions) {
-                const states = defaultSkillStates(extension);
-                for (const name of [...states.keys()]) {
-                  states.set(
+          const applySnapshotOverrides = (snapshot: ExtensionStoreSnapshot) => {
+            for (const extension of extensions) {
+              const states = defaultSkillStates(extension);
+              for (const name of [...states.keys()]) {
+                states.set(
+                  name,
+                  extensionStore.getSkillWorkspaceOverride(
+                    snapshot,
+                    extension.id,
+                    workspaceCwd,
                     name,
-                    extensionStore.getSkillWorkspaceOverride(
+                  ) ?? states.get(name)!,
+                );
+              }
+              extensionSkillStates.set(extension, states);
+            }
+          };
+          let storeRead = false;
+          if (entry) {
+            // State exists: a read failure must not fall back to manifest
+            // defaults, which would report a managed package the user
+            // disabled as active — the error propagates to the outer catch.
+            await fs.readdir(extensionStore.extensionsDir);
+            // createDataDir: false — a read-only status probe must not
+            // create plugin data directories for agent-plugins packages.
+            const snapshot = await extensionManager.refreshCacheWithSnapshot({
+              createDataDir: false,
+            });
+            extensions = extensionManager.getLoadedExtensions();
+            applySnapshotOverrides(snapshot);
+            storeRead = true;
+          } else if (storeEntry) {
+            // A store without an extensions dir can hold managed activation
+            // state, but no user packages. Read the snapshot without the
+            // store lock: acquiring it materializes the store directories, a
+            // write this probe must not perform (and cannot, on a read-only
+            // home). A corrupt store still fails closed out of peekSnapshot.
+            const snapshot = await extensionStore.peekSnapshot();
+            if (snapshot) {
+              if (managedExtensionsDir) {
+                extensions = await extensionManager.loadManagedExtensions(
+                  workspaceCwd,
+                  { createDataDir: false },
+                );
+                for (const extension of extensions) {
+                  extension.isActive =
+                    extensionStore.getActivation(
                       snapshot,
                       extension.id,
+                      extension.name,
                       workspaceCwd,
-                      name,
-                    ) ?? states.get(name)!,
-                  );
+                    ).effective === 'enabled';
                 }
-                extensionSkillStates.set(extension, states);
               }
+              applySnapshotOverrides(snapshot);
               storeRead = true;
-            } catch (error) {
-              // Fail-and-report whenever state exists: the store-free
-              // fallback below answers with manifest defaults, which would
-              // report a managed package the user disabled as active. Only a
-              // home with neither an extensions dir nor a store can use it.
-              if (entry || storeEntry) throw error;
             }
           }
           if (!storeRead) {

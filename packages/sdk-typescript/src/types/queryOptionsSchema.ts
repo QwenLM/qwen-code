@@ -64,6 +64,22 @@ const RESERVED_CLI_FLAGS = new Set([
   '--input-file',
 ]);
 
+// yargs' default camel-case-expansion accepts `--managedExtensions` for the
+// `--managed-extensions` option (and likewise for every hyphenated flag), so
+// an exact-string match never sees the spelling a caller actually sent.
+// Normalize before the lookup: decamelize, and fold the boolean-negation
+// prefix (`--no-x` guards the same surface as `--x`).
+const normalizeReservedFlag = (arg: string): string => {
+  const flag = arg.split('=')[0] ?? '';
+  const decamelized = flag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+  return decamelized.startsWith('--no-')
+    ? `--${decamelized.slice('--no-'.length)}`
+    : decamelized;
+};
+
+const isReservedArg = (arg: string): boolean =>
+  RESERVED_CLI_FLAGS.has(normalizeReservedFlag(arg));
+
 /**
  * OAuth configuration for MCP servers
  */
@@ -268,12 +284,9 @@ export const QueryOptionsSchema = z
     extraArgs: z
       .array(z.string().min(1, 'extraArgs items cannot be empty'))
       .refine(
-        (args) =>
-          !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? '')),
+        (args) => !args.some((arg) => isReservedArg(arg)),
         (args) => {
-          const blocked = args.find((arg) =>
-            RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? ''),
-          );
+          const blocked = args.find((arg) => isReservedArg(arg));
           return {
             message: `extraArgs cannot contain reserved flag: ${blocked}`,
           };
