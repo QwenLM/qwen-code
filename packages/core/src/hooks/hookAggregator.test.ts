@@ -12,6 +12,7 @@ import type {
   HookOutput,
   PermissionRequestHookOutput,
   PostToolBatchHookOutput,
+  PreToolUseHookOutput,
 } from './types.js';
 
 describe('HookAggregator', () => {
@@ -1271,6 +1272,143 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.decision).toBe('block');
       expect(result.finalOutput?.reason).toBe('blocked');
       expect(result.finalOutput?.terminalSequence).toBe('\x07');
+    });
+  });
+
+  describe('mergeWithOrLogic - PreToolUse permissionDecision ranking', () => {
+    const aggregatePreToolUse = (outputs: HookOutput[]) => {
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PreToolUse,
+        success: true,
+        output,
+        duration: 100,
+      }));
+      return aggregator.aggregateResults(results, HookEventName.PreToolUse);
+    };
+
+    const preToolUseOutput = (
+      permissionDecision: 'allow' | 'deny' | 'ask',
+      permissionDecisionReason: string,
+    ): HookOutput => ({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision,
+        permissionDecisionReason,
+      },
+    });
+
+    it('deny wins over allow regardless of hook order (deny first)', () => {
+      const result = aggregatePreToolUse([
+        preToolUseOutput('deny', 'deny-hook: DENY'),
+        preToolUseOutput('allow', 'allow-hook: ALLOW'),
+      ]);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.isDenied()).toBe(true);
+    });
+
+    it('deny wins over allow regardless of hook order (allow first)', () => {
+      const result = aggregatePreToolUse([
+        preToolUseOutput('allow', 'allow-hook: ALLOW'),
+        preToolUseOutput('deny', 'deny-hook: DENY'),
+      ]);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.isDenied()).toBe(true);
+    });
+
+    it('deny wins over ask', () => {
+      const result = aggregatePreToolUse([
+        preToolUseOutput('ask', 'ask-hook: ASK'),
+        preToolUseOutput('deny', 'deny-hook: DENY'),
+      ]);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+    });
+
+    it('ask wins over allow', () => {
+      const result = aggregatePreToolUse([
+        preToolUseOutput('ask', 'ask-hook: ASK'),
+        preToolUseOutput('allow', 'allow-hook: ALLOW'),
+      ]);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('ask');
+      expect(finalOutput.isAsk()).toBe(true);
+    });
+
+    it('reason comes from the winning decision; same-rank reasons concatenate', () => {
+      const result = aggregatePreToolUse([
+        preToolUseOutput('allow', 'allow-hook: ALLOW'),
+        preToolUseOutput('deny', 'deny-hook-1: DENY'),
+        preToolUseOutput('deny', 'deny-hook-2: DENY'),
+      ]);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.getPermissionDecisionReason()).toBe(
+        'deny-hook-1: DENY\ndeny-hook-2: DENY',
+      );
+    });
+
+    it('single hook output is unchanged', () => {
+      const result = aggregatePreToolUse([
+        preToolUseOutput('allow', 'allow-hook: ALLOW'),
+      ]);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('allow');
+      expect(finalOutput.getPermissionDecisionReason()).toBe(
+        'allow-hook: ALLOW',
+      );
+    });
+
+    it('keeps last-wins for unrelated hookSpecificOutput fields', () => {
+      const outputs: HookOutput[] = [
+        {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'deny-hook: DENY',
+            updatedInput: { url: 'https://first.example' },
+          },
+        },
+        {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            permissionDecisionReason: 'allow-hook: ALLOW',
+            updatedInput: { url: 'https://second.example' },
+          },
+        },
+      ];
+
+      const result = aggregatePreToolUse(outputs);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.hookSpecificOutput?.['updatedInput']).toEqual({
+        url: 'https://second.example',
+      });
+    });
+
+    it('hooks without permissionDecision do not lower the merged rank', () => {
+      const outputs: HookOutput[] = [
+        preToolUseOutput('deny', 'deny-hook: DENY'),
+        { hookSpecificOutput: { additionalContext: 'ctx only' } },
+      ];
+
+      const result = aggregatePreToolUse(outputs);
+
+      const finalOutput = result.finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.hookSpecificOutput?.['additionalContext']).toBe(
+        'ctx only',
+      );
     });
   });
 });
