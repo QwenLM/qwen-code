@@ -14,6 +14,7 @@ import {
   openNoFollow,
 } from '@qwen-code/qwen-code-core/noFollowOpen';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
 import {
   MAX_REGISTERED_WORKSPACES,
@@ -294,16 +295,18 @@ function parseSnapshot(
         );
       }
       if (typeof value !== 'string' || !value) {
-        throw new WorkspaceRegistrationStoreError(
-          `Workspace registration store pinnedAts[${JSON.stringify(registrationId)}] must be a non-empty string`,
+        writeStderrLine(
+          `qwen serve: skipping invalid pinnedAts[${JSON.stringify(registrationId)}]: not a non-empty string, got ${JSON.stringify(value)}`,
         );
+        continue;
       }
       // Validate ISO-8601 timestamp format.
       const parsed = Date.parse(value);
       if (Number.isNaN(parsed)) {
-        throw new WorkspaceRegistrationStoreError(
-          `Workspace registration store pinnedAts[${JSON.stringify(registrationId)}] must be a valid ISO-8601 timestamp, got ${JSON.stringify(value)}`,
+        writeStderrLine(
+          `qwen serve: skipping invalid pinnedAts[${JSON.stringify(registrationId)}]: not a valid ISO-8601 timestamp, got ${JSON.stringify(value)}`,
         );
+        continue;
       }
       pinnedAts ??= {};
       pinnedAts[registrationId] = value;

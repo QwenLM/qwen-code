@@ -6124,8 +6124,17 @@ export function WebShellSidebar({
                                   ws.primary &&
                                   ws.trusted &&
                                   Boolean(onOpenWorkspaceManagement);
+                                // Gate pin on: not primary, has registration IDs (stored in registry),
+                                // workspace_pinning feature advertised, and not locked.
+                                const canPin =
+                                  !ws.primary &&
+                                  ws.registrationIds !== undefined &&
+                                  ws.registrationIds.length > 0 &&
+                                  workspace.capabilities?.features.includes(
+                                    'workspace_pinning',
+                                  ) === true;
                                 const menuActions: WorkspaceMenuActions = {
-                                  ...(!ws.primary
+                                  ...(canPin
                                     ? {
                                         togglePin: () =>
                                           handleToggleWorkspacePin(ws),

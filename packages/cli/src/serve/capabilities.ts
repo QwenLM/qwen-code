@@ -391,6 +391,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_display_name: { since: 'v1' },
   scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
+  // Pin/unpin workspaces in the sidebar with newest-first ordering.
+  // Requires persistent workspace registration store.
+  workspace_pinning: { since: 'v1' },
   // A native OS directory picker can be opened on the daemon host
   // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
   // with a display). Headless hosts omit the tag so clients hide the
@@ -712,6 +715,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'persistent_workspace_registration',
+    (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'workspace_pinning',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
   ],
   [

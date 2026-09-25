@@ -1933,9 +1933,9 @@ export function registerWorkspaceManagementRoutes(
         sendSealed(res);
         return;
       }
+      const registrationId = String(req.params['id']);
       operationStarted();
       try {
-        const registrationId = String(req.params['id']);
         const body = await safeBody(req);
         const isPinned = body['isPinned'];
         if (typeof isPinned !== 'boolean') {
