@@ -22,7 +22,7 @@
     "packages/channels/plugin-example",
     "integrations/external-context",
     "integrations/external-context-mem0",
-    "!packages/desktop-shell",
+    "!packages/desktop",
     "!packages/live-host",
     "!packages/mobile-shell"
   ],
@@ -201,6 +201,7 @@
     "@lydell/node-pty": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
