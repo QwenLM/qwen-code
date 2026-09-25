@@ -1536,15 +1536,10 @@ export async function connectAndDiscover(
 }
 
 /**
- * Discovers and sanitizes tools from a connected MCP client.
- * It retrieves function declarations from the client, filters out disabled tools,
- * generates valid names for them, and wraps them in `DiscoveredMCPTool` instances.
- *
- * @param mcpServerName The name of the MCP server.
- * @param mcpServerConfig The configuration for the MCP server.
- * @param mcpClient The active MCP client instance.
- * @returns A promise that resolves to an array of discovered and enabled tools.
- * @throws An error if no enabled tools are found or if the server provides invalid function declarations.
+ * Applies resource listing UI metadata (`_meta.ui`) to matching discovered tools.
+ * @param tools Discovered tools.
+ * @param resources Resources whose `_meta.ui` decorates matching tools.
+ * @returns The updated tool list.
  */
 function applyListingAppResourceUi(
   tools: DiscoveredMCPTool[],

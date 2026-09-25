@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/browser-use",
   "private": true,
-  "version": "0.24.4",
+  "version": "0.24.5",
   "description": "Browser Use SDK for the Qwen Code Node REPL",
   "type": "module",
   "license": "Apache-2.0",

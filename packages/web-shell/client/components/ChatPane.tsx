@@ -1741,6 +1741,7 @@ export function ChatPane({
                     ? fileChangesByTurn
                     : undefined
                 }
+                sourceSessionId={connection.sessionId}
                 turnArtifacts={
                   visibleTurnOutputKinds.has('artifact')
                     ? artifactsByTurn

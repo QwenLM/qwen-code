@@ -60,8 +60,10 @@ import {
   getTaskExecutionRecord,
   getShellToolSemanticDescription,
   getToolDescription,
+  getAdvisorDisplayText,
   getToolSummaryDescription,
   getToolResultSummary,
+  isAdvisorToolName,
   isAskUserQuestionToolName,
   isActiveToolStatus,
   isSkillToolName,
@@ -149,6 +151,7 @@ function hasDetailView(tool: ACPToolCall): boolean {
     name === 'read_file' ||
     name === 'readfile' ||
     isSkillToolName(name) ||
+    isAdvisorToolName(name) ||
     isAskUserQuestionToolName(tool.toolName) ||
     isWorkflowToolName(name)
   );
@@ -182,8 +185,10 @@ export function extractDiff(tool: ACPToolCall): string {
 
   const previewPatch = tool.args?.patch;
   if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
-  const previewNewText = tool.args?.newText;
-  const previewOldText = tool.args?.oldText;
+  // `newText`/`oldText` come from the safe tool preview projection; the full
+  // projection carries the edit tool's real parameter names instead.
+  const previewNewText = tool.args?.newText ?? tool.args?.new_string;
+  const previewOldText = tool.args?.oldText ?? tool.args?.old_string;
   if (
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
@@ -1354,6 +1359,7 @@ export const ToolLine = memo(function ToolLine({
     name === 'search' ||
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
+  const isAdvisor = isAdvisorToolName(name);
   const filePreviewAction =
     detailsVisible &&
     (isRead ||
@@ -1396,7 +1402,7 @@ export const ToolLine = memo(function ToolLine({
   // summary visible instead of replacing it with an empty detail area.
   const detailView = hasDetailView(tool);
   const showDescriptionInDetail = expanded && descExpandable;
-  const useMarkdownDetail = isRead;
+  const useMarkdownDetail = isRead || isAdvisor;
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
@@ -1596,6 +1602,9 @@ export const ToolLine = memo(function ToolLine({
                   <ExpandedAskUserQuestionOutput tool={tool} />
                 )}
                 {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
+                {isAdvisor && (
+                  <Markdown content={getAdvisorDisplayText(tool) ?? ''} />
+                )}
               </ToolExpandedCard>
             )}
           </div>

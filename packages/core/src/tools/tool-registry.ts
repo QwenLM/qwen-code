@@ -52,6 +52,30 @@ export interface DeferredToolSummary {
 
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
+/**
+ * What a deferred tool looked like when tool_search returned it: the parameter
+ * contract its arguments were written against plus, for an MCP tool, the server
+ * it belongs to. `tool_call` recomputes it and refuses a bridged call whose
+ * live value differs (#11321); a direct call never reaches that comparison.
+ *
+ * The free-text `description` is deliberately excluded. Shipped deferred tools
+ * rebuild it from mutable state on every `schema` access — `WebSearchTool`
+ * interpolates the current month/year and `ReadFileTool` the effective input
+ * modalities — intentionally, so a long-lived `qwen serve`/ACP process is not
+ * stale across a month boundary or a mid-session `/model` switch. Hashing that
+ * prose made an unchanged tool's fingerprint drift and refuse a legitimate call
+ * whose parameters still matched the reviewed schema.
+ */
+export function deferredDeclarationFingerprint(
+  tool: AnyDeclarativeTool,
+): string {
+  const server = tool instanceof DiscoveredMCPTool ? tool.serverName : '';
+  const schema = tool.schema;
+  return `${server}\u0000${schema.name ?? tool.name}\u0000${JSON.stringify(
+    schema.parametersJsonSchema,
+  )}`;
+}
+
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
@@ -218,6 +242,14 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
+  // Fingerprint of each tool as tool_search last returned it, kept across
+  // `/clear` and deliberately never pruned: an entry can only match the same
+  // server, schema name and parameter schema, so a stale one either still
+  // describes the live tool or makes tool_call ask for a fresh review.
+  // Pruning it on removal would invert that — a dropped entry reads as "never
+  // reviewed" and passes a replacement through. Bounded by the distinct tool
+  // names reviewed in this process.
+  private reviewedDeferredDeclarations: Map<string, string> = new Map();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
@@ -391,6 +423,10 @@ export class ToolRegistry {
     this.factories.set(name, factory);
   }
 
+  unregisterTool(name: string): void {
+    this.tools.delete(name);
+  }
+
   /**
    * Registers a lazy tool factory for a tool that an active
    * `settings.tools.eager` allowlist demoted to deferred (#9827,
@@ -552,7 +588,8 @@ export class ToolRegistry {
         // the same name would inherit `revealed: true` from the prior
         // session — `getFunctionDeclarations` would emit it (since it
         // checks reveal state) before the model has any way to know
-        // the tool exists this session.
+        // the tool exists this session. The reviewed-declaration record
+        // is deliberately left alone: see `reviewedDeferredDeclarations`.
         this.revealedDeferred.delete(name);
       }
     }
@@ -962,6 +999,22 @@ export class ToolRegistry {
    */
   unrevealDeferredTool(name: string): void {
     this.revealedDeferred.delete(name);
+  }
+
+  /** Records the declaration tool_search just returned. */
+  recordReviewedDeclaration(tool: AnyDeclarativeTool): void {
+    this.reviewedDeferredDeclarations.set(
+      tool.name,
+      deferredDeclarationFingerprint(tool),
+    );
+  }
+
+  /**
+   * The fingerprint recorded by {@link recordReviewedDeclaration}, or
+   * `undefined` when tool_search has not returned this tool in the session.
+   */
+  getReviewedDeclaration(name: string): string | undefined {
+    return this.reviewedDeferredDeclarations.get(name);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
