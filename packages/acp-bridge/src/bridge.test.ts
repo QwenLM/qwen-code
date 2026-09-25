@@ -13298,11 +13298,13 @@ describe('createAcpSessionBridge', () => {
     const second = makeChannel();
     const channels = [first, second];
     const restoreEvents = recordRestoreEvents();
+    const diagnostics: Array<{ line: string; level?: string }> = [];
     const bridge = makeBridge({
       sessionScope: 'thread',
       sessionRestoreTimeoutMs: 20,
       channelFactory: async () => channels.shift()!.channel,
       telemetry: restoreEvents.telemetry,
+      onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
     });
     try {
       const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -13378,6 +13380,10 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(0);
       expect(first.killed).toBe(true);
       await vi.advanceTimersByTimeAsync(0);
+      expect(diagnostics).toContainEqual({
+        line: expect.stringContaining('qwen serve: channel exited'),
+        level: 'warn',
+      });
       await expect(
         bridge.spawnOrAttach({
           workspaceCwd: WS_A,
@@ -14525,9 +14531,11 @@ describe('createAcpSessionBridge', () => {
         cancelled: vi.fn(),
       },
     };
+    const diagnostics: Array<{ line: string; level?: string }> = [];
     const bridge = makeBridge({
       channelFactory: async () => handle.channel,
       telemetry,
+      onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
     });
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -14568,6 +14576,12 @@ describe('createAcpSessionBridge', () => {
           'transport_detail=prepared_response:required=262144:available=0:cap=67108864',
         ),
       );
+      expect(diagnostics).toContainEqual({
+        line: expect.stringContaining(
+          'transport=ndjson_queue_limit_exceeded, transport_detail=prepared_response:required=262144:available=0:cap=67108864',
+        ),
+        level: 'warn',
+      });
     } finally {
       stderr.mockRestore();
       await bridge.shutdown();
@@ -23932,6 +23946,45 @@ describe('createAcpSessionBridge', () => {
         line: 'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down)',
         level: 'warn',
       });
+      await bridge.shutdown();
+    });
+
+    it('reports a planned channel retirement at info', async () => {
+      const handle = makeChannel();
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.killSession(session.sessionId);
+
+      await vi.waitFor(() =>
+        expect(diagnostics).toContainEqual({
+          line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+          level: 'info',
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('finishes channel teardown when the diagnostic sink throws', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: () => {
+          throw new Error('sink failed');
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const iter = bridge.subscribeEvents(session.sessionId);
+
+      handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
+      const next = await iter[Symbol.asyncIterator]().next();
+
+      expect(next.value?.type).toBe('session_died');
+      expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
 
