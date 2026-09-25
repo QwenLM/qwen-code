@@ -5,7 +5,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { deriveConfig, type Config } from '../config/config.js';
 import {
   firePreToolUseHook,
@@ -44,6 +43,16 @@ import {
 } from './managed-tool-protocol.js';
 
 import type { ManagedToolFileHistoryClient } from './managed-tool-file-history-protocol.js';
+
+function invocationParams(params: unknown): Record<string, unknown> {
+  // Native tools add optional undefined fields; hash the same JSON sent on the wire.
+  const projected = JSON.parse(JSON.stringify(params)) as Record<
+    string,
+    unknown
+  >;
+  managedToolDigest(projected);
+  return projected;
+}
 
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
 
@@ -422,7 +431,7 @@ export class ManagedToolRuntime {
     const reference: ManagedToolInvocationReference = {
       ...identity,
       invocationId: randomUUID(),
-      argsDigest: managedToolDigest(invocation.params),
+      argsDigest: managedToolDigest(invocationParams(invocation.params)),
     };
     const toolUseId = generateToolUseId();
     const entry: Entry = {
@@ -434,7 +443,7 @@ export class ManagedToolRuntime {
       toolUseId,
       prepared: {
         ...reference,
-        params: structuredClone(invocation.params) as Record<string, unknown>,
+        params: invocationParams(invocation.params),
         description: invocation.getDescription(),
         locations: invocation.toolLocations(),
         defaultPermission,
@@ -540,7 +549,8 @@ export class ManagedToolRuntime {
     if (entry.execution)
       throw new Error('Managed tool invocation already dispatched.');
     if (
-      managedToolDigest(entry.invocation.params) !== entry.reference.argsDigest
+      managedToolDigest(invocationParams(entry.invocation.params)) !==
+      entry.reference.argsDigest
     ) {
       throw new Error('Managed tool parameters changed after preparation.');
     }
@@ -630,15 +640,14 @@ export class ManagedToolRuntime {
       const raw = await entry.invocation.execute(
         signal,
         (output) => this.progress(entry, output),
-        {
-          ...this.config.getShellExecutionConfig(),
-          requireProcessGroupExit: true,
-        },
+        this.config.getShellExecutionConfig(),
       );
       result = {
-        executionStatus:
-          raw.executionStatus ??
-          (raw.error ? (signal.aborted ? 'cancelled' : 'error') : 'success'),
+        executionStatus: raw.error
+          ? signal.aborted
+            ? 'cancelled'
+            : 'error'
+          : 'success',
       };
       try {
         result.result = structuredClone({
@@ -834,22 +843,16 @@ export async function createBuiltinManagedToolRuntime(
     { WriteFileTool },
     { EditTool },
     { NotebookEditTool },
-    { ShellTool },
     { GlobTool },
     { LSTool },
-    { GrepTool },
-    { RipGrepTool },
     { ZoomImageTool },
   ] = await Promise.all([
     import('./read-file.js'),
     import('./write-file.js'),
     import('./edit.js'),
     import('./notebook-edit.js'),
-    import('./shell.js'),
     import('./glob.js'),
     import('./ls.js'),
-    import('./grep.js'),
-    import('./ripGrep.js'),
     import('./zoom-image.js'),
   ]);
   const registry = config.getToolRegistry();
@@ -884,7 +887,6 @@ export async function createBuiltinManagedToolRuntime(
     WriteFileTool,
     EditTool,
     NotebookEditTool,
-    ShellTool,
     GlobTool,
     LSTool,
     ZoomImageTool,
@@ -892,29 +894,6 @@ export async function createBuiltinManagedToolRuntime(
     (Constructor) => Constructor !== LSTool || toolConfig.isLsToolEnabled(),
   );
   const revision = randomUUID();
-  const admittedGrep = registry.getTool(GrepTool.Name);
-  let grep: AnyDeclarativeTool | undefined;
-  if (
-    admittedGrep?.constructor === GrepTool ||
-    admittedGrep?.constructor === RipGrepTool
-  ) {
-    let useRipgrep = false;
-    if (toolConfig.getUseRipgrep()) {
-      try {
-        useRipgrep = await canUseRipgrep(toolConfig.getUseBuiltinRipgrep(), {
-          requireProcessGroupExit: true,
-          cwd: toolConfig.getTargetDir(),
-        });
-      } catch (error) {
-        if (
-          (error as NodeJS.ErrnoException).code ===
-          'ERR_OWNED_COMMAND_UNSUPPORTED'
-        )
-          throw error;
-      }
-    }
-    grep = useRipgrep ? new RipGrepTool(toolConfig) : new GrepTool(toolConfig);
-  }
   const boundTools =
     toolConfig === config
       ? undefined
@@ -936,10 +915,6 @@ export async function createBuiltinManagedToolRuntime(
           const tool = config.getToolRegistry().getTool(Constructor.Name);
           return tool?.constructor === Constructor ? [tool] : [];
         })),
-      ...(grep &&
-      config.getToolRegistry().getTool(GrepTool.Name) === admittedGrep
-        ? [grep]
-        : []),
     ],
     () => revision,
     fileHistory,

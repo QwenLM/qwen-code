@@ -22,7 +22,7 @@ class LocalProcessRuntimeProvisionerTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
 
     @Test
-    void reportsADurableKindAndLosesAMissingProcess() throws Exception {
+    void reportsUnknownWhenTheProcessIsNotOwned() throws Exception {
         HttpRuntimeTransport transport = new HttpRuntimeTransport();
         try (LocalProcessRuntimeProvisioner provisioner =
                 new LocalProcessRuntimeProvisioner(List.of("node"),
@@ -47,7 +47,7 @@ class LocalProcessRuntimeProvisionerTest {
             RuntimeObservation observation = provisioner
                     .reconcile(request, seed, handle, missing)
                     .toCompletableFuture().get(5, TimeUnit.SECONDS);
-            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
                     observation.getOutcome());
         }
     }

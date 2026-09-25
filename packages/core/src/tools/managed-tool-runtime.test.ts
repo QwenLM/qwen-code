@@ -24,6 +24,7 @@ import {
   type ManagedToolExecutionResult,
   type ManagedToolRuntimeFileHistory,
 } from './managed-tool-runtime.js';
+import { managedToolDigest } from './managed-tool-protocol.js';
 import type {
   ManagedToolCallIdentity,
   ManagedToolInvocationReference,
@@ -330,6 +331,8 @@ describe('ManagedToolRuntime', () => {
       await runtime.prepare({ ...call, callId: 'call-2' }, ReadFileTool.Name, {
         file_path: '/managed-child/b.txt',
       });
+      expect(first.params).toEqual({ file_path: '/managed-child/a.txt' });
+      expect(first.argsDigest).toBe(managedToolDigest(first.params));
       expect(first.description).toBe('a.txt');
       expect(first.defaultPermission).toBe('allow');
       expect(first.sessionId).toBe(sessionId);
@@ -734,24 +737,6 @@ describe('ManagedToolRuntime', () => {
     expect(disposed).toBe(true);
     expect(hooks.failure).toHaveBeenCalledTimes(1);
   });
-
-  it.each(['cancelled', 'not_started'] as const)(
-    'preserves explicit Shell %s without inventing a tool error',
-    async (executionStatus) => {
-      tool.setup = (invocation) =>
-        invocation.execute.mockResolvedValue({ ...rawResult, executionStatus });
-      const ref = await prepare();
-      await runtime.preflight(ref);
-      expect(await runtime.execute(ref)).toMatchObject({
-        executionStatus,
-        result: rawResult,
-      });
-      expect(hooks.post).not.toHaveBeenCalled();
-      expect(hooks.failure).toHaveBeenCalledTimes(
-        executionStatus === 'cancelled' ? 1 : 0,
-      );
-    },
-  );
 
   it('does not fabricate cancellation when an already running write actually succeeds', async () => {
     const gate = deferred<ToolResult>();

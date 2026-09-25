@@ -28,7 +28,6 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
-import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
@@ -3365,32 +3364,7 @@ async function runQwenServeImpl(
     'serve / ACP / web terminals',
   );
 
-  const hostedProfile = optsIn.profile ?? 'default';
-  if (hostedProfile === 'hosted-harness') {
-    optsIn.managedRuntimeBrokerUrl ??=
-      process.env['QWEN_RUNTIME_BROKER_URL'];
-    optsIn.managedRuntimeBrokerToken ??=
-      process.env['QWEN_RUNTIME_BROKER_TOKEN'];
-    optsIn.hostedHarnessCapabilityDigest ??=
-      process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV];
-    validateHostedHarnessProfile(
-      { ...optsIn, profile: hostedProfile },
-      {
-        serverToken: QWEN_SERVER_TOKEN_ENV,
-        brokerUrl: 'QWEN_RUNTIME_BROKER_URL',
-        brokerToken: 'QWEN_RUNTIME_BROKER_TOKEN',
-        capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
-      },
-    );
-  } else if (
-    optsIn.managedRuntimeBrokerUrl !== undefined ||
-    optsIn.managedRuntimeBrokerToken !== undefined ||
-    optsIn.hostedHarnessCapabilityDigest !== undefined
-  ) {
-    throw new Error(
-      'Managed Runtime Broker options require --profile hosted-harness.',
-    );
-  }
+  validateHostedHarnessProfile(optsIn);
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];

@@ -235,7 +235,10 @@ public final class LocalProcessRuntimeProvisioner
             return RuntimeObservation.unknown(handle);
         }
         OwnedProcess process = owned.get(lastLease.getRuntimeInstanceId());
-        if (process != null && !process.process.isAlive()) {
+        if (process == null) {
+            return RuntimeObservation.unknown(handle);
+        }
+        if (!process.process.isAlive()) {
             return RuntimeObservation.notFound();
         }
         try {
@@ -245,9 +248,6 @@ public final class LocalProcessRuntimeProvisioner
                     || "managed_runtime_unauthorized".equals(
                             failure.getCode())) {
                 return RuntimeObservation.conflict(handle);
-            }
-            if (process == null) {
-                return RuntimeObservation.notFound();
             }
             return RuntimeObservation.unknown(handle);
         }

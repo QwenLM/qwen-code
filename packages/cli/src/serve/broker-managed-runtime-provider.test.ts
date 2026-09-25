@@ -102,6 +102,67 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(bodies[0]).not.toHaveProperty('workspaceCwd');
   });
 
+  it('retries a failed acquisition and invalidates issued clients after release', async () => {
+    let acquisitions = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire')) {
+        acquisitions++;
+        return acquisitions === 1
+          ? new Response('{}', { status: 503 })
+          : json(envelope({ acquired: true }));
+      }
+      if (url.endsWith(':release')) return json(envelope({ released: true }));
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    await expect(
+      provider.getToolV2Client(request(), { harnessSessionId }),
+    ).rejects.toThrow('503');
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    expect(acquisitions).toBe(2);
+    await provider.release(runtimeSessionId, request(), { terminal: true });
+    const requests = fetchImpl.mock.calls.length;
+    expect(() => client.manifest()).toThrow('closed');
+    await expect(client.execute(reference())).rejects.toThrow('closed');
+    expect(fetchImpl).toHaveBeenCalledTimes(requests);
+    provider.dispose();
+  });
+
+  it('keeps cleanup reachable when the acquire response is lost', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).endsWith('tool-sessions:acquire')) {
+        throw new TypeError('connection closed after acquire');
+      }
+      if (String(input).endsWith(':release')) {
+        return json(envelope({ released: true }));
+      }
+      throw new Error('Unexpected request');
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    await expect(
+      provider.getToolV2Client(request(), { harnessSessionId }),
+    ).rejects.toThrow('connection closed');
+    await expect(
+      provider.release(runtimeSessionId, request(), { terminal: true }),
+    ).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await expect(
+      provider.getToolV2Client(request(), { harnessSessionId }),
+    ).rejects.toThrow('permanently closed');
+    provider.dispose();
+  });
+
   it('reserves a durable execution identity before starting it', async () => {
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
     let droppedExecutionResponse = false;

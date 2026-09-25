@@ -285,7 +285,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: ['default', 'hosted-harness'] as const,
         default: 'default' as const,
         description:
-          'Deployment profile. hosted-harness runs the resident model loop and delegates every Managed Tool operation through a Java Runtime Broker.',
+          'Deployment profile. hosted-harness is reserved and currently rejects startup; Broker session wiring is not implemented.',
       })
       .option('token', {
         type: 'string',
@@ -605,19 +605,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Enable the experimental resident Managed Gateway with durable admission and Tool-only workspace Runtimes.',
+          'Reserved experimental mode; not implemented and rejects startup.',
       })
       .option('experimental-managed-runtime-worker', {
         type: 'boolean',
         default: false,
         description:
-          'Expose the private authenticated Managed Runtime worker protocol. Requires a daemon bearer token.',
+          'Reserved experimental mode; not implemented and rejects startup.',
       })
       .option('experimental-managed-runtime-auto-local', {
         type: 'boolean',
         default: false,
         description:
-          'Automatically start and manage local Tool-only Runtimes. Requires --experimental-managed-agents.',
+          'Reserved experimental mode; not implemented and rejects startup.',
       })
       .option('experimental-managed-runtime-url', {
         type: 'string',

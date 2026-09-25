@@ -9,13 +9,9 @@
 import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import express, { type RequestHandler } from 'express';
-import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ManagedToolV2Client } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { ManagedToolFileHistoryState } from '@qwen-code/qwen-code-core';
-import type { ManagedWorkerBoot } from './managed-runtime-activator.js';
-import type { ManagedWorkerFileBoot } from './managed-runtime-worker-bootstrap.js';
+import type { ManagedToolFileHistoryState } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import {
   LocalManagedRuntimeProvider,
@@ -23,12 +19,10 @@ import {
 } from './managed-runtime-provider.js';
 import {
   MANAGED_RUNTIME_PROTOCOL_VERSION,
-  MANAGED_RUNTIME_ROUTE_PREFIX,
   parseManagedRuntimeExecuteRequest,
   parseManagedRuntimePrepareRequest,
   type ManagedRuntimePrepareRequest,
 } from './managed-runtime-protocol.js';
-import { registerManagedRuntimeWorkerRoutes } from './routes/managed-runtime-worker.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -111,28 +105,6 @@ function fakeRuntime(): {
   return { bridge, registry, execute, cancel, close };
 }
 
-function workerApp(
-  provider: LocalManagedRuntimeProvider,
-  owned?: ManagedWorkerBoot | ManagedWorkerFileBoot,
-  beforeRoutes?: RequestHandler,
-) {
-  const app = express();
-  app.use(express.json({ limit: '10mb' }));
-  if (beforeRoutes) app.use(beforeRoutes);
-  registerManagedRuntimeWorkerRoutes(app, {
-    provider,
-    owned,
-    authorize: (req, res, next) => {
-      if (req.headers.authorization !== `Bearer ${token}`) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
-      next();
-    },
-  });
-  return app;
-}
-
 async function listen(server: Server, port = 0): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -182,31 +154,6 @@ describe('Managed Runtime providers', () => {
     };
   }
 
-  function ownedBoot(): ManagedWorkerBoot {
-    return {
-      type: 'boot',
-      version: 1,
-      gatewayIncarnation: 'gateway',
-      leaseId: 'lease',
-      epoch: 1,
-      ...prepareRequest,
-      token,
-      outputRoot: '/tmp/owned-output',
-      cliEntry: '/cli.js',
-    };
-  }
-
-  function fileOwnedBoot(): ManagedWorkerFileBoot {
-    return {
-      ...ownedBoot(),
-      runtimeInstanceId: 'runtime-instance',
-      provisionRequestId: 'provision-request',
-      workspaceGeneration: 'workspace-generation',
-      capabilityDigest: 'capability-digest',
-      isolationClass: 'workspace',
-    };
-  }
-
   function deferred<T>() {
     let resolve!: (value: T) => void;
     const promise = new Promise<T>((done) => {
@@ -215,100 +162,12 @@ describe('Managed Runtime providers', () => {
     return { promise, resolve };
   }
 
-  it('attests the exact durable worker identity before private use', async () => {
+  it('rejects a bridge without managed tool capabilities before spawning', () => {
     const runtime = fakeRuntime();
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const owned = fileOwnedBoot();
-    const app = workerApp(local, owned);
-    const body = {
-      protocolVersion: 2,
-      provisionRequestId: owned.provisionRequestId,
-      tenantId: owned.tenantId,
-      workspaceId: owned.workspaceId,
-      workspaceGeneration: owned.workspaceGeneration,
-      workspaceCwd: owned.workspaceCwd,
-      capabilityDigest: owned.capabilityDigest,
-      isolationClass: owned.isolationClass,
-    };
-    const attest = (value: Record<string, unknown>) =>
-      request(app)
-        .post('/internal/managed-runtime/v2/attest')
-        .set('Authorization', `Bearer ${token}`)
-        .set('X-Qwen-Managed-Lease-Id', owned.leaseId)
-        .set('X-Qwen-Managed-Lease-Epoch', String(owned.epoch))
-        .send(value);
-
-    await request(app)
-      .post('/internal/managed-runtime/v2/attest')
-      .send(body)
-      .expect(401);
-    await attest({ ...body, provisionRequestId: 'another' }).expect(409);
-    const response = await attest(body).expect(200);
-    expect(response.body).toEqual({
-      protocolVersion: 2,
-      runtimeInstanceId: owned.runtimeInstanceId,
-      runtimeIncarnation: owned.gatewayIncarnation,
-      leaseId: owned.leaseId,
-      epoch: owned.epoch,
-      provisionRequestId: owned.provisionRequestId,
-      tenantId: owned.tenantId,
-      workspaceId: owned.workspaceId,
-      workspaceGeneration: owned.workspaceGeneration,
-      workspaceCwd: owned.workspaceCwd,
-      capabilityDigest: owned.capabilityDigest,
-      isolationClass: owned.isolationClass,
-    });
+    delete runtime.bridge.executeManagedRuntimeTool;
+    const provider = new LocalManagedRuntimeProvider(runtime.registry);
+    expect(() => provider.prepare(prepareRequest)).toThrow('does not support');
     expect(runtime.bridge.spawnOrAttach).not.toHaveBeenCalled();
-    local.dispose();
-  });
-
-  it('fences a parsed first v2 request that arrives after release is acknowledged', async () => {
-    const runtime = fakeRuntime();
-    runtime.bridge.getManagedToolV2Client = vi.fn(
-      () => toolV2Client() as unknown as ManagedToolV2Client,
-    );
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const entered = deferred<void>();
-    const dispatch = deferred<void>();
-    const owned = ownedBoot();
-    const server = createServer(
-      workerApp(local, owned, (req, _res, next) => {
-        if (req.path.endsWith('/v2/manifest')) {
-          entered.resolve();
-          void dispatch.promise.then(() => next());
-        } else next();
-      }),
-    );
-    servers.push(server);
-    const remote = new RemoteManagedRuntimeProvider({
-      baseUrl: `http://127.0.0.1:${await listen(server)}`,
-      token,
-      lease: owned,
-    });
-    try {
-      const client = await remote.getToolV2Client(prepareRequest);
-      const manifest = client.manifest().catch((error: unknown) => error);
-      await entered.promise;
-      await expect(
-        remote.release(prepareRequest.sessionId, prepareRequest),
-      ).resolves.toBe(true);
-      expect(await manifest).toBeInstanceOf(Error);
-      expect(runtime.close).toHaveBeenCalledOnce();
-      const late = vi.spyOn(local, 'getToolV2Client');
-      dispatch.resolve();
-      await vi.waitFor(() => expect(late).toHaveBeenCalledOnce());
-      await expect(late.mock.results[0].value).rejects.toThrow();
-      expect(runtime.bridge.spawnOrAttach).toHaveBeenCalledOnce();
-      expect(() => local.prepare(prepareRequest)).toThrow('closing');
-      expect(() => remote.prepare(prepareRequest)).toThrow();
-      await expect(
-        remote.release(prepareRequest.sessionId, prepareRequest),
-      ).resolves.toBe(true);
-    } finally {
-      dispatch.resolve();
-      remote.dispose();
-      local.dispose();
-    }
   });
 
   it('upgrades a pending local v1 release to a terminal identity before completing cleanup', async () => {
@@ -390,7 +249,7 @@ describe('Managed Runtime providers', () => {
     const remote = new RemoteManagedRuntimeProvider({
       baseUrl: 'http://127.0.0.1:4181',
       token,
-      lease: ownedBoot(),
+      lease: { leaseId: 'lease', epoch: 1 },
       fetch: vi.fn(async (url: RequestInfo | URL) => {
         const path = new URL(String(url)).pathname;
         if (path.endsWith('/prepare'))
@@ -434,7 +293,7 @@ describe('Managed Runtime providers', () => {
     const remote = new RemoteManagedRuntimeProvider({
       baseUrl: 'http://127.0.0.1:4181',
       token,
-      lease: ownedBoot(),
+      lease: { leaseId: 'lease', epoch: 1 },
       fetch: vi.fn(async (url: RequestInfo | URL) => {
         versions.push(new URL(String(url)).pathname);
         return Response.json({
@@ -480,214 +339,6 @@ describe('Managed Runtime providers', () => {
     remote.dispose();
   });
 
-  it('exposes terminal release only with owned auth, lease and strict workspace identity', async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(runtime.bridge.resumeSession).mockRejectedValue(
-      Object.assign(new Error('not found'), { code: 'session_not_found' }),
-    );
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const path = '/internal/managed-runtime/v2/release';
-    const body = { ...prepareRequest, protocolVersion: 2 };
-    await request(workerApp(local)).post(path).send(body).expect(404);
-    const app = workerApp(local, ownedBoot());
-    await request(app).post(path).send(body).expect(401);
-    await request(app)
-      .post(path)
-      .set('authorization', `Bearer ${token}`)
-      .send(body)
-      .expect(409);
-    const authorized = () =>
-      request(app)
-        .post(path)
-        .set('authorization', `Bearer ${token}`)
-        .set('X-Qwen-Managed-Lease-Id', 'lease')
-        .set('X-Qwen-Managed-Lease-Epoch', '1');
-    await authorized()
-      .send({ ...body, tenantId: 'other' })
-      .expect(409);
-    await authorized()
-      .send({ ...body, extra: true })
-      .expect(400);
-    await authorized()
-      .send({ ...body, protocolVersion: 1 })
-      .expect(400);
-    const result = await authorized().send(body).expect(200);
-    expect(result.body).toEqual({ protocolVersion: 2, released: true });
-    expect(() => local.prepare(prepareRequest)).toThrow();
-    local.dispose();
-  });
-
-  it('connects v2 invocations and file history through the owned HTTP listener without losing optional fields', async () => {
-    const runtime = fakeRuntime();
-    const client = toolV2Client();
-    runtime.bridge.getManagedToolV2Client = vi.fn(
-      () => client as unknown as ManagedToolV2Client,
-    );
-    vi.mocked(runtime.bridge.getSessionSummary).mockReturnValue({
-      workspaceCwd,
-      sourceType: 'managed-gateway',
-      sourceId: prepareRequest.sessionId,
-    } as never);
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const owned: ManagedWorkerBoot = {
-      type: 'boot',
-      version: 1,
-      gatewayIncarnation: 'gateway',
-      leaseId: 'lease',
-      epoch: 1,
-      ...prepareRequest,
-      token,
-      outputRoot: '/tmp/owned-output',
-      cliEntry: '/cli.js',
-    };
-    const server = createServer(workerApp(local, owned));
-    servers.push(server);
-    const remote = new RemoteManagedRuntimeProvider({
-      baseUrl: `http://127.0.0.1:${await listen(server)}`,
-      token,
-      lease: owned,
-    });
-    try {
-      const connected = await remote.getToolV2Client(prepareRequest);
-      const trackedFileBackups = Object.fromEntries(
-        Array.from({ length: 100 }, (_, i) => [
-          `${'directory/'.repeat(5)}file-${i}.txt`,
-          {
-            backupFileName: '0123456789abcdef@v1',
-            version: 1,
-            backupTime: '2026-09-09T00:00:00.000Z',
-          },
-        ]),
-      );
-      const snapshots = Array.from({ length: 100 }, (_, i) => ({
-        promptId: `turn-${i}`,
-        timestamp: '2026-09-09T00:00:00.000Z',
-        trackedFileBackups,
-      }));
-      expect(Buffer.byteLength(JSON.stringify(snapshots))).toBeGreaterThan(
-        1024 * 1024,
-      );
-      client.fileHistory.bind.mockResolvedValueOnce({
-        ownerSessionId: prepareRequest.sessionId,
-        revision: 0,
-        snapshots,
-      });
-      const binding = {
-        ownerSessionId: prepareRequest.sessionId,
-        ownerRuntimeSessionId: prepareRequest.sessionId,
-        executionCwd: workspaceCwd,
-        snapshots,
-      };
-      await expect(connected.fileHistory!.bind(binding)).resolves.toEqual({
-        ownerSessionId: prepareRequest.sessionId,
-        revision: 0,
-        snapshots,
-      });
-      await connected.fileHistory!.checkpoint('parent-turn');
-      await connected.fileHistory!.snapshot();
-      expect(client.fileHistory.bind).toHaveBeenCalledExactlyOnceWith(binding);
-      expect(client.fileHistory.checkpoint).toHaveBeenCalledExactlyOnceWith(
-        'parent-turn',
-      );
-      expect(client.fileHistory.snapshot).toHaveBeenCalledExactlyOnceWith();
-      client.fileHistory.snapshot.mockResolvedValueOnce({
-        ownerSessionId: prepareRequest.sessionId,
-        revision: -1,
-        snapshots: [],
-      });
-      await expect(connected.fileHistory!.snapshot()).rejects.toThrow();
-      await connected.manifest();
-      const identity = {
-        sessionId: invocation.sessionId,
-        promptId: invocation.promptId,
-        callId: invocation.callId,
-        capabilityDigest: invocation.capabilityDigest,
-        policyRevision: invocation.policyRevision,
-      };
-      await connected.beginTurn(identity);
-      await connected.prepare(identity, 'read_file', {
-        file_path: 'proof.txt',
-      });
-      const mediaContext = { inputModalities: { image: true, pdf: false } };
-      await connected.prepare(
-        identity,
-        'read_file',
-        { file_path: 'image.png' },
-        undefined,
-        mediaContext,
-      );
-      expect(client.prepare).toHaveBeenLastCalledWith(
-        identity,
-        'read_file',
-        { file_path: 'image.png' },
-        undefined,
-        mediaContext,
-      );
-      await connected.confirmation(invocation);
-      await connected.confirm(invocation, 'proceed_once' as never);
-      await connected.confirm(
-        invocation,
-        'proceed_once' as never,
-        { answers: { answer: 'yes' } },
-        'preflight',
-      );
-      await connected.preflight(invocation);
-      await connected.execute(invocation);
-      await connected.status(invocation);
-      await connected.cancel(invocation);
-      expect(client.confirm.mock.calls).toEqual([
-        [invocation, 'proceed_once', undefined, 'permission'],
-        [
-          invocation,
-          'proceed_once',
-          { answers: { answer: 'yes' } },
-          'preflight',
-        ],
-      ]);
-      expect(client.execute).toHaveBeenCalledExactlyOnceWith(invocation);
-      expect(client.status).toHaveBeenCalledExactlyOnceWith(invocation, 0);
-      const data = Buffer.alloc(7 * 1024 * 1024, 1).toString('base64');
-      const mediaResult = {
-        executionStatus: 'success',
-        result: {
-          llmContent: [{ inlineData: { mimeType: 'image/jpeg', data } }],
-          returnDisplay: 'image',
-        },
-      };
-      const mediaStatus = {
-        state: 'settled',
-        result: mediaResult,
-        progress: [],
-        cancelRequested: false,
-        firstAvailableSeq: 1,
-        lastSeq: 0,
-        progressGap: false,
-      };
-      client.execute.mockResolvedValueOnce(mediaResult);
-      client.status.mockResolvedValueOnce(mediaStatus);
-      client.cancel.mockResolvedValueOnce(mediaStatus);
-      expect(data.length).toBeGreaterThan(8 * 1024 * 1024);
-      await expect(connected.execute(invocation)).resolves.toEqual(mediaResult);
-      await expect(connected.status(invocation)).resolves.toEqual(mediaStatus);
-      await expect(connected.cancel(invocation)).resolves.toEqual(mediaStatus);
-      await expect(
-        remote.getToolV2Client({ ...prepareRequest, tenantId: 'other' }),
-      ).rejects.toThrow();
-      await expect(
-        remote.release(prepareRequest.sessionId, prepareRequest),
-      ).resolves.toBe(true);
-      vi.mocked(runtime.bridge.resumeSession).mockRejectedValueOnce(
-        Object.assign(new Error('not found'), { code: 'session_not_found' }),
-      );
-      await expect(
-        remote.release(prepareRequest.sessionId, prepareRequest),
-      ).resolves.toBe(true);
-    } finally {
-      remote.dispose();
-      local.dispose();
-    }
-  });
-
   it('applies the media exception only to valid v2 inline bytes over a chunked HTTP response', async () => {
     let responseText = '';
     const server = createServer((req, res) => {
@@ -706,7 +357,7 @@ describe('Managed Runtime providers', () => {
     const remote = new RemoteManagedRuntimeProvider({
       baseUrl: `http://127.0.0.1:${await listen(server)}`,
       token,
-      lease: ownedBoot(),
+      lease: { leaseId: 'lease', epoch: 1 },
     });
     try {
       const connected = await remote.getToolV2Client(prepareRequest);
@@ -783,74 +434,6 @@ describe('Managed Runtime providers', () => {
       await expect(connected.execute(invocation)).rejects.toThrow('size limit');
     } finally {
       remote.dispose();
-    }
-  });
-
-  it('keeps an admitted v2 execute response during release while refusing new execution', async () => {
-    const runtime = fakeRuntime();
-    const client = toolV2Client();
-    const started = deferred<void>();
-    const closing = deferred<void>();
-    const finish = deferred<void>();
-    client.execute.mockImplementation(async () => {
-      started.resolve();
-      await finish.promise;
-      return { executionStatus: 'success' };
-    });
-    runtime.close.mockImplementation(async () => {
-      closing.resolve();
-      await finish.promise;
-    });
-    runtime.bridge.getManagedToolV2Client = vi.fn(
-      () => client as unknown as ManagedToolV2Client,
-    );
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const server = createServer(workerApp(local, ownedBoot()));
-    servers.push(server);
-    const remote = new RemoteManagedRuntimeProvider({
-      baseUrl: `http://127.0.0.1:${await listen(server)}`,
-      token,
-      lease: ownedBoot(),
-    });
-    let pending: Promise<unknown> | undefined;
-    let release: Promise<boolean> | undefined;
-    try {
-      const connected = await remote.getToolV2Client(prepareRequest);
-      let settled = false;
-      pending = connected.execute(invocation).then(
-        (result) => {
-          settled = true;
-          return result;
-        },
-        (error: unknown) => {
-          settled = true;
-          return error;
-        },
-      );
-      await started.promise;
-      release = remote.release(prepareRequest.sessionId, prepareRequest);
-      await closing.promise;
-      await expect(connected.execute(invocation)).rejects.toThrow('released');
-      await expect(
-        connected.prepare(invocation, 'read_file', {}),
-      ).rejects.toThrow('released');
-      await expect(connected.status(invocation)).resolves.toMatchObject({
-        state: 'executing',
-      });
-      await expect(connected.cancel(invocation)).resolves.toMatchObject({
-        state: 'cancel_requested',
-      });
-      expect(settled).toBe(false);
-      finish.resolve();
-      await expect(pending).resolves.toEqual({ executionStatus: 'success' });
-      await expect(release).resolves.toBe(true);
-      expect(client.execute).toHaveBeenCalledOnce();
-      await expect(connected.execute(invocation)).rejects.toThrow();
-    } finally {
-      finish.resolve();
-      await Promise.allSettled([pending, release]);
-      remote.dispose();
-      local.dispose();
     }
   });
 
@@ -1118,346 +701,6 @@ describe('Managed Runtime providers', () => {
     local.dispose();
   });
 
-  it('exposes v2 only on an owned listener and forwards strictly bound calls to the issued client', async () => {
-    const runtime = fakeRuntime();
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const execute = vi.fn(async () => ({
-      executionStatus: 'success' as const,
-      result: { llmContent: 'proof', returnDisplay: 'proof' },
-    }));
-    const client = {
-      manifest: vi.fn(async () => ({
-        ...manifest,
-        policyRevision: 'generation',
-      })),
-      execute,
-      beginTurn: vi.fn(async () => {}),
-      confirm: vi.fn(async () => {}),
-    } as unknown as ManagedToolV2Client;
-    runtime.bridge.getManagedToolV2Client = vi.fn(() => client);
-    const outer = { ...prepareRequest, protocolVersion: 2 };
-    await request(workerApp(local))
-      .post('/internal/managed-runtime/v2/manifest')
-      .set('Authorization', `Bearer ${token}`)
-      .send(outer)
-      .expect(404);
-    const app = express();
-    app.use(express.json());
-    registerManagedRuntimeWorkerRoutes(app, {
-      provider: local,
-      owned: {
-        type: 'boot',
-        version: 1,
-        gatewayIncarnation: 'gateway',
-        leaseId: 'lease',
-        epoch: 2,
-        ...prepareRequest,
-        token,
-        outputRoot: '/tmp/owned',
-        cliEntry: '/tmp/cli.js',
-      },
-      authorize: (req, res, next) => {
-        if (req.headers.authorization !== `Bearer ${token}`)
-          res.sendStatus(401);
-        else next();
-      },
-    });
-    const post = (operation: string, fields: Record<string, unknown> = {}) =>
-      request(app)
-        .post(`/internal/managed-runtime/v2/${operation}`)
-        .set('Authorization', `Bearer ${token}`)
-        .set('X-Qwen-Managed-Lease-Id', 'lease')
-        .set('X-Qwen-Managed-Lease-Epoch', '2')
-        .send({ ...outer, ...fields });
-    for (const operation of [
-      'manifest',
-      'begin-turn',
-      'prepare',
-      'confirmation',
-      'confirm',
-      'preflight',
-      'execute',
-      'status',
-      'cancel',
-    ]) {
-      await request(app)
-        .post(`/internal/managed-runtime/v2/${operation}`)
-        .send(outer)
-        .expect(401);
-      await request(app)
-        .post(`/internal/managed-runtime/v2/${operation}`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(outer)
-        .expect(409);
-      await post(operation, { tenantId: 'foreign' }).expect(409);
-    }
-    expect(runtime.bridge.getManagedToolV2Client).not.toHaveBeenCalled();
-    await post('manifest').expect(200);
-    expect(runtime.bridge.getManagedToolV2Client).toHaveBeenCalledWith(
-      prepareRequest.sessionId,
-      { clientId: 'runtime-client-p8' },
-    );
-    const identity = {
-      sessionId: prepareRequest.sessionId,
-      promptId: 'prompt-1',
-      callId: 'call-1',
-      capabilityDigest: manifest.capabilityDigest,
-      policyRevision: 'generation',
-    };
-    const reference = {
-      ...identity,
-      invocationId: 'invocation-1',
-      argsDigest: 'b'.repeat(64),
-    };
-    await post('execute', { protocolVersion: 1, reference }).expect(400);
-    await post('execute', { reference, authorized: true }).expect(400);
-    await post('execute', {
-      reference: {
-        ...reference,
-        sessionId: '550e8400-e29b-41d4-a716-446655440109',
-      },
-    }).expect(400);
-    expect(execute).not.toHaveBeenCalled();
-    const beginning = await post('begin-turn', { identity }).expect(200);
-    expect(beginning.body).toEqual({ protocolVersion: 2, result: null });
-    const result = await post('execute', { reference }).expect(200);
-    expect(result.body).toMatchObject({
-      protocolVersion: 2,
-      result: { executionStatus: 'success' },
-    });
-    expect(execute).toHaveBeenCalledExactlyOnceWith(reference);
-    expect(runtime.execute).not.toHaveBeenCalled();
-    local.dispose();
-  });
-
-  it('requires the immutable owned lease and scope on all private operations', async () => {
-    const runtime = fakeRuntime();
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const app = express();
-    app.use(express.json());
-    const owned = {
-      type: 'boot' as const,
-      version: 1 as const,
-      gatewayIncarnation: 'gateway',
-      leaseId: 'lease',
-      epoch: 2,
-      ...prepareRequest,
-      token,
-      outputRoot: '/tmp/owned',
-      cliEntry: '/tmp/cli.js',
-    };
-    registerManagedRuntimeWorkerRoutes(app, {
-      provider: local,
-      owned,
-      authorize: (req, res, next) => {
-        if (req.headers.authorization !== `Bearer ${token}`) {
-          res.sendStatus(401);
-          return;
-        }
-        next();
-      },
-    });
-    for (const operation of [
-      'prepare',
-      'manifest',
-      'execute',
-      'cancel',
-      'release',
-    ]) {
-      const url = `${MANAGED_RUNTIME_ROUTE_PREFIX}/${operation}`;
-      await request(app).post(url).send(prepareRequest).expect(401);
-      await request(app)
-        .post(url)
-        .set('Authorization', `Bearer ${token}`)
-        .send(prepareRequest)
-        .expect(409);
-      await request(app)
-        .post(url)
-        .set('Authorization', `Bearer ${token}`)
-        .set('X-Qwen-Managed-Lease-Id', 'old')
-        .set('X-Qwen-Managed-Lease-Epoch', '2')
-        .send(prepareRequest)
-        .expect(409);
-      await request(app)
-        .post(url)
-        .set('Authorization', `Bearer ${token}`)
-        .set('X-Qwen-Managed-Lease-Id', 'lease')
-        .set('X-Qwen-Managed-Lease-Epoch', '2')
-        .send({ ...prepareRequest, tenantId: 'other' })
-        .expect(409);
-    }
-    expect(runtime.bridge.spawnOrAttach).not.toHaveBeenCalled();
-    const server = createServer(app);
-    servers.push(server);
-    const port = await listen(server);
-    const remote = new RemoteManagedRuntimeProvider({
-      baseUrl: `http://127.0.0.1:${port}`,
-      token,
-      lease: owned,
-    });
-    const handle = remote.prepare(prepareRequest);
-    await handle.ready;
-    expect(runtime.bridge.spawnOrAttach).toHaveBeenCalledOnce();
-    await expect(
-      handle.getManifest(new AbortController().signal),
-    ).resolves.toEqual(manifest);
-    remote.dispose();
-    local.dispose();
-  });
-
-  it('keeps Gateway prepare pending until a separate Runtime worker starts', async () => {
-    const reservation = createServer();
-    const port = await listen(reservation);
-    await close(reservation);
-
-    const runtime = fakeRuntime();
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const remote = new RemoteManagedRuntimeProvider({
-      baseUrl: `http://127.0.0.1:${port}`,
-      token,
-      prepareRetryDelayMs: 5,
-      prepareRetryMaxDelayMs: 10,
-      prepareRetryWindowMs: 2_000,
-    });
-    const handle = remote.prepare(prepareRequest);
-    let ready = false;
-    void handle.ready.then(() => {
-      ready = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(ready).toBe(false);
-    expect(runtime.bridge.spawnOrAttach).not.toHaveBeenCalled();
-
-    const server = createServer(workerApp(local));
-    servers.push(server);
-    await listen(server, port);
-    await handle.ready;
-    expect(runtime.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
-
-    await expect(
-      handle.getManifest(new AbortController().signal),
-    ).resolves.toEqual(manifest);
-    await expect(
-      handle.execute(
-        {
-          executionId: 'execution-p8',
-          turnId: 'turn-p8',
-          toolCallId: 'call-p8',
-          capabilityDigest: manifest.capabilityDigest,
-          toolName: 'read_file',
-          input: { file_path: 'proof.txt' },
-        },
-        new AbortController().signal,
-      ),
-    ).resolves.toMatchObject({ executionStatus: 'success' });
-    expect(runtime.execute).toHaveBeenCalledTimes(1);
-
-    await close(server);
-    local.dispose();
-    vi.mocked(runtime.bridge.resumeSession).mockResolvedValueOnce({
-      sessionId: prepareRequest.sessionId,
-      workspaceCwd,
-      attached: true,
-      clientId: 'runtime-client-restored-p8',
-      hasActivePrompt: false,
-      sourceType: 'managed-gateway',
-      sourceId: prepareRequest.sessionId,
-      sourcePersisted: true,
-      state: {} as never,
-    });
-    const restoredLocal = new LocalManagedRuntimeProvider(runtime.registry);
-    const restoredServer = createServer(workerApp(restoredLocal));
-    servers.push(restoredServer);
-    await listen(restoredServer, port);
-    const continuation = remote.prepare({
-      ...prepareRequest,
-      turnKind: 'continuation',
-    });
-    await continuation.ready;
-    await expect(
-      continuation.getManifest(new AbortController().signal),
-    ).resolves.toEqual(manifest);
-    expect(runtime.bridge.resumeSession).toHaveBeenCalledWith({
-      sessionId: prepareRequest.sessionId,
-      workspaceCwd,
-      sourceType: 'managed-gateway',
-      sourceId: prepareRequest.sessionId,
-    });
-
-    await close(restoredServer);
-    restoredLocal.dispose();
-    vi.mocked(runtime.bridge.resumeSession).mockResolvedValueOnce({
-      sessionId: prepareRequest.sessionId,
-      workspaceCwd,
-      attached: true,
-      clientId: 'runtime-client-release-p8',
-      hasActivePrompt: false,
-      sourceType: 'managed-gateway',
-      sourceId: prepareRequest.sessionId,
-      sourcePersisted: true,
-      state: {} as never,
-    });
-    const releaseLocal = new LocalManagedRuntimeProvider(runtime.registry);
-    const releaseServer = createServer(workerApp(releaseLocal));
-    servers.push(releaseServer);
-    await listen(releaseServer, port);
-
-    await expect(remote.release(prepareRequest.sessionId)).resolves.toBe(true);
-    expect(runtime.close).toHaveBeenCalledWith(prepareRequest.sessionId, {
-      clientId: 'runtime-client-release-p8',
-    });
-    remote.dispose();
-    releaseLocal.dispose();
-  });
-
-  it('sends explicit cancellation without retrying Tool execution', async () => {
-    const runtime = fakeRuntime();
-    let executionStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      executionStarted = resolve;
-    });
-    runtime.execute.mockImplementation(
-      (_sessionId, _toolRequest, signal: AbortSignal) =>
-        new Promise((_resolve, reject) => {
-          executionStarted();
-          signal.addEventListener(
-            'abort',
-            () => reject(signal.reason ?? new Error('aborted')),
-            { once: true },
-          );
-        }),
-    );
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const server = createServer(workerApp(local));
-    servers.push(server);
-    const port = await listen(server);
-    const remote = new RemoteManagedRuntimeProvider({
-      baseUrl: `http://127.0.0.1:${port}`,
-      token,
-    });
-    const handle = remote.prepare(prepareRequest);
-    await handle.ready;
-    const controller = new AbortController();
-    const execution = handle.execute(
-      {
-        executionId: 'execution-cancel-p8',
-        turnId: 'turn-cancel-p8',
-        toolCallId: 'call-cancel-p8',
-        capabilityDigest: manifest.capabilityDigest,
-        toolName: 'read_file',
-        input: { file_path: 'proof.txt' },
-      },
-      controller.signal,
-    );
-    await started;
-    controller.abort(new Error('deadline'));
-    await expect(execution).rejects.toThrow('deadline');
-    await vi.waitFor(() => expect(runtime.cancel).toHaveBeenCalledTimes(1));
-    expect(runtime.execute).toHaveBeenCalledTimes(1);
-    remote.dispose();
-    local.dispose();
-  });
-
   it('closes a restored Session when release races with warmup', async () => {
     const runtime = fakeRuntime();
     let finishResume!: (session: {
@@ -1688,39 +931,6 @@ describe('Managed Runtime providers', () => {
     expect(runtime.bridge.resumeSession).toHaveBeenCalledTimes(1);
     expect(runtime.bridge.spawnOrAttach).not.toHaveBeenCalled();
     expect(runtime.close).not.toHaveBeenCalled();
-    local.dispose();
-  });
-
-  it('rejects unauthenticated and model-bearing worker requests', async () => {
-    const runtime = fakeRuntime();
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const app = workerApp(local);
-    await request(app)
-      .post(`${MANAGED_RUNTIME_ROUTE_PREFIX}/prepare`)
-      .send(prepareRequest)
-      .expect(401);
-    const forbidden = await request(app)
-      .post(`${MANAGED_RUNTIME_ROUTE_PREFIX}/prepare`)
-      .set('authorization', `Bearer ${token}`)
-      .send({ ...prepareRequest, prompt: 'must not cross the boundary' });
-    expect(forbidden.status).toBe(400);
-    expect(runtime.bridge.spawnOrAttach).not.toHaveBeenCalled();
-    local.dispose();
-  });
-
-  it('treats a workspace mapping mismatch as a permanent conflict', async () => {
-    const runtime = fakeRuntime();
-    const local = new LocalManagedRuntimeProvider(runtime.registry);
-    const response = await request(workerApp(local))
-      .post(`${MANAGED_RUNTIME_ROUTE_PREFIX}/prepare`)
-      .set('authorization', `Bearer ${token}`)
-      .send({ ...prepareRequest, workspaceCwd: '/tmp/wrong-workspace' });
-
-    expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({
-      code: 'managed_runtime_identity_conflict',
-    });
-    expect(runtime.bridge.spawnOrAttach).not.toHaveBeenCalled();
     local.dispose();
   });
 

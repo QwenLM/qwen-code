@@ -329,6 +329,17 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
         false,
       );
     }
+    if (
+      !runtime.bridge.getManagedRuntimeToolManifest ||
+      !runtime.bridge.executeManagedRuntimeTool ||
+      !runtime.bridge.cancelManagedRuntimeTool
+    ) {
+      throw new ManagedRuntimeProviderError(
+        'managed_runtime_unavailable',
+        'The bridge does not support Managed Runtime tools.',
+        false,
+      );
+    }
     const readyBinding = this.startWarmup(runtime, request);
     return {
       ready: readyBinding.then(() => undefined),
@@ -342,7 +353,7 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
         ]);
         operationSignal.throwIfAborted();
         return waitForValue(
-          binding.runtime.bridge.getManagedRuntimeToolManifest(
+          binding.runtime.bridge.getManagedRuntimeToolManifest!(
             request.sessionId,
             { clientId: binding.runtimeClientId },
           ),
@@ -357,7 +368,7 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
           this.lifetime.signal,
         ]);
         operationSignal.throwIfAborted();
-        return binding.runtime.bridge.executeManagedRuntimeTool(
+        return binding.runtime.bridge.executeManagedRuntimeTool!(
           request.sessionId,
           toolRequest,
           operationSignal,
@@ -422,6 +433,13 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
       }
     };
     assertBinding(true);
+    if (!binding.runtime.bridge.getManagedToolV2Client) {
+      throw new ManagedRuntimeProviderError(
+        'managed_runtime_unavailable',
+        'The bridge does not support Managed Tool v2.',
+        false,
+      );
+    }
     const client = binding.runtime.bridge.getManagedToolV2Client(
       request.sessionId,
       {
@@ -483,7 +501,7 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
       );
     }
     if (!binding) return false;
-    const result = await binding.runtime.bridge.cancelManagedRuntimeTool(
+    const result = await binding.runtime.bridge.cancelManagedRuntimeTool!(
       sessionId,
       executionId,
       { clientId: binding.runtimeClientId },

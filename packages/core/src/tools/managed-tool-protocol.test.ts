@@ -219,6 +219,32 @@ describe('managed tool JSON digests', () => {
 
 describe('managed tool confirmation DTOs', () => {
   const onConfirm = vi.fn(async () => {});
+  it('allows a bounded confirmation larger than the request budget', () => {
+    const content = 'x'.repeat(150 * 1024);
+    const details: ToolCallConfirmationDetails = {
+      type: 'edit',
+      title: 'Edit',
+      fileName: 'a.txt',
+      filePath: '/workspace/a.txt',
+      fileDiff: '-a\n+b',
+      originalContent: content,
+      newContent: content + 'b',
+      onConfirm,
+    };
+    expect(serializeManagedToolConfirmation(details)).toMatchObject({
+      originalContent: content,
+      newContent: content + 'b',
+    });
+    expect(() => managedToolDigest({ content })).not.toThrow();
+    expect(() => managedToolDigest({ old: content, new: content })).toThrow();
+    expect(() =>
+      serializeManagedToolConfirmation({
+        ...details,
+        originalContent: 'x'.repeat(8 * 1024 * 1024),
+      }),
+    ).toThrow('size limit');
+  });
+
   const details: ToolCallConfirmationDetails[] = [
     {
       type: 'edit',

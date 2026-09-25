@@ -401,7 +401,9 @@ export function serializeManagedToolConfirmation(
         'Confirmation belongs to the Gateway.',
       );
   }
-  return JSON.parse(canonicalJson(result)) as ManagedToolConfirmationDetails;
+  return JSON.parse(
+    canonicalJson(result, 8 * 1024 * 1024 - 64 * 1024),
+  ) as ManagedToolConfirmationDetails;
 }
 
 export function parseManagedToolConfirmationPayload(

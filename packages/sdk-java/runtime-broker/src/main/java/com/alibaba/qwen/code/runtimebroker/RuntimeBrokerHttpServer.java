@@ -21,10 +21,8 @@ import java.util.function.Function;
 /**
  * Private HTTP face of the merged Runtime Broker for a Hosted Harness.
  *
- * <p>Prepare and create both call {@link RuntimeBrokerService#createExecution},
- * which records the call and drives dispatch. Start reads that record back.
- * Resolve asks {@link RuntimeBrokerService#reconcileExecution} for evidence;
- * the caller's resolution label is accepted and not applied as a result.
+ * <p>The service supports immediate dispatch. Deferred prepare/start and
+ * operator resolution are unavailable until they have durable service APIs.
  */
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
@@ -88,8 +86,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
-                    && ("/executions:prepare".equals(relative)
-                            || "/executions".equals(relative))) {
+                    && "/executions:prepare".equals(relative)) {
+                throw unsupported();
+            }
+            if ("POST".equals(exchange.getRequestMethod())
+                    && "/executions".equals(relative)) {
                 executionRequest(exchange);
                 return;
             }
@@ -187,20 +188,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             throws IOException {
         if ("POST".equals(exchange.getRequestMethod())
                 && suffix.endsWith(":start")) {
-            String executionCallId = pathId(suffix.substring(0,
-                    suffix.length() - ":start".length()));
-            Map<String, Object> body = requestBody(exchange, "start request");
-            requireProtocol(body);
-            JsonCodec.requiredString(body, "requestId", "start request");
-            String harnessSessionId = JsonCodec.requiredString(body,
-                    "harnessSessionId", "start request");
-            String runtimeSessionId = JsonCodec.requiredString(body,
-                    "runtimeSessionId", "start request");
-            complete(exchange, service.getExecution(harnessSessionId,
-                    runtimeSessionId, executionCallId),
-                    record -> executionEnvelope(harnessSessionId,
-                            runtimeSessionId, record));
-            return;
+            throw unsupported();
         }
         if ("POST".equals(exchange.getRequestMethod())
                 && suffix.endsWith(":cancel")) {
@@ -222,23 +210,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
         if ("POST".equals(exchange.getRequestMethod())
                 && suffix.endsWith(":resolve")) {
-            String executionCallId = pathId(suffix.substring(0,
-                    suffix.length() - ":resolve".length()));
-            Map<String, Object> body = requestBody(exchange,
-                    "resolve request");
-            requireProtocol(body);
-            JsonCodec.requiredString(body, "requestId", "resolve request");
-            String harnessSessionId = JsonCodec.requiredString(body,
-                    "harnessSessionId", "resolve request");
-            String runtimeSessionId = JsonCodec.requiredString(body,
-                    "runtimeSessionId", "resolve request");
-            requireResolution(JsonCodec.requiredString(body, "resolution",
-                    "resolve request"));
-            complete(exchange, service.reconcileExecution(harnessSessionId,
-                    runtimeSessionId, executionCallId),
-                    reconciliation -> executionEnvelope(harnessSessionId,
-                            runtimeSessionId, reconciliation.getRecord()));
-            return;
+            throw unsupported();
         }
         if ("GET".equals(exchange.getRequestMethod())
                 && suffix.indexOf('/') < 0) {
@@ -271,13 +243,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
     }
 
-    private static void requireResolution(String raw) {
-        if (!"confirmed_not_executed".equals(raw)
-                && !"accepted_unknown".equals(raw)) {
-            throw new RuntimeBrokerException(400,
-                    "runtime_broker_invalid_request",
-                    "Runtime Broker resolution is unsupported.", false);
-        }
+    private static RuntimeBrokerException unsupported() {
+        return new RuntimeBrokerException(501,
+                "runtime_broker_operation_unsupported",
+                "Deferred execution and operator resolution are not implemented.",
+                false);
     }
 
     private static void requireProtocol(Map<String, Object> body) {
@@ -412,6 +382,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     private static Map<String, Object> executionEnvelope(
             String harnessSessionId, String runtimeSessionId,
             ToolExecutionRecord record) {
+        if (record.getState() == ToolExecutionRecord.State.UNKNOWN) {
+            throw new RuntimeBrokerException(409,
+                    "runtime_broker_execution_unknown",
+                    "Runtime execution outcome is unknown.", false);
+        }
         Map<String, Object> response = envelope(harnessSessionId,
                 runtimeSessionId, "executionCallId",
                 record.getExecutionCallId());
