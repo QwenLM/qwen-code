@@ -494,8 +494,7 @@ export function parseRule(raw: string): PermissionRule {
   //   specifier = "coder", toolParamMatchers = [{model,opus},{type,*}]
   let specifier: string | undefined = rawSpecifier;
   let toolParamMatchers:
-    | Array<{ key: string; valuePattern: string }>
-    | undefined;
+    Array<{ key: string; valuePattern: string }> | undefined;
 
   if (
     specifierKind === 'literal' &&
