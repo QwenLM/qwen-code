@@ -4220,6 +4220,27 @@ bad`);
         expect(grandchild.getToolRegistry()).toBe(child.getToolRegistry());
       });
 
+      // The intermediate also withholds, so it records NO own
+      // SESSION_SKILL_MANAGER symbol; the great-grandchild recovers the
+      // session manager only because the lookup walks the prototype chain to
+      // the child's record. Narrowing that lookup to Object.hasOwn (or
+      // deriving Configs without Object.create) turns this red while both
+      // two-level tests above stay green.
+      it('restores the session manager three levels down, past a non-reanchoring intermediate', async () => {
+        const child = await launch({ tools: [ToolNames.READ_FILE] });
+        const grandchild = await launch(
+          { disallowedTools: [ToolNames.SKILL] },
+          child,
+        );
+        expect(grandchild.getSkillManager()).toBeNull();
+
+        const greatGrandchild = await launch({}, grandchild);
+        expect(greatGrandchild.getSkillManager()).toBe(sessionManager);
+        expect(
+          greatGrandchild.getToolRegistry().getAllToolNames(),
+        ).toContain(ToolNames.SKILL);
+      });
+
       it('withholds the manager when an eager allowlist hides the Skill tool', async () => {
         // `settings.tools.eager` without `skill` leaves it permission-deferred
         // in the session registry, and prepareTools() then drops it from the
