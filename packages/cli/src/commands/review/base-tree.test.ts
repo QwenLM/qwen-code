@@ -124,6 +124,13 @@ const failedBuild = {
 // file's coverage for the lane the fence never speaks on.
 const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
+// APFS (and NTFS) reject filenames that are not valid UTF-8 with EILSEQ, so
+// a fixture holding a raw 0xff name byte only exists where the filesystem
+// stores name bytes verbatim.
+const itWhereByteExactNamesExist = it.skipIf(
+  process.platform === 'win32' || process.platform === 'darwin',
+);
+
 describe('runBaseTree', () => {
   let repo: string;
   let worktree: string;
@@ -995,7 +1002,7 @@ describe('runBaseTree', () => {
     },
   );
 
-  itWhereContainmentExists(
+  itWhereByteExactNamesExist(
     'records a filename holding a non-UTF-8 byte instead of dying on it (R1-26)',
     () => {
       // `ls-files -z` exists to preserve a byte-exact filename, and decoding
