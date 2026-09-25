@@ -23915,6 +23915,26 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('reports an unexpected channel exit through onDiagnosticLine', async () => {
+      const handle = makeChannel();
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const iter = bridge.subscribeEvents(session.sessionId);
+
+      handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
+      await iter[Symbol.asyncIterator]().next();
+
+      expect(diagnostics).toContainEqual({
+        line: 'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down)',
+        level: 'warn',
+      });
+      await bridge.shutdown();
+    });
+
     it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {

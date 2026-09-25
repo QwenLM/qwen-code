@@ -4265,9 +4265,15 @@ export function createSessionControlPlane(
           ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
           : {}),
       });
-      writeStderrLine(
-        `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.harness.transportFailed ? (info.harness.transportFailureCode ?? 'failed') : 'ok'}${info.harness.transportFailureDetail ? `, transport_detail=${info.harness.transportFailureDetail}` : ''}, ${sessions.length} session(s) torn down)`,
-      );
+      const message = `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.harness.transportFailed ? (info.harness.transportFailureCode ?? 'failed') : 'ok'}${info.harness.transportFailureDetail ? `, transport_detail=${info.harness.transportFailureDetail}` : ''}, ${sessions.length} session(s) torn down)`;
+      // Clients such as the VS Code companion stop reading daemon stderr
+      // after startup, so the teardown reason must also reach daemon.log.
+      try {
+        opts.onDiagnosticLine?.(message, channelExitExpected ? 'info' : 'warn');
+      } catch {
+        /* Best effort. */
+      }
+      writeStderrLine(message);
     }
     for (const sid of sessions) {
       const sessEntry = byId.get(sid);
