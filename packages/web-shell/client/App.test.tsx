@@ -16135,6 +16135,9 @@ describe('App session callbacks', () => {
     await flush();
     const before = testState.latestChatEditorProps!.contextUsageControls;
     expect(before).toBeDefined();
+    expect(
+      document.body.querySelectorAll('[data-web-shell-compression-announcer]'),
+    ).toHaveLength(1);
     let unregister!: () => void;
     act(() => {
       unregister = testState.latestSplitViewProps!
@@ -16147,8 +16150,14 @@ describe('App session callbacks', () => {
         getContextUsage: mockPaneSessionActions.getContextUsage,
       });
     });
+    expect(
+      document.body.querySelectorAll('[data-web-shell-compression-announcer]'),
+    ).toHaveLength(2);
     expect(testState.latestChatEditorProps!.contextUsageControls).toBe(before);
     act(() => unregister());
+    expect(
+      document.body.querySelectorAll('[data-web-shell-compression-announcer]'),
+    ).toHaveLength(1);
     expect(testState.latestChatEditorProps!.contextUsageControls).toBe(before);
   });
 

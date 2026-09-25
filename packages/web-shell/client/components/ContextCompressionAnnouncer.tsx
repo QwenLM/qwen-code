@@ -38,6 +38,9 @@ export function useContextCompressionAnnouncements() {
   const [announcements, setAnnouncements] = useState<
     Record<string, CompressionAnnouncement>
   >({});
+  // Keep this callback stable: context consumers include it in their
+  // compression handler dependencies, so recreating it would re-register the
+  // handler while an operation is in flight.
   const announce = useCallback((next: CompressionAnnouncement) => {
     setAnnouncements((current) => {
       const key = scopeKey(next);

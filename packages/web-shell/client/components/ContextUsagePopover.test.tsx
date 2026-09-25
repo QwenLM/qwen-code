@@ -132,7 +132,9 @@ describe('ContextUsagePopover', () => {
     await advance(1);
     expect(h.card?.getAttribute('role')).toBe('dialog');
     expect(h.card?.textContent).toContain('Remaining40,000 tokens');
-    expect(h.card?.querySelector('[role="status"], [role="alert"]')).toBeNull();
+    expect(
+      h.card?.querySelector('[data-web-shell-compression-feedback]'),
+    ).toBeNull();
     expect(document.activeElement).toBe(h.draft);
     pointer(h.trigger, 'pointerout', document.body);
     await advance(100);

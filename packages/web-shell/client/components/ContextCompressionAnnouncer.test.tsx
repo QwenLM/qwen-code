@@ -96,6 +96,9 @@ function mount(shadow = false) {
       result = nextResult;
       render();
     },
+    get announce() {
+      return announce;
+    },
     messages() {
       return [...target.querySelectorAll('[aria-live]')]
         .map((node) => node.textContent)
@@ -109,6 +112,7 @@ describe('ContextCompressionAnnouncer', () => {
     'keeps one live message when feedback surfaces change (shadow=%s)',
     (shadow) => {
       const h = mount(shadow);
+      const announce = h.announce;
       expect(h.messages()).toEqual([]);
       const event = {
         operation: {},
@@ -127,6 +131,7 @@ describe('ContextCompressionAnnouncer', () => {
       for (const count of [1, 0, 2]) {
         h.surfaces(count);
         h.flush();
+        expect(h.announce).toBe(announce);
         expect(h.target.querySelector('[role="status"]')).toBe(live);
         expect(h.messages()).toEqual(['Compressing…']);
       }
