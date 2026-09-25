@@ -527,7 +527,7 @@ function testRuntimeNodePtyTargetMapping() {
 }
 
 function testRuntimePreparation(directory) {
-  const testPackageDir = path.join(directory, 'packages', 'desktop-shell');
+  const testPackageDir = path.join(directory, 'packages', 'desktop');
   const testScript = path.join(testPackageDir, 'scripts', 'prepare-runtime.js');
   const sourceRoot = path.join(directory, 'source');
   const runtimeDir = path.join(testPackageDir, 'runtime');

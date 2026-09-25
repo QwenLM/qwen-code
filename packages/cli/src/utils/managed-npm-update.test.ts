@@ -475,3 +475,32 @@ describe('managed npm update', () => {
     }
   });
 });
+
+describe('global npm configuration', () => {
+  it('resolves it with real npm when npm refuses to print the path', () => {
+    // npm will not print a value that looks like a secret, and a UUID in the
+    // global prefix is enough to trip its redaction.
+    for (const key of Object.keys(process.env)) {
+      if (/^npm_config_(globalconfig|prefix|userconfig)$/i.test(key)) {
+        vi.stubEnv(key, undefined);
+      }
+    }
+    const root = makeTemporaryDirectory();
+    const prefix = path.join(root, 'node-123e4567-e89b-12d3-a456-426614174000');
+    fs.mkdirSync(prefix);
+    vi.stubEnv('NPM_CONFIG_PREFIX', prefix);
+    // A developer's ~/.npmrc must not decide the global configuration here.
+    vi.stubEnv('NPM_CONFIG_USERCONFIG', path.join(root, 'npmrc'));
+
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      writeBaseInstallation(root),
+      path.join(root, 'updates'),
+    );
+
+    expect(update.installArgs.slice(1, 3)).toEqual([
+      '--globalconfig',
+      path.resolve(prefix, 'etc', 'npmrc'),
+    ]);
+  }, 60_000);
+});
