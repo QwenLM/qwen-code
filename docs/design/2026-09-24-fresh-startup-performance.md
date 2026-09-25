@@ -283,9 +283,10 @@ These were open while the PR was a draft.
 5. **IDE walk.** Kept; it loses nothing (section 7, item 5).
 6. **Split.** One PR. If maintainers prefer, the process-chain change (E1+E8)
    is the part to split out; the bugs found in review were all there.
-7. **Harness and CI.** A follow-up PR checks in the harness and adds D1/D2
-   ratchets, which are deterministic on Linux. Wall-clock and D3 stay nightly
-   or manual.
+7. **Harness and CI.** A follow-up PR (#12674) checks in the harness for
+   manual runs, with no CI gate. The interactive D1 and D2 stop at TTI, and
+   timer-driven work before TTI shifts with runner speed, so a gate would be
+   flaky.
 
 ## 10. Validation
 
@@ -366,5 +367,5 @@ These are not part of this PR:
   become a gate.
 - **Field telemetry.** Enable the reserved `qwen-code.startup.duration`
   metric.
-- **Benchmark harness and CI ratchets** (decision 7).
+- **Benchmark harness** for manual runs (decision 7, #12674).
 - **Source maps** for bundle stack traces, if needed (decision 3).
