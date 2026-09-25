@@ -6,15 +6,18 @@
 
 import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
-import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
+import type {
+  GoalContinuationTurn,
+  GoalTurnHost,
+  GoalTurnPermit,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
+import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
-export interface QueuedGoalTurn {
+export interface QueuedGoalTurn extends GoalContinuationTurn {
   kind: 'goal';
   permit: GoalTurnPermit;
   turnKey: string;
-  continuationContext: string;
-  verifierFeedback?: string;
 }
 
 export interface QueuedUserSubmission {
@@ -22,6 +25,13 @@ export interface QueuedUserSubmission {
   modelText: string;
   submittedPrompt?: string;
   turnKey: string;
+  /**
+   * Shell intent recorded when the message was submitted. The drain routes
+   * on this record instead of the live shell-mode flag, which may have
+   * flipped while the entry waited in the queue (#11626). Undefined means
+   * the producer recorded no intent; the drain falls back to the live flag.
+   */
+  shellMode?: boolean;
 }
 
 export interface DirectUserAdmission {
@@ -29,7 +39,22 @@ export interface DirectUserAdmission {
   goal?: QueuedGoalTurn;
 }
 
-export type QueuedSubmission = QueuedUserSubmission | QueuedGoalTurn;
+export interface QueuedPeerSubmission {
+  kind: 'peer';
+  modelText: string;
+  displayText: string;
+  /**
+   * The drain already rendered this entry's notification; set when a
+   * failed admission restores it so the retry does not re-render it.
+   */
+  displayed?: boolean;
+  delivery?: PeerQueuedDelivery;
+}
+
+export type QueuedSubmission =
+  | QueuedUserSubmission
+  | QueuedPeerSubmission
+  | QueuedGoalTurn;
 export type GoalQueueControlMode = 'normal' | 'priority' | 'only';
 
 export interface UseMessageQueueReturn {
@@ -39,6 +64,12 @@ export interface UseMessageQueueReturn {
     message: string,
     deferUntilIdle?: boolean,
     submittedPrompt?: string,
+    shellMode?: boolean,
+  ) => void;
+  addPeerMessage: (
+    message: string,
+    displayText: string,
+    delivery?: PeerQueuedDelivery,
   ) => void;
   enqueueGoalTurn: (
     input: Parameters<GoalTurnHost['startGoalTurn']>[0],
@@ -46,6 +77,7 @@ export interface UseMessageQueueReturn {
   peekNextUserBatchKey: (goalTurnActive?: boolean) => string | undefined;
   hasQueuedUserMessages: () => boolean;
   getPendingSubmissionCount: () => number;
+  getQueuedPeerCount: () => number;
   claimGoalTurn: () => QueuedGoalTurn | undefined;
   claimDirectUserAdmission: () => DirectUserAdmission;
   removeGoalTurns: () => string[];
@@ -57,7 +89,18 @@ export interface UseMessageQueueReturn {
   popAllMessages: (
     onRemoved?: (turnKeys: string[]) => void,
   ) => QueuedUserSubmission | null;
-  restoreMessages: (messages: string[], submittedPrompt?: string) => void;
+  restoreMessages: (
+    messages: string[],
+    submittedPrompt?: string,
+    deferUntilIdle?: boolean,
+    shellMode?: boolean,
+  ) => void;
+  restorePeerMessage: (
+    message: string,
+    displayText: string,
+    displayed?: boolean,
+    delivery?: PeerQueuedDelivery,
+  ) => void;
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
 }
 
@@ -66,6 +109,22 @@ interface QueuedMessage {
   text: string;
   submittedPrompt?: string;
   deferUntilIdle: boolean;
+  /**
+   * Shell intent recorded at submit time (see QueuedUserSubmission).
+   * Batches are kept intent-homogeneous so one routing decision never
+   * misroutes another entry's command or prompt.
+   */
+  shellMode?: boolean;
+  /**
+   * A delivered cross-session envelope. Drained alone and submitted on a
+   * path that skips user-input preprocessing — the text is peer-authored,
+   * so it must not run through `@path`/slash/shell handling.
+   */
+  peer?: boolean;
+  /** Peer-only: its notification was already rendered before a restore. */
+  displayed?: boolean;
+  /** Peer-only: frame identity used to re-check its recipient at drain. */
+  delivery?: PeerQueuedDelivery;
 }
 
 export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
@@ -74,17 +133,23 @@ function aggregateUserMessages(
   messages: readonly QueuedMessage[],
 ): QueuedUserSubmission {
   const text = messages.map((message) => message.text).join('\n\n');
-  const submittedPrompts = messages.map((message) => message.submittedPrompt);
+  // Every member contributes a projection — its own when it has one, its
+  // model text otherwise — so a single projection-less member cannot drop
+  // a peer message's one-liner and surface the raw envelope as the
+  // user's prompt instead.
+  const submittedPrompt = messages
+    .map((message) => message.submittedPrompt ?? message.text)
+    .join('\n\n');
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
-    ...(submittedPrompts.every(
-      (submittedPrompt): submittedPrompt is string =>
-        submittedPrompt !== undefined,
-    )
-      ? { submittedPrompt: submittedPrompts.join('\n\n') }
-      : {}),
+    submittedPrompt,
+    // Callers keep batches intent-homogeneous, so every member carries the
+    // same value; the first represents the batch.
+    ...(messages[0].shellMode === undefined
+      ? {}
+      : { shellMode: messages[0].shellMode }),
   };
 }
 
@@ -96,7 +161,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
   const nextMessageKey = useCallback(() => `message-queue:${randomUUID()}`, []);
 
   const addMessage = useCallback(
-    (message: string, deferUntilIdle = false, submittedPrompt?: string) => {
+    (
+      message: string,
+      deferUntilIdle = false,
+      submittedPrompt?: string,
+      shellMode?: boolean,
+    ) => {
       const text = message.trim();
       if (!text) return;
       queueRef.current = [
@@ -106,6 +176,31 @@ export function useMessageQueue(): UseMessageQueueReturn {
           text,
           deferUntilIdle,
           submittedPrompt,
+          ...(shellMode === undefined ? {} : { shellMode }),
+        },
+      ];
+      setQueuedMessages(queueRef.current);
+    },
+    [nextMessageKey],
+  );
+
+  const addPeerMessage = useCallback(
+    (message: string, displayText: string, delivery?: PeerQueuedDelivery) => {
+      const text = message.trim();
+      if (!text) return;
+      queueRef.current = [
+        ...queueRef.current,
+        {
+          key: nextMessageKey(),
+          text,
+          // Deferred exactly like the typed-input-deferred path: the
+          // mid-turn steer drain returns raw text only, and a drained
+          // envelope would be steered into the active turn with its
+          // projection lost.
+          deferUntilIdle: true,
+          submittedPrompt: displayText,
+          peer: true,
+          ...(delivery !== undefined ? { delivery } : {}),
         },
       ];
       setQueuedMessages(queueRef.current);
@@ -122,14 +217,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
       ) {
         return;
       }
+      const { permit, ...continuation } = input;
       const entry: QueuedGoalTurn = {
         kind: 'goal',
-        permit: { ...input.permit },
-        turnKey: `goal-runtime:${input.permit.turnId}`,
-        continuationContext: input.continuationContext,
-        ...(input.verifierFeedback
-          ? { verifierFeedback: input.verifierFeedback }
-          : {}),
+        permit: { ...permit },
+        turnKey: `goal-runtime:${permit.turnId}`,
+        ...continuation,
       };
       goalQueueRef.current = [...goalQueueRef.current, entry];
       setQueuedGoalTurns(goalQueueRef.current);
@@ -150,6 +243,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
   const getPendingSubmissionCount = useCallback(
     () => queueRef.current.length + goalQueueRef.current.length,
+    [],
+  );
+
+  const getQueuedPeerCount = useCallback(
+    () => queueRef.current.filter(({ peer }) => Boolean(peer)).length,
     [],
   );
 
@@ -182,6 +280,8 @@ export function useMessageQueue(): UseMessageQueueReturn {
     (
       goalControlMode: GoalQueueControlMode = 'normal',
     ): QueuedSubmission | null => {
+      // Goal controls bypass ordinary input so queued text cannot prevent
+      // clearing or replacing the Goal that is holding that input.
       if (goalControlMode !== 'normal') {
         const goalCommandIndex = queueRef.current.findIndex(({ text }) =>
           GOAL_COMMAND_RE.test(text),
@@ -201,15 +301,42 @@ export function useMessageQueue(): UseMessageQueueReturn {
         if (goalControlMode === 'only') return null;
       }
 
+      const head = queueRef.current[0];
+      if (head?.peer) {
+        queueRef.current = queueRef.current.slice(1);
+        setQueuedMessages(queueRef.current);
+        return {
+          kind: 'peer',
+          modelText: head.text,
+          displayText: head.submittedPrompt ?? head.text,
+          ...(head.displayed ? { displayed: true } : {}),
+          ...(head.delivery !== undefined ? { delivery: head.delivery } : {}),
+        };
+      }
+
       const plainMessages = queueRef.current.filter(
-        ({ text }) => !isSlashCommand(text),
+        ({ text, peer }) => !isSlashCommand(text) && !peer,
       );
       if (plainMessages.length > 0) {
-        queueRef.current = queueRef.current.filter(({ text }) =>
-          isSlashCommand(text),
+        // One routing decision per batch: the batch is the contiguous run of
+        // entries from the head that share the first plain entry's recorded
+        // shell intent, so a shell command and a model prompt never merge
+        // into a blob the drain can only route one way (#11626). Stopping at
+        // the first difference keeps submission order too — a later entry
+        // with the head's intent never overtakes an earlier entry queued
+        // with a different one.
+        const headIntent = plainMessages[0].shellMode;
+        const batch: QueuedMessage[] = [];
+        for (const message of plainMessages) {
+          if (message.shellMode !== headIntent) break;
+          batch.push(message);
+        }
+        const batchKeys = new Set(batch.map(({ key }) => key));
+        queueRef.current = queueRef.current.filter(
+          ({ key }) => !batchKeys.has(key),
         );
         setQueuedMessages(queueRef.current);
-        return aggregateUserMessages(plainMessages);
+        return aggregateUserMessages(batch);
       }
 
       const [userHead, ...userRest] = queueRef.current;
@@ -238,16 +365,28 @@ export function useMessageQueue(): UseMessageQueueReturn {
     (onRemoved?: (turnKeys: string[]) => void): QueuedUserSubmission | null => {
       const current = queueRef.current;
       if (current.length === 0) return null;
-      queueRef.current = [];
-      setQueuedMessages([]);
-      onRemoved?.(current.map(({ key }) => key));
-      return aggregateUserMessages(current);
+      // Peer entries stay queued: this pop restores user text into the
+      // editable buffer, and a peer-authored envelope re-submitted from
+      // there would run through UserQuery preprocessing (`@path`/slash/
+      // shell) with its attribution lost. They drain on their own path
+      // once the session is idle again.
+      const popped = current.filter(({ peer }) => !peer);
+      if (popped.length === 0) return null;
+      queueRef.current = current.filter(({ peer }) => Boolean(peer));
+      setQueuedMessages(queueRef.current);
+      onRemoved?.(popped.map(({ key }) => key));
+      return aggregateUserMessages(popped);
     },
     [],
   );
 
   const restoreMessages = useCallback(
-    (messages: string[], submittedPrompt?: string) => {
+    (
+      messages: string[],
+      submittedPrompt?: string,
+      deferUntilIdle = false,
+      shellMode?: boolean,
+    ) => {
       const restored = messages
         .map((text) => text.trim())
         .filter(Boolean)
@@ -257,10 +396,37 @@ export function useMessageQueue(): UseMessageQueueReturn {
           ...(messages.length === 1 && submittedPrompt !== undefined
             ? { submittedPrompt }
             : {}),
-          deferUntilIdle: false,
+          deferUntilIdle,
+          ...(shellMode === undefined ? {} : { shellMode }),
         }));
       if (restored.length === 0) return;
       queueRef.current = [...restored, ...queueRef.current];
+      setQueuedMessages(queueRef.current);
+    },
+    [nextMessageKey],
+  );
+
+  const restorePeerMessage = useCallback(
+    (
+      message: string,
+      displayText: string,
+      displayed = false,
+      delivery?: PeerQueuedDelivery,
+    ) => {
+      const text = message.trim();
+      if (!text) return;
+      queueRef.current = [
+        {
+          key: nextMessageKey(),
+          text,
+          deferUntilIdle: true,
+          submittedPrompt: displayText,
+          peer: true,
+          ...(displayed ? { displayed: true } : {}),
+          ...(delivery !== undefined ? { delivery } : {}),
+        },
+        ...queueRef.current,
+      ];
       setQueuedMessages(queueRef.current);
     },
     [nextMessageKey],
@@ -289,10 +455,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
     messageQueue: queuedMessages.map(({ text }) => text),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
+    addPeerMessage,
     enqueueGoalTurn,
     peekNextUserBatchKey,
     hasQueuedUserMessages,
     getPendingSubmissionCount,
+    getQueuedPeerCount,
     claimGoalTurn,
     claimDirectUserAdmission,
     removeGoalTurns,
@@ -301,6 +469,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
     getQueuedMessagesText,
     popAllMessages,
     restoreMessages,
+    restorePeerMessage,
     drainQueue,
   };
 }

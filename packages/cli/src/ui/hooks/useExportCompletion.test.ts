@@ -91,6 +91,7 @@ function createCompletion(
     midInputGhostText: null,
     activeCategory: 'all',
     availableCategories: ['all'],
+    selectCategory: vi.fn(),
     switchCategory: vi.fn(),
     ...overrides,
   };

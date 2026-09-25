@@ -137,11 +137,10 @@ export default {
   'type to filter…': 'escriviu per filtrar…',
   'No skills are currently available.':
     'No hi ha habilitats disponibles actualment.',
-  'All available skills are locked at a higher scope (see below).':
-    'Totes les habilitats disponibles estan bloquejades en un àmbit superior (veure a sota).',
   'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
+  'Locked by settings entries you cannot toggle here:':
+    'Bloquejades per entrades de paràmetres (aquí no es poden commutar):',
+  '{{count}} locked not shown': '{{count}} habilitats bloquejades no mostrades',
   'higher scope': 'àmbit superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloquejada: {{scope}}]',
@@ -433,6 +432,12 @@ export default {
   active: 'activa',
   disabled: 'desactivada',
   enabled: 'activada',
+  'disabled (bare mode)': 'desactivada (mode mínim)',
+  'disabled (safe mode)': 'desactivada (mode segur)',
+  'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
+  'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
+  'disabled (turned off for this session)':
+    'desactivada (apagada en aquesta sessió)',
   'View Details': 'Visualitza els detalls',
   'Update failed:': "Error en l'actualització:",
   'Updating {{name}}...': 'Actualitzant {{name}}...',
@@ -477,6 +482,7 @@ export default {
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
   'Hide Tips': 'Amaga els consells',
+  'Show Tool Call Arguments': 'Mostra els arguments de les crides a eines',
   'Show Line Numbers in Code': 'Mostra els números de línia al codi',
   'Show Citations': 'Mostra les cites',
   'Custom Witty Phrases': 'Frases enginyoses personalitzades',
@@ -512,6 +518,7 @@ export default {
   'Tool Output Truncation Lines': "Línies de truncament de la sortida d'eines",
   'Folder Trust': 'Confiança de carpeta',
   'Tool Schema Compliance': 'Compliment de Tool Schema',
+  Unset: 'No definit',
   'Auto (detect from system)': 'Automàtic (detectar del sistema)',
   'Auto (follow user input)': "Automàtic (seguir l'entrada de l'usuari)",
   'Auto (detect terminal theme)': 'Automàtic (detectar el tema del terminal)',
@@ -621,6 +628,10 @@ export default {
     'Aquesta extensió instal·larà les habilitats següents:',
   'This extension will install the following subagents:':
     'Aquesta extensió instal·larà els subagents següents:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Aquesta extensió instal·larà els fluxos de treball següents (scripts JavaScript que poden iniciar subagents):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Aquests scripts de flux de treball han canviat des de la versió instal·lada: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Instal·lació cancel·lada per a "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -685,6 +696,7 @@ export default {
   'Context files:': 'Fitxers de context:',
   'Skills:': 'Habilitats:',
   'Agents:': 'Agents:',
+  'Workflows:': 'Fluxos de treball:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     "No s'ha pogut instal·lar l'extensió d'enllaç.",
@@ -786,6 +798,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurats',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Torneu a obrir aquest menú per recarregar les definicions dels hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Els controls dels hooks i la configuració de seguretat HTTP requereixen un reinici.',
+  'Failed to reload hook definitions: {{error}}':
+    'No s’han pogut recarregar les definicions dels hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Return per seleccionar · Esc per cancel·lar',
   'Exit codes:': 'Codis de sortida:',
@@ -850,8 +868,8 @@ export default {
     "L'entrada a l'ordre és JSON amb tool_name, tool_input, tool_use_id, error, error_type, is_interrupt i is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text de la TUI interactiva compatible).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text capturada en un límit d’enviament compatible).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
@@ -1178,6 +1196,12 @@ export default {
     "La compressió de l'historial del xat no ha reduït la mida. Això pot indicar problemes amb el missatge de compressió.",
   'Could not compress chat history due to a token counting error.':
     "No s'ha pogut comprimir l'historial del xat per un error de recompte de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió era buit.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
+  'Could not compress chat history due to an API error.':
+    "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================
@@ -1588,12 +1612,27 @@ export default {
   'No tasks currently running': 'No hi ha cap tasca en execució',
   'No entry to show.': 'No hi ha cap entrada per mostrar.',
   'needs approval': 'necessita aprovació',
+  'Large workflow': 'Workflow gran',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow gran: {{agents}} agents programats (llindar d’avís {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow gran: ~{{tokens}} tokens de sortida previstos (llindar d’avís {{cap}}).',
   'rejected — edit config to re-approve':
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
+  'from nested agent': "de l'agent imbricat",
   Running: 'En execució',
+  Pausing: 'Pausant',
   Paused: 'En pausa',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    "La pausa és cooperativa; el treball en curs pot acabar abans que el flux de treball es posi en pausa. Una crida d'agent que espera una aprovació d'eina manté l'execució en aquest estat i continua comptant per al límit de temps actiu fins que es respongui l'aprovació.",
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    "En pausa: no s'iniciaran agents nous; el codi de l'script entre crides d'agent continua executant-se. Prem p per reprendre. /clear, /branch i el canvi de sessió cancel·len les execucions en pausa.",
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    "La pausa o la represa ha estat rebutjada; l'estat del flux de treball ha canviat. Torna-ho a provar.",
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Consell: usa `/workflows p <runId>` o Tasques en segon pla + p per posar en pausa/reprendre cooperativament; usa `/workflows <runId>` per veure els detalls.',
   Completed: 'Completada',
   Failed: 'Fallida',
   Stopped: 'Aturada',
@@ -1868,6 +1907,9 @@ export default {
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
+  'Startup context': "Context d'inici",
+  Unattributed: 'No atribuït',
+  'Cached prefix': 'Prefix en memòria cau',
   'Run /context detail for per-item breakdown.':
     'Executeu /context detail per a un desglossament per element.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -1979,6 +2021,19 @@ export default {
     'Desa una memòria duradora al sistema de memòria.',
   'Ask a quick side question without affecting the main conversation':
     'Fes una pregunta ràpida sense afectar la conversa principal',
+  'Get a second opinion on the current conversation from a reviewer model':
+    "Obtén una segona opinió sobre la conversa actual d'un model revisor",
+  'Consulting advisor...': "Consultant l'assessor...",
+  'Advisor review failed: {{error}}':
+    "La revisió de l'assessor ha fallat: {{error}}",
+  'No conversation context available for /advisor':
+    'No hi ha context de conversa disponible per a /advisor',
+  'Focus too long (max {{max}} chars)':
+    'El focus és massa llarg (màx. {{max}} caràcters)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    "Una altra operació està en curs, espereu que es completi abans d'executar /advisor",
+  'No response received.': "No s'ha rebut cap resposta.",
+  'No model configured.': 'No hi ha cap model configurat.',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Autenticació basada en navegador amb proveïdors de tercers (p. ex. OpenRouter, ModelScope)',
   'Manage Arena sessions': "Gestiona les sessions de l'Arena",
@@ -2176,6 +2231,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2347,6 +2404,7 @@ export default {
   'from {{marketplace}}': 'de {{marketplace}}',
   installed: 'instal·lada',
   '{{count}} Agents': '{{count}} agents',
+  '{{count}} Workflows': '{{count}} workflows',
   '{{count}} Commands': '{{count}} ordres',
   '{{count}} MCP': '{{count}} MCP',
   '{{count}} Skills': '{{count}} habilitats',
@@ -2379,6 +2437,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': 'Artefacte',
   'toolDisplayName.RecordArtifact': "Enregistra l'artefacte",
+  'toolDisplayName.ReportFindings': 'Informa de les troballes',
   'toolDisplayName.Skill': 'Habilitat',
   'toolDisplayName.EnterPlanMode': 'Entra al mode de planificació',
   'toolDisplayName.ExitPlanMode': 'Surt del mode de planificació',
@@ -2400,11 +2459,13 @@ export default {
   'toolDisplayName.TeamCreate': 'Crea equip',
   'toolDisplayName.TeamDelete': 'Suprimeix equip',
   'toolDisplayName.TeamPlanApproval': "Aprovació del pla d'equip",
+  'toolDisplayName.RequestShutdown': "Sol·licita l'aturada",
   'toolDisplayName.SendMessage': 'Envia missatge',
   'toolDisplayName.StructuredOutput': 'Sortida estructurada',
   'toolDisplayName.Monitor': 'Monitor',
   'toolDisplayName.NotebookEdit': 'Edita notebook',
   'toolDisplayName.ToolSearch': "Cerca d'eines",
+  'toolDisplayName.ToolCall': "Crida d'eina",
   'toolDisplayName.EnterWorktree': "Entra a l'arbre de treball",
   'toolDisplayName.ExitWorktree': "Surt de l'arbre de treball",
   'toolDisplayName.Workflow': 'Flux de treball',
@@ -2622,6 +2683,7 @@ export default {
     'Ctrl+Q per posar a la cua · ↑ per editar els missatges en cua',
   'Enter to steer · Ctrl+Q to queue':
     'Return per redirigir · Ctrl+Q per posar a la cua',
+  '{{count}} queued': '{{count}} a la cua',
   'Queue message for the next turn':
     'Posar el missatge a la cua per al torn següent',
   '{{count}} session': '{{count}} sessió',
@@ -2699,8 +2761,6 @@ export default {
   // ============================================================================
   // Ordres diverses
   // ============================================================================
-  'Set a goal — keep working until the condition is met':
-    'Estableix un objectiu — continua treballant fins que es compleixi la condició',
   'Show current process memory diagnostics':
     'Mostra els diagnòstics de memòria del procés actual',
   'Record a CPU profile for Chrome DevTools analysis':
@@ -2825,4 +2885,5 @@ export default {
     "Els canvis del gestor d'habilitats automàtiques estan desactivats en mode segur.",
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
+  'Kept model as {{model}}': 'Model mantingut com a {{model}}',
 };

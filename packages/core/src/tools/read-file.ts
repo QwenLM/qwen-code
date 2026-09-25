@@ -16,8 +16,9 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 
-import type { PartListUnion } from '@google/genai';
+import type { PartListUnion, FunctionDeclaration } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
@@ -28,6 +29,7 @@ import {
 } from '../utils/fileUtils.js';
 import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
+import type { InputModalities } from '../core/contentGenerator.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -63,18 +65,18 @@ export interface ReadFileToolParams {
   /**
    * The line number to start reading from (optional)
    */
-  offset?: number;
+  offset?: number | null;
 
   /**
    * The number of lines to read (optional)
    */
-  limit?: number;
+  limit?: number | null;
 
   /**
    * For PDF files, the page range to extract as text (e.g. "1-5", "3", "10-20").
    * Pages are 1-indexed. Open-ended ranges like "3-" are not supported.
    */
-  pages?: string;
+  pages?: string | null;
 }
 
 class ReadFileToolInvocation extends BaseToolInvocation<
@@ -99,7 +101,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       return `${shortPath} (pages ${this.params.pages})`;
     }
 
-    const { offset, limit } = this.params;
+    const offset = this.params.offset ?? undefined;
+    const limit = this.params.limit ?? undefined;
     if (offset !== undefined && limit !== undefined) {
       return `${shortPath} (lines ${offset + 1}-${offset + limit})`;
     } else if (offset !== undefined) {
@@ -112,7 +115,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   override toolLocations(): ToolLocation[] {
-    return [{ path: this.params.file_path, line: this.params.offset }];
+    return [
+      { path: this.params.file_path, line: this.params.offset ?? undefined },
+    ];
   }
 
   /**
@@ -149,7 +154,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // per-read freshness `<system-reminder>` that must be re-emitted
     // on every read.
     const cacheEnabled = !this.config.getFileReadCacheDisabled();
-    const useFastPath = cacheEnabled && !isAutoMem;
+    const nestedRead = getCurrentToolCallSource()?.kind === 'code_mode';
+    const useFastPath = cacheEnabled && !isAutoMem && !nestedRead;
     const cache = this.config.getFileReadCache();
     // A request-level "full" Read asks for the whole file: no offset,
     // no limit, no PDF page range. The cache entry is only marked as
@@ -197,9 +203,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       this.params.file_path,
       this.config,
       {
-        offset: this.params.offset,
-        limit: this.params.limit,
-        pages: this.params.pages,
+        offset: this.params.offset ?? undefined,
+        limit: this.params.limit ?? undefined,
+        pages: this.params.pages ?? undefined,
         preserveUnsupportedImage: prepareForVisionBridge,
         preparePdfForVisionBridge: prepareForVisionBridge,
         signal,
@@ -275,6 +281,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         full: isFullRead && !result.isTruncated,
         cacheable,
       });
+      // Reading into a program does not prove the full text reached history.
+      if (nestedRead) cache.markReadEvictedFromHistory(recordStats);
     }
 
     let llmContent: PartListUnion;
@@ -520,6 +528,48 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 }
 
 /**
+ * Build the model-facing read_file description, tailored to the model's actual
+ * input modalities. Audio/video are advertised — and the "read the clip you
+ * just produced" contract stated — ONLY when the selected model can perceive
+ * them. A text-only model must not be told it can "watch a video", or it will
+ * call read_file expecting to see a clip it cannot ingest (the exact failure
+ * behind fine-detail video QA where the model clips but never re-reads). The
+ * PDF/text/image handling and the vision-bridge fallback are model-agnostic and
+ * always stated. Recomputed live in {@link ReadFileTool.schema} so it tracks a
+ * mid-session `/model` switch, not just the modalities at construction time.
+ */
+export function buildReadFileDescription(modalities: InputModalities): string {
+  const preamble = `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. For text files, the tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. `;
+  const trailer = ` For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs. For notebooks, provide 'file_path' and omit 'offset', 'limit', and 'pages' or set them to null.`;
+
+  const nouns: string[] = [];
+  const formats: string[] = [];
+  if (modalities.audio) {
+    nouns.push('audio');
+    formats.push('audio (MP3, M4A, WAV, FLAC, OGG, AAC)');
+  }
+  if (modalities.video) {
+    nouns.push('video');
+    formats.push('video (MP4, MOV, MKV, WEBM, AVI)');
+  }
+
+  if (nouns.length === 0) {
+    // Text-only (or image/PDF-only) model: never advertise audio/video.
+    return `${preamble}Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb).${trailer}`;
+  }
+
+  const perceive =
+    modalities.video && modalities.audio
+      ? 'watch a video (frames + audio) or listen to an audio file'
+      : modalities.video
+        ? 'watch a video (frames + audio)'
+        : 'listen to an audio file';
+  const viewHear = modalities.video ? 'view/hear' : 'hear';
+
+  return `${preamble}Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), ${nouns.join(', ')}, PDF files, and Jupyter notebooks (.ipynb); ${formats.join(' and ')} require the selected model to support the corresponding modality. When multimodal support is enabled, ${nouns.join(' and ')} files are delivered to you for DIRECT perception — you can actually ${perceive} by reading it. In particular, after you cut or downscale a media segment with a clip/extract tool, call read_file on the resulting clip to actually ${viewHear} that segment yourself before answering — do not assume its contents.${trailer}`;
+}
+
+/**
  * Implementation of the ReadFile tool logic
  */
 export class ReadFileTool extends BaseDeclarativeTool<
@@ -529,7 +579,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
   static readonly Name: string = ToolNames.READ_FILE;
 
   // Self-managed: ReadFile controls its own size via line-based paging
-  // (offset/limit, default 2000 lines), so it is exempt from the scheduler's
+  // (offset/limit, default truncateToolOutputLines setting), so it is exempt from the scheduler's
   // char-based truncation. Oversized reads are bounded by the per-message
   // batch budget instead.
   override get maxOutputChars(): number {
@@ -540,7 +590,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
+      buildReadFileDescription(config.getEffectiveInputModalities?.() ?? {}),
       Kind.Read,
       {
         properties: {
@@ -551,23 +601,38 @@ export class ReadFileTool extends BaseDeclarativeTool<
           },
           offset: {
             description:
-              "Optional: For text files, the 0-based line number to start reading from. Requires 'limit' to be set. Use for paginating through large files.",
-            type: 'integer',
+              "Optional: For text files, the 0-based line number to start reading from. Requires 'limit' to be set. Use for paginating through large files. Omit or set to null for Jupyter notebooks (.ipynb); null is treated as omitted.",
+            type: ['integer', 'null'],
           },
           limit: {
             description:
-              "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit).",
-            type: 'integer',
+              "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit). Omit or set to null for Jupyter notebooks (.ipynb); null is treated as omitted.",
+            type: ['integer', 'null'],
           },
           pages: {
-            description: `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
-            type: 'string',
+            description: `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input. Omit or set to null for Jupyter notebooks (.ipynb); null is treated as omitted.`,
+            type: ['string', 'null'],
           },
         },
         required: ['file_path'],
         type: 'object',
       },
     );
+  }
+
+  // Recompute the model-facing description from the model's CURRENT input
+  // modalities each time the declaration is assembled, so a mid-session
+  // `/model` switch (e.g. to a text-only model) is reflected — the constructor
+  // value only captures the modalities at build time. See
+  // {@link buildReadFileDescription}.
+  override get schema(): FunctionDeclaration {
+    return {
+      name: this.name,
+      description: buildReadFileDescription(
+        this.config.getEffectiveInputModalities?.() ?? {},
+      ),
+      parametersJsonSchema: this.parameterSchema,
+    };
   }
 
   protected override validateToolParamValues(
@@ -586,6 +651,24 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
+    params.offset ??= undefined;
+    params.limit ??= undefined;
+    params.pages ??= undefined;
+
+    if (params.pages !== undefined) {
+      const pages = params.pages.trim();
+      params.pages = pages.length > 0 ? pages : undefined;
+    }
+
+    if (
+      path.extname(filePath).toLowerCase() === '.ipynb' &&
+      (params.offset !== undefined ||
+        params.limit !== undefined ||
+        params.pages !== undefined)
+    ) {
+      return `For Jupyter notebooks (.ipynb), omit 'offset', 'limit', and 'pages' or set them to null. Retry with: ${JSON.stringify({ file_path: filePath, offset: null, limit: null, pages: null })}`;
+    }
+
     if (
       params.offset !== undefined &&
       (!Number.isInteger(params.offset) || params.offset < 0)
@@ -597,23 +680,6 @@ export class ReadFileTool extends BaseDeclarativeTool<
       (!Number.isInteger(params.limit) || params.limit <= 0)
     ) {
       return 'Limit must be a positive integer';
-    }
-
-    if (params.pages !== undefined) {
-      const pages = params.pages.trim();
-      params.pages = pages.length > 0 ? pages : undefined;
-    }
-
-    const ext = path.extname(filePath).toLowerCase();
-    if (
-      (params.offset !== undefined || params.limit !== undefined) &&
-      ext === '.ipynb'
-    ) {
-      return 'offset and limit are not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
-    }
-
-    if (params.pages !== undefined && ext === '.ipynb') {
-      return 'pages is not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
     }
 
     if (params.pages) {

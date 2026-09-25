@@ -10,6 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 
 import {
   evaluateTimeBasedTrigger,
+  isClearedMediaPlaceholder,
   microcompactHistory,
   MICROCOMPACT_CLEARED_MESSAGE,
   MICROCOMPACT_CLEARED_IMAGE_PREFIX,
@@ -37,6 +38,40 @@ function makeToolResult(name: string, output: string): Content {
   return {
     role: 'user',
     parts: [{ functionResponse: { name, response: { output } } }],
+  };
+}
+
+function makeBridgedToolCall(
+  id: string,
+  name: string,
+  args: Record<string, unknown> = {},
+): Content {
+  return {
+    role: 'model',
+    parts: [
+      {
+        functionCall: {
+          id,
+          name: 'tool_call',
+          args: { name, arguments: args },
+        },
+      },
+    ],
+  };
+}
+
+function makeBridgedToolResult(id: string, output: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id,
+          name: 'tool_call',
+          response: { output },
+        },
+      },
+    ],
   };
 }
 
@@ -143,6 +178,65 @@ describe('evaluateTimeBasedTrigger', () => {
   });
 });
 
+describe('isClearedMediaPlaceholder', () => {
+  it('matches the exact placeholder shape microcompaction emits', () => {
+    expect(
+      isClearedMediaPlaceholder('[Old inline media cleared: image/png]'),
+    ).toBe(true);
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: application/octet-stream]',
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the empty-mime shape the producer can emit', () => {
+    // sanitizeMimeForPlaceholder returns '' for empty/whitespace-only/
+    // bracket-only mimeTypes, and the producer's `??` fallback only covers
+    // null/undefined, so a degenerate mimeType yields `[... cleared: ]`.
+    // The consumer must recognize that shape too, or a cleared media-only
+    // entry would be counted as a genuine prompt and desynchronize the
+    // rewind prompt count.
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: ]')).toBe(
+      true,
+    );
+  });
+
+  it('does not match a user prompt that merely begins with the prefix', () => {
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: image/png] why is this in my history?',
+      ),
+    ).toBe(false);
+    expect(isClearedMediaPlaceholder('[Old inline media cleared:')).toBe(false);
+    expect(isClearedMediaPlaceholder('hello world')).toBe(false);
+    expect(isClearedMediaPlaceholder('')).toBe(false);
+  });
+
+  it('does not match interiors the producer can never emit (newline/tab/CR)', () => {
+    // sanitizeMimeForPlaceholder normalizes \r/\n/\t to spaces before
+    // interpolation, so a generated placeholder never contains them.
+    // Accepting them would misclassify multi-line user text that starts
+    // with the prefix as a placeholder.
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: screenshot\nfrom staging]',
+      ),
+    ).toBe(false);
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a\tb]')).toBe(
+      false,
+    );
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a\rb]')).toBe(
+      false,
+    );
+    // …while the space-normalized interior the producer DOES emit for
+    // such a mimeType still matches.
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a b]')).toBe(
+      true,
+    );
+  });
+});
+
 describe('microcompactHistory', () => {
   afterEach(clearEnv);
 
@@ -154,6 +248,26 @@ describe('microcompactHistory', () => {
       makeModelMessage('hi'),
     ];
     const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS);
+    expect(result.history).toBe(history);
+    expect(result.meta).toBeUndefined();
+  });
+
+  it.each([
+    'toString',
+    'constructor',
+    'valueOf',
+    'hasOwnProperty',
+    '__proto__',
+  ])('handles Object.prototype tool name %s', (name) => {
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'prototype-name', name, args: {} } }],
+      },
+    ];
+
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS);
+
     expect(result.history).toBe(history);
     expect(result.meta).toBeUndefined();
   });
@@ -781,6 +895,111 @@ describe('microcompactHistory', () => {
     ).toBe('Y'.repeat(25_500));
   });
 
+  it('size-compacts bridged tool results using the target tool identity', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c1', 'WEB_FETCH'),
+      makeBridgedToolResult('c1', 'x'.repeat(1_000)),
+      makeBridgedToolCall('c2', 'web_fetch'),
+      makeBridgedToolResult('c2', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      toolsCleared: 1,
+      toolResultCharsBefore: 1_006,
+    });
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not guess when a bridged call id maps to mixed tool names', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'web_fetch'),
+      makeBridgedToolCall('reused', 'grep_search'),
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not throw on non-string tool names in unvalidated history', () => {
+    // Resumed or hand-edited session files can carry truthy non-string
+    // names; the identity resolution must not throw on them.
+    const history = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'n', name: 42, args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'n',
+              name: {},
+              response: { output: 'x'.repeat(5000) },
+            },
+          },
+        ],
+      },
+    ] as unknown as Content[];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not guess when a bridged call id has an unparseable sibling call', () => {
+    // The reused id pairs one well-formed bridged read_file with a call
+    // whose envelope target cannot be parsed; the safe outcome is refusal,
+    // not compaction on the one identity that did parse.
+    const malformedCall = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'reused',
+            name: 'tool_call',
+            args: { name: 42 },
+          },
+        },
+      ],
+    } as unknown as Content;
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'read_file', { file_path: '/proj/a.ts' }),
+      malformedCall,
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
   it('size-compacts old skill results and keeps the most recent result', () => {
     const oldSkillContent = 'old skill instructions '.repeat(20);
     const recentSkillContent = 'recent skill instructions';
@@ -1343,6 +1562,35 @@ describe('microcompactHistory', () => {
     expect(result.meta!.mediaCleared).toBe(1);
   });
 
+  it('emits a placeholder the consumer recognizes even for degenerate mimeTypes', () => {
+    // The producer's `?? 'application/octet-stream'` fallback only covers
+    // null/undefined; an empty or bracket-only mimeType survives
+    // sanitizeMimeForPlaceholder as ''. Whatever shape is emitted must
+    // round-trip through isClearedMediaPlaceholder, or a cleared media-only
+    // entry would later be counted as a genuine user prompt.
+    for (const mimeType of ['', '   ', ']', '[]']) {
+      const history: Content[] = [
+        makeUserMessage('look at this'),
+        makeInlineImage(mimeType, 'OLDOLDOLDOLD'),
+        makeUserMessage('and this'),
+        // Recent image so the degenerate one is not the keepRecent newest.
+        makeInlineImage('image/jpeg', 'NEWNEWNEWNEW'),
+      ];
+
+      const result = microcompactHistory(
+        history,
+        twoHoursAgo,
+        DEFAULT_SETTINGS,
+      );
+
+      const emitted = result.history[1]!.parts![0]!.text!;
+      expect(
+        isClearedMediaPlaceholder(emitted),
+        `emitted shape for mimeType ${JSON.stringify(mimeType)}: ${JSON.stringify(emitted)}`,
+      ).toBe(true);
+    }
+  });
+
   it('does not reclear an already-cleared image part', () => {
     const history: Content[] = [
       {
@@ -1709,11 +1957,38 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
       toolResultsNumToKeep: 1,
     });
 
+    expect(result.history[1]).not.toBe(history[1]);
+    expect(result.history[1].parts?.[0]?.functionResponse).toMatchObject({
+      id: 'c0',
+      response: { output: MICROCOMPACT_CLEARED_MESSAGE },
+    });
     expect(result.meta).toBeDefined();
     expect(result.meta!.toolsCleared).toBe(1);
     // Only the blanked (oldest) file is reported; the kept one is not.
     expect(result.meta!.evictedReadPaths).toEqual(['/proj/old.ts']);
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('reports the inner file path of a blanked bridged read_file result', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c0', 'read_file', {
+        file_path: '/proj/old.ts',
+      }),
+      makeBridgedToolResult('c0', 'old long content '.repeat(50)),
+      makeBridgedToolCall('c1', 'web_fetch'),
+      makeBridgedToolResult('c1', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toMatchObject({
+      toolsCleared: 1,
+      evictedReadPaths: ['/proj/old.ts'],
+      unresolvedEvictedReads: 0,
+    });
   });
 
   it('does not let a kept read_file result vouch for residency (issue #4239)', () => {

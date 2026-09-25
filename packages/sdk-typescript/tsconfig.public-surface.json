@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*.ts", "test/unit/daemon-public-surface.test.ts"],
+  "exclude": ["node_modules", "dist"]
+}

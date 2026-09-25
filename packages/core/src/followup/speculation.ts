@@ -6,7 +6,7 @@
  * Speculation Engine
  *
  * Speculatively executes the accepted suggestion before the user confirms,
- * using a forked GeminiChat with copy-on-write file isolation.
+ * using a forked LlmChat with copy-on-write file isolation.
  *
  * Flow:
  * 1. Suggestion shown → startSpeculation() fires
@@ -15,15 +15,17 @@
  * 4. User types → abortSpeculation() cleans up
  */
 
+import { shellResultText } from '../utils/shell-result.js';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { GeminiClient } from '../core/client.js';
-import { StreamEventType } from '../core/geminiChat.js';
+import type { LlmClient } from '../core/client.js';
+import type { ToolArtifact } from '../tools/tools.js';
+import { StreamEventType } from '../core/llm-chat.js';
 import {
-  canonicalToolName,
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
+import { canonicalToolName } from '../tools/tool-names.js';
 import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
@@ -34,13 +36,18 @@ import {
   createForkedChat,
   runForkedAgent,
   runWithForkedChatModel,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
-} from '../utils/tool-response-finalizer.js';
+} from '../tools/tool-response-finalizer.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../tools/tool-result-boundary-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,6 +57,34 @@ const debugLogger = createDebugLogger('SPECULATION');
 
 const MAX_SPECULATION_TURNS = 20;
 const MAX_SPECULATION_MESSAGES = 100;
+
+function observeSpeculationProducer(params: {
+  config: Config;
+  callId: string;
+  toolName: string;
+  persistedOutputFiles?: string[];
+  artifacts?: ReadonlyArray<{ kind?: unknown }>;
+  knownNone?: boolean;
+  values: () => ReturnType<typeof toolResultPartDiagnosticValues>;
+}): void {
+  try {
+    observeToolResultBoundary({
+      stage: 'producer',
+      sessionId: params.config.getSessionId?.(),
+      toolCallId: params.callId,
+      toolName: params.toolName,
+      artifacts: [
+        toolResultBoundaryArtifact(
+          params.knownNone ? [] : params.persistedOutputFiles,
+          params.artifacts,
+        ),
+      ],
+      values: params.values,
+    });
+  } catch {
+    // Diagnostics must not affect speculative execution.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -107,7 +142,12 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
-  const cacheSafe = getCacheSafeParams();
+  if (config.getShellExecutionSandbox?.()) {
+    throw new Error(
+      'Speculative execution is unavailable with tools.executionSandbox.',
+    );
+  }
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');
   }
@@ -213,7 +253,7 @@ interface LoopResult {
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
-  cacheSafe: import('../utils/forkedAgent.js').CacheSafeParams,
+  cacheSafe: import('../agents/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
   const modelSelector =
@@ -292,13 +332,37 @@ async function runSpeculativeLoop(
         const name = fc.name ?? '';
         const id = fc.id;
         const args = (fc.args ?? {}) as Record<string, unknown>;
+        const toolRegistry = config.getToolRegistry();
+        // Permission-deferred calls must use the normal scheduler approval
+        // path; speculation deliberately bypasses that path.
+        if (toolRegistry.isPermissionDeferred?.(name)) {
+          hitBoundary = true;
+          break;
+        }
         const persistenceCallId =
           id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
+        let producerObserved = false;
+        const observeProducer = (
+          params: Omit<
+            Parameters<typeof observeSpeculationProducer>[0],
+            'config' | 'callId' | 'toolName'
+          >,
+        ) => {
+          if (producerObserved) return;
+          producerObserved = true;
+          observeSpeculationProducer({
+            ...params,
+            config,
+            callId: persistenceCallId,
+            toolName: name,
+          });
+        };
         const gate = await evaluateToolCall(
           name,
           args,
           state.overlayFs!,
           approvalMode,
+          config.getTargetDir?.(),
         );
 
         if (gate.action === 'boundary') {
@@ -319,7 +383,6 @@ async function runSpeculativeLoop(
         // Execute the tool directly (bypassing CoreToolScheduler)
         // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
         try {
-          const toolRegistry = config.getToolRegistry();
           const tool = await toolRegistry.ensureTool(name);
           if (!tool) {
             const responsePart: Part = {
@@ -329,6 +392,10 @@ async function runSpeculativeLoop(
                 response: { error: `Tool '${name}' not found` },
               },
             };
+            observeProducer({
+              knownNone: true,
+              values: () => toolResultPartDiagnosticValues(responsePart),
+            });
             functionResponses.push(responsePart);
             responseEntries.push({
               callId: persistenceCallId,
@@ -349,6 +416,8 @@ async function runSpeculativeLoop(
                 toolName: canonicalToolName(name),
                 args: invocation.params as Record<string, unknown>,
                 signal: state.abortController!.signal,
+                sessionId: config.getSessionId(),
+                cwd: config.getTargetDir(),
                 ...(invocationContext ? { invocationContext } : {}),
               },
             );
@@ -368,6 +437,34 @@ async function runSpeculativeLoop(
             state.abortController!.signal,
           );
           state.toolUseCount++;
+          let resultArtifacts: ToolArtifact[] | undefined;
+          let resultPersistedOutputFiles: string[] | undefined;
+          try {
+            resultArtifacts = result.artifacts;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+          try {
+            resultPersistedOutputFiles = result.persistedOutputFiles;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+
+          observeProducer({
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
+            values: () => [
+              ...toolResultPartDiagnosticValues(result.llmContent),
+              ...(shellResultText(result.returnDisplay) !== undefined
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: shellResultText(result.returnDisplay)!,
+                    },
+                  ]
+                : []),
+            ],
+          });
 
           const convertedResponseParts = result.error
             ? convertToFunctionErrorResponse(
@@ -395,7 +492,8 @@ async function runSpeculativeLoop(
             callId: persistenceCallId,
             toolName: name,
             responseParts,
-            persistedOutputFiles: result.persistedOutputFiles,
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
           });
         } catch (error: unknown) {
           const responsePart: Part = {
@@ -410,6 +508,10 @@ async function runSpeculativeLoop(
               },
             },
           };
+          observeProducer({
+            knownNone: true,
+            values: () => toolResultPartDiagnosticValues(responsePart),
+          });
           functionResponses.push(responsePart);
           responseEntries.push({
             callId: persistenceCallId,
@@ -496,7 +598,7 @@ async function runSpeculativeLoop(
  */
 export async function acceptSpeculation(
   state: SpeculationState,
-  geminiClient: GeminiClient,
+  llmClient: LlmClient,
 ): Promise<SpeculationResult> {
   const timeSavedMs = state.boundary
     ? Math.max(0, state.boundary.completedAt - state.startTime)
@@ -513,7 +615,7 @@ export async function acceptSpeculation(
 
     // Inject into main conversation
     for (const msg of cleanMessages) {
-      await geminiClient.addHistory(msg);
+      await llmClient.addHistory(msg);
     }
 
     state.status = 'completed';
@@ -628,7 +730,7 @@ The assistant responded: ${speculatedSummary || '(tool calls executed)'}
 
 ${SUGGESTION_PROMPT}`;
 
-    const cacheSafeParams = getCacheSafeParams();
+    const cacheSafeParams = getCacheSafeParams(config.getSessionId());
     if (!cacheSafeParams) return null;
     const model = modelOverride ?? config.getFastModel();
     const resolvedModel = model ?? cacheSafeParams.model;

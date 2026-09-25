@@ -12,12 +12,15 @@ import type {
   GoalStateCause,
   Logger,
   SessionListItem,
+  ToolArtifact,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
   HistoryItem,
   HistoryItemBtw,
   ConfirmationRequest,
+  ContextCompressionMeta,
+  ContextCompressionNotice,
 } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
@@ -27,6 +30,14 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import type { PeerMessaging } from '../../peerMessaging/peer-messaging.js';
+
+export interface NonInteractiveSlashCommandPolicy {
+  readonly allowSessionReset: boolean;
+  readonly allowWorkspaceSettingsWrite: boolean;
+  readonly persistModelSelection: boolean;
+  readonly blockedBuiltinCommandNames: readonly string[];
+}
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -38,6 +49,7 @@ export interface CommandContext {
    * - acp: ACP/Zed integration mode
    */
   executionMode?: 'interactive' | 'non_interactive' | 'acp';
+  executionPolicy?: NonInteractiveSlashCommandPolicy;
   // Invocation properties for when commands are called.
   invocation?: {
     /** The raw, untrimmed input string from the user. */
@@ -54,6 +66,11 @@ export interface CommandContext {
     settings: LoadedSettings;
     logger: Logger | null;
     extensionRefreshState?: ExtensionRefreshState;
+    /**
+     * Present only when cross-session messaging is enabled and its socket
+     * bound; `/peers` treats null as "the feature is off".
+     */
+    peerMessaging?: PeerMessaging | null;
   };
   // UI state and history management
   ui: {
@@ -63,6 +80,8 @@ export interface CommandContext {
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
     clear: () => void;
+    /** Clears transient assistant output before replacing conversation history. */
+    clearPendingState?: () => void;
     /**
      * Sets the transient debug message displayed in the application footer in debug mode.
      */
@@ -95,7 +114,7 @@ export interface CommandContext {
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
-    setGeminiMdFileCount: (count: number) => void;
+    setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
@@ -139,6 +158,8 @@ export interface MessageActionReturn {
   type: 'message';
   messageType: 'info' | 'warning' | 'error';
   content: string;
+  /** Files already written by the command; advisory metadata for ACP clients. */
+  artifacts?: ToolArtifact[];
 }
 
 export type GoalCommandOperation =
@@ -163,7 +184,20 @@ export interface GoalControlActionReturn {
 export interface StreamMessagesActionReturn {
   type: 'stream_messages';
   messages: AsyncGenerator<
-    { messageType: 'info' | 'warning' | 'error'; content: string },
+    {
+      messageType: 'info' | 'warning' | 'error';
+      content: string;
+      /**
+       * Machine-readable companion to `content` for consumers that render the
+       * message themselves. Only the compression commands set it.
+       */
+      contextCompression?: ContextCompressionMeta;
+      /**
+       * Same, for the invocation note. A separate key on purpose: the two
+       * frames merge into one block, where a shared key would be overwritten.
+       */
+      contextCompressionNotice?: ContextCompressionNotice;
+    },
     void,
     unknown
   >;
@@ -215,6 +249,7 @@ export interface OpenDialogActionReturn {
     | 'permissions'
     | 'approval-mode'
     | 'effort'
+    | 'output-style'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -238,13 +273,15 @@ export interface LoadHistoryActionReturn {
 
 /**
  * The return type for a command action that should immediately submit
- * content as a prompt to the Gemini model.
+ * content as a prompt to the model.
  */
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
   /**
    * Optional per-turn model id. When set, this prompt (and any tool-call
    * continuations it spawns) runs on the given model without changing the
@@ -447,9 +484,19 @@ export interface SlashCommand {
   /** Usage examples shown in Help and completion. */
   examples?: string[];
 
+  /**
+   * The documented `/name` of a saved-workflow command. `CommandService` may
+   * rename an extension workflow on a collision; a `slashCommands.disabled`
+   * entry written with this name still matches the renamed command.
+   */
+  workflowName?: string;
+
   /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
   skillDetail?: {
     name: string;
+    // The manifest spelling when `name` carries an owner prefix; carried
+    // because the extension-skill store and the manifest both key on it.
+    authoredName?: string;
     description?: string;
     body?: string;
     filePath?: string;

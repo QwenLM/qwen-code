@@ -9,10 +9,12 @@ import {
   checkCommandPermissions,
   escapeShellArg,
   getShellConfiguration,
-  ShellExecutionService,
+  isSignalTermination,
   flatMapTextParts,
   checkArgumentSafety,
 } from '@qwen-code/qwen-code-core';
+
+import { executeRuntimeShell } from '@qwen-code/qwen-code-core/sandbox/runtime-shell.js';
 
 import type { CommandContext } from '../../ui/commands/types.js';
 import type { IPromptProcessor, PromptPipelineContent } from './types.js';
@@ -189,7 +191,8 @@ export class ShellProcessor implements IPromptProcessor {
           defaultFg: activeTheme.colors.Foreground,
           defaultBg: activeTheme.colors.Background,
         };
-        const { result } = await ShellExecutionService.execute(
+        const { result } = await executeRuntimeShell(
+          config,
           injection.resolvedCommand,
           config.getTargetDir(),
           () => {},
@@ -218,7 +221,7 @@ export class ShellProcessor implements IPromptProcessor {
           executionResult.exitCode !== null
         ) {
           processedPrompt += `\n[Shell command '${injection.resolvedCommand}' exited with code ${executionResult.exitCode}]`;
-        } else if (executionResult.signal !== null) {
+        } else if (isSignalTermination(executionResult.signal)) {
           processedPrompt += `\n[Shell command '${injection.resolvedCommand}' terminated by signal ${executionResult.signal}]`;
         }
       }

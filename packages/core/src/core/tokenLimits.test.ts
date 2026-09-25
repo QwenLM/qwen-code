@@ -15,6 +15,13 @@ import {
 } from './tokenLimits.js';
 
 describe('normalize', () => {
+  it('keeps unrecognized batch routing tags out of token lookup', () => {
+    expect(normalize('google/gemini-2.5-flash:batch')).toBe('batch');
+    expect(
+      knownTokenLimit('google/gemini-2.5-flash:batch', 'output'),
+    ).toBeUndefined();
+  });
+
   it('should lowercase and trim the model string', () => {
     expect(normalize('  GEMINI-1.5-PRO  ')).toBe('gemini-1.5-pro');
   });
@@ -41,6 +48,19 @@ describe('normalize', () => {
 
   it('should collapse whitespace to a single hyphen', () => {
     expect(normalize('claude 3.5 sonnet')).toBe('claude-3.5-sonnet');
+  });
+
+  it('rewrites dotted-minor Claude aliases to the canonical hyphenated form', () => {
+    expect(normalize('claude-opus-4.8')).toBe('claude-opus-4-8');
+    // Multi-component and already-hyphenated-minor shapes fold too, so the
+    // version parser and the limit tables agree on every alias shape.
+    expect(normalize('claude-opus-4.8.0')).toBe('claude-opus-4-8');
+    expect(normalize('claude-opus-4-8.0')).toBe('claude-opus-4-8-0');
+    // Space-separated display names reach the rewrite (ws collapse runs first).
+    expect(normalize('Claude Opus 4.8')).toBe('claude-opus-4-8');
+    // Family-agnostic: a not-yet-enumerated family still folds instead of
+    // collapsing to the bare family name.
+    expect(normalize('claude-newfam-5.1')).toBe('claude-newfam-5-1');
   });
 
   it('should remove date and version suffixes', () => {
@@ -103,6 +123,11 @@ describe('normalize', () => {
     expect(normalize('model-v1.1')).toBe('model');
   });
 
+  it('should keep the DeepSeek V4 generation suffix the limit table keys on', () => {
+    expect(normalize('deepseek-v4')).toBe('deepseek-v4');
+    expect(normalize('deepseek-v4.1')).toBe('deepseek-v4.1');
+  });
+
   it('should remove suffix version numbers w/o "v" prefix only if they are preceded by another dash', () => {
     expect(normalize('model-test-1.1')).toBe('model-test');
     expect(normalize('gpt-4.1')).toBe('gpt-4.1');
@@ -159,6 +184,40 @@ describe('tokenLimit', () => {
       expect(tokenLimit('vertex/claude-opus-4-8')).toBe(1_000_000);
     });
 
+    it('should return 1M for dotted-minor Opus 4.6-4.8 aliases (LiteLLM/Vertex/Bedrock convention)', () => {
+      // Model Group aliases exposed by LiteLLM/Vertex/Bedrock-style proxies
+      // frequently use `.` between major and minor. normalize() rewrites
+      // these to the canonical hyphenated form so a single downstream
+      // pattern matches both conventions.
+      expect(tokenLimit('claude-opus-4.6')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4.7')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4.8')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-4.8')).toBe(1_000_000);
+      expect(tokenLimit('bedrock/claude-opus-4.8')).toBe(1_000_000);
+    });
+
+    it('should return 1M for dotted-revision and space-separated Opus aliases', () => {
+      // Semver-style groups and hyphenated-minor-with-dotted-revision must not
+      // collapse to the generic 200K fallback while the version parser accepts
+      // them (the two subsystems would otherwise disagree).
+      expect(tokenLimit('claude-opus-4.8.0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4-8.0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4-8.1')).toBe(1_000_000);
+      // Display-style names pasted into a model field.
+      expect(tokenLimit('Claude Opus 4.8')).toBe(1_000_000);
+      expect(tokenLimit('claude opus 4.8')).toBe(1_000_000);
+    });
+
+    it('should return 1M for Opus 5.x (bare major and dotted/hyphenated minors)', () => {
+      expect(tokenLimit('claude-opus-5')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5-0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5-1')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5.0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5.1')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-5')).toBe(1_000_000);
+      expect(tokenLimit('bedrock/claude-opus-5-0')).toBe(1_000_000);
+    });
+
     it('should return 200K for other Claude models', () => {
       expect(tokenLimit('claude-sonnet-4-6')).toBe(200000);
       expect(tokenLimit('claude-sonnet-4')).toBe(200000);
@@ -200,8 +259,16 @@ describe('tokenLimit', () => {
 
   describe('DeepSeek', () => {
     it('should return 1M for DeepSeek V4 models', () => {
+      expect(tokenLimit('deepseek-v4')).toBe(1000000);
       expect(tokenLimit('deepseek-v4-flash')).toBe(1000000);
       expect(tokenLimit('deepseek-v4-pro')).toBe(1000000);
+    });
+
+    it('should return 1M/384K for the official API deepseek-flash name', () => {
+      // api.deepseek.com serves V4 flash as `deepseek-flash`; the DashScope
+      // spelling `deepseek-v4.1-flash` is rejected by the official endpoint.
+      expect(tokenLimit('deepseek-flash')).toBe(1000000);
+      expect(tokenLimit('deepseek-flash', 'output')).toBe(384000);
     });
 
     it('should return 128K for DeepSeek models', () => {
@@ -356,6 +423,31 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('vertex/claude-opus-4-8', 'output')).toBe(128_000);
       expect(tokenLimit('claude-sonnet-4-6', 'output')).toBe(65536);
     });
+
+    it('should return 128K output for dotted-minor Opus 4.6-4.8 aliases', () => {
+      expect(tokenLimit('claude-opus-4.6', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4.7', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('bedrock/claude-opus-4.8', 'output')).toBe(128_000);
+    });
+
+    it('should return 128K output for dotted-revision and space-separated Opus aliases', () => {
+      expect(tokenLimit('claude-opus-4.8.0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4-8.0', 'output')).toBe(128_000);
+      expect(tokenLimit('Claude Opus 4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('claude opus 4.8', 'output')).toBe(128_000);
+    });
+
+    it('should return 128K output for Opus 5.x (bare major and dotted/hyphenated minors)', () => {
+      expect(tokenLimit('claude-opus-5', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5-0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5-1', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5.0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5.1', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-5', 'output')).toBe(128_000);
+      expect(tokenLimit('bedrock/claude-opus-5-0', 'output')).toBe(128_000);
+    });
   });
 
   describe('legacy model output fallbacks', () => {
@@ -386,6 +478,7 @@ describe('tokenLimit with output type', () => {
 
   describe('other output limits', () => {
     it('should return correct output limits for DeepSeek', () => {
+      expect(tokenLimit('deepseek-v4', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-v4-flash', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-v4-pro', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-reasoner', 'output')).toBe(65536);
@@ -514,6 +607,27 @@ describe('defaultOutputCeiling', () => {
     expect(defaultOutputCeiling('claude-opus-4-6')).toBe(128_000);
     expect(defaultOutputCeiling('claude-opus-4-7')).toBe(128_000);
     expect(defaultOutputCeiling('vertex/claude-opus-4-8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to dotted-minor Opus 4.6-4.8 aliases', () => {
+    expect(defaultOutputCeiling('claude-opus-4.6')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4.7')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4.8')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-4.8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to dotted-revision and space-separated Opus aliases', () => {
+    expect(defaultOutputCeiling('claude-opus-4.8.0')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4-8.0')).toBe(128_000);
+    expect(defaultOutputCeiling('Claude Opus 4.8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to Opus 5.x', () => {
+    expect(defaultOutputCeiling('claude-opus-5')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5-0')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5-1')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5.0')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-5')).toBe(128_000);
   });
 
   it('uses the default output limit for an unknown model', () => {

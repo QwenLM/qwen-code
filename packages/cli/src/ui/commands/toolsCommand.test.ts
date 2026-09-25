@@ -27,6 +27,10 @@ const mockTools = [
 ] as Tool[];
 
 describe('toolsCommand', () => {
+  it('opts in to running during streaming', () => {
+    expect(toolsCommand.canRunDuringStreaming).toBe(true);
+  });
+
   it('should display an error if the tool registry is unavailable', async () => {
     const mockContext = createMockCommandContext({
       services: {
@@ -52,7 +56,10 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () => ({ getAllTools: () => [] as Tool[] }),
+          getToolRegistry: () => ({
+            getAllTools: () => [] as Tool[],
+            isDeferredAndHidden: () => false,
+          }),
         },
       },
     });
@@ -74,7 +81,10 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () => ({ getAllTools: () => mockTools }),
+          getToolRegistry: () => ({
+            getAllTools: () => mockTools,
+            isDeferredAndHidden: () => false,
+          }),
         },
       },
     });
@@ -90,11 +100,34 @@ describe('toolsCommand', () => {
     expect(message.tools[1].displayName).toBe('Code Editor');
   });
 
+  it('marks deferred tools so a tools.eager allowlist is visible (#10075)', async () => {
+    const mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getToolRegistry: () => ({
+            getAllTools: () => mockTools,
+            isDeferredAndHidden: (name: string) => name === 'code-editor',
+          }),
+        },
+      },
+    });
+
+    if (!toolsCommand.action) throw new Error('Action not defined');
+    await toolsCommand.action(mockContext, '');
+
+    const [message] = (mockContext.ui.addItem as vi.Mock).mock.calls[0];
+    expect(message.tools[0].deferred).toBe(false);
+    expect(message.tools[1].deferred).toBe(true);
+  });
+
   it('should list tools with descriptions when "desc" arg is passed', async () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () => ({ getAllTools: () => mockTools }),
+          getToolRegistry: () => ({
+            getAllTools: () => mockTools,
+            isDeferredAndHidden: () => false,
+          }),
         },
       },
     });
@@ -110,5 +143,63 @@ describe('toolsCommand', () => {
       'Reads files from the local system.',
     );
     expect(message.tools[1].description).toBe('Edits code files.');
+  });
+
+  it('flags hidden media-policy tools as fixedOnly, but not model-enabled ones', async () => {
+    const mediaTools = [
+      {
+        name: 'omni_downsample_image',
+        displayName: 'DownsampleImage',
+        description: 'Downsamples an image.',
+        schema: {},
+        // Media-policy tool with no modelAccess entry → hidden from the
+        // model's declarations → must surface as fixed-only in /tools.
+        mediaPolicyDescriptor: {
+          kind: 'media_policy',
+          inputMediaTypes: ['image'],
+          outputs: [],
+        },
+      },
+      {
+        name: 'omni_probe_media',
+        displayName: 'ProbeMedia',
+        description: 'Probes media metadata.',
+        schema: {},
+        // Same descriptor, but modelAccess.enabled below re-exposes it to
+        // the model, so it must NOT carry the fixed-only marker.
+        mediaPolicyDescriptor: {
+          kind: 'media_policy',
+          inputMediaTypes: ['image'],
+          outputs: [],
+        },
+      },
+      ...mockTools,
+    ] as Tool[];
+    const mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getToolRegistry: () => ({
+            getAllTools: () => mediaTools,
+            isDeferredAndHidden: () => false,
+          }),
+          getOmniPolicyToolsSettings: () => ({
+            omni_probe_media: { modelAccess: { enabled: true } },
+          }),
+        },
+      },
+    });
+
+    if (!toolsCommand.action) throw new Error('Action not defined');
+    await toolsCommand.action(mockContext, '');
+
+    const [message] = (mockContext.ui.addItem as vi.Mock).mock.calls[0];
+    expect(message.tools).toHaveLength(4);
+    expect(message.tools[0]).toMatchObject({
+      name: 'omni_downsample_image',
+      fixedOnly: true,
+    });
+    expect(message.tools[1].fixedOnly).toBeUndefined();
+    expect(message.tools[2].fixedOnly).toBeUndefined();
+    expect(message.tools[3].fixedOnly).toBeUndefined();
   });
 });

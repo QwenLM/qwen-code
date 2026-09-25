@@ -28,6 +28,9 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { SessionNotFoundError } from '../acp-session-bridge.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 
 const setupGithubMock = vi.hoisted(() => vi.fn());
 
@@ -44,15 +47,29 @@ const PARENT_ENV: WorkspaceRuntimeEnvMetadata = {
 
 function makeBridge(): HttpAcpBridge {
   return {
-    spawnOrAttach: vi.fn(async (req: { workspaceCwd: string }) => ({
-      sessionId:
-        req.workspaceCwd === '/ws-b' ? 'secondary-session' : 'primary-session',
-      workspaceCwd: req.workspaceCwd,
-      attached: false,
-      clientId:
-        req.workspaceCwd === '/ws-b' ? 'secondary-client' : 'primary-client',
-    })),
+    spawnOrAttach: vi.fn(
+      async (req: { workspaceCwd: string; sessionId?: string }) => ({
+        sessionId:
+          req.sessionId ??
+          (req.workspaceCwd === '/ws-b'
+            ? 'secondary-session'
+            : 'primary-session'),
+        workspaceCwd: req.workspaceCwd,
+        attached: false,
+        clientId:
+          req.workspaceCwd === '/ws-b' ? 'secondary-client' : 'primary-client',
+      }),
+    ),
+    getSessionSummary: vi.fn((sessionId: string) => {
+      throw new SessionNotFoundError(sessionId);
+    }),
+    killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => {}),
+    getSessionCatalogVersion: vi.fn(() => ({
+      generation: 'wq-acp-fake-catalog-generation',
+      revision: 0,
+    })),
+    markSessionCatalogChanged: vi.fn(),
     executeShellCommand: vi.fn(async () => ({
       exitCode: 0,
       output: 'ok',
@@ -61,6 +78,12 @@ function makeBridge(): HttpAcpBridge {
     isWorkspaceMemoryRememberAvailable: vi.fn(async () => true),
     runWorkspaceMemoryRemember: vi.fn(async () => ({
       filesTouched: [],
+      touchedScopes: [],
+    })),
+    runWorkspaceMemoryForget: vi.fn(async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
       touchedScopes: [],
     })),
     publishWorkspaceEvent: vi.fn(),
@@ -249,16 +272,44 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
 
     const app = express();
     app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     handle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as unknown as DaemonWorkspaceService,
       fsFactory: workspaceRegistry.primary.routeFileSystemFactory,
       enabled: true,
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          workspaceRegistry.listManaged().map((runtime) => runtime.bridge),
+        getPersistenceTargets: () =>
+          workspaceRegistry.listManaged().map((runtime) => ({
+            workspaceCwd: runtime.workspaceCwd,
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          })),
+        getBridgeWorkspaceId: (bridge) =>
+          workspaceRegistry
+            .listEntries()
+            .find((entry) => entry.current?.runtime.bridge === bridge)
+            ?.workspaceId,
+      }),
       daemonEnv: {
         ...process.env,
         HTTPS_PROXY: 'http://primary-proxy.example:8080',
       },
       workspaceRegistry,
+      extraWsRoutes: [
+        {
+          path: '/test-extra',
+          bypassPrimaryDrain: true,
+          onConnection: (ws) => {
+            ws.send('extra-ready');
+            ws.close(1000, 'done');
+          },
+        },
+        { path: '/test-primary-extra', onConnection: () => {} },
+      ],
       deviceFlowRegistry,
       cdpTunnelOverWs: true,
       cdpTunnelRegistry: cdpRegistry,
@@ -606,6 +657,313 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(primaryBridge.executeShellCommand).not.toHaveBeenCalled();
   });
 
+  it('shares caller-supplied sessionId admission across primary and qualified mounts', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440181';
+    let releasePrimary!: () => void;
+    const primaryGate = new Promise<void>((resolve) => {
+      releasePrimary = resolve;
+    });
+    vi.mocked(primaryBridge.spawnOrAttach).mockImplementationOnce(
+      async (request) => {
+        await primaryGate;
+        return {
+          sessionId: request.sessionId!,
+          workspaceCwd: request.workspaceCwd,
+          attached: false,
+          clientId: 'primary-client',
+        };
+      },
+    );
+
+    const primary = sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(primaryBridge.spawnOrAttach).toHaveBeenCalledOnce(),
+    );
+
+    const secondary = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws-b',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    expect(secondary['error']).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'pending',
+      },
+    });
+    expect(secondaryBridge.spawnOrAttach).not.toHaveBeenCalled();
+
+    releasePrimary();
+    await expect(primary).resolves.toMatchObject({
+      result: { sessionId },
+    });
+  });
+
+  it('uses the concrete primary bridge generation for restore admission', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440182';
+    await writeStoredSession(sessionId, '/ws');
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    primaryBridge.loadSession = vi.fn(async (request) => {
+      await restoreGate;
+      return {
+        sessionId,
+        workspaceCwd: request.workspaceCwd,
+        attached: false,
+        clientId: request.clientId ?? 'old-primary-client',
+        state: {},
+        hasActivePrompt: false,
+      };
+    });
+
+    const first = sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/load',
+      params: { sessionId, workspaceCwd: '/ws' },
+    });
+    await vi.waitFor(() =>
+      expect(primaryBridge.loadSession).toHaveBeenCalledOnce(),
+    );
+
+    const entry = workspaceRegistry.primaryEntry;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    const replacementBridge = makeBridge();
+    replacementBridge.resumeSession = vi.fn(async (request) => ({
+      sessionId,
+      workspaceCwd: request.workspaceCwd,
+      attached: false,
+      clientId: request.clientId ?? 'new-primary-client',
+      state: {},
+      hasActivePrompt: false,
+    }));
+    workspaceRegistry.activateReplacement(
+      entry,
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: replacementBridge,
+      }),
+      'policy-2',
+    );
+
+    const second = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/resume',
+      params: { sessionId, workspaceCwd: '/ws' },
+    });
+    expect(second['error']).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_workspace_conflict',
+        conflict: 'pending',
+        workspaceId: 'primary-id',
+      },
+    });
+    expect(replacementBridge.resumeSession).not.toHaveBeenCalled();
+
+    releaseRestore();
+    await expect(first).resolves.toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(primaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+  });
+
+  it('rolls back session/new when its generation changes while building the response', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440183';
+    let releaseContext!: () => void;
+    const contextGate = new Promise<void>((resolve) => {
+      releaseContext = resolve;
+    });
+    primaryBridge.getSessionContextStatus = vi.fn(async () => {
+      await contextGate;
+      return { v: 1 as const, sessionId, workspaceCwd: '/ws', state: {} };
+    });
+
+    const pending = sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(primaryBridge.getSessionContextStatus).toHaveBeenCalledOnce(),
+    );
+
+    const entry = workspaceRegistry.primaryEntry;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    workspaceRegistry.activateReplacement(
+      entry,
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: makeBridge(),
+      }),
+      'policy-2',
+    );
+    releaseContext();
+
+    await expect(pending).resolves.toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(primaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+  });
+
+  it('rolls back session/fork through the bridge generation that created it', async () => {
+    let releaseFork!: () => void;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    primaryBridge.branchSession = vi.fn(async (sessionId) => {
+      await forkGate;
+      return {
+        sessionId: 'forked-primary-session',
+        workspaceCwd: '/ws',
+        attached: false,
+        clientId: 'forked-primary-client',
+        state: {},
+        displayName: 'Forked primary session',
+        forkedFrom: { sessionId, displayName: sessionId },
+      };
+    });
+    const pending = sendWsRequests('/acp', [
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { workspaceCwd: '/ws' },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'session/fork',
+        params: { sessionId: 'primary-session' },
+      },
+    ]);
+    await vi.waitFor(() =>
+      expect(primaryBridge.branchSession).toHaveBeenCalledOnce(),
+    );
+
+    const replacementBridge = makeBridge();
+    const entry = workspaceRegistry.primaryEntry;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    workspaceRegistry.activateReplacement(
+      entry,
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: replacementBridge,
+      }),
+      'policy-2',
+    );
+    releaseFork();
+
+    const responses = await pending;
+    expect(responses[1]).toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(primaryBridge.killSession).toHaveBeenCalledWith(
+      'forked-primary-session',
+      { requireZeroAttaches: true },
+    );
+    expect(replacementBridge.killSession).not.toHaveBeenCalled();
+  });
+
+  it('uses the registry generation guard for qualified ACP mounts', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440184';
+    let releaseContext!: () => void;
+    const contextGate = new Promise<void>((resolve) => {
+      releaseContext = resolve;
+    });
+    secondaryBridge.getSessionContextStatus = vi.fn(async () => {
+      await contextGate;
+      return { v: 1 as const, sessionId, workspaceCwd: '/ws-b', state: {} };
+    });
+
+    const pending = sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws-b',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(secondaryBridge.getSessionContextStatus).toHaveBeenCalledOnce(),
+    );
+
+    const entry = workspaceRegistry.getEntryByWorkspaceId('secondary-id')!;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    releaseContext();
+
+    await expect(pending).resolves.toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(secondaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+  });
+
   it('rejects a body workspaceCwd that differs from the selected mount', async () => {
     const response = await sendWsRequest('/workspaces/secondary-id/acp', {
       jsonrpc: '2.0',
@@ -683,7 +1041,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(res.status).toBe(200);
   });
 
-  it('reserves Live creation and relocates compatible ACP restores before exposing them', async () => {
+  it('rejects workspace-qualified ACP access to the Live runtime', async () => {
     const liveBridge = makeBridge();
     const restoreSession = async (req: { sessionId: string }) => ({
       sessionId: req.sessionId,
@@ -726,246 +1084,53 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       }),
     );
 
-    const rejectedNew = await sendWsRequest('/workspaces/live-id/acp', {
-      jsonrpc: '2.0',
-      id: 40,
-      method: 'session/new',
-      params: {},
-    });
-    expect(rejectedNew['error']).toMatchObject({
-      code: -32602,
-      data: { errorKind: 'live_session_creation_reserved' },
-    });
-    expect(liveBridge.spawnOrAttach).not.toHaveBeenCalled();
-
-    const rejectedFork = await sendWsRequest('/workspaces/live-id/acp', {
-      jsonrpc: '2.0',
-      id: 46,
-      method: 'session/fork',
-      params: { sessionId: 'live-session' },
-    });
-    expect(rejectedFork['error']).toMatchObject({
-      code: -32602,
-      data: { errorKind: 'live_session_creation_reserved' },
-    });
-    expect(liveBridge.branchSession).not.toHaveBeenCalled();
-
-    await writeStoredSession('generic-session', '/live-root');
-    const restoredProjectless = await sendWsRequest('/workspaces/live-id/acp', {
-      jsonrpc: '2.0',
-      id: 41,
-      method: 'session/load',
-      params: { sessionId: 'generic-session' },
-    });
-    expect(restoredProjectless['result']).toMatchObject({});
-    expect(materializeLiveConversationDirectory).toHaveBeenCalledWith(
-      'generic-session',
-    );
-    expect(loadSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: 'generic-session',
-        workspaceCwd: '/live-root',
-      }),
-    );
-    expect(changeSessionCwd).toHaveBeenCalledWith('generic-session', {
-      path: '/live-root/conversation-generic-session',
-      allowedRoots: ['/live-root'],
-      managedRelocation: 'live-conversation',
-    });
-    materializeLiveConversationDirectory.mockClear();
-    loadSession.mockClear();
-    changeSessionCwd.mockClear();
-
-    const foreignWorkspace = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-live-foreign-workspace-'),
-    );
-    try {
-      await writeStoredSession('foreign-live-session', foreignWorkspace, {
-        sourceType: 'default',
-        sourceId: 'realtime_voice:p1:h1:a1:foreign-call',
+    for (const route of [
+      '/workspaces/live-id/acp',
+      '/workspaces/%2Flive-root/acp',
+    ]) {
+      const response = await postInitialize(route);
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        code: 'workspace_mismatch',
       });
-      const rejectedForeignLoad = await sendWsRequest(
-        '/workspaces/live-id/acp',
-        {
-          jsonrpc: '2.0',
-          id: 47,
-          method: 'session/load',
-          params: {
-            sessionId: 'foreign-live-session',
-            cwd: foreignWorkspace,
-          },
-        },
-      );
-      expect(rejectedForeignLoad['error']).toMatchObject({ code: -32602 });
-      expect(materializeLiveConversationDirectory).not.toHaveBeenCalled();
-      expect(loadSession).not.toHaveBeenCalled();
-    } finally {
-      await fsp.rm(foreignWorkspace, { recursive: true, force: true });
     }
 
-    await writeStoredSession('live-session', '/live-root', {
-      sourceType: 'default',
-      sourceId: 'realtime_voice:p1:h1:a1:call-1',
-    });
-    const restored = await sendWsRequest('/workspaces/live-id/acp', {
-      jsonrpc: '2.0',
-      id: 42,
-      method: 'session/load',
-      params: { sessionId: 'live-session' },
-    });
-    expect(restored['result']).toMatchObject({});
-    expect(materializeLiveConversationDirectory).toHaveBeenCalledWith(
-      'live-session',
-    );
-    expect(loadSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: 'live-session',
-        workspaceCwd: '/live-root',
-        sourceType: 'default',
-        sourceId: 'realtime_voice:p1:h1:a1:call-1',
-      }),
-    );
-    expect(changeSessionCwd).toHaveBeenCalledWith('live-session', {
-      path: '/live-root/conversation-live-session',
-      allowedRoots: ['/live-root'],
-      managedRelocation: 'live-conversation',
-    });
-    expect(
-      materializeLiveConversationDirectory.mock.invocationCallOrder[0],
-    ).toBeLessThan(loadSession.mock.invocationCallOrder[0]!);
-    expect(loadSession.mock.invocationCallOrder[0]).toBeLessThan(
-      changeSessionCwd.mock.invocationCallOrder[0]!,
-    );
-
-    activeLiveSessionIds.add('live-session');
-    const blockedClose = await new Promise<Record<string, unknown>>(
-      (resolve, reject) => {
-        const ws = new WebSocket(
-          `ws://127.0.0.1:${port}/workspaces/live-id/acp`,
-          { handshakeTimeout: 2000 },
-        );
-        ws.on('open', () => ws.send(INITIALIZE));
-        ws.on('message', (data: WebSocket.RawData) => {
-          const message = JSON.parse(data.toString()) as Record<
-            string,
-            unknown
-          >;
-          if (message['id'] === 1) {
-            ws.send(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                id: 2,
-                method: 'session/load',
-                params: { sessionId: 'live-session' },
-              }),
-            );
-          } else if (message['id'] === 2) {
-            ws.send(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                id: 3,
-                method: 'session/close',
-                params: { sessionId: 'live-session' },
-              }),
-            );
-          } else if (message['id'] === 3) {
-            ws.close();
-            resolve(message);
-          }
-        });
-        ws.on('error', reject);
-      },
-    );
-    expect(blockedClose['error']).toMatchObject({
-      code: -32600,
-      data: {
-        errorKind: 'live_session_active',
-        httpStatus: 409,
-        sessionId: 'live-session',
-      },
-    });
-    for (const [id, method] of [
-      [48, '_qwen/sessions/archive'],
-      [49, '_qwen/sessions/delete'],
-    ] as const) {
-      const blocked = await sendWsRequest('/workspaces/live-id/acp', {
+    await expect(
+      sendWsRequest('/workspaces/live-id/acp', {
         jsonrpc: '2.0',
-        id,
-        method,
-        params: { sessionIds: ['live-session'] },
-      });
-      expect(blocked['error']).toMatchObject({
-        code: -32600,
-        data: {
-          errorKind: 'live_session_active',
-          httpStatus: 409,
-          sessionId: 'live-session',
-        },
-      });
-    }
-    expect(liveBridge.closeSession).not.toHaveBeenCalled();
-    activeLiveSessionIds.delete('live-session');
-
-    await writeStoredSession('live-resume', '/live-root', {
-      sourceType: 'default',
-      sourceId: 'realtime_voice:p1:h1:a1:call-2',
-    });
-    const resumed = await sendWsRequest('/workspaces/live-id/acp', {
-      jsonrpc: '2.0',
-      id: 43,
-      method: 'session/resume',
-      params: { sessionId: 'live-resume' },
-    });
-    expect(resumed['result']).toMatchObject({});
-    expect(resumeSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: 'live-resume',
-        workspaceCwd: '/live-root',
-        sourceType: 'default',
-        sourceId: 'realtime_voice:p1:h1:a1:call-2',
+        id: 40,
+        method: 'session/load',
+        params: { sessionId: 'live-session' },
       }),
-    );
-    expect(changeSessionCwd).toHaveBeenCalledWith('live-resume', {
-      path: '/live-root/conversation-live-resume',
-      allowedRoots: ['/live-root'],
-      managedRelocation: 'live-conversation',
-    });
-
-    await writeStoredSession('live-active', '/live-root', {
-      sourceType: 'default',
-      sourceId: 'realtime_voice:p1:h1:a1:call-active',
-    });
-    const active = await sendWsRequest('/workspaces/live-id/acp', {
-      jsonrpc: '2.0',
-      id: 44,
-      method: 'session/load',
-      params: { sessionId: 'live-active' },
-    });
-    expect(active['result']).toMatchObject({});
-    expect(changeSessionCwd).not.toHaveBeenCalledWith(
-      'live-active',
-      expect.anything(),
-    );
-
-    await writeStoredSession('live-active-root', '/live-root', {
-      sourceType: 'default',
-      sourceId: 'realtime_voice:p1:h1:a1:call-active-root',
-    });
-    const activeAtRoot = await sendWsRequest('/workspaces/live-id/acp', {
-      jsonrpc: '2.0',
-      id: 45,
-      method: 'session/load',
-      params: { sessionId: 'live-active-root' },
-    });
-    expect(activeAtRoot['error']).toMatchObject({ code: -32603 });
-    expect(liveBridge.detachClient).toHaveBeenCalledWith(
-      'live-active-root',
-      'live-client',
-    );
-    expect(liveBridge.killSession).not.toHaveBeenCalledWith(
-      'live-active-root',
-      expect.anything(),
-    );
+    ).rejects.toThrow('Unexpected server response: 400');
+    await expect(
+      sendWsRequest('/workspaces/%2Flive-root/acp', {
+        jsonrpc: '2.0',
+        id: 41,
+        method: 'session/load',
+        params: { sessionId: 'live-session' },
+      }),
+    ).rejects.toThrow('Unexpected server response: 400');
+    for (const route of [
+      '/workspaces/live-id/voice/stream',
+      '/workspaces/%2Flive-root/voice/stream',
+    ]) {
+      await expect(
+        new Promise<void>((resolve, reject) => {
+          const ws = new WebSocket(`ws://127.0.0.1:${port}${route}`, {
+            handshakeTimeout: 2_000,
+          });
+          ws.on('open', () => {
+            ws.close();
+            resolve();
+          });
+          ws.on('error', reject);
+        }),
+      ).rejects.toThrow('Unexpected server response: 400');
+    }
+    expect(liveBridge.spawnOrAttach).not.toHaveBeenCalled();
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(resumeSession).not.toHaveBeenCalled();
   });
 
   it('forwards unexpected legacy POST failures to Express', async () => {
@@ -995,12 +1160,29 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     ]);
     const app = express();
     app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     const singleHandle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as DaemonWorkspaceService,
       enabled: true,
       workspaceRegistry: registry,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          registry.listManaged().map((runtime) => runtime.bridge),
+        getPersistenceTargets: () =>
+          registry.listManaged().map((runtime) => ({
+            workspaceCwd: runtime.workspaceCwd,
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          })),
+        getBridgeWorkspaceId: (bridge) =>
+          registry
+            .listEntries()
+            .find((entry) => entry.current?.runtime.bridge === bridge)
+            ?.workspaceId,
+      }),
     })!;
     const singleServer = await new Promise<Server>((resolve) => {
       const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
@@ -1580,6 +1762,41 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(response).toEqual({ status: 503, retryAfter: '5' });
   });
 
+  it('does not apply primary ACP drain to an extra WebSocket route', async () => {
+    handle!.beginWorkspaceDrain('primary-id');
+
+    const message = await new Promise<string>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/test-extra`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('message', (data: WebSocket.RawData) => resolve(data.toString()));
+      ws.on('error', reject);
+    });
+
+    expect(message).toBe('extra-ready');
+  });
+
+  it('keeps primary-scoped extra routes behind the primary drain gate', async () => {
+    handle!.beginWorkspaceDrain('primary-id');
+
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/test-primary-extra`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('unexpected-response', (_req, res) => {
+        resolve(res.statusCode);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('primary-scoped extra route should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(status).toBe(503);
+  });
+
   it('rejects unowned and spoofed correlation frames during drain', async () => {
     const replies = await new Promise<Array<Record<string, unknown>>>(
       (resolve, reject) => {
@@ -1721,16 +1938,68 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       jsonrpc: '2.0',
       id: 2,
       method: '_qwen/workspace/memory/remember',
-      params: { content: 'secondary-only memory' },
+      params: { content: 'shared memory', scope: 'user' },
     });
 
     await vi.waitFor(() => {
       expect(secondaryBridge.runWorkspaceMemoryRemember).toHaveBeenCalledWith({
-        content: 'secondary-only memory',
+        content: 'shared memory',
         contextMode: 'workspace',
+        scope: 'user',
       });
     });
     expect(primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported workspace remember scope before the bridge', async () => {
+    const reply = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/memory/remember',
+      params: { content: 'wrong scope', scope: 'global' },
+    });
+
+    expect(reply).toMatchObject({
+      error: {
+        code: -32602,
+        message: '`scope` must be "project", "user", or omitted',
+      },
+    });
+    expect(secondaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+  });
+
+  it('runs secondary workspace forget tasks on the secondary bridge with scope', async () => {
+    await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/memory/forget',
+      params: { query: 'old preference', scope: 'user' },
+    });
+
+    await vi.waitFor(() => {
+      expect(secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledWith({
+        query: 'old preference',
+        scope: 'user',
+      });
+    });
+    expect(primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported workspace forget scope before the bridge', async () => {
+    const reply = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/memory/forget',
+      params: { query: 'wrong scope', scope: 'global' },
+    });
+
+    expect(reply).toMatchObject({
+      error: {
+        code: -32602,
+        message: '`scope` must be "project", "user", or omitted',
+      },
+    });
+    expect(secondaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
   });
 
   it('rejects a WS upgrade to an unknown workspace selector', async () => {

@@ -244,6 +244,7 @@ export const directoryCommand: SlashCommand = {
                 const {
                   memoryContent,
                   fileCount,
+                  contextFilePaths,
                   conditionalRules,
                   projectRoot,
                 } = await loadServerHierarchicalMemory(
@@ -255,13 +256,15 @@ export const directoryCommand: SlashCommand = {
                   context.services.settings.merged.context?.importFormat ||
                     'tree',
                   config.getContextRuleExcludes(),
+                  { extensionRuleSources: config.getExtensionRuleSources() },
                 );
                 config.setUserMemory(memoryContent);
-                config.setGeminiMdFileCount(fileCount);
+                config.setMemoryFileCount(fileCount);
+                config.setContextFilePaths(contextFilePaths);
                 config.setConditionalRulesRegistry(
                   new ConditionalRulesRegistry(conditionalRules, projectRoot),
                 );
-                context.ui.setGeminiMdFileCount(fileCount);
+                context.ui.setMemoryFileCount(fileCount);
                 messages.push(
                   t(
                     'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
@@ -279,7 +282,7 @@ export const directoryCommand: SlashCommand = {
           }
 
           if (added.length > 0) {
-            const gemini = config.getGeminiClient();
+            const gemini = config.getLlmClient();
             if (gemini) {
               try {
                 await gemini.addDirectoryContext();

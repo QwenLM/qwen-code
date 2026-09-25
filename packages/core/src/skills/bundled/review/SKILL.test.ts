@@ -8,6 +8,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  BuiltinAgentRegistry,
+  REVIEW_BUILTIN_SUBAGENT_TYPE,
+} from '../../../subagents/builtin-agents.js';
 
 const skillDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,8 +20,22 @@ const skillDir = path.dirname(fileURLToPath(import.meta.url));
 const POINTER_RE = /\(measured; DESIGN\.md — ([^()\n]+(?:\([^()\n]*\))?)\)/g;
 const POINTER_OPEN = '(measured; DESIGN.md — ';
 
-function skillBody(): string {
+// The verdict-gated reference files (#9787): Step 7, Step 8 and the Aone
+// paths live beside the core body and are read on demand. The split moved
+// whole sections verbatim, so every revert guard below governs the full
+// corpus, whichever file the guarded text now lives in.
+const REFERENCE_FILES = ['posting.md', 'persistence.md', 'aone.md'];
+
+function coreBody(): string {
   return fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+}
+
+function referenceBody(name: string): string {
+  return fs.readFileSync(path.join(skillDir, 'references', name), 'utf8');
+}
+
+function skillBody(): string {
+  return [coreBody(), ...REFERENCE_FILES.map(referenceBody)].join('\n');
 }
 
 function incidentPointers(body: string): string[] {
@@ -33,6 +51,106 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
+  it('composes EVERY decided stop — a refused re-rule must not hide behind a clean-stop exit', () => {
+    // `qwen review run` completes a decided stop only when a composed
+    // verdict exists: a nothing-open ledger composes a no-event Comment,
+    // and a stop with no composed artifact is a re-rule the compose gate
+    // refused — exit 1, never a silent exit 0 over standing blockers.
+    const body = skillBody();
+    expect(body).toContain('the stop STILL composes before stopping');
+    expect(body).toContain('`stopReRule: { dispositions: [] }`');
+    expect(body).toContain('decided stop with no composed artifact');
+  });
+
+  it('rules an unplanned declarer under the eighth coverage failure, not a ninth', () => {
+    // `check-coverage` names a declarer whose chunk id the plan does not
+    // carry in the SAME `ERROR:` line as the planned ones, so the skill's
+    // eight rulings still cover everything the gate prints.
+    const body = skillBody();
+    expect(body).toContain(
+      'It reports eight failures, and they are not the same:',
+    );
+    // INSIDE the eighth bullet, not a bullet of its own — a ninth bullet
+    // would be a ninth failure with nothing in the gate to match it.
+    const eighth = body
+      .split('\n')
+      .find((l) => l.startsWith('- **Chunks declared uncoverable**'));
+    expect(eighth).toContain(
+      'The same line also names a declarer whose chunk id this plan does not carry',
+    );
+    expect(eighth).toContain(
+      'it is listed by that id but is no chunk of this plan',
+    );
+    expect(eighth).toContain(
+      'if you relay it in `uncoverableChunks`, write the bare `chunk <id>`',
+    );
+    expect(eighth).toContain('under the same ruling.');
+  });
+
+  it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
+    // The stop gate cannot tell "every anchored path vanished" from
+    // "anchored paths sit byte-identical to the reviewed round" — the slice
+    // empties in both shapes — so the bullet must split the ledger by CITED
+    // PATHS instead of reporting it wholesale: findings whose cited bytes
+    // are gone are SUPERSEDED, never still-standing blockers; findings whose
+    // cited file still stands render as still-standing, exactly as the
+    // unchanged-since-last-round bullet does. Reporting the list wholesale
+    // rendered a standing Critical SUPERSEDED while its bytes still filled
+    // the tree, and the stop never surfaced it again.
+    const body = skillBody();
+    expect(body).toContain('nothingToReview: { reason: "scope-emptied" }');
+    expect(body).toContain('SUPERSEDED');
+    expect(body).toContain(
+      'Never render these findings as still-standing blockers',
+    );
+    // The split itself: the gate's blind spot named, and the still-standing
+    // half routed to the unchanged bullet's rendering.
+    expect(body).toContain('the stop gate does not distinguish the two');
+    expect(body).toContain(
+      "split the cache's still-open findings by their CITED PATHS",
+    );
+    // R17-2: presence is NOT the key — a discarded change leaves the file
+    // present with the cited bytes gone, and no other channel names those
+    // paths. The capture publishes the machine-readable split key and the
+    // bullet must route through it, both membership directions.
+    expect(body).toContain('`incremental.scope.supersededPaths`');
+    expect(body).toContain('a discarded change leaves the file present');
+    expect(body).toContain('IS IN `supersededPaths`');
+    expect(body).toContain('NOT in the list sits byte-identical');
+    expect(body).not.toContain(
+      'A finding whose cited file is STILL PRESENT in the tree',
+    );
+    // The old routing, which sent the branch down the verbatim-standing
+    // path, must not survive anywhere in the skill.
+    expect(body).not.toContain(
+      "Render the cache's still-open findings exactly as the two branches above do",
+    );
+    // …and neither may the wholesale-SUPERSEDED instruction the split
+    // replaced: a list reported without the path split re-opens the defect.
+    expect(body).not.toContain('Name each still-open finding');
+  });
+
+  it('keeps the file-review plan family outside every cleanup sweep prefix', () => {
+    // Step 9 sweeps `.qwen/tmp/qwen-review-<target>-*`, and ANY
+    // `qwen-review-…` family sits inside SOME target's sweep — the target
+    // whose token prefixes it. A file literally named `file` (or
+    // `file-<X>`) cleaning up while another file review ran swept that
+    // review's live plan mid-round (measured), because file reviews take no
+    // lease and the plan is re-read all round long. The per-run plan family
+    // — the one carrying `<HHMMSS>` — must therefore not start with
+    // `qwen-review-`, which is what makes the Step 9 contract "cleanup must
+    // never glob its family" structurally true.
+    const body = skillBody();
+    const templates = [
+      ...body.matchAll(/\.qwen\/tmp\/([^\n]+?-plan\.json)/g),
+    ].map((m) => m[1]);
+    const perRun = templates.filter((t) => t.includes('<HHMMSS>'));
+    expect(perRun.length).toBeGreaterThan(0);
+    for (const t of perRun) {
+      expect(t.startsWith('qwen-review-')).toBe(false);
+    }
+  });
+
   it('anchors every SKILL.md incident pointer at a DESIGN.md heading', () => {
     const body = skillBody();
     const pointers = incidentPointers(body);
@@ -78,6 +196,2001 @@ describe('bundled review skill', () => {
   it('pins the setup-batch ordering constraints', () => {
     const body = skillBody();
     expect(body).toContain('`fetch-pr` before all of them');
-    expect(body).toContain('`agent-prompt --roster` after the rules load');
+    expect(body).toContain('`emit-workflow` after the rules load');
+    // The re-run ordering, same class as the two above and newer. A side-file
+    // `--since` re-run rewrites the fetch report from scratch, while
+    // `repo-context` enriches that same file in place: run in the other
+    // order the enrichment is silently discarded and the roster builds
+    // without the manifest's required agents.
+    expect(body).toContain(
+      '**any side-file `fetch-pr --since` re-run before `repo-context`**',
+    );
+  });
+
+  it('pins the pre-verify carried-ledger dedup as a mechanical step (#10105)', () => {
+    const body = coreBody();
+    // The command, not prose: the whole point is that the model is out of
+    // the matching loop, in the spirit of the script-lint gate.
+    expect(body).toContain('review dedup-candidates --plan');
+    // The kept list is what shards — a run that shards the raw union pays
+    // the verify cost the step exists to end.
+    expect(body).toContain(
+      "**Build the verify shards from the report's `kept` list only.**",
+    );
+    // The safe-to-be-wrong direction, both halves: the severity guard and
+    // the posting-layer backstop.
+    expect(body).toContain(
+      'a Critical candidate never drops against a non-Critical entry',
+    );
+    expect(body).toContain(
+      "the posting layer's duplicate drop remains the backstop",
+    );
+    // A dropped candidate's claim survives through the Step 6 ruling — the
+    // sentence that licenses dropping it at all.
+    expect(body).toContain(
+      'a matched posted finding is a ledger entry Step 6 still rules on',
+    );
+    // The pair's reporting transition routes its fresh findings through the
+    // same command (the string occurs in BOTH pair bullets, pinned below),
+    // or the leak reopens the first time a convergence pair reports.
+    expect(body).toContain('the report accumulates within the round');
+    // The ordering the transition owes: the carried-ledger dedup runs BEFORE
+    // the pair's findings merge into the cumulative list, and only its
+    // `kept` list merges. Merging first and deduping after strands every
+    // dropped candidate in the list under its `— [unverified]` tag — never
+    // sharded, never verdict-ruled — and the tag backstop relaunches the
+    // very verifier this step exists to save (or a budget-refused relaunch
+    // leaves the tag for `compose-review` to cap the verdict on).
+    expect(body).toContain(
+      "merge ONLY the report's `kept` list into the cumulative list",
+    );
+    expect(body).toContain(
+      'Dropped candidates never enter the cumulative findings file',
+    );
+    // The 3B pair bullet carries the same clause — a large-diff re-review
+    // with open threads is the motivating shape of this feature, and its
+    // transition must shard the deduped `kept` list, not the raw union.
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section3B = body.slice(start, end);
+    expect(section3B).toContain("Step 4's carried-ledger dedup");
+    expect(section3B).toContain('merge only its `kept` list');
+    expect(section3B).toContain(
+      'dropped candidates never enter the cumulative findings file',
+    );
+  });
+
+  it('keeps the language-pitfall and wrapper/proxy checks as dedicated high-effort angles', () => {
+    // #9788: both rode inside Agent 1a's line-by-line brief as bullets, and
+    // the walk's rhythm diluted them — a checklist pattern-match and a
+    // structural routing expectation are different attention modes from
+    // judging each line in its context. Folding them back restores the
+    // dilution the split exists to remove.
+    const body = skillBody();
+    // The angles exist as roles of their own, listed among the selectors a
+    // relaunch rebuilds.
+    expect(body).toContain('`1d`');
+    expect(body).toContain('`1e`');
+    // 1e is high-only AND conditional on the plan's own signal — the gate
+    // fails safe (an absent field rosters it), which the skill states.
+    expect(body).toContain(
+      `rostered only when the plan's \`wrapperSignal\` is true`,
+    );
+    // And 1a no longer carries either clause folded into its row.
+    expect(body).not.toContain(
+      `the language's own pitfalls, and wrapper/proxy routing`,
+    );
+  });
+
+  it('keeps anchor validation inside the CLI, not in the orchestrator', () => {
+    // The whole point of routing the anchor through `--since`: a hand-run
+    // check is one a run can skip, and the skill forbids hand-computed diffs
+    // everywhere else. Reverting this section to the pre-`--since` wording
+    // restores `git cat-file` / `merge-base --is-ancestor` as orchestrator
+    // steps, and nothing else in this file notices — checking out the
+    // merge-base SKILL.md leaves every other test here green.
+    const body = skillBody();
+    // The bullet's OPENING, which is the only instruction that makes `--since`
+    // fire on the primary (cache) path at all. Repo-wide sweep found zero
+    // assertions naming the cache file or `lastCommitSha`, so a revert to the
+    // pre-PR ordering — cache read beside the fetch report, after `fetch-pr` —
+    // silently degrades every cached-anchor round to a full review.
+    expect(body).toContain(
+      'read `.qwen/review-cache/pr-<n>.json` **before** `fetch-pr`',
+    );
+    expect(body).toContain(
+      'pass BOTH fields to the fetch verbatim: `--since <lastCommitSha> ' +
+        '--since-model <lastModelId>`',
+    );
+    expect(body).toContain(
+      '**You never run `git` against an anchor yourself**',
+    );
+    // All three prohibitions. The two this test's own comment names — the
+    // hand-run `cat-file` and `merge-base --is-ancestor` — were covered by no
+    // assertion, so a partial revert restoring exactly the checks
+    // `fetch-pr --since` exists to own shipped green. (The age-rule pins
+    // further down name different commands with different operands, in a
+    // different section, and do not reach this sentence.)
+    expect(body).toContain('no `git diff <sha>..HEAD`');
+    expect(body).toContain('no `cat-file`, no `merge-base --is-ancestor`');
+    // The report field the check acts on, and the separation the reason
+    // taxonomy rests on: one field names the CAUSE, another says whether a
+    // plan exists.
+    expect(body).toContain(
+      '**Whether a PLAN exists is a separate field: `diffPath`.**',
+    );
+    // …and the re-run instruction, including the flag-replacement rule that
+    // keeps a second `--since` from reading as two anchors.
+    expect(body).toContain(
+      'REPLACING any `--since` it already carries, never appending a second one',
+    );
+  });
+
+  it('pins which refusal reasons the recovery flow may retry', () => {
+    // The orchestrator's recovery loop acts on this prose alone, and the
+    // producer deliberately manufactures both planless shapes. Deleting the
+    // retry exception strands the one shape a re-run fixes; widening the
+    // retryable set re-refuses a dead anchor every round forever.
+    const body = skillBody();
+    expect(body).toContain(
+      'Every other reason is deterministic for the same sha and must NOT be retried',
+    );
+    expect(body).toContain('Retry that one, once.');
+    // The once-cap's re-keyed shape: a base-less `capture-failed` is the
+    // retryable class, but git's exit status cannot split its transient
+    // member from its deterministic one (a deleted remote base exits 128
+    // identically), so the retry is bounded to one.
+    expect(body).toContain(
+      'One shape of `capture-failed` retries ONCE, not forever',
+    );
+    expect(body).toContain('`baseFetchFailed: true`');
+    // The re-key's premise: a planless partition failure cannot be
+    // base-less, so the cap no longer keys on `partition-failed` at all.
+    expect(body).toContain(
+      'a planless `partition-failed` always carries a `mergeBaseSha`',
+    );
+    // The narrowing reason is deterministic for the same sha like every other
+    // non-infrastructure one: the same two captures select the same hunks. A
+    // future edit moving it into the retryable set would re-narrow to nothing
+    // every round, forever.
+    expect(body).toContain('`nothing-to-narrow` re-narrows identically');
+    expect(body).toContain('found no common ancestor at all');
+    // The narrowing reason's definition in the enumeration and the retryable
+    // set's membership, pinned outright: the recovery loop reads both, and a
+    // rename of the one or a widening of the other ships green without them.
+    expect(body).toContain(
+      '`nothing-to-narrow` (the narrowing found nothing it could publish',
+    );
+    expect(body).toContain('(`base-untrusted`, `capture-failed`:');
+  });
+
+  it('records the range the round actually reviewed in provenance', () => {
+    // A saved report is read by someone who cannot re-derive its scope, so
+    // recording the merge base for a round that reviewed `diffBase..head`
+    // hands that reader a range the run never had.
+    // The whole rule, not its opening clause. The discriminating CONDITION
+    // and the fallback half were each pinned by nothing: deleting the
+    // condition, flipping it to `and upToDate`, or swapping the fallback for
+    // `fetchedSha` all shipped this file green, and each one records a scope
+    // the run never had.
+    expect(skillBody()).toContain(
+      '`incremental.diffBase` on a delta-scoped round (`incremental.effective` and no `upToDate`)',
+    );
+    expect(skillBody()).toContain('`mergeBaseSha` on every other');
+  });
+
+  it('pins the same-model gate on both incremental-anchor paths', () => {
+    // The gate is prompt-level, and it survived main's move of the scoping
+    // into `fetch-pr --since` (#9100) with its wording rewritten: the cache
+    // path must not PASS a cross-model anchor at all — `fetch-pr` validates
+    // an anchor against the history, never against who certified it, so a
+    // gate applied after the call is no gate — and the recovery path gates
+    // on the marker's own `model`, which this PR is what adds. A revert or
+    // paraphrase of either clause must fail here; the unit suites pin the
+    // identity's carriage, not these instructions.
+    const body = skillBody();
+    // Cache path: BOTH fields are copied to the command, and the gate is
+    // ruled there. Reverting to a hand-applied comparison is the bug, not the
+    // fix — `{{model}}` interpolates the bare id while every identity the CLI
+    // records is provider-qualified, so the two sides were never the same
+    // kind of string and two providers exposing one name compared equal.
+    expect(body).toContain(
+      '--since <lastCommitSha> --since-model <lastModelId>',
+    );
+    expect(body).toContain('**Copy them; do not compare them to anything.**');
+    expect(body).toContain('`cross-model-anchor`');
+    // No identity comparison may survive anywhere in the prompt: six review
+    // rounds closed one channel each and the next round found another, and
+    // this is what makes the class closed by construction rather than by
+    // another point fix.
+    expect(body).not.toMatch(/`lastModelId` equals/);
+    expect(body).not.toMatch(/model matches|model differs/);
+    // Recovery path: the marker carries the certifying identity now, so the
+    // "no `lastModelId` in the marker" premise main wrote against is gone.
+    expect(body).toContain('the marker carries `model` beside its `sha`');
+    expect(body).not.toContain('there is no `lastModelId` in the marker');
+    // …and, unlike the cache path, its gate is RULED BY THE CLI. The two
+    // identities are not comparable in prompt text — the marker's is
+    // provider-qualified, `{{model}}` is the bare id — so an instruction to
+    // compare them by hand is the bug, not the fix. Reverting to one must
+    // fail here.
+    expect(body).toContain(
+      '**the same-model gate on this path is RULED FOR YOU',
+    );
+    expect(body).toContain('do not compare the two identities yourself');
+    expect(body).not.toMatch(
+      /side file's anchor is passed as `--since` only when that `model` equals/,
+    );
+    // A section with no verdict at all is a mismatch, not a pass: the side
+    // file can outlive the round that vouched for it.
+    expect(body).toContain('A ledger section that states no verdict');
+    // …and the recovery path is reached from a cache-path WITHHOLD too, not
+    // only from an absent or refused anchor. Without that clause a round
+    // whose cache held another model's anchor stops at the cache and never
+    // looks at the marker — which may hold one this model certified.
+    expect(body).toContain(
+      'including the case where it HELD one that the cache-path gate withheld',
+    );
+    // The work list crosses models even when the anchor does not.
+    expect(body).toContain('the work list carries across models');
+  });
+
+  it('launches the 3B convergence pair in one generated workflow', () => {
+    // The pair's wall-clock saving exists only while both rounds go out
+    // together: a later edit serializing the skill while the prompt-builder
+    // tests stay green (they call each round builder themselves) restores
+    // the extra round wall. Bounded to the 3B section so the 3A pair's
+    // identical phrasing cannot satisfy it.
+    const body = skillBody();
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    expect(section).toContain('`--all-chunks --round 1`');
+    expect(section).toContain('`--all-chunks --round 2`');
+    expect(section).toContain('in one generated workflow');
+    expect(section).toContain('emit-workflow --batch');
+    // The reporting transition is the fix for the round-0 blocker; a revert
+    // dropping it must fail here, not slip through.
+    expect(section).toContain('wait for BOTH fan-outs');
+    expect(section).toContain('every shard passed as `--round 2`');
+  });
+
+  it('routes both initial topologies through the fixed workflow emitter', () => {
+    const body = coreBody();
+    for (const [start, end] of [
+      ['## Step 3A:', '## Step 3B:'],
+      ['## Step 3B:', '### Whole-file invariant agents'],
+    ]) {
+      const section = body.slice(body.indexOf(start), body.indexOf(end));
+      const commands = [...section.matchAll(/```bash\n([\s\S]*?)```/g)].map(
+        ([, command]) => command,
+      );
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toContain('review emit-workflow --plan');
+      expect(commands[0]).toContain('--rules');
+      expect(commands[0]).not.toContain('agent-prompt');
+      expect(section).toContain('foreground `workflow` call');
+    }
+    expect(body.split('---')[1]).toMatch(/^ {2}- workflow$/m);
+    expect(body).toContain('`run_in_background: false`, without `args`');
+    expect(body).not.toContain(
+      'invoking all `agent` tools in a **single response**',
+    );
+  });
+
+  it('keeps focused navigation on workflow dispatch without reverse auditors', () => {
+    const body = coreBody();
+    const start = body.indexOf('**Automatic navigation profile:**');
+    expect(start).toBeGreaterThan(-1);
+    const focused = body.slice(start, body.indexOf('\n\n', start));
+    expect(focused).toContain('`emit-workflow`');
+    expect(focused).toContain('`scriptPath`');
+    expect(focused).toContain('ONE foreground `workflow` call');
+    expect(focused).toContain('single `docs-nav` reviewer');
+    expect(focused).toContain('Skip Step 5 entirely');
+    expect(focused).not.toContain('agent-prompt --roster');
+
+    const batch = body.slice(
+      body.indexOf('### Batch verification'),
+      body.indexOf('**Do not write the verifier'),
+    );
+    expect(batch).toContain('except for `reviewProfile: "docs-nav"`');
+    expect(batch).toContain('in the same generated workflow');
+    expect(batch).toContain('combine all successful manifests');
+    expect(batch).toContain(
+      'At medium or for `reviewProfile: "docs-nav"`, there is no reverse audit',
+    );
+  });
+
+  it('makes every recorded follow-up command produce a manifest for the selected wave', () => {
+    const body = coreBody();
+    const commands = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].flatMap(
+      ([, block]) => block.split(/(?=^"\$\{QWEN_CODE_CLI:-qwen\}")/m),
+    );
+    const builders = commands.filter((command) =>
+      command.startsWith('"${QWEN_CODE_CLI:-qwen}" review agent-prompt '),
+    );
+    // invariant-a (Step 3D repair), verify (Step 4), the two reverse-audit
+    // builds (Step 5), and the Step 6B fix-audit — one agent, still a
+    // recorded follow-up, so still a manifest riding `emit-workflow
+    // --batch`, never a hand-carried prompt.
+    expect(builders).toHaveLength(5);
+    for (const command of builders) {
+      expect(command).toContain('--batch');
+      expect(command).toMatch(/> [^\n]+\.json/);
+      expect(command).not.toContain('| head');
+    }
+    expect(body).toContain('Never glob historical manifests or prompt records');
+    expect(body).toContain('include a manifest after exit 4/5');
+    expect(body).toContain('If no build succeeded, invoke no workflow');
+    expect(body).toContain("round _k+1_ plus round _k_'s verifier shards");
+    expect(body).toContain('Keep the worktree until the workflow has settled');
+    expect(body).toContain('recover any completed verifier results');
+    expect(body).not.toContain('stop waiting on it yourself');
+  });
+
+  it('pins the bounded-tail protocol on the round-cap bullet', () => {
+    // The ROUND CAP refusal message carries the same verify-only /
+    // compose-floor contract; a revert of the bullet's protocol hunk must
+    // fail a test, not slip through.
+    const body = skillBody();
+    expect(body).toContain('`agent-prompt --role verify` **only**');
+    expect(body).toContain('no fresh re-verification pass');
+  });
+
+  it('pins the relay-entry removal on the CONVERGED bullet', () => {
+    // The CONVERGED clear removes the marker on disk, but the entry an
+    // earlier stop refusal told the orchestrator to relay is orchestrator
+    // state — compose-review's dedup splice stops running once the marker
+    // is gone, so only this instruction recalls it. A revert of the
+    // sentence must fail a test, not slip through.
+    const body = skillBody();
+    expect(body).toContain('remove it now — this convergence supersedes');
+  });
+
+  it('pins the unbounded-family collapse and its load-bearing clauses', () => {
+    // Collapsing an unbounded family into one class-level finding is the whole
+    // point of the change. Each clause below carries a distinct obligation a
+    // "resolve the contradiction" follow-up is most likely to drop: the surface
+    // (not round-count) definition, the anti-enumeration collapse, and the
+    // structural-fix ruling. A paraphrase or revert of any must fail a test.
+    const body = skillBody();
+    expect(body).toContain('Boundedness is a property of the SURFACE');
+    expect(body).toContain(
+      'collapse the whole family into one class-level finding',
+    );
+    expect(body).toContain(
+      'Rule the class finding `fixed` only when the structural change lands',
+    );
+    // The rule must govern BOTH sibling paths: the open-blocker re-check routes an
+    // unbounded family to the collapse rule instead of enumerating (R3-1/R3-5), and
+    // so does the ledger `fixed` bullet's own routing clause (R5-140).
+    expect(body).toContain('apply the bounded/unbounded rule above instead');
+    expect(body).toContain(
+      'apply the bounded/unbounded rule below instead of filing the sibling',
+    );
+    // A resurfaced sibling of a collapsed family has its own disposition, so the
+    // re-check does not fall to still-stands / cannot-tell every round (R3-6).
+    expect(body).toContain('superseded by `<class-id>`');
+    // Supersession must not retire a proven blocker behind a weaker class finding:
+    // the strongest severity/confidence is preserved through the collapse (R5 R1-1).
+    expect(body).toContain('Supersession preserves the strongest evidence');
+    expect(body).toContain(
+      'at least the highest severity AND confidence any absorbed sibling demonstrated',
+    );
+    // The class finding must carry a demonstrated witness corner or it confirms
+    // only low, never posts, and the whole mechanism goes inert.
+    expect(body).toContain(
+      'The class finding carries one demonstrated entrance as its witness',
+    );
+  });
+
+  it('pins the enumeration-trap sentence in the 3b role-table row', () => {
+    // The role table is a digest, but the enumeration-trap sentence is this PR's
+    // stated purpose in the role contract; a revert/paraphrase must fail (R5-487).
+    expect(skillBody()).toContain('Also flags the **enumeration trap**');
+  });
+
+  it('pins the root-cause-as-one-finding rule against the pattern-merge', () => {
+    // The root-cause family must NOT go through the pattern-aggregation merge
+    // (severity promotion + per-location expansion → split ledger ids). A revert
+    // to "merge them into a single finding" via the merge path must fail here.
+    const body = skillBody();
+    expect(body).toContain(
+      'A root-cause family is one class-level finding, NOT a pattern-aggregation',
+    );
+    // The load-bearing clauses, not just the heading: root risk (not symptom-max)
+    // and root confidence (not symptom-max) — harmonising to highest-severity must
+    // fail here (R3-8).
+    expect(body).toContain(
+      'its severity is the demonstrated risk of the **root** (not the highest symptom)',
+    );
+    expect(body).toContain("at the **root's own confidence**");
+  });
+
+  it('pins the convergence posture and its load-bearing clauses', () => {
+    // The posture is the reviewer-side brake on the review→fix→re-review
+    // bloat loop. Each clause below carries a distinct obligation a later
+    // "simplify the prose" edit is most likely to drop: the floor's
+    // round-adaptive default, the axes-only Critical deferral rule, the
+    // record-not-request contract, and the age-reference/anchor distinction
+    // (conflating `commitId` with the ledger `sha` would scope an
+    // incremental review past scope a fail-closed round never certified).
+    const body = skillBody();
+    expect(body).toContain('Through round 5 the floor is `suggestion`');
+    expect(body).toContain('**from round 6 it is `critical`**');
+    // A Critical leaves the posting set by its AXES, never by severity, and
+    // only at floor `critical` (#10291): the one deferrable shape is named,
+    // the wrong-result and regression arms are pinned as always posting,
+    // the unclassified arm too, and the rounds-2–5 age rule is kept off
+    // Criticals.
+    expect(body).toContain(
+      'A Critical is deferred by its axes, never by its severity — and only at floor `critical`.',
+    );
+    expect(body).toContain(
+      '`direction: fails-closed` AND `baseline: new-surface`',
+    );
+    expect(body).toContain('Every other Critical posts');
+    expect(body).toContain('`certifies-falsely` at either baseline');
+    expect(body).toContain('`regression` in either direction');
+    expect(body).toContain('a blocker in doubt posts');
+    // The deferrable-set definition names the Critical shape where it is
+    // introduced, and the deterministic carve-out is scoped to Suggestions.
+    expect(body).toContain(
+      'plus, at floor `critical` only, the fails-closed/new-surface Criticals described below',
+    );
+    expect(body).toContain(
+      'a deterministic Critical the axes classify defers like any other axes-Critical',
+    );
+    // The orchestrator-side no-guess rule — the only instruction keeping the
+    // orchestrator from completing a deferrable pair — pinned like its
+    // verifier-side twin in agent-prompt.test.ts.
+    expect(body).toContain('an axis the verifier omitted stays absent');
+    expect(body).toContain("never fill one in from the finding's prose");
+    expect(body).toContain('a guess on EITHER axis of the pair');
+    // The in-band report copies the axes too — one copy list, not two.
+    expect(body).toContain(
+      '`summary`, `shortSummary`, `failureScenario`, `category`, `direction`, `baseline` — never re-typed',
+    );
+    expect(body).toContain(
+      'the rounds-2–5 code-age rule never touches a Critical',
+    );
+    expect(body).toContain('no issue is filed by the review');
+    expect(body).toContain('an **age reference, never an incremental anchor**');
+    expect(body).toContain('skip the age rule, not the review');
+    // The explicit knob's two directions: `critical` from round 1, and
+    // `suggestion` as the off switch — the operator override the default
+    // must never shadow.
+    expect(body).toContain(
+      '`critical` applies the Critical-only posture from round 1',
+    );
+    expect(body).toContain('`suggestion` turns the posture **off**');
+    // The deferrable set is what the floor takes away — never the
+    // terminal-only tiers: routing low-confidence or Nice-to-have findings
+    // through the deferral list would PUBLISH what the posting path never
+    // would (round-1 review finding).
+    expect(body).toContain(
+      'a non-Critical finding that would otherwise post is recorded, not requested',
+    );
+    expect(body).toContain('stay terminal-only exactly as before');
+    // Deferral publishes, so it owes verification like a posted finding —
+    // a deferrals-only APPROVE must not slip the verifier floor.
+    expect(body).toContain(
+      'an unverified claim does not become publishable by being deferred',
+    );
+    // ...and the entry is TYPED — one object per finding copied from the
+    // artifact's own fields, never a sentence: four review rounds of regex
+    // misses on the free-text form (kebab paths, the aggregate suffix, an
+    // en dash, a title-borne tag) closed only by carrying the fields.
+    expect(body).toContain(
+      "as a **TYPED entry, one object per finding, copied from the artifact's own fields**",
+    );
+    expect(body).toContain('never write that line into the state');
+    // The age command is hostile-input-hardened in both operands (round-1
+    // review findings: shell injection via unquoted PR-controlled filename;
+    // glob pathspec matching a sibling file). A "simplify the command"
+    // edit must fail here.
+    expect(body).toContain(
+      "git --literal-pathspecs diff <commitId>..HEAD --unified=0 -- '<file>'",
+    );
+    expect(body).toContain('neither hardening is optional');
+    // The embedded-apostrophe rule is load-bearing on its own: a legal name
+    // like `it's.ts` breaks the quoted token without it, and deleting only
+    // that clause left every other assertion green (round-5 review finding).
+    expect(body).toContain("a `'` inside the name becomes `'\\''`");
+    // The state carries the verdict's floor UNRESOLVED — a round-resolved
+    // `suggestion` is indistinguishable from the operator's explicit
+    // posture-off override, and passing it turned every legal rounds-2-5
+    // age deferral into an unlicensed one (round-5 review finding).
+    expect(body).toContain(
+      "verdict's `severityFloor` into the compose state UNRESOLVED",
+    );
+    // The age rule's premise needs the previous round to have READ the code
+    // it vouches for: scope that round disclosed as not reviewed gets no
+    // age suppression (round-1 review finding).
+    expect(body).toContain(
+      'a first-time Suggestion in code nobody read must post like any round-1 finding',
+    );
+    // The validation commands are the rebase-skip arm's only detection
+    // mechanism — without these pins, deleting the sentence leaves the
+    // skip-list's "fails the validation" clause dangling (round-7 finding).
+    expect(body).toContain('git cat-file -e <commitId>^{commit}');
+    expect(body).toContain('git merge-base --is-ancestor <commitId> HEAD');
+    // The two diff-output doubt states fail open (round-7 finding): a
+    // non-matching pathspec is about the path, and a zero-hunk non-empty
+    // diff (a PR-controlled .gitattributes binary mark) is a change.
+    expect(body).toContain("git cat-file -e HEAD:'<file>'");
+    expect(body).toContain('zero `@@` hunks');
+    // Multi-location findings have exactly one governing rule under the age
+    // gate (round-7 finding).
+    expect(body).toContain('A pattern aggregate is aged per location');
+    // The posture round's source of truth and the context-unavailable
+    // resolution (round-7 findings): the cache never decides the posture,
+    // and a degraded run fails open to full posting at round 1.
+    expect(body).toContain(
+      'the round that decides the posture is the SIDE FILE',
+    );
+    expect(body).toContain('no recovered ledger → round 1 → no posture');
+    expect(body).toContain('treat `auto` as round 1: no posture, full posting');
+    // The age rule is auto-only: an explicit `suggestion` floor is the
+    // operator saying "post everything", and the age gate deferring under it
+    // would contradict the override (round-2 review finding).
+    expect(body).toContain(
+      'never under an explicit `--severity-floor suggestion`',
+    );
+    // Deferral is a posting decision: the finding stays in the artifact, and
+    // the deferred list must never become ledger work for the next round.
+    expect(body).toContain(
+      'the deferral is a posting decision recorded in the compose state',
+    );
+    expect(body).toContain(
+      'Findings the convergence posture deferred stay out the same way',
+    );
+  });
+
+  it('rules the selection-drift line as a disclosure that owes no mid-round repair', () => {
+    // Both commands print it as a NOTE and exit 0, so without a ruling the
+    // orchestrator has two readings and both are wrong: ignore it, or act on
+    // its text — "re-capture the diff and re-plan" is Step 1, and rewriting
+    // the plan mid-round moves the mtime every prompt record and transcript
+    // of the round is fenced on.
+    const body = skillBody();
+    expect(body).toContain(
+      '**The coverage report may also carry `selectionDrift`**',
+    );
+    expect(body).toContain('It is a disclosure, not a ninth failure');
+    // Each phrase below occurs ONCE in the corpus — a pin on words another
+    // ruling also uses ("it owes **no relaunch**") stays green with this
+    // paragraph deleted.
+    expect(body).toContain('this NOTE owes no relaunch and no repair round');
+    expect(body).toContain(
+      '**Do not re-capture or re-plan mid-round**, whatever the line says.',
+    );
+    // …and it must not have been turned into a gate along the way.
+    expect(body).toContain('it moves no exit code, it caps nothing');
+    // The causes have different repairs; the ruling must not flatten them
+    // back into "the diff moved".
+    expect(body).toContain('an unreadable file may never have moved');
+    // Step 6 describes the NOTE lines beside the FIXes as withheld builds;
+    // the drift NOTE is the other kind, and that paragraph has to say so.
+    expect(body).toContain(
+      'One other `NOTE:` can sit there — `selection drift:`, ruled in Step 3D: a disclosure that posts no gap and owes nothing this round.',
+    );
+    // The causes, kept apart: flattened to "the diff moved" the ruling sends
+    // every one of them to the same repair.
+    expect(body).toContain(
+      "the diff file changed, was replaced or is gone; it could not be read; or the plan's chunk list or recorded identity does not match, or is not something this build can read",
+    );
+    for (const phrase of [
+      'It is a disclosure, not a ninth failure',
+      'this NOTE owes no relaunch and no repair round',
+      '**Do not re-capture or re-plan mid-round**, whatever the line says.',
+      // Report-only, in the skill's own words: flipped to "it is part of
+      // `ok`" the paragraph above stayed green.
+      'it is not part of `ok`, it moves no exit code, it caps nothing',
+      // A NOTE from both commands — the skill performs FIX lines.
+      '`compose-review` prints `NOTE: selection drift: …` beside its FIX lines',
+      // The positive instruction, and the reason that makes it one.
+      "Finish the round against the plan as written, and relay the line's own words in the terminal report",
+      "the plan file's mtime is the epoch every prompt record and transcript of this round is fenced on",
+      'an unreadable file may never have moved',
+      // Who records it, which command says it how, and why it only reports.
+      'every capture command records in the plan what the plan was computed from',
+      '`check-coverage` prints `NOTE: <what it found>`',
+      'The check has never fired on a real run; that is why it only reports',
+    ]) {
+      expect(body.split(phrase)).toHaveLength(2);
+    }
+  });
+
+  it('pins the composed body budget and its trim order', () => {
+    // A body over GitHub's limit is rejected whole — blockers included — so
+    // the trim ORDER is the policy: a later "simplify the prose" edit that
+    // drops it would leave the model free to shorten findings itself, which
+    // is the one thing this must never license.
+    const body = skillBody();
+    expect(body).toContain('rejected by the API **whole**');
+    expect(body).toContain('**the Chinese fold first**');
+    // All four ranks, in the order the ladder actually drops them. The
+    // enumeration named two of them while the code had four, so a reader
+    // taking the skill at its word placed the advisory and the observation
+    // wherever seemed reasonable — and the ranks are the policy.
+    expect(body).toContain(
+      'then the mechanism-health note, then the residual-risk advisory, then the deferral display, then the not-reviewed disclosures, then the convergence observation',
+    );
+    // The other half of the policy. A "simplify the prose" edit turning
+    // `never` into `last` would leave every prefix pin matching while the
+    // skill started licensing the one trim this budget exists to refuse.
+    expect(body).toContain(
+      '**the blockers, the undecided-blocker list and the sentences that qualify the verdict never**',
+    );
+    // The last-resort cut has its own order, and it is the opposite of the
+    // rung order above: there, the undecided list never yields; here, it is
+    // the first thing spent, because the author already has it.
+    expect(body).toContain(
+      "it spends the sentences the author already received in an earlier round — the undecided-blocker list — before this round's body Criticals",
+    );
+    // The placement rule is what keeps the last resort bounded: a notice
+    // below the cut has to survive whatever the cut left open, and three
+    // hand models of that shipped three classes of divergence.
+    expect(body).toContain(
+      '**that notice rides above the cut, with the others**',
+    );
+    expect(body).toContain('You do not shorten anything yourself to help it');
+    // Where a trimmed section can still be read is not uniform, and the
+    // generalized promise ("stays whole in the artifact") is false for the
+    // disclosures: the artifact persists findings, counts and the trimmed
+    // body. Pin the split, and the terminal-summary duty it creates.
+    expect(body).toContain(
+      '**a finding it trims stays whole in the findings artifact**',
+    );
+    expect(body).toContain(
+      '**A trimmed disclosure section is not a finding and has no other durable copy**',
+    );
+    // ...and the exception, so the terminal-summary duty above is asked for
+    // where it is actually owed. Both convergence paragraphs keep a copy on
+    // the composed verdict and on stderr, which is why the trim line names
+    // WHICH of the dropped kinds the summary is the only copy of.
+    expect(body).toContain(
+      'the mechanism-health note, the observation and the residual-risk advisory all ride the composed verdict',
+    );
+    expect(body).toContain(
+      '**say in your Step 6 terminal summary what was trimmed and what it said.**',
+    );
+    // Step 8 makes the same promise about the deferral list from the other
+    // end. It drifted once already — the budget can drop the whole list, not
+    // just the entries past its 20-line cap — so pin the qualification here
+    // rather than let the two paragraphs disagree about the same channel.
+    expect(body).toContain(
+      'Their durable record on the PR is the POSTED deferral list',
+    );
+    expect(body).toContain(
+      'it is **not guaranteed**: the list is the first section the body budget trims',
+    );
+    // The tails carry the load: without them the paragraph reads as a
+    // durability promise again, which is the drift this pin exists for.
+    expect(body).toContain('so an overflowing body can carry none of it');
+    // The recoverable record lives OFF the PR page — the marker makes the
+    // block locatable across rounds, the CI upload keeps the full entries.
+    // Pin both halves of that qualification, or the paragraph drifts back
+    // to a page-side promise.
+    expect(body).toContain('<!-- qwen-review-deferred -->');
+    // And the retention half: the artifact expires while the body's
+    // overflow pointer persists, so an unqualified "keeps a recoverable
+    // record" overstates the mechanism — the sentence must name the window.
+    expect(body).toContain('90-day retention window');
+    expect(body).toContain(
+      'keeps a recoverable record even though the PR page never shows it',
+    );
+    expect(body).toContain(
+      "when the budget trims it, the terminal summary is where the author's copy comes from",
+    );
+  });
+
+  it('pins the resume branch on Step 1', () => {
+    // The resume flow is prose over three subcommands (`fetch-pr --resume`,
+    // `recover-findings`, the round re-entry); a later edit dropping any leg
+    // leaves `--resume` silently starting fresh runs. Pin the load-bearing
+    // sentences.
+    const body = skillBody();
+    expect(body).toContain('Resuming an interrupted run (`--resume`)');
+    expect(body).toContain('review recover-findings');
+    expect(body).toContain('`{"resumed": true, ...}`');
+    expect(body).toContain('`{"resumed": false, "resumeRefused": "<reason>"}`');
+    expect(body).toContain('resumes at round `k+1`');
+    expect(body).toContain('re-enters at `latestReverseAuditRound + 1`');
+    // The restart bound survives a resume only through this reader; the
+    // effort pin and the lightweight inertness disclosure are the two
+    // silent-surprise fixes.
+    expect(body).toContain('`restartsSpent`');
+    expect(body).toContain('`effort-mismatch`');
+    expect(body).toContain('no effect in lightweight mode');
+    // R13-2: the effort rule must key on `effortSource`, so a `--comment`
+    // forced-high is passed through on a resume (a recorded lower level then
+    // refuses and runs fresh at high) rather than silently pinned — dropping
+    // the `forced-by-comment` arm re-creates the "comment at medium" state.
+    expect(body).toContain('`forced-by-comment`');
+    expect(body).toContain(
+      '`explicit`, `last_used`, `configured`, or `forced-by-comment`',
+    );
+    expect(body).not.toContain(
+      'pass --effort only when the user chose a level in THIS invocation',
+    );
+    // R15-11: a resumed run must NOT re-take the incremental decision — the
+    // previous attempt's `incremental` field is history, so the continuation
+    // never enters the `upToDate` stop/cleanup branch that would destroy the
+    // reused worktree/lease.
+    expect(body).toContain('is now HISTORY, not a decision to re-take');
+    expect(body).toContain('This branch does not apply on a resumed run');
+    // The Step 7 half specifically: `restartsSpent` also appears in Step 1,
+    // so these anchor the restart-bound blockquote's own survival sentences —
+    // deleting or inverting them must fail here, not ship silently.
+    expect(body).toContain('One slice of this fact survives a resume');
+    expect(body).toContain(
+      "Only a never-resumed run's re-entry records nothing",
+    );
+  });
+
+  it('relays a remembered effort notice before the review starts', () => {
+    const body = skillBody();
+    expect(body).toContain(
+      'When a warning says the last explicitly typed effort was reused, relay it as the opening line before starting the review.',
+    );
+  });
+
+  it('routes both remote-resolution paths through match-remote', () => {
+    // The pr-url path (Step 1) and the bare-PR-number path both resolve the
+    // remote via the deterministic matcher. A later edit reverting either
+    // hunk to the old model-prose rule must fail a test, not slip through.
+    const body = skillBody();
+    const invocations =
+      body.match(/"\$\{QWEN_CODE_CLI:-qwen\}" review match-remote/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    // The bare-number path threads the host `review meta` resolved at —
+    // dropping it rematches auth-config-only GHE clones against github.com.
+    expect(body).toContain('--host <host from meta>');
+    expect(body).toContain('Exit 6 means no remote matches');
+    expect(body).toContain(
+      'the matcher exits 6 (no remote matches) or 7 (several do)',
+    );
+  });
+
+  it('routes the 422 head-drift re-check through review meta with the host note', () => {
+    // The drift re-check used to be a prose `gh pr view … --json headRefOid`;
+    // a revert to that wording drops the Enterprise `--host` note and, on an
+    // auth-config-only GHE clone, resolves github.com — a foreign headSha
+    // produces a false "head advanced mid-review" ruling.
+    const body = skillBody();
+    expect(body).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review meta <n> --repo <owner>/<repo>',
+    );
+    expect(body).toMatch(
+      /meta <n> --repo <owner>\/<repo>` \(with `--host <host>` for every PR target/,
+    );
+    // The drift ruling's load-bearing semantic — what `headSha` is compared
+    // against — must stay pinned, or a rewrite truncating the comparison
+    // clause leaves the agent guessing (and a stale `commit_id` resubmits).
+    expect(body).toContain(
+      'compare its `headSha` to the `commit_id` in your review JSON',
+    );
+    // The anchor-recovery rename: `gh pr diff` output → `fetch-diff` output.
+    // A revert re-runs `gh pr diff`, which (no GH_HOST recipe taught anymore)
+    // routes at github.com on an auth-config-only GHE clone.
+    expect(body).toContain(
+      '(in lightweight mode, against the `fetch-diff` output you already have)',
+    );
+  });
+
+  it('routes Step 7 owner/repo and head-SHA resolution through review meta', () => {
+    // Revert guard: restoring the pre-absorption `gh repo view` /
+    // `gh pr view --json headRefOid` prose here decides where the review
+    // POSTS — on an auth-config-only GHE clone that is github.com's
+    // same-named repo. Both lines must stay subcommand-shaped.
+    const body = skillBody();
+    expect(body).toContain(
+      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (with `--host <host>` for every PR target — see Step 1\'s host rule) and read its `ownerRepo`',
+    );
+    expect(body).toContain(
+      "review meta {pr_number} --repo {owner}/{repo}` (with `--host <host>` for every PR target — see Step 1's host rule) and read its `headSha`",
+    );
+  });
+
+  it('keeps the presubmit example on the host rule', () => {
+    // Revert guard: presubmit was the one Step 7 subcommand example
+    // missing the host flag; on an auth-config-only GHE clone a dropped
+    // `--host` routes its platform queries at github.com — the same
+    // failure class the meta pins above guard.
+    const body = skillBody();
+    expect(body).toContain(
+      '[--new-findings .qwen/tmp/qwen-review-{target}-new-findings.json] \\\n  [--host <host>]',
+    );
+  });
+
+  it('pins the publish-assets weave as the last, all-or-nothing step', () => {
+    // Revert guard: `--findings-out` is written only after the push and
+    // the manifest succeed; without the clause the artifact's failure
+    // contract is unstated, and a mid-publish failure reads as a partial
+    // weave or a reason not to re-run.
+    const body = skillBody();
+    expect(body).toContain(
+      'the `--findings-out` rewrite runs only after every file has landed and the manifest is written',
+    );
+    expect(body).toContain(
+      'a run that fails partway through the push is completed by an idempotent re-run',
+    );
+  });
+
+  it('names the deferral channel in the bodyCriticals sources', () => {
+    // Revert guard: compose-review relocates a `Critical` entry written
+    // into `deferredSuggestions` into the body Criticals — unless it is the
+    // one shape the floor defers (#10291); the bodyCriticals bullet must
+    // name that mechanical relocation, and its one exception, beside the
+    // two model-written sources.
+    const body = skillBody();
+    expect(body).toContain(
+      'a `Critical` entry placed in `deferredSuggestions` is relocated here unless the floor is `critical` and the entry is `fails-closed` on `new-surface`',
+    );
+    // The fix-witness invariant on body Criticals carves the deferral
+    // channel out explicitly: its line carries neither witness nor
+    // constraint, and the artifact keeps the full entry.
+    expect(body).toContain(
+      "the deferral channel's disclosed line is the one exception",
+    );
+  });
+
+  it('keeps the lightweight capture on fetch-diff with the plan-diff host note', () => {
+    // Revert guard: restoring a prose `gh pr diff > file` here (or dropping
+    // the plan-diff --host note) must fail a test, not slip through — the
+    // Enterprise paragraph no longer teaches any GH_HOST routing recipe, so
+    // a hand-restored gh call silently routes at github.com.
+    const body = skillBody();
+    expect(body).toContain(
+      'review fetch-diff <number> --repo <owner>/<repo> --host <host> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt',
+    );
+    expect(body).toContain(
+      '# add --host <host> (every PR target, including github.com) — plan-diff',
+    );
+    // Step 5 only plans the diff Step 1 already fetched — a second
+    // fetch-diff would re-download it (and could race a head advance).
+    expect(body).toContain(
+      "Step 1's `fetch-diff` already wrote it, so this block only plans it",
+    );
+  });
+
+  it('keeps rule 4 on the welded issue-context command, not prose gh calls', () => {
+    // Revert guard: restoring `gh pr view … --json closingIssuesReferences` /
+    // `gh issue view` prose drops every `--host`, and on an auth-config-only
+    // GHE clone those fetches route at github.com's same-named repo.
+    const body = skillBody();
+    expect(body).toContain(
+      'review issue-context <pr> --repo <owner/repo> --out <evidence-file>',
+    );
+    expect(body).not.toContain('--json closingIssuesReferences');
+  });
+
+  it('keeps the incident-replay carve-out in rule 4 and the context paragraph', () => {
+    // Revert guard: drop the carve-out and the orchestrator runs under an
+    // unqualified "issue evidence outranks PR framing / do not treat the PR
+    // description as ground truth" while the verify brief still declares the
+    // exception — so in the no-linked-issue case, the exact one the replay
+    // duty exists for, a description-grounded replay finding is downgraded or
+    // dropped at orchestration. Both copies pinned: rule 4's and the Step 2
+    // context paragraph's.
+    const body = skillBody();
+    expect(body).toContain(
+      'One carve-out: when no issue evidence exists and the PR description itself narrates a motivating incident',
+    );
+    expect(body).toContain('the replay duty stands on the narrative alone');
+    // The orchestrator-side copy of the R2-1 routing rule, and the roll-call
+    // example that models the full four-item receipt: reverting either
+    // restores the pre-R2-1 standard in which a skipped replay reads
+    // identically to a performed one, while every brief-side pin stays green.
+    expect(body).toContain(
+      'a replay that found NO step changed arrives as a Critical **finding**, never inside this receipt',
+    );
+    expect(body).toContain(
+      'not a bugfix, description narrates no incident → scope empty',
+    );
+  });
+
+  it('keeps the Step 6 comment-body tail-fetch and the Posted: fallback grounded', () => {
+    // Revert guard: the tail-fetch must stay `--out … to the command the note
+    // names` (a restored `--jq .body > file` redirect is rejected by yargs on
+    // the welded command-body notes, so the tail is never fetched), and the
+    // Posted: fallback must stay CODE on GitHub (the provider composes the
+    // missing url) while the Aone arm never regresses to hand-assembling a
+    // link or re-querying the platform for the stable detailUrl.
+    const body = skillBody();
+    expect(body).toContain(
+      'add `--out .qwen/tmp/qwen-review-{target}-body-<id>.md` to the command the note names',
+    );
+    expect(body).toContain('`submit` fills the gap itself');
+    expect(body).toContain(
+      'the provider composes the PR-page URL from the routed host and the target',
+    );
+    // The Aone receipt rides the pre-write read's detailUrl — no re-query,
+    // and the coordinates relay survives the one case it comes up empty.
+    expect(body).toContain(
+      "the receipt carries the MR's own `detailUrl` from the pre-write read",
+    );
+    // A linkless receipt is NOT Aone-only: the GitHub compose fails closed
+    // on an unknowable routing host. The stale claim would send the model
+    // hand-assembling a GitHub link in exactly the corner the code refuses.
+    expect(body).not.toContain('possible only on Aone');
+    expect(body).toContain("relay the target's coordinates");
+    expect(body).toContain('Never assemble an Aone link yourself');
+  });
+
+  it('pins the Step 6B fix audit as a scoped disclosure, not a re-review', () => {
+    const body = coreBody();
+    const step = body.slice(
+      body.indexOf('### Step 6B: Apply the findings (`--fix`)'),
+      body.indexOf('## Step 7: Submit PR review'),
+    );
+    expect(step.length).toBeGreaterThan(0);
+    // The ordering the audit's correctness turns on: the snapshot is taken
+    // BEFORE the first edit, the outcomes are recorded BEFORE the audit (it
+    // reads them off the rebuilt artifact), the hunks producer runs before
+    // the consumer, and the audit runs BEFORE the report_findings re-issue
+    // (its notes ride that call).
+    const at = (needle: string) => {
+      const i = step.indexOf(needle);
+      expect(i, `Step 6B lost: ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    expect(at('review fix-delta --snapshot')).toBeLessThan(
+      at('Apply each finding to the working tree'),
+    );
+    expect(
+      at('--outcomes .qwen/tmp/qwen-review-{target}-outcomes.json'),
+    ).toBeLessThan(at('review fix-delta \\\n  --since'));
+    expect(at('review fix-delta \\\n  --since')).toBeLessThan(
+      at('--role fix-audit'),
+    );
+    expect(at('--role fix-audit')).toBeLessThan(
+      at('**Then re-issue the `report_findings` call, outcomes on it.**'),
+    );
+    // Producer and consumer sides derive from the SAME strings: a rename of
+    // any producer `--out` path must touch the constant the consumer needle
+    // reads, or the auditor reads a stale leftover at the old path.
+    const snapshotPath = '.qwen/tmp/qwen-review-{target}-fix-snapshot.json';
+    const hunksPath = '.qwen/tmp/qwen-review-{target}-fix-hunks.diff';
+    const artifactPath = '.qwen/tmp/qwen-review-{target}-findings.json';
+    expect(step).toContain(`--out ${snapshotPath}`);
+    expect(step).toContain(`--since ${snapshotPath}`);
+    expect(step).toContain(`--out ${hunksPath}`);
+    expect(step).toContain(`--hunks ${hunksPath}`);
+    expect(step).toContain(`--out ${artifactPath}`);
+    expect(step).toContain(`--findings ${artifactPath}`);
+    // Failure-coupled: without the `&&` a failed `--since` leaves the
+    // auditor running over a previous run's hunks at the same path.
+    expect(step).toContain(`--out ${hunksPath} && \\`);
+    expect(step).toContain('The `&&` is load-bearing');
+    // `--plan` is `demandOption: true` on the builder.
+    expect(step).toContain(
+      'review agent-prompt --plan <the plan report from Step 1> --role fix-audit',
+    );
+    // Two things answer to "fix audit": the PR re-review's narrowed ROUND
+    // and this step's one AGENT. The step says which, and why they never
+    // meet in one run.
+    expect(step).toContain(
+      'It is not the **fix-audit round** Step 1 routes on when it chooses the topology',
+    );
+    expect(step).toContain(
+      'its target is a pull request, where `fix.effective` is false',
+    );
+    // The constraints that keep it from being the forbidden re-review, and
+    // the disclosure-not-finding rule that closes the back door.
+    expect(step).toContain('never the reviewed diff');
+    expect(step).toContain('one agent, and not a re-review');
+    expect(step).toContain('It produces no verdict and files no finding.');
+    expect(step).toContain('It reports two things, and both are disclosures:');
+    expect(step).toContain('hunks in, disclosures out, no verdict');
+    expect(step).toContain(
+      '**An unpinned assumption is a disclosure, not a finding.**',
+    );
+    expect(step).toContain('It never enters `findings-in.json`');
+    expect(step).toContain('never counts toward `fresh` or `induced`');
+    expect(step).toContain(
+      'never into `findings-in.json`, the census, or the verdict',
+    );
+    expect(step).toContain('**Do not re-run Steps 1–6**');
+    expect(step).toContain('precisely so that it is not one');
+    // Skip only when the ledger AND the tree agree nothing was applied.
+    expect(step).toContain(
+      '**Skip the audit — and say so in one line — only when the ledger holds no `fixed` outcome and the hunks file is empty**',
+    );
+    // The two ledger/tree mismatches are diagnoses, each with a foreign-write
+    // exit that never invents an outcome.
+    expect(step).toContain(
+      '**Hunks that landed beside a ledger with no `fixed` outcome**',
+    );
+    expect(step).toContain('do not invent a `fixed` outcome to clear it');
+    expect(step).toContain(
+      'Fix audit: not run — hunks carry edits no outcome owns',
+    );
+    expect(step).toContain('**An empty hunks file beside a `fixed` outcome**');
+    expect(step).toContain('Fix audit: not run — <what the command said>');
+    expect(step).toContain(
+      'disclosed and moved past, never a reason to touch the outcomes or the artifact',
+    );
+    // The scope `fix-delta --since` prints is relayed beside the return: an
+    // all-clear without it claims more than the command saw.
+    expect(step).toContain(
+      '**`fix-delta --since` states its scope on stderr, every run**',
+    );
+    expect(step).toContain('`HEAD moved between the two moments`');
+    // …relayed with what it actually means: the hunks still compare the
+    // working tree, so a committed edit IS in them.
+    expect(step).toContain('so a committed edit is in them');
+    // Several auditor lines for one id share that finding's single note.
+    expect(step).toContain(
+      'joined with `; `, after any note the fix round already wrote',
+    );
+    expect(step).toContain(
+      'Repeat those lines under the **Fix audit** heading',
+    );
+    // Both of the auditor's line forms have a ledger-note template, and the
+    // re-issue carries the note to the client.
+    expect(step).toContain(
+      'run the `review findings --outcomes` command above again',
+    );
+    expect(step).toContain('for every `fixed` the fix audit annotated');
+    expect(step).toContain(
+      '`fix audit: unpinned — assumes <…>; pin with: <…>` for an assumption',
+    );
+    expect(step).toContain(
+      '`fix audit: unattested — no hunk in the audit input touches <its locations>`',
+    );
+    expect(step).toContain('`subagent_type: "review-agent"`');
+    // Reach, stated exactly: the local/file `--fix` path only.
+    expect(step).toContain(
+      'this audit runs where Step 6B runs — the `local` and `file` `--fix` path, the one `fix.effective` admits',
+    );
+    expect(step).toContain('the path #10153 covers');
+    // The interactive path: the plan `agent-prompt --plan` needs is swept on
+    // a local target and survives on a file target.
+    expect(step).toContain(
+      'Fix audit: not run — plan report swept by Step 9 cleanup',
+    );
+    expect(step).toContain('**On a `local` target the plan is gone**');
+    expect(step).toContain(
+      '**On a FILE target no sweep ever reaches the plan**',
+    );
+    expect(step).toContain("**run the audit on this path in Step 6B's order**");
+    // The file-target path's order and inputs: snapshot BEFORE the first
+    // edit, and the REBUILT artifact as --findings, never the saved one.
+    expect(step).toContain('look **before the first edit**');
+    expect(step).toContain(
+      'and **that rebuilt artifact** as `--findings`, never the saved artifact itself',
+    );
+    expect(step).toContain(
+      '`agent-prompt --role fix-audit … --hunks … --batch`, `emit-workflow --batch`',
+    );
+    expect(step).toContain(
+      'Fix audit: not run — file-review plan removed at Step 9',
+    );
+  });
+
+  it('pins the fix-witness mandate in all three of its halves', () => {
+    // The reviewer-side half of #9578. Three clauses have to survive together or
+    // the rule goes inert in a way the suite would not notice:
+    //   1. the finding format has to ASK for the criterion,
+    //   2. the comment has to CARRY it (a criterion recorded and never posted
+    //      reaches no fixer, which is the whole failure being repaired), and
+    //   3. the exemption has to stay `N/A` rather than a bar on reporting —
+    //      without it the next edit turns an acceptance criterion into a
+    //      precondition and the rule starts costing findings.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Fix witness** — the test that must go RED if that fix is removed',
+    );
+    // The third half, at BOTH sites the exemption lives: the format's
+    // declaration and the posting rule's silence clause. Rewriting either
+    // into a bar on reporting ships green under every other assertion here.
+    expect(body).toContain(
+      'or `N/A` when the fix adds no guard, branch or behaviour a test can pin',
+    );
+    expect(body).toContain(
+      'A finding whose `fixWitness` is `N/A` adds nothing',
+    );
+    // The aggregate slot: Step 6 names Fix witness in the pattern-aggregated
+    // format, so the Step 4 template it points at must carry the slot — an
+    // aggregate whose fix adds a guard otherwise ships every expanded comment
+    // without the acceptance criterion, silently defeating the "the line
+    // reaches every fixer" property for exactly the aggregated shape.
+    expect(body).toContain(
+      "- **Fix witness:** <the group's shared acceptance criterion",
+    );
+    expect(body).toContain(
+      'And a comment whose fix adds a guard carries the test that must pin it',
+    );
+    expect(body).toContain(
+      'name the test that must fail if the fix is removed, and ask for the mutation that proves it',
+    );
+    expect(body).toContain(
+      'this sentence never changes what the comment reports or at what severity',
+    );
+  });
+
+  it('pins the fix-constraint field in all three of its halves', () => {
+    // The premise half of #10153, beside the fix-witness claim half above.
+    // The same three clauses have to survive together:
+    //   1. the finding format has to ASK for the fact (Step 6, and the Step 4
+    //      aggregate slot Step 6 points at),
+    //   2. the comment has to CARRY it — a constraint recorded and never
+    //      posted reaches no fixer, and the human fixer reading the comment
+    //      is the loop this field exists for, and
+    //   3. the two properties that make it different from its sibling must
+    //      hold at both sites: omitted rather than `N/A` (comment volume,
+    //      #9177), and witness-grade evidence — a quoted constant or a
+    //      file:line — rather than a caution the fixer would follow.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Fix constraint** — an existing fact the fix must not violate, with its source',
+    );
+    expect(body).toContain(
+      'Omit it when none was observed — never `N/A` — and never without a source',
+    );
+    expect(body).toContain(
+      '- **Fix constraint:** <the existing fact the general fix must not violate',
+    );
+    expect(body).toContain(
+      'Suggested fix, Fix witness, Fix constraint, Severity',
+    );
+    // The artifact field list: a fourth optional field the command carries
+    // but the skill does not name is one the orchestrator strips when it
+    // re-emits the artifact by hand.
+    expect(body).toContain(
+      '`fixConstraint` is the existing fact the fix must not violate, with its source',
+    );
+    expect(body).toContain(
+      'And a comment whose fix rests on an existing fact carries that fact',
+    );
+    expect(body).toContain(
+      'a constraint that names no constant and no `file:line` is not posted',
+    );
+    expect(body).toContain(
+      'A finding with no `fixConstraint` adds nothing — no `N/A`, no "no constraints observed"',
+    );
+    // R4-2: half 2's operative sentence — the heading is pinned above, but
+    // the mandate itself was not, so weakening "carries it" shipped green.
+    expect(body).toContain(
+      'When the finding has a `fixConstraint`, the posted body carries it in one sentence of ordinary prose',
+    );
+    // R4-1: the witness closes the body, so the constraint's only consistent
+    // place is immediately before it — and a finding whose `fixWitness` is
+    // `N/A` has no witness sentence to stand beside, so the constraint takes
+    // that place itself, after the suggestion block.
+    expect(body).toContain(
+      'immediately before the fix-witness sentence, which still closes the body',
+    );
+    expect(body).toContain(
+      'the constraint sentence takes its place after the suggestion block',
+    );
+  });
+
+  it('keeps the fix side — fixWitness and sourced fixConstraint — through the dedup merge', () => {
+    // R1-2 (#10168): the merge rules kept the most detailed description, the
+    // highest severity, and the source tags — never a fix-side field. Two
+    // agents reporting one root cause then lost the constraint only the less
+    // detailed copy recorded, before canonicalization ever saw the finding:
+    // the presence-keyed posting rule read "absent" on the deduplicated
+    // record and posted the unconstrained fix the field exists to prevent.
+    // R3-1: the sibling field dies the same death — the fix-witness sentence
+    // is presence-keyed too, so a witness only the discarded copy recorded
+    // is silently omitted and the fix ships unwitnessed (#9578). The
+    // preservation therefore names BOTH fields at all three merging sites —
+    // Step 4's paragraph and the two pair-loop bullets that merge on their
+    // own wording — or a pair-merge ships green under the Step 4 pin while
+    // dropping the field the same way. The adjudication sentence stays
+    // constraint-specific: two sourced constraints can conflict as claims
+    // about the code, and the rule that settles them re-reads the sources;
+    // this pin only guards that nothing fix-side is silently discarded.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Deduplication merges the fix side too: keep every `fixWitness` and every sourced `fixConstraint` the merged findings carry.**',
+    );
+    expect(body).toContain('when two conflict, adjudicate explicitly');
+    expect(body).toContain(
+      '`fixWitness`/sourced `fixConstraint` on either copy survives the merge',
+    );
+    expect(body).toContain(
+      '`fixWitness`/sourced `fixConstraint` on any copy survives the merge',
+    );
+  });
+
+  it('carries the fix side onto a Critical relocated into the body', () => {
+    // R1-1 (#10168): the carry rule was scoped to inline comment bodies, but
+    // a confirmed Critical whose locations all fail anchor resolution moves
+    // to `bodyCriticals` — the review body becomes its sole published copy,
+    // and a constraint the entry does not carry reaches no fixer. R3-1: the
+    // fix-witness sentence is presence-keyed the same way and dies the same
+    // death, so the carry covers both fix-side sentences. R3-2: the cover is
+    // scoped to the two moves the orchestrator performs — on an Aone target
+    // `submit` itself relocates an unanchorable Critical through a one-line
+    // entry rebuilt from the claim line alone, a channel neither sentence
+    // rides — and that residue must stay a named acceptance, never the
+    // universal promise ("every PR-facing copy") the channel contradicts.
+    // The requirement must stand at both sites the routing is spoken: the
+    // posting rule that performs the move, and the compose-state field that
+    // receives it.
+    const body = skillBody();
+    expect(body).toContain(
+      'the rule follows the finding through the two moves the orchestrator performs',
+    );
+    expect(body).toContain(
+      'a Critical carrying either fix-side sentence — the fix-witness or the constraint sentence — that moves to `bodyCriticals`',
+    );
+    expect(body).toContain(
+      'appends the same sentence to that entry, copied from the artifact',
+    );
+    // R4-1: an entry that carries both sentences appends them in the inline
+    // order — the constraint before the witness.
+    expect(body).toContain(
+      'the constraint before the witness when the finding carries both',
+    );
+    expect(body).toContain(
+      'an entry whose finding carries a `fixWitness` or a `fixConstraint` appends the corresponding sentence',
+    );
+    // The disclosed residue: Aone performs no server-side anchor validation,
+    // so submit relocates at submit time through the claim line alone, and
+    // the rule names the loss instead of promising past it.
+    expect(body).toContain(
+      'relocates an unanchorable Critical into the body as a one-line entry rebuilt from the claim line alone',
+    );
+    expect(body).toContain('the loss is a named acceptance, not a silent one');
+    // R4: the named residue covers the two further exits that carry neither
+    // sentence — the typed deferral line (a `DeferredEntry` holds no
+    // fix-side field) and the duplicate-drop account (a name-and-location
+    // pointer, never the finding's own text).
+    expect(body).toContain(
+      'a finding carried into `deferredSuggestions` renders as the typed one-line entry',
+    );
+    expect(body).toContain(
+      'a Suggestion dropped as a duplicate posts a name-and-location account only',
+    );
+  });
+
+  it('pins the fix-induced disposition and both of its operands', () => {
+    // Attribution needs the DISPOSITION and the two-operand test together.
+    // With only the disposition, a round folds any adjacent defect into an
+    // old id and welds two claims to one entry later rounds cannot separate;
+    // with only the test, there is nothing to rule and the count the
+    // non-convergence rule reads never gets produced.
+    const body = skillBody();
+    expect(body).toContain('- **fix-induced** —');
+    expect(body).toContain(
+      'The test is mechanical on both operands, and both must hold',
+    );
+    expect(body).toContain('changed since the age reference');
+    expect(body).toContain('you can state the causal link in one clause');
+    // The first three guardrails. The first keeps attribution from becoming a way
+    // to not report something, the second keeps a Critical id from quietly
+    // becoming a Suggestion, and the third fixes the fail direction at
+    // "mint a new id" — the behaviour every round had before the rule.
+    expect(body).toContain(
+      'Attribution is a **bookkeeping** decision and never a posting one',
+    );
+    expect(body).toContain(
+      'only when the new defect is at least as severe and as confident as the entry it carries',
+    );
+    expect(body).toContain('**mint the fresh id**');
+    // The fourth guardrail: two distinct new defects tracing to the same
+    // previous entry cannot both take its id — the artifact validator
+    // refuses a duplicate id and with it the whole round's findings.
+    expect(body).toContain('**one re-report per original id per round**');
+    expect(body).toContain('Count the second in `fresh` but not `induced`');
+  });
+
+  it('pins the fix-induced comment marking and why it is not decoration', () => {
+    // Issue #9674. The marking is what parts a fix-induced re-report from a
+    // still-stands re-post for the volume trend's first-time count; without
+    // the instruction the module's reader finds nothing to read and the
+    // trend silently understates new work on churning pull requests again.
+    // Both halves pinned: the FORMAT (what to write) and the RESTRICTION
+    // (never on a still-stands, where the claim really is the old one).
+    const body = skillBody();
+    expect(body).toContain(
+      "mark it `(fix-induced)` right after the id's colon",
+    );
+    expect(body).toContain(
+      '**[Critical]** R1-2: (fix-induced) <the new claim>',
+    );
+    expect(body).toContain(
+      'Write the marking only on a re-report that IS fix-induced — never on a `still stands`',
+    );
+  });
+
+  it('pins the census contract and the module-owns-the-verdict split', () => {
+    // The census is the numerator/denominator the non-convergence finding is
+    // computed from, and three clauses have to survive together: what to
+    // count, that ABSENCE is not zero (a zeros pair carries the streak but
+    // states a measured round that found nothing), and that the
+    // model does not get to rule on its own
+    // numbers — without the last, the narrated-away-cap failure reappears
+    // wearing a different hat.
+    const body = skillBody();
+    expect(body).toContain('convergence: {"fresh": N, "induced": M}');
+    // What to COUNT — the shape pins above do not reach the definition:
+    // fix-induced findings count in `fresh` whichever way they were id'd,
+    // `induced` is a subset of `fresh`, and the count keys on attribution,
+    // not on new lines. Deleting any clause leaves the suite green and the
+    // model miscounts exactly the churning rounds the bar is built for.
+    expect(body).toContain(
+      'Fix-induced findings count whether they took a previous id or a new one',
+    );
+    expect(body).toContain('(they are new defects; the id is bookkeeping)');
+    expect(body).toContain('`induced` is a SUBSET of `fresh`');
+    expect(body).toContain(
+      'It is the attributed count, not the count of findings on new lines',
+    );
+    // What NOT to count, besides the ruled-away dispositions: a finding
+    // confirmed but dropped as an already-reported duplicate RESTATES a
+    // defect an earlier round identified — it is not newly identified, and
+    // it reaches none of the three channels the module cross-checks `fresh`
+    // against. Counting it inflates the census past everything reported,
+    // the module refuses the pair as impossible, and a measured below-bar
+    // round then reads as unmeasured — the streak CARRIES where the
+    // contract says a measured below-bar round RESETS (or, above the bar,
+    // the advance is lost and the blocker delayed).
+    expect(body).toContain(
+      'dropped as duplicates of already-reported findings',
+    );
+    expect(body).toContain('**Omitting is not the same as zero**');
+    expect(body).toContain('**You count; the module rules.**');
+    expect(body).toContain(
+      'it is not yours to soften, re-word, delete from the body, or explain away in the Summary',
+    );
+  });
+
+  it('runs comment-status and presubmit on Aone targets — backed, not skipped', () => {
+    // Revert guard (#9616, #9627): comment-status and presubmit used to sit
+    // on the Aone skip list and the skill carried the "no dedup backing" /
+    // "self-PR detection has no Aone backing" caveats — repeat rounds
+    // re-posted every finding and a review of the user's own MR got no
+    // downgrade. Both subcommands are now a1-backed with the full semantics;
+    // restoring either the skip or a caveat must fail here, not slip
+    // through.
+    const body = skillBody();
+    expect(body).toContain('`comment-status`, `presubmit`) work unchanged');
+    expect(body).toContain('(`comment-status` and `presubmit` ARE a1-backed');
+    expect(body).toContain('the MR author is matched against `a1 auth whoami`');
+    expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('no dedup backing yet');
+    expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+    expect(body).not.toContain('come back neutral');
+    expect(body).not.toContain('`--new-findings` is unused');
+    expect(body).not.toContain(
+      '`pr-context` and `comment-status` have no Aone backing',
+    );
+    // The last three skip residues this change removes — the setup-batch
+    // parenthetical, the comment-status guard clause, and the Step 6
+    // no-report clause. The positive assertions above stay green if a
+    // merge resolution or partial revert re-adds any of them, while Aone
+    // runs skip comment-status again; the replacement contract is the
+    // a1-backed report's existence in Step 6's re-check.
+    expect(body).not.toContain('drops out of the batch');
+    expect(body).not.toContain('leaving a two-call batch');
+    expect(body).not.toContain('the command has no backing');
+    expect(body).not.toContain('skips the command with the Step 1 batch');
+    expect(body).toContain('on an Aone target it runs a1-backed');
+  });
+
+  it('keeps the corrected Aone --comment contract, not merge residue', () => {
+    // The merge that became this PR's head committed conflict markers and a
+    // STALE variant of the `--comment` bullet back-to-back with the corrected
+    // one (R8-1). The stale variant claims a blanket verdict cap and orders
+    // an unbounded drift re-review — contradicting the implementation:
+    // compose-review caps only APPROVE, submit's drift re-review stops at the
+    // once-per-review restart bound, and submit prints the could-not-re-verify
+    // warning the relay names. Re-resolving the merge against the stale side
+    // must fail here, not slip through.
+    const body = skillBody();
+    // No merge-conflict residue anywhere: a bare `=======` under a bullet
+    // list parses as a setext-heading underline and `>>>>>>>` renders as a
+    // blockquote, silently restructuring the instructions a review runs on.
+    expect(body).not.toMatch(/^(<{7}|={7}|>{7})/m);
+    // The forced cap is GONE now that pr-context is backed: approve fires
+    // exactly when the run read the MR's context (the same gate as
+    // GitHub), and only a context-unavailable run stays capped at COMMENT
+    // — neither the stale bullet's blanket cap nor a forced one.
+    expect(body).toContain(
+      'fires for an APPROVE verdict exactly when the run read the MR',
+    );
+    expect(body).toContain('a context-unavailable run stays capped at COMMENT');
+    expect(body).not.toContain('which caps the verdict at');
+    expect(body).not.toContain(
+      'the context-unavailable cap keeps an **Approve** verdict at Comment',
+    );
+    // The drift re-review is bounded by the once-per-review restart bound;
+    // the stale variant ordered it unconditionally.
+    expect(body).toContain(
+      'but ONLY while the per-review head-movement restart bound is unspent',
+    );
+    // The could-not-re-verify relay the corrected variant adds: submit
+    // prints the warning on both the success and the mid-batch-failure path.
+    expect(body).toContain(
+      'WARNING: could not re-verify the MR head after posting',
+    );
+  });
+
+  it('mandates the review-agent subagent type, never general-purpose', () => {
+    // This literal is the whole delivery mechanism for the explicit tool list.
+    // `general-purpose` declares no `tools`, so it takes prepareTools'
+    // inherit-everything branch and every agent re-declares 51 schemas on
+    // every turn — measured at ~1.08M extra prompt tokens across one
+    // 13-agent roster (DESIGN.md — The inherited tool surface). A revert to
+    // the old literal is silent: the review still runs, just six times
+    // dearer per agent.
+    const body = skillBody();
+    expect(body).toContain(
+      `set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and \`run_in_background: false\``,
+    );
+    // The type must exist, or every launch fails outright: an unknown
+    // `subagent_type` is not substituted with the default — only an omitted
+    // one is — so the review would die on `Subagent "…" not found` rather
+    // than quietly run under `general-purpose`. `not.toBeNull()`, because
+    // `getBuiltinAgent` returns `null` on a miss and `toBeDefined()` accepts
+    // it: under `toBeDefined` a renamed or deleted entry sailed through.
+    expect(
+      BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE),
+    ).not.toBeNull();
+    // Every `subagent_type` the skill names, as a set — the positive form,
+    // because a ban on literals only catches the spellings it enumerates: a
+    // reworded "Each is a general-purpose subagent" (no backticks) passed one.
+    // `fork` appears only as the type the rule forbids.
+    //
+    // A set, not `toEqual` on the array: pinning count and order would freeze
+    // the document's shape, so restating the rule at Steps 4 and 5 — a
+    // strictly more correct change, since those launch paths sit furthest
+    // from this line — would turn this red. Every tooth survives: a
+    // reintroduced `general-purpose` still fails.
+    const namedTypes = [...body.matchAll(/subagent_type: "([^"]+)"/g)].map(
+      (m) => m[1],
+    );
+    expect(namedTypes.length).toBeGreaterThan(0);
+    expect(new Set(namedTypes)).toEqual(
+      new Set([REVIEW_BUILTIN_SUBAGENT_TYPE, 'fork']),
+    );
+    // Step 3B names the type in prose rather than as a `subagent_type:`
+    // literal, so it needs its own positive pin — one missed site sends a
+    // whole topology down the expensive branch.
+    expect(body).toContain(`\`${REVIEW_BUILTIN_SUBAGENT_TYPE}\` subagent`);
+    expect(body).not.toContain('general-purpose` subagent');
+    expect(body).not.toContain('a general-purpose subagent');
+
+    // The tool set the skill quotes must be the registry's, spelled the way a
+    // caller would have to spell it. The first draft said "read, grep, glob,
+    // shell, write, edit" — four labels matching no registered name, against
+    // which the very next sentence asks the orchestrator to judge whether a
+    // part needs something outside the set.
+    const declared =
+      BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)
+        ?.tools ?? [];
+    expect(declared.length).toBeGreaterThan(0);
+    // BOTH directions, against the sentence itself rather than the whole
+    // document. A registry-⊆-body pin cannot see SKILL.md advertising a tool
+    // the registry no longer declares: shrinking the list would leave the
+    // skill promising a capability the agent lacks, and the very next
+    // sentence asks the orchestrator to judge against what is advertised.
+    const carries = body.match(/`review-agent` carries ([^.]+)\./);
+    expect(carries).not.toBeNull();
+    const advertised = [...carries![1].matchAll(/`([a-z_]+)`/g)].map(
+      (m) => m[1],
+    );
+    expect(new Set(advertised)).toEqual(new Set(declared));
+  });
+
+  it('ships the verdict-gated reference files beside the core body', () => {
+    // The split (#9787) moves whole steps, not rules: the core keeps the
+    // gates and the invariants that bind runs which never load a file, and
+    // each reference owns one conditional territory.
+    for (const name of REFERENCE_FILES) {
+      expect(referenceBody(name).length).toBeGreaterThan(1000);
+    }
+    expect(referenceBody('posting.md')).toContain('# Step 7: Submit PR review');
+    expect(referenceBody('persistence.md')).toContain(
+      '# Step 8: Save review report and cache',
+    );
+    expect(referenceBody('aone.md')).toContain('# Aone Code paths');
+  });
+
+  it('keeps posting severity instructions aligned with Critical-only classification', () => {
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain('leading source marker');
+    expect(posting).toContain(
+      'quoted witness text, does not promote a Suggestion',
+    );
+    expect(posting).not.toContain('position-independent substring test');
+    expect(posting).not.toContain('occurs _anywhere_ in its body');
+  });
+
+  it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
+    // presubmit's reply carrier matches a wanted id at ANY location (its
+    // anchor may be unmapped or the finding moved); a location-qualified
+    // drop rule denied exactly the exemption that entry exists to grant.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**except a finding whose `id` appears in `matchedIds` of ANY `existingComments.repost` entry**',
+    );
+    expect(posting).toContain('so never re-check the location');
+    expect(posting).toContain('id appears in matchedIds of ANY repost');
+    expect(posting).not.toContain('entry at the same location');
+    expect(posting).not.toContain('repost entry at the same');
+    // The anchors-file and Exclusion-Criteria restatements of the rule.
+    expect(posting).toContain(
+      'the carried-id re-post exemption joins on the id',
+    );
+    expect(posting).not.toContain('intersects on `(path, line)` plus id');
+    expect(posting).not.toContain('at its location is exempted');
+  });
+
+  it('tells the model a deferral title leading with a fixed id is refused (#9940 review, round 30)', () => {
+    // `submit`'s gate reads deferred titles through the same head-slot
+    // read the closure mint uses, so an id-leading title IS a re-post —
+    // the doc listed it as a safe cross-reference, which sends the model
+    // into a refusal it was told could not happen.
+    const core = coreBody();
+    expect(core).toContain('A **deferral title is not**');
+    expect(core).toContain('a title whose HEAD SLOT carries a fixed id');
+    expect(core).toContain('re-posts that finding and is refused');
+    expect(core).not.toContain(
+      "a duplicate-drop note, a deferral title, another ruling's `by` — is a cross-reference",
+    );
+    // The gate reads the whole head slot, so "leading with" alone sends
+    // the model into the refusal the sentence exists to prevent.
+    expect(core).toContain('behind axis and source tags');
+  });
+
+  it('states where the repost legs anchor and who caps the downgrade reasons (#9940 review, round 30)', () => {
+    // presubmit writes the reasons uncapped; compose-review caps each at
+    // 400 code points, drops what a 2000-point total cannot hold, and
+    // joins and escapes the rest. And a carry-reply repost entry carries
+    // the REPLY's anchor, never null — a model told otherwise re-checks a
+    // location that answers nothing.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain("a ROOT leg's matchedIds are the ids of");
+    expect(posting).toContain("findings at that entry's own location");
+    expect(posting).toContain('else 0) — never null');
+    expect(posting).not.toContain("may be the reply's, `line: null` unmapped");
+    expect(posting).toContain('`compose-review` caps');
+    expect(posting).toContain('each at 400 code points');
+    expect(posting).toContain('ones past a 2000-point total');
+  });
+
+  it('names the CI salvage contract as the one exception to the drift restart', () => {
+    // The workflow's supersede watcher arms a salvage past its threshold
+    // and exports QWEN_REVIEW_SALVAGE_POST beside the marker; without this
+    // exception the anchorsAtRisk=true rule commands abandon-and-restart in
+    // exactly the drifted state a salvage creates (R32-2). Cross-pinned with
+    // scripts/tests/qwen-pr-review-workflow.test.js, which pins the export.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**One exception — the CI salvage contract:** when the environment carries `QWEN_REVIEW_SALVAGE_POST=1` **and** the file named by `QWEN_CI_REVIEW_SALVAGE_OK_FILE` exists with content equal to `headDrift.reviewedSha`',
+    );
+    expect(posting).toContain('do **not** restart: submit as planned');
+    expect(posting).toContain('this consumes no restart');
+  });
+
+  it('gates every reference file on the verdict in the core body', () => {
+    // A run must learn from the injected core alone WHICH file to read and
+    // when; a gate that moved into the file it gates would be unreadable.
+    const core = coreBody();
+    expect(core).toContain('**Reference files, gated by this verdict.**');
+    // Pin each enumeration prefix together with its load-condition clause
+    // as ONE contiguous substring: checked separately, a rewrite that swaps
+    // two clauses between bullets ships green while a report-only run loads
+    // the wrong file. The gating is the mechanism this split introduces.
+    expect(core).toContain(
+      '`references/posting.md` — Step 7 (authorisation, anchors, presubmit, `submit`, the 422/head-drift recovery, `publish-assets`). Load it when, and only when, posting is live',
+    );
+    expect(core).toContain(
+      '`references/persistence.md` — Step 8 (report, artifact registration, incremental cache). Load it before Step 8 on every run except cross-repo lightweight mode',
+    );
+    expect(core).toContain(
+      '`references/aone.md` — the Aone paths (see the Aone note below). Load it before `match-remote` when the target is Aone',
+    );
+  });
+
+  it('keeps the write prohibition and the posting gates in the core body', () => {
+    // The one-sentence write ban and the PR-only/high-only posting rule must
+    // bind a run that never loads posting.md — the bypass they guard against
+    // does not wait for the gate file.
+    const core = coreBody();
+    expect(core).toContain(
+      '`qwen review submit` is the only write path in this skill',
+    );
+    expect(core).toContain('Posting is a PR-only, high-only action');
+    // The step headings stay in core so every "Step 7" / "Step 8" cross-
+    // reference in the corpus resolves to the pointer that forwards.
+    expect(core).toContain('## Step 7: Submit PR review');
+    expect(core).toContain('## Step 8: Save review report and cache');
+    // The compose-state field list relocated to Step 6 references the
+    // never-in-body rule whose full text moved to posting.md; the entry must
+    // restate the rule's substance so a report-only run (which never loads
+    // posting.md) still sees why a Suggestion must not ride the review body.
+    expect(core).toContain('does not filter review bodies');
+  });
+
+  it('moved the sections whole — no step body duplicated across files', () => {
+    const core = coreBody();
+    const corpus = skillBody();
+    // Distinctive openings of the moved sections: present in exactly one
+    // file of the corpus, and absent from the core. The corpus-wide count
+    // alone would pass a revert that keeps a section in the core, and the
+    // absence-from-core alone passes a copy duplicated BETWEEN the
+    // reference files — an Aone --comment run loads both posting.md and
+    // aone.md, so one run would then obey two potentially divergent
+    // copies of the same step.
+    expect(corpus.match(/\*\*Use the "Create Review" API/g)).toHaveLength(1);
+    expect(corpus.match(/### Report persistence/g)).toHaveLength(1);
+    expect(
+      corpus.match(/run `\/review` \*\*from inside a clone of that repo\*\*/g),
+    ).toHaveLength(1);
+    expect(core).not.toContain(
+      '**Use the "Create Review" API to submit verdict + inline comments',
+    );
+    expect(core).not.toContain('### Report persistence');
+    expect(core).not.toContain(
+      'run `/review` **from inside a clone of that repo**',
+    );
+    // The compose-state field list relocated from Step 7 to Step 6's Verdict
+    // section: one copy in the corpus, in the core.
+    expect(corpus.match(/- `modelId` — for the footer\./g)).toHaveLength(1);
+    expect(core).toContain('- `modelId` — for the footer.');
+  });
+
+  it('pins the minimal arm report_findings override on the unverified level', () => {
+    // Step 6 mandates `report_findings` at the run's RESOLVED effort with
+    // entries copied from the findings artifact, and Step 3M forbids the
+    // artifact. Without its own override — the one Step 3C has — the arm
+    // either skips the call for lack of an artifact or reports at the
+    // resolved effort (high on a PR target): clients render the unverified
+    // marker only for `level: "low"`, so either shape defeats the
+    // labeled-unverified property the parser force-offs and the posting
+    // declines reserve for this arm.
+    const body = coreBody();
+    const start = body.indexOf('## Step 3M');
+    const end = body.indexOf('## Step 4');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    expect(section).toContain('`report_findings`');
+    expect(section).toContain('`level: "low"`');
+    expect(section).toContain('the composed finding list');
+    expect(section).toContain(
+      'would render these unverified findings indistinguishably from a verified high-effort review',
+    );
+  });
+
+  it('keeps template tokens out of the raw-loaded reference files', () => {
+    // BundledSkillLoader interpolates only the core body it injects; the
+    // reference files are read raw via read_file, so a token there reaches
+    // the run unreplaced: a literal `(v{{cliVersion}})` draft footer is
+    // one stripReviewFooter cannot match (the version span excludes
+    // braces), so every posted comment carries the broken token above the
+    // canonical footer, and a `{{model}}` copied into the cache JSON
+    // fails the next round's same-model anchor gate.
+    for (const name of REFERENCE_FILES) {
+      expect(referenceBody(name)).not.toMatch(/\{\{[^}]+\}\}/);
+    }
+    // The reference files' footer templates name YOUR_MODEL_ID, whose
+    // value the loader prepends to the injected core body — but only when
+    // the core body carries a model token; without one the declaration
+    // vanishes and the templates dangle.
+    expect(/{{model}}|YOUR_MODEL_ID/.test(coreBody())).toBe(true);
+  });
+
+  it('keeps the file-review plan --out fill-in bounded', () => {
+    // The plan's `--out` is the one artifact name the caller chooses, and
+    // the skill used to recommend filling it with the reviewed path's
+    // separators replaced — a deep target then passes the filesystem's
+    // 255-byte filename limit and the plan write dies with ENAMETOOLONG
+    // before the capture runs.
+    //
+    // "Short" is not bounded, which is what the first fix said: a basename
+    // is itself allowed up to 255 bytes and the decoration adds 34, so the
+    // recommendation has to name a NUMBER.
+    const body = skillBody();
+    expect(body).toContain('first 24 characters of the basename');
+    // R23: the Step 1 bullet restated the template with the FULL basename,
+    // contradicting the capture block ~30 lines below — a model executing
+    // the bullet as written died with ENAMETOOLONG for any basename over
+    // ~226 bytes. Every spelling of the template must carry the truncation.
+    expect(body).not.toContain('file-review-<basename>');
+    expect(body).toContain('ENAMETOOLONG');
+    expect(body).not.toContain(
+      'the reviewed path with its separators replaced',
+    );
+  });
+  it('names file-review reports from the capture-derived target token', () => {
+    // Step 8's report name and `qwen review run`'s report pin are one
+    // contract; the pre-PR `<filename>` convention agreed with the pin only
+    // at the repo root, so every file review of a nested path lost its
+    // Report: line — silently, since the verdict itself is unaffected.
+    const body = skillBody();
+    expect(body).toContain('<YYYY-MM-DD>-<HHMMSS>-<target>.md');
+    expect(body).not.toContain('<YYYY-MM-DD>-<HHMMSS>-<filename>.md');
+  });
+  it('makes the file review remove its own chosen plan name', () => {
+    // The plan's `--out` is the ONE name the orchestrator chooses — unique
+    // per run, because a file review takes no lease — so Step 9's
+    // `qwen-review-<target>-*` sweep can never match it. The paragraph must
+    // keep both halves: the duty (the run that wrote it removes it) and the
+    // glob that must not exist — the family's `qwen-review-`-free prefix is
+    // what makes "never glob its family" true (pinned structurally above).
+    const body = skillBody();
+    expect(body).toContain('Remove the plan `--out` you wrote');
+    // R20-4: a file review whose token derives to a RESERVED name shares
+    // the sweep namespace with the whole-tree round, and neither is
+    // lease-guarded — running cleanup there deletes a live concurrent
+    // plan and its records.
+    expect(body).toContain(
+      '**A FILE review whose derived token collides with a RESERVED one — `local`, `pr`, or `pr-<n>` — must NOT run this command at all**',
+    );
+    // R18-5: the file family sits outside every cleanup sweep, so this
+    // instruction is its ONLY remover — and cleanup's #9206 retention (keep
+    // the record directory of a run that stopped without converging) must
+    // ride with it, or every unconverged file review destroys its own
+    // diagnosis evidence on the way out.
+    expect(body).toContain(
+      '**unless the reverse-audit loop stopped without converging**',
+    );
+    expect(body).toContain(
+      '`budget-stop.json` marker inside the `-prompts` directory',
+    );
+    expect(body).toContain('must never glob its family');
+    expect(body).toContain(
+      "deleted concurrent file reviews' live plans mid-round",
+    );
+    // The plan-derived record directory (`<plan minus .json>-prompts`,
+    // prompt-record.ts) rode the same free stem out of every cleanup sweep
+    // and retention scan, and nothing else removed it — the manual-removal
+    // duty must cover it beside the plan JSON.
+    expect(body).toContain('and the `-prompts` directory beside it');
+    expect(body).toContain('nothing else removes it');
+    // …and the token-bearing inventory must not claim the reverse-audit
+    // transcripts carry the CLI-derived token: they ride the plan's stem
+    // via the record directory, which the same block declares free.
+    expect(body).toContain('the roster, coverage,');
+    expect(body).not.toContain('coverage, the reverse-audit');
+  });
+  it('never asks the orchestrator to derive the file-review target', () => {
+    // Two derivations of one name is how `qwen review run` came to poll for
+    // an artifact no child ever wrote. The parent canonicalises through
+    // `realpathSync`; a hand-applied recipe normalises characters and does
+    // not, so a symlink BELOW the repo root made them disagree and a review
+    // that had already run — and with --comment, already posted — reported
+    // no verdict. The command derives it now, from `--file`.
+    const body = skillBody();
+    expect(body).not.toContain("put through the CLI's own normalization");
+    expect(body).toContain('**Do not pass `--target` for a file review');
+    expect(body).toContain('derives it from `--file`');
+  });
+  it('pins the local stop bullet for the field-less capture shapes', () => {
+    // The stop bullets are the orchestrator's branch table for the shapes a
+    // local capture can produce, and the shapes WITHOUT a field are the ones
+    // a revert is most likely to drop. Both — the tree-moved shape and the
+    // dropped-out-path shape (a hidden divergence git cannot see) — share one
+    // machine-readable signature: `chunks: []`, empty `skippedFiles`, no
+    // `nothingToReview`, by construction (neither is decided, so the
+    // capture withholds the field); without this bullet the round falls
+    // through the unchanged no-diff rule and reports nothing-to-review,
+    // which is exactly what the capture's own warning sentences forbid.
+    const body = skillBody();
+    expect(body).toContain('the tree MOVED while the capture was hashing it');
+    expect(body).toContain('re-run `capture-local` once');
+    expect(body).toContain(
+      'WARNING: 0 chunks, but the working tree changed while the capture was being hashed',
+    );
+    // The round-12 shape: a cached path still on disk and diverging from
+    // HEAD refuses the anchor AND withholds the clean-tree stop, so the
+    // same branch table must route it — named apart from the moved tree,
+    // with its own warning sentence and its own user guidance.
+    expect(body).toContain(
+      'a cached path DROPPED OUT of the capture while still on disk',
+    );
+    expect(body).toContain(
+      'WARNING: 0 chunks, but a cached path dropped out of this capture while still on disk and diverges from HEAD',
+    );
+    expect(body).toContain('diverges from HEAD invisibly to git');
+    // The round-15 shape: `--no-untracked` leaves the clean-tree stop's
+    // third clause ("nothing untracked") checked by nobody, so the capture
+    // withholds the stop — same signature, its own sentence, and its own
+    // guidance: a re-run changes nothing (the flag is the cause), so the
+    // branch reports the untracked scope as not reviewed instead.
+    expect(body).toContain(
+      'the tracked tree is clean, but untracked files were not enumerated (--no-untracked)',
+    );
+    expect(body).toContain('for the `--no-untracked` shape do NOT re-run');
+    // The round-16 shape: the SAME flag withholds the two incremental stops
+    // — their comparisons cover tracked content only, and the gate admits no
+    // narrower round than the cache, so a brand-new file is invisible to
+    // both. Same signature, its own sentence, and the same no-re-run branch
+    // the clean-tree shape rides.
+    expect(body).toContain(
+      'The incremental scope kept nothing to review, but untracked files were not enumerated (--no-untracked)',
+    );
+  });
+  it('has Step 0 WRITE its verdict, not pipe it past the guard', () => {
+    // The round's first write into `.qwen/tmp` is Step 0's. Through `tee` it
+    // was a shell redirection no command could guard, so a workspace that
+    // committed `.qwen/tmp` as a symlink took that write before anything
+    // checked; `--out` routes it through `ensureReviewTmpDir`. A drift back
+    // to `tee` re-opens it with every suite still green.
+    const body = skillBody();
+    expect(body).toContain(
+      'review parse-args --stdin --out .qwen/tmp/qwen-review-parse-args.json',
+    );
+    expect(body).not.toContain('| tee .qwen/tmp/qwen-review-parse-args.json');
+  });
+
+  it('checks the candidate is this round\u2019s own before promoting', () => {
+    // R17-4: the candidate path is stable per target and local/file reviews
+    // take no lease, so a concurrent same-target run overwrites the file
+    // mid-round — indistinguishable by path. The capture publishes the
+    // written candidate's stateId beside the path, and Step 8 must compare
+    // before promoting; a mismatch is a withheld candidate, said out loud.
+    const body = skillBody();
+    expect(body).toContain('`cacheCandidateStateId`');
+    expect(body).toContain(
+      "The command's refusal (or an absent `cacheCandidateStateId` field on a plan that published a path) is treated exactly like a withheld candidate",
+    );
+    // R24-2: the check is the COMMAND's, bound to the bytes it promotes — a
+    // check the orchestrator made against the same stable path minutes
+    // earlier did not bind the read that followed it.
+    expect(body).toContain("--state-id <the plan's cacheCandidateStateId>");
+    // R25-1: the ledger name is per-round for the same concurrency reason —
+    // and by the report's clock, not the tree's hash, which two concurrent
+    // rounds over an unchanged tree compute alike.
+    expect(body).toContain(
+      '`.qwen/tmp/qwen-review-<target>-ledger-<timestamp>.json`',
+    );
+    expect(body).toContain("Not the tree's `stateId`");
+  });
+
+  it('has both PR stops write the sidecar the run reader expects', () => {
+    // R23: `stopNameFor` predicts `qwen-review-pr-<n>-stop.json` but nothing
+    // in the PR flow ever wrote one — capture-local runs only for
+    // local/file targets — so every decided PR stop (up-to-date, empty
+    // diff) exited 1 "Review did not complete" over a round that WAS
+    // decided: the exact failure shape the sidecar mechanism closed for
+    // local rounds, left open behind a reader that suggested coverage.
+    const body = skillBody();
+    expect(body).toContain('**Before the cleanup, write the stop sidecar**');
+    expect(body).toContain('.qwen/tmp/qwen-review-pr-<n>-stop.json');
+    expect(body).toContain(
+      'write the stop sidecar exactly as the up-to-date stop below does',
+    );
+  });
+
+  it('keys the local cache write to the marker\u2019s withholding conditions', () => {
+    // R8-2: the local fail-closed LIST was "completed" three times and a
+    // fourth shape walked through it each time — the last one an Uncoverable
+    // chunk and a whiffed lens, which withheld the PR marker's `sha` but
+    // never this write, so a local round promoted the candidate over scope
+    // nobody reviewed and the next round's scoping sliced it out of scope.
+    // The rule now KEYS the write to the marker paragraph's withholding
+    // conditions instead of re-enumerating them, so one definition serves
+    // both writes and the two cannot drift.
+    const body = skillBody();
+    // Located by THIS branch's opening for the same paragraph: the write
+    // became one command (`cache-commit`) for both flows, so the sentence the
+    // rule lives under changed while the rule did not.
+    const start = body.indexOf(
+      '**The write is one command, for PR and local alike',
+    );
+    const end = body.indexOf(
+      '**The cache advances exactly when the marker anchored',
+    );
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    // The mechanical rule — a reference to the marker's withholding set,
+    // not a second list.
+    expect(section).toContain(
+      "skip this write under any condition that would withhold the PR marker's `sha`",
+    );
+    // Applied as CONDITIONS, not a marker check — a local round posts
+    // nothing, and a literal marker check would skip every write.
+    expect(section).toContain('no marker to read');
+    // The two shapes the enumeration missed, named in the examples.
+    expect(section).toContain('Uncoverable chunk');
+    expect(section).toContain('whiffed lens');
+    // The anti-drift clause that makes the examples non-authoritative.
+    expect(section).toContain(
+      'The examples are the set as written, not the gate',
+    );
+  });
+});
+
+describe('bundled review skill — the decided-stop composed verdict (#9908)', () => {
+  it('routes every ledger-bearing stop through compose-review', () => {
+    // A decided stop used to complete with event: null, so `--fail-on
+    // request-changes` passed over standing blockers — the R8-1/R13-3
+    // residual. Each stop now composes a real verdict when open Criticals
+    // exist, and the dispositions channel is machine-checked by the CLI.
+    const body = skillBody();
+    // The two incremental stops DEDUCE dispositions (byte-identical state /
+    // the supersededPaths split); clean-tree JUDGES them (no anchor).
+    expect(body).toContain(
+      '**When open Criticals exist, compose the stop verdict before stopping**',
+    );
+    expect(body).toContain('stopReRule: { dispositions: [...] }');
+    expect(body).toContain(
+      'compose the stop verdict before stopping, exactly as that bullet prescribes',
+    );
+    expect(body).toContain(
+      '`superseded` for a Critical whose cited file is in `supersededPaths`',
+    );
+    expect(body).toContain(
+      'the dispositions are judged, not deduced: no anchor certifies what moved',
+    );
+    // Criticals only — Suggestions never enter dispositions, and a
+    // cleared stop comments rather than approves.
+    expect(body).toContain(
+      'Criticals only — Suggestions never enter dispositions',
+    );
+    expect(body).toContain('composes a Comment, never an Approve');
+  });
+
+  it('keys the unchanged bullet’s nothing-open branch on open CRITICALS, like its siblings', () => {
+    // "No open findings" left a Suggestions-only ledger in NEITHER branch:
+    // the model stopped without composing, run.ts read a decided stop with
+    // no composed artifact, and the round exited 1 ("Review did not
+    // complete") on every unchanged re-run — a standing wedge with nothing
+    // open to fix. The scope-emptied and clean-tree bullets already key
+    // this branch on "no open Criticals".
+    const body = skillBody();
+    expect(body).toContain(
+      'When the cached ledger holds no open Criticals — open Suggestions alone block nothing',
+    );
+    expect(body).not.toContain('When the cached ledger has no open findings');
+  });
+});
+
+describe('the worktree prebuild (issue #10108)', () => {
+  // The fetch report's `dependencies` field and the workflow switch that
+  // produces it are named in two places the reader acts on: the Step 1 field
+  // list, and the "do not install here" rule, which must keep standing on a
+  // prebuilt tree (a hand-run `npm ci` there reinstalls what is already
+  // installed). The env literal mirrors `PREBUILD_ENV` in
+  // packages/cli/src/commands/review/lib/prebuild.ts.
+  it('names the report field and the switch, and keeps the no-hand-install rule', () => {
+    const body = coreBody();
+    expect(body).toContain(
+      '`dependencies` (present only when the fetch ran the **prebuild**',
+    );
+    expect(body).toContain('QWEN_REVIEW_PREBUILD=1');
+    expect(body).toContain(
+      "never install by hand, and on a prebuilt tree `build-test`'s own install gate makes Agent 7's install a no-op",
+    );
+    // The no-op claim is scoped to the install half: Agent 7's build
+    // recompiles the closure (the per-package build script pre-cleans
+    // `dist`), so the field text must not promise a build no-op.
+    expect(body).toContain(
+      "Agent 7's install is a no-op on such a tree (its build recompiles",
+    );
+    expect(body).not.toContain('install and build are no-ops');
+  });
+
+  it('qualifies the probe-overlap invitation with the dist pre-clean window', () => {
+    // The field invites probes to run before Agent 7 finishes, but Agent
+    // 7's build pre-cleans each package's `dist` before recompiling, so
+    // the invitation must name the window in which a probe importing a
+    // rebuilding sibling resolves against a missing tree — a probe
+    // overlapping Agent 7's build keeps to workspaces outside the closure.
+    const body = coreBody();
+    expect(body).toContain(
+      'but never against a workspace in that closure while Agent 7',
+    );
+    expect(body).toContain(
+      'resolves against a missing or partial `dist` in that window',
+    );
   });
 });

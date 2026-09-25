@@ -13,7 +13,11 @@ import {
   type MockedFunction,
 } from 'vitest';
 import OpenAI from 'openai';
-import { DashScopeOpenAICompatibleProvider } from './dashscope.js';
+import {
+  DashScopeOpenAICompatibleProvider,
+  selectDashScopeThinkingKnob,
+} from './dashscope.js';
+import { determineProvider } from '../index.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
@@ -110,6 +114,62 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(provider).toBeInstanceOf(DashScopeOpenAICompatibleProvider);
     });
   });
+
+  it.each([
+    [{ thinking_budget: 4096 }, { thinking_budget: 4096 }],
+    [{ enable_thinking: false }, { reasoning_effort: 'none' }],
+    [{ enable_thinking: true }, { reasoning_effort: 'low' }],
+    [
+      { reasoning_effort: 'medium', thinking_budget: 4096 },
+      { reasoning_effort: 'medium' },
+    ],
+  ])(
+    'honors configured tiered protocols with extra_body %j',
+    (extraBody, expected) => {
+      const model = 'qwen-custom-tiered';
+      const getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'xhigh'],
+            defaultEffort: 'xhigh',
+            disableField: 'reasoning_effort',
+          },
+        },
+      });
+      mockCliConfig.getResolvedModelConfig = getResolvedModelConfig;
+      mockContentGeneratorConfig.authType = AuthType.USE_OPENAI;
+      mockContentGeneratorConfig.model = 'qwen-configured-main';
+      mockContentGeneratorConfig.reasoning = { effort: 'low' };
+      mockContentGeneratorConfig.extra_body = extraBody;
+      const wire = provider.buildRequest(
+        { model, messages: [] },
+        'test',
+      ) as unknown as Record<string, unknown>;
+      expect({
+        enable_thinking: wire['enable_thinking'],
+        reasoning_effort: wire['reasoning_effort'],
+        thinking_budget: wire['thinking_budget'],
+      }).toEqual({
+        enable_thinking: undefined,
+        reasoning_effort: undefined,
+        thinking_budget: undefined,
+        ...expected,
+      });
+      expect(getResolvedModelConfig).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        model,
+        mockContentGeneratorConfig.baseUrl,
+      );
+      mockContentGeneratorConfig.reasoning = { effort: 'high' };
+      mockContentGeneratorConfig.extra_body = undefined;
+      const invalid = provider.buildRequest(
+        { model, messages: [] },
+        'test',
+      ) as unknown as Record<string, unknown>;
+      expect(invalid['reasoning_effort']).toBeUndefined();
+    },
+  );
 
   it('enables content-only thinking-tag leak detection', () => {
     expect(provider.getResponseParsingOptions()).toEqual({
@@ -243,6 +303,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for alicloudapi.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via alicloudapi origin: api-id.cn-hangzhou.alicloudapi.com',
+      );
+    });
+
+    it('should return true for port-bearing alicloudapi.com URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alicloudapi.com:8443/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alicloudapi.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
     it('should return false for bare alibaba-inc.com domain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
@@ -273,6 +369,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://aliyun-inc.com.evil.com/v1',
         'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://notalicloudapi.com/v1',
+        'https://alicloudapi.com.evil.com/v1',
       ];
 
       configs.forEach((baseUrl) => {
@@ -437,6 +535,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  // Guards the full acceptance path end-to-end: an alicloudapi.com base URL
+  // must route through the DashScope provider so buildRequest injects the
+  // session-tracking metadata into the request body.
+  describe('determineProvider routing for alicloudapi.com', () => {
+    const alicloudapiConfig = {
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+      model: 'qwen-max',
+    } as ContentGeneratorConfig;
+
+    it('routes alicloudapi.com base URLs to the DashScope provider', () => {
+      const routed = determineProvider(alicloudapiConfig, mockCliConfig);
+      expect(routed).toBeInstanceOf(DashScopeOpenAICompatibleProvider);
+    });
+
+    it('injects session-tracking metadata into the request body', () => {
+      const routed = determineProvider(
+        alicloudapiConfig,
+        mockCliConfig,
+      ) as DashScopeOpenAICompatibleProvider;
+
+      const result = routed.buildRequest(
+        {
+          model: 'qwen-max',
+          messages: [{ role: 'user', content: 'Hello!' }],
+        },
+        'test-prompt-id',
+      );
+
+      expect(result.metadata).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+  });
+
   describe('buildHeaders', () => {
     it('should build DashScope-specific headers', () => {
       const headers = provider.buildHeaders();
@@ -486,6 +620,36 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         `QwenCode/unknown (${process.platform}; ${process.arch})`,
       );
     });
+
+    it('should add the OssResourceResolve header when omni is enabled', () => {
+      const omniCliConfig = {
+        ...mockCliConfig,
+        isOmniEnabled: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const omniProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        omniCliConfig,
+      );
+
+      const headers = omniProvider.buildHeaders();
+
+      expect(headers['X-DashScope-OssResourceResolve']).toBe('enable');
+    });
+
+    it('should omit the OssResourceResolve header when omni is disabled', () => {
+      const omniCliConfig = {
+        ...mockCliConfig,
+        isOmniEnabled: vi.fn().mockReturnValue(false),
+      } as unknown as Config;
+      const omniProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        omniCliConfig,
+      );
+
+      const headers = omniProvider.buildHeaders();
+
+      expect(headers).not.toHaveProperty('X-DashScope-OssResourceResolve');
+    });
   });
 
   describe('buildClient', () => {
@@ -504,10 +668,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
             'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
           },
+          fetch: expect.any(Function),
         }),
       );
 
       expect(client).toBeDefined();
+    });
+
+    it('installs session ID injection on the runtime fetch', async () => {
+      const runtimeFetch = vi.fn(
+        async (_input: string | URL | Request, _init?: RequestInit) =>
+          new Response(),
+      );
+      vi.mocked(buildRuntimeFetchOptions).mockReturnValue({
+        fetch: runtimeFetch,
+      });
+
+      const client = provider.buildClient() as unknown as {
+        config: { fetch: typeof fetch };
+      };
+      await client.config.fetch(
+        'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+      );
+
+      const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
+      expect(headers.get('session_id')).toBe('test-session-id');
     });
 
     it('should use default timeout and maxRetries when not provided', () => {
@@ -581,6 +766,250 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       temperature: 0.7,
     };
 
+    // DashScope is an aggregating gateway. `metadata` is a platform-private
+    // tracing object that only its own inference path understands; forwarded to a
+    // third-party vendor backend that types `metadata` as a string it fails to
+    // deserialize and the request comes back as a flat 400, which made those
+    // models unusable through Qwen Code entirely.
+    it.each([['qwen-max'], ['qwen3.8-max'], ['coder-model']] as const)(
+      'ships metadata for the qwen-family model %s',
+      (model) => {
+        const result = provider.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it.each([
+      ['ZHIPU/GLM-5.3-Flash'],
+      ['deepseek-v4-pro'],
+      ['moonshot/kimi-k3'],
+    ] as const)('omits metadata for the non-qwen model %s', (model) => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+      // The gate is metadata-only: everything else the provider ships is untouched.
+      expect(result['messages']).toBeDefined();
+      expect(result['preserve_thinking']).toBe(true);
+    });
+
+    it.each([['ZHIPU/GLM-5.3-Flash'], ['glm-5.2']] as const)(
+      'sends metadata for the non-qwen model %s when enableRequestMetadata is true',
+      (model) => {
+        // The client cannot tell a forwarded request from one DashScope serves
+        // itself, so an operator whose first-party non-qwen sessions still need
+        // sessionId/promptId correlation can force the field back on.
+        const generator = new DashScopeOpenAICompatibleProvider(
+          { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+          mockCliConfig,
+        );
+
+        const result = generator.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it('omits metadata even for a qwen model when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    // buildRequest has a second, separate return for vision models with its own
+    // metadata spread. The gate tests above only exercise the non-vision return, so
+    // a regression at the vision call site would ship `metadata` for a non-qwen
+    // vision model while every test above stayed green.
+    it('ships metadata on the vision path for a qwen-family vision model', () => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it('omits metadata on the vision path when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      // Still the vision branch, so the gate is what changed and not the route.
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('gates the vision path on the request model, not the configured model', () => {
+      // resolveWireModel falls back to the configured model when the request
+      // model is missing. A non-qwen configured model with a qwen vision request
+      // model is the one input where the two disagree, so it pins which one the
+      // vision call site hands the gate.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, model: 'ZHIPU/GLM-5.3-Flash' },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    // A side-model generator is built with its own per-model config but shares
+    // the session Config, so the gate reads only the provider's own value. The
+    // session's value must neither override a per-model opt-out nor fill in a
+    // value the cross-provider agent config deliberately cleared.
+    it('prefers the provider config enableRequestMetadata over the session value', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('honours a provider config enableRequestMetadata when the session sets none', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({}),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it('ignores the session enableRequestMetadata when the provider config has none', () => {
+      // buildAgentContentGeneratorConfig clears every generation field for a
+      // cross-provider agent, so undefined here is deliberate and the ambient
+      // session value must not fill it in for a vendor-forwarded model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('ignores a session false when the provider config has none', () => {
+      // Same isolation in the other direction: a session opt-out must not
+      // strip tracing from a cross-provider agent running a first-party model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it.each([
+      ['gpt-5.4', 'high', 'high'],
+      ['gpt-5.4', 'max', 'xhigh'],
+      ['gpt-6-astra', 'max', 'max'],
+    ] as const)(
+      'maps %s effort %s to flat %s on an IdeaLab gateway',
+      (model, effort, expected) => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+            model,
+            reasoning: { effort },
+            samplingParams: { max_completion_tokens: 1024 },
+          },
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort },
+            max_completion_tokens: 1024,
+          } as OpenAI.Chat.ChatCompletionCreateParams,
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe(expected);
+        expect(result['reasoning']).toBeUndefined();
+        expect(result['max_completion_tokens']).toBe(1024);
+      },
+    );
+
     it('should add cache control to system message only for non-streaming requests', () => {
       const request = { ...baseRequest, stream: false };
       const result = provider.buildRequest(request, 'test-prompt-id');
@@ -622,7 +1051,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
       '%s reasoning effort',
       (model) => {
-        it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
+        it.each(['low', 'medium', 'high', 'xhigh'] as const)(
           'passes %s through as reasoning_effort',
           (effort) => {
             const generator = new DashScopeOpenAICompatibleProvider(
@@ -651,6 +1080,105 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         );
       },
     );
+
+    describe.each([
+      'qwen3.8-max',
+      'qwen3.8-max-preview',
+      'qwen3.8-max-latest',
+      'qwen3.8-max-2026-01-15',
+    ])('%s reasoning effort ceiling', (model) => {
+      it('warns once however many requests the same provider builds', () => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model,
+            reasoning: { effort: 'max' },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const request = {
+          ...baseRequest,
+          model,
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0];
+
+        generator.buildRequest(request, 'first');
+        generator.buildRequest(request, 'second');
+
+        const clampWarnings = mockDebugLogger.warn.mock.calls.filter(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('tiered-effort family'),
+        );
+        expect(clampWarnings).toHaveLength(1);
+      });
+
+      it('clamps the max tier to xhigh, the strongest tier DashScope accepts', () => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model,
+            reasoning: { effort: 'max' },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort: 'max' },
+          } as unknown as Parameters<typeof generator.buildRequest>[0],
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe('xhigh');
+      });
+    });
+
+    it('caps a non-qwen model on a DashScope host at the generic ceiling', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'vendor-compatible-model',
+          reasoning: { effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'vendor-compatible-model',
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('caps a GLM model served over DashScope, which is not a Z.ai host', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-5.2',
+          reasoning: { effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
 
     it('lets extra_body override qwen3.8-max reasoning_effort', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
@@ -697,6 +1225,176 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it.each([
+      {
+        name: 'extra_body thinking_budget over request-level effort',
+        extraBody: { enable_thinking: true, thinking_budget: 4096 },
+        requestFields: { reasoning_effort: 'max' },
+        configuredReasoning: false,
+        expectedEffort: undefined,
+        expectedBudget: 4096,
+        expectedThinking: true,
+      },
+      {
+        name: 'request-level thinking_budget over configured effort',
+        extraBody: undefined,
+        requestFields: { thinking_budget: 2048 },
+        configuredReasoning: true,
+        expectedEffort: undefined,
+        expectedBudget: 2048,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'extra_body thinking_budget over configured effort',
+        extraBody: { thinking_budget: 3072 },
+        requestFields: {},
+        configuredReasoning: true,
+        expectedEffort: undefined,
+        expectedBudget: 3072,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'extra_body effort over request-level thinking_budget',
+        extraBody: { reasoning_effort: 'max' },
+        requestFields: { thinking_budget: 2048 },
+        configuredReasoning: false,
+        expectedEffort: 'max',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'request-level effort over a same-layer thinking_budget',
+        extraBody: undefined,
+        requestFields: {
+          reasoning_effort: 'high',
+          thinking_budget: 1024,
+        },
+        configuredReasoning: false,
+        expectedEffort: 'high',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null extra_body thinking_budget falls through to configured effort',
+        extraBody: { thinking_budget: null },
+        requestFields: {},
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null extra_body reasoning_effort falls through to configured effort',
+        extraBody: { reasoning_effort: null },
+        requestFields: {},
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null request-level thinking_budget falls through to configured effort',
+        extraBody: undefined,
+        requestFields: { thinking_budget: null },
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null request-level reasoning_effort falls through to configured effort',
+        extraBody: undefined,
+        requestFields: { reasoning_effort: null },
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null extra_body enable_thinking is omitted without a configured effort',
+        extraBody: { enable_thinking: null },
+        requestFields: {},
+        configuredReasoning: false,
+        expectedEffort: undefined,
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null request-level enable_thinking is omitted without a configured effort',
+        extraBody: undefined,
+        requestFields: { enable_thinking: null },
+        configuredReasoning: false,
+        expectedEffort: undefined,
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+    ])('resolves $name', (testCase) => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max-preview',
+          ...(testCase.configuredReasoning
+            ? { reasoning: { effort: 'low' as const } }
+            : {}),
+          extra_body: testCase.extraBody,
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max-preview',
+          ...testCase.requestFields,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      if (testCase.expectedEffort === undefined) {
+        expect(result['reasoning_effort']).toBeUndefined();
+      } else {
+        expect(result['reasoning_effort']).toBe(testCase.expectedEffort);
+      }
+      if (testCase.expectedBudget === undefined) {
+        expect(result['thinking_budget']).toBeUndefined();
+      } else {
+        expect(result['thinking_budget']).toBe(testCase.expectedBudget);
+      }
+      if (testCase.expectedThinking === undefined) {
+        expect(result['enable_thinking']).toBeUndefined();
+      } else {
+        expect(result['enable_thinking']).toBe(testCase.expectedThinking);
+      }
+      expect(result['reasoning']).toBeUndefined();
+    });
+
+    it('warns that the dropped budget came from a request-level same-layer pair', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max-preview',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max-preview',
+          reasoning_effort: 'high',
+          thinking_budget: 1024,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      );
+
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max-preview',
+          reasoningEffort: 'high',
+          dropped: ['thinking_budget'],
+        },
+      );
+    });
+
     it('drops the preset enable_thinking when an effort tier ships on qwen3.8-max-preview', () => {
       // The Token Plan preset ships qwen3.8-max-preview with enableThinking,
       // which provider-config.ts turns into extra_body.enable_thinking; the
@@ -725,7 +1423,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['enable_thinking']).toBeUndefined();
       expect(result['reasoning']).toBeUndefined();
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        'DashScope: dropped extra_body thinking knobs that conflict with reasoning_effort',
+        'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max-preview',
           reasoningEffort: 'high',
@@ -911,9 +1609,146 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['enable_thinking']).toBeUndefined();
     });
 
-    it('drops both conflicting knobs when a tier ships alongside enable_thinking and thinking_budget', () => {
-      // Multi-knob shape: the delete loop must clear every conflicting
-      // field, not just the first one.
+    it('honours samplingParams enable_thinking: false over the configured tier', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('none');
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
+    it('keeps extra_body effort over a lower-priority samplingParams disable', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'high' },
+          extra_body: { reasoning_effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('max');
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
+    it('keeps the tier over a lower-priority samplingParams disable when extra_body enables thinking', () => {
+      // Regression: selection used to register only `enable_thinking ===
+      // false`, so the lower-priority disable won cross-layer resolution
+      // and rewrote the shipping tier to `none` — inverting the documented
+      // extra_body > samplingParams precedence.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'high' },
+          extra_body: { enable_thinking: true },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('high');
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'high',
+          dropped: ['enable_thinking'],
+        },
+      );
+    });
+
+    it('keeps a higher-priority extra_body enable_thinking over a samplingParams disable without a tier', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: { enable_thinking: true },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps a samplingParams budget over the configured tier under an extra_body on-switch', () => {
+      // The on-switch blocks lower-priority off-switches but does not choose
+      // a value, so the next value-bearing layer still wins over reasoning.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'high' },
+          extra_body: { enable_thinking: true },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          thinking_budget: 2048,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['thinking_budget']).toBe(2048);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'high',
+          dropped: ['reasoning_effort'],
+        },
+      );
+    });
+
+    it('keeps higher-priority extra_body thinking knobs over a configured tier', () => {
+      // Both extra_body fields outrank the configured reasoning effort, so
+      // the lower-priority tier is removed without discarding user knobs.
       const generator = new DashScopeOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,
@@ -928,9 +1763,202 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('high');
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['thinking_budget']).toBe(1024);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'high',
+          dropped: ['reasoning_effort'],
+        },
+      );
+    });
+
+    it('keeps a higher-priority budget over a request-level none sentinel', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: { thinking_budget: 4096 },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          reasoning_effort: 'none',
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['thinking_budget']).toBe(4096);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'none',
+          dropped: ['reasoning_effort'],
+        },
+      );
+    });
+
+    it('keeps a higher-priority budget over a request-level disable', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: { thinking_budget: 4096 },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['thinking_budget']).toBe(4096);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: undefined,
+          dropped: ['enable_thinking'],
+        },
+      );
+    });
+
+    it.each([
+      {
+        name: 'extra_body disable over a request-level budget',
+        extraBody: { enable_thinking: false },
+        requestFields: { thinking_budget: 4096 },
+      },
+      {
+        name: 'same-layer extra_body disable and budget',
+        extraBody: { enable_thinking: false, thinking_budget: 1024 },
+        requestFields: {},
+      },
+      {
+        name: 'same-layer request-level disable and budget',
+        extraBody: undefined,
+        requestFields: { enable_thinking: false, thinking_budget: 2048 },
+      },
+    ])('canonicalizes $name without a configured tier', (testCase) => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: testCase.extraBody,
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          ...testCase.requestFields,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('none');
       expect(result['enable_thinking']).toBeUndefined();
       expect(result['thinking_budget']).toBeUndefined();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: undefined,
+          dropped: ['enable_thinking', 'thinking_budget'],
+        },
+      );
+    });
+
+    it('keeps a legacy Qwen budget over an opaque none effort', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.7-max',
+          extra_body: { thinking_budget: 4096, reasoning_effort: 'none' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen3.7-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['thinking_budget']).toBe(4096);
+    });
+
+    it('drops every conflicting knob when extra_body explicitly disables thinking', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'high' },
+          extra_body: { enable_thinking: false, thinking_budget: 1024 },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen3.8-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('none');
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['thinking_budget']).toBeUndefined();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'high',
+          dropped: ['enable_thinking', 'thinking_budget'],
+        },
+      );
+    });
+
+    it('drops an explicit budget when none disables thinking', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: { enable_thinking: false, thinking_budget: 1024 },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          reasoning_effort: 'none',
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('none');
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['thinking_budget']).toBeUndefined();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'none',
+          dropped: ['enable_thinking', 'thinking_budget'],
+        },
+      );
     });
 
     it.each(['qwen3.8-max-2026-01-15', 'qwen3.8-max-latest'])(
@@ -955,15 +1983,46 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       },
     );
 
-    it('drops an extra_body thinking_budget when an effort tier ships', () => {
-      // DashScope rejects requests carrying both reasoning_effort and
-      // thinking_budget; the selected tier wins.
+    it('reports cross-layer and same-layer drops together', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,
           model: 'qwen3.8-max',
-          reasoning: { effort: 'high' },
-          extra_body: { thinking_budget: 1024 },
+          extra_body: {
+            enable_thinking: true,
+            reasoning_effort: 'high',
+            thinking_budget: 1024,
+          },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen3.8-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('high');
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['thinking_budget']).toBeUndefined();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'high',
+          dropped: ['thinking_budget', 'enable_thinking'],
+        },
+      );
+    });
+
+    it('does not warn about an undefined thinking_budget key', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: {
+            reasoning_effort: 'high',
+            thinking_budget: undefined,
+          },
         } as ContentGeneratorConfig,
         mockCliConfig,
       );
@@ -974,6 +2033,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       expect(result['reasoning_effort']).toBe('high');
       expect(result['thinking_budget']).toBeUndefined();
+      expect(mockDebugLogger.warn).not.toHaveBeenCalled();
     });
 
     it('keeps thinking_budget alongside enable_thinking on legacy qwen models', () => {
@@ -1797,6 +2857,175 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  describe('reattach boundary cache control (issue #11627)', () => {
+    const reattachImageBlock = {
+      type: 'image_url' as const,
+      image_url: { url: 'data:image/png;base64,AAAA' },
+    };
+
+    it('places the conversation breakpoint before reattached parts appended to the last user message', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(content).toHaveLength(3);
+      // Breakpoint lands on the stable text block, not the reattach marker/image.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'Stable user text',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('walks back to the previous message when the whole last message is reattach', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'user', content: 'Stable user text' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The last message is entirely reattach content: it must not be marked.
+      const lastContent = result.messages[2]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(lastContent?.[0]).not.toHaveProperty('cache_control');
+      expect(lastContent?.[1]).not.toHaveProperty('cache_control');
+      // The breakpoint moves onto the previous stable message instead.
+      expect(result.messages[1]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'Stable user text',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('keeps the last-block anchor when no reattach boundary is supplied', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Unchanged behavior: last block keeps the breakpoint.
+      expect(content?.[1]).toMatchObject({
+        type: 'image_url',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+    });
+
+    it('skips an empty-string tool result when walking back to a stable block', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The empty tool result stays a bare string — not rewritten into a
+      // fabricated zero-length text part carrying cache_control.
+      expect(result.messages[1]?.content).toBe('');
+      // The breakpoint degrades to the system message (system-only caching).
+      expect(result.messages[0]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'System prompt',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('walks the anchor back past a current-turn inline image to stable text', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'look at this screenshot' },
+              reattachImageBlock,
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Breakpoint lands on the prompt text, not the inline image the next
+      // turn textualizes.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'look at this screenshot',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+    });
+  });
+
   describe('output token limits', () => {
     it('should limit max_tokens when it exceeds model limit', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
@@ -2063,6 +3292,258 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((result as any).preserve_thinking).toBe(false);
+    });
+  });
+});
+
+describe('selectDashScopeThinkingKnob', () => {
+  const model = 'qwen3.8-max';
+
+  it('returns undefined for non-tiered or missing models', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        'qwen3-max',
+        { enable_thinking: false },
+        { thinking_budget: 100 },
+        'high',
+      ),
+    ).toBeUndefined();
+    expect(
+      selectDashScopeThinkingKnob(
+        undefined,
+        { reasoning_effort: 'high' },
+        undefined,
+        undefined,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('matches the tiered family case-insensitively', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        'QWEN3.8-MAX-preview',
+        undefined,
+        undefined,
+        'high',
+      ),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  it('returns undefined when no layer carries a knob', () => {
+    expect(
+      selectDashScopeThinkingKnob(model, undefined, undefined, undefined),
+    ).toBeUndefined();
+  });
+
+  it('falls back to the unified reasoning tier', () => {
+    expect(
+      selectDashScopeThinkingKnob(model, undefined, undefined, 'high'),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  it('lets an extra_body disable win over same-layer values and lower layers', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        { enable_thinking: false, reasoning_effort: 'low' },
+        { thinking_budget: 100 },
+        'high',
+      ),
+    ).toEqual({
+      source: 'extra_body',
+      field: 'enable_thinking',
+      value: false,
+    });
+  });
+
+  it('lets an extra_body budget win over lower-priority layers', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        { thinking_budget: 300 },
+        { reasoning_effort: 'low' },
+        'high',
+      ),
+    ).toEqual({
+      source: 'extra_body',
+      field: 'thinking_budget',
+      value: 300,
+    });
+  });
+
+  it('keeps reasoning_effort over an explicit same-layer thinking_budget', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        { reasoning_effort: 'low', thinking_budget: 300 },
+        undefined,
+        undefined,
+      ),
+    ).toEqual({
+      source: 'extra_body',
+      field: 'reasoning_effort',
+      value: 'low',
+    });
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { reasoning_effort: 'low', thinking_budget: 100 },
+        undefined,
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'reasoning_effort',
+      value: 'low',
+    });
+  });
+
+  it('ignores nullish extra_body knobs', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        {
+          enable_thinking: null,
+          reasoning_effort: null,
+          thinking_budget: undefined,
+        },
+        undefined,
+        'high',
+      ),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  describe('extra_body on-switch', () => {
+    it('lets a samplingParams value decide', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          { thinking_budget: 200 },
+          'high',
+        ),
+      ).toEqual({
+        source: 'samplingParams',
+        field: 'thinking_budget',
+        value: 200,
+      });
+    });
+
+    it('lets the reasoning tier decide when samplingParams has no value', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          undefined,
+          'high',
+        ),
+      ).toEqual({
+        source: 'reasoning',
+        field: 'reasoning_effort',
+        value: 'high',
+      });
+    });
+
+    it('is itself the selection when nothing below carries a value', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          undefined,
+          undefined,
+        ),
+      ).toEqual({
+        source: 'extra_body',
+        field: 'enable_thinking',
+        value: true,
+      });
+    });
+
+    it('blocks a lower-priority samplingParams disable', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          { enable_thinking: false },
+          'high',
+        ),
+      ).toEqual({
+        source: 'reasoning',
+        field: 'reasoning_effort',
+        value: 'high',
+      });
+    });
+  });
+
+  it('lets a samplingParams disable win over the reasoning tier', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { enable_thinking: false },
+        'high',
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'enable_thinking',
+      value: false,
+    });
+  });
+
+  it('lets a samplingParams budget win over the reasoning tier', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { thinking_budget: 128 },
+        'high',
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'thinking_budget',
+      value: 128,
+    });
+  });
+
+  it('lets the reasoning tier decide under a samplingParams on-switch', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { enable_thinking: true },
+        'high',
+      ),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  it('keeps a lone samplingParams on-switch as the selection', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { enable_thinking: true },
+        undefined,
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'enable_thinking',
+      value: true,
     });
   });
 });

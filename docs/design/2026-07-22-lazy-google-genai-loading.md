@@ -22,14 +22,21 @@ Provider implementations continue to use the official SDK classes. In particular
 
 `createContentGenerator()` still validates configuration, preloads the runtime fetch implementation, and performs Qwen OAuth credential acquisition at its current point in the session lifecycle. It returns a private lazy `ContentGenerator` whose memoized loader constructs the selected provider and wraps it in `LoggingContentGenerator` on the first asynchronous content-generator operation.
 
-All four asynchronous operations share the same loader promise:
+All three asynchronous operations share the same loader promise:
 
 - `generateContent`
 - `generateContentStream`
-- `countTokens`
 - `embedContent`
 
-Concurrent first calls therefore import and construct the provider once. `useSummarizedThinking()` remains synchronous and is supplied from the selected provider's known behavior: true for Gemini/Vertex and false for OpenAI, Qwen OAuth, and Anthropic.
+Concurrent first calls therefore import and construct the provider once.
+
+> **Update (2026-08, PR #9676)**: `countTokens` and `useSummarizedThinking`
+> were removed from the `ContentGenerator` interface — no production caller
+> used either, and the removal narrows every provider and test double to the
+> operations something actually calls. This doc originally listed four shared
+> asynchronous operations (including `countTokens`) and a synchronous
+> `useSummarizedThinking()` supplied from each provider's known behavior; both
+> are gone from the interface, the lazy wrapper, and the four providers.
 
 Qwen OAuth credential acquisition remains eager within `createContentGenerator()`. An expired or missing cached credential therefore continues to reject ACP session creation rather than producing an apparently usable session that fails only on its first prompt.
 
@@ -49,7 +56,7 @@ The serve fast-path metafile guard adds `@google/genai` to the ACP forbidden-pac
 
 There are three direct production creation paths. `Config.refreshAuth()` owns the main-session generator. `BaseLlmClient` owns cached per-model generators for routed side requests. `createRuntimeContentGeneratorView()` owns dedicated generators used by the in-process agent backend, subagent manager, and forked agents. Each path stores and consumes only the `ContentGenerator` interface, so the private lazy wrapper preserves its ownership and routing boundary.
 
-The interface consumers call only `generateContent`, `generateContentStream`, `countTokens`, `embedContent`, and `useSummarizedThinking`. The main chat path, prompt hooks, memory/goal/side queries, vision routing, subagents, and session resume do not inspect the concrete provider or unwrap `LoggingContentGenerator`; a repository-wide search found no production `instanceof` or `getWrapped()` caller. MCP tool discovery is separate from generator ownership and keeps the SDK-provided `mcpToTool` adapter behind its own first-use import.
+The interface consumers call only `generateContent`, `generateContentStream`, and `embedContent`. The main chat path, prompt hooks, memory/goal/side queries, vision routing, subagents, and session resume do not inspect the concrete provider or unwrap `LoggingContentGenerator`; a repository-wide search found no production `instanceof` or `getWrapped()` caller. MCP tool discovery is separate from generator ownership and keeps the SDK-provided `mcpToTool` adapter behind its own first-use import.
 
 ## Alternatives rejected
 
@@ -71,7 +78,7 @@ The interface consumers call only `generateContent`, `generateContentStream`, `c
 
 ## Verification
 
-Unit tests cover helper parity, deferred construction, Qwen credential timing, single-flight behavior, provider-specific summarized-thinking values, deferred module failures, and MCP discovery behavior. The bundled metafile must show `@google/genai` absent from the ACP static closure while retaining it in dynamic provider/MCP chunks.
+Unit tests cover helper parity, deferred construction, Qwen credential timing, single-flight behavior, deferred module failures, and MCP discovery behavior. The bundled metafile must show `@google/genai` absent from the ACP static closure while retaining it in dynamic provider/MCP chunks.
 
 The 2C4G acceptance run follows #7264: 30 paired serial cold starts, `channel.initialize` P50/P95, process-to-first-session, preheated/warm behavior, concurrent first sessions, telemetry on/off, and peak RSS. Because this change moves work later, it additionally records session-response-to-first-token and process-to-first-token for an immediate first prompt. A startup win that is fully repaid as a first-token regression is reported rather than treated as a successful optimization.
 

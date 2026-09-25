@@ -9,7 +9,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
-import { extractGeminiContent, stringifyGenAiJson } from './gen-ai-content.js';
+import { extractLlmContent, stringifyGenAiJson } from './gen-ai-content.js';
 
 const SHORT_TRUNCATION_SUFFIX = '...[TRUNCATED]';
 const debugLogger = createDebugLogger('GEN_AI_CONTENT');
@@ -90,6 +90,162 @@ function truncatePrefixedContent(
 
 // --- Interaction Span: User Prompt ---
 
+export function addAgentInputMessageAttributes(
+  config: Config,
+  span: Span,
+  promptText: string,
+): void {
+  if (
+    !areSensitiveSpanAttributesEnabled(config) ||
+    promptText.trim().length === 0
+  ) {
+    return;
+  }
+  writeJsonAttribute(config, span, 'gen_ai.input.messages', [
+    {
+      role: 'user',
+      parts: [{ type: 'text', content: promptText }],
+    },
+  ]);
+}
+
+export function addAgentOutputMessageAttributes(
+  config: Config,
+  span: Span,
+  responseText: string,
+  finishReason: string,
+): void {
+  if (
+    !areSensitiveSpanAttributesEnabled(config) ||
+    responseText.trim().length === 0
+  ) {
+    return;
+  }
+  const reason = normalizeAgentFinishReason(finishReason);
+  if (!reason) return;
+  writeJsonAttribute(config, span, 'gen_ai.output.messages', [
+    {
+      role: 'assistant',
+      parts: [{ type: 'text', content: responseText }],
+      finish_reason: reason,
+    },
+  ]);
+}
+
+function normalizeAgentFinishReason(
+  finishReason: string | undefined,
+): string | undefined {
+  const reason = finishReason?.trim().toLowerCase();
+  if (!reason || reason === 'finish_reason_unspecified') return undefined;
+  if (reason === 'stop') return 'stop';
+  if (reason === 'max_tokens') return 'length';
+  if (
+    reason === 'tool_calls' ||
+    reason === 'function_call' ||
+    reason === 'tool_call'
+  ) {
+    return 'tool_call';
+  }
+  if (
+    reason === 'safety' ||
+    reason === 'recitation' ||
+    reason === 'language' ||
+    reason === 'blocklist' ||
+    reason === 'prohibited_content' ||
+    reason === 'spii' ||
+    reason === 'image_safety' ||
+    reason === 'image_prohibited_content' ||
+    reason === 'image_recitation' ||
+    reason === 'image_other'
+  ) {
+    return 'content_filter';
+  }
+  return reason;
+}
+
+export class AgentOutputMessageCapture {
+  private readonly enabled: boolean;
+  private readonly maxLength: number;
+  private responseText = '';
+  private finishReason: string | undefined;
+  private overflow = false;
+  private committed: { responseText: string; finishReason: string } | undefined;
+
+  constructor(private readonly config: Config) {
+    this.enabled = areSensitiveSpanAttributesEnabled(config);
+    this.maxLength = this.enabled
+      ? config.getTelemetrySensitiveSpanAttributeMaxLength()
+      : 0;
+  }
+
+  beginResponse(): void {
+    if (!this.enabled) return;
+    this.clearResponse();
+    this.committed = undefined;
+  }
+
+  appendText(text: string): void {
+    if (!this.enabled || !text || this.overflow) return;
+    const remaining = this.maxLength - this.responseText.length;
+    if (text.length > remaining) {
+      this.responseText = '';
+      this.overflow = true;
+      this.committed = undefined;
+      return;
+    }
+    this.responseText += text;
+  }
+
+  observeFinishReason(finishReason: string | undefined): void {
+    if (!this.enabled) return;
+    const normalized = normalizeAgentFinishReason(finishReason);
+    if (normalized) this.finishReason = normalized;
+  }
+
+  restartAttempt(preserveText: boolean): void {
+    if (!this.enabled) return;
+    if (!preserveText) {
+      this.clearResponse();
+    } else {
+      this.finishReason = undefined;
+    }
+    this.committed = undefined;
+  }
+
+  commitResponse(hasToolCalls: boolean): void {
+    if (
+      !this.enabled ||
+      hasToolCalls ||
+      this.overflow ||
+      this.responseText.trim().length === 0 ||
+      !this.finishReason
+    ) {
+      this.committed = undefined;
+      return;
+    }
+    this.committed = {
+      responseText: this.responseText,
+      finishReason: this.finishReason,
+    };
+  }
+
+  writeToSpan(span: Span | undefined): void {
+    if (!span || !this.committed) return;
+    addAgentOutputMessageAttributes(
+      this.config,
+      span,
+      this.committed.responseText,
+      this.committed.finishReason,
+    );
+  }
+
+  private clearResponse(): void {
+    this.responseText = '';
+    this.finishReason = undefined;
+    this.overflow = false;
+  }
+}
+
 export function addUserPromptAttributes(
   config: Config,
   span: Span,
@@ -120,7 +276,7 @@ export function addSystemPromptAttributes(
   systemInstruction: unknown,
 ): void {
   if (!areSensitiveSpanAttributesEnabled(config)) return;
-  const parts = extractGeminiContent({
+  const parts = extractLlmContent({
     config: { systemInstruction },
   }).systemInstructions;
   if (parts !== undefined) {
@@ -145,7 +301,7 @@ export function addToolSchemaAttributes(
   )
     ? tools
     : [{ functionDeclarations: tools }];
-  const definitions = extractGeminiContent({
+  const definitions = extractLlmContent({
     config: { tools: providerTools },
   }).toolDefinitions;
   if (definitions !== undefined) {
@@ -171,13 +327,7 @@ export function addModelOutputAttributes(
       ? originalLengthOrFinishReason
       : finishReason;
   if (!reason) return;
-  writeJsonAttribute(config, span, 'gen_ai.output.messages', [
-    {
-      role: 'assistant',
-      parts: [{ type: 'text', content: responseText }],
-      finish_reason: reason,
-    },
-  ]);
+  addAgentOutputMessageAttributes(config, span, responseText, reason);
 }
 
 /**

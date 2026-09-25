@@ -27,21 +27,30 @@ pub use cursor::{
     CursorSemantics, CursorTarget, CursorThemeSelection,
 };
 pub use inputs::{
-    CaptureScope, ClickButton, ClickInput, ClipboardReadInput, ClipboardWriteInput, DesktopScope,
-    DragInput, EndSessionInput, EscalateSessionInput, EscalationReason, GetAgentCursorStateInput,
-    GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionStateInput,
-    HotkeyInput, InvokeMenuInput, MoveCursorInput, PressKeyInput, ScrollBy, ScrollDirection,
-    ScrollInput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
-    SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
+    action_target_schema, ActionTarget, CaptureScope, ClickButton, ClickInput, ClipboardReadInput,
+    ClipboardWriteInput, DeliveryMode, DesktopScope, DoubleClickInput, DragInput, EndSessionInput,
+    EscalateSessionInput, EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput,
+    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput,
+    GetWindowStateInput, HotkeyInput, InvokeMenuInput, LaunchAppInput, ListAppsInput,
+    ListSessionsInput, ListWindowsInput, MoveCursorInput, ObservationRevisionInput, PasteFormat,
+    PasteInput, PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollBy,
+    ScrollDirection, ScrollInput, SelectTextInput, SetAgentCursorEnabledInput,
+    SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetValueInput, SetWindowFrameInput,
+    StartSessionInput, TextSelection, ToolInput, TypeTextInput, WindowClickInput, WindowDragInput,
+    WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput, WindowTypeTextInput,
+    MULTI_CALL_SESSION_DESCRIPTION,
 };
 pub use outputs::{
-    ActionDelivery, ActionDeliveryMode, ActionEffect, ActionEscalation, ActionEscalationReason,
-    ActionEscalationTarget, ActionEvidence, ActionEvidenceKind, ActionResult,
-    ActionResultValidationError, ActionRoute, ClipboardReadOutput, ClipboardWriteOutput,
-    CursorMotionOutput, CursorPointOutput, CursorPositionOutput, CursorThemeOutput,
-    CursorVisualOutput, DesktopStateOutput, EffectiveScope, EndSessionOutput,
-    GetAgentCursorStateOutput, ScreenSizeOutput, SessionStateOutput, SetAgentCursorEnabledOutput,
+    advertised_output_schema, refusal_envelope_schema, ActionDelivery, ActionDeliveryMode,
+    ActionEffect, ActionEscalation, ActionEscalationReason, ActionEscalationTarget, ActionEvidence,
+    ActionEvidenceKind, ActionResult, ActionResultValidationError, ActionRoute,
+    ClipboardReadOutput, ClipboardWriteOutput, CursorMotionOutput, CursorPointOutput,
+    CursorPositionOutput, CursorThemeOutput, CursorVisualOutput, DesktopStateOutput,
+    EffectiveScope, EndSessionOutput, GetAgentCursorStateOutput, ListSessionsOutput,
+    ObservationRevisionOutput, ScreenSizeOutput, SessionClientKindOutput, SessionLifecycleState,
+    SessionOutput, SessionStateOutput, SessionTransportOutput, SetAgentCursorEnabledOutput,
     SetAgentCursorMotionOutput, SetAgentCursorThemeOutput, StartSessionOutput, ToolOutput,
+    WindowStateOutput,
 };
 pub use verification::{
     BoundsExpectation, ElementPredicate, ElementSelector, PredicateOutcome, StatePredicate,
@@ -56,7 +65,7 @@ pub const TOOLS_LIST_SCHEMA_VERSION: &str = "1";
 pub const CAPABILITY_VERSION: &str = "1";
 
 /// Shape version for the checked-in generated client contract.
-pub const CONTRACT_VERSION: &str = "0.6.0";
+pub const CONTRACT_VERSION: &str = "0.7.0";
 
 /// MCP protocol version used by current cua-driver clients.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -81,6 +90,9 @@ pub const ACTION_RESULT_TOOLS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "paste",
+    "select_text",
+    "perform_secondary_action",
     "set_window_frame",
     "invoke_menu",
     "browser_click",
@@ -283,6 +295,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn get_window_state_input_serializes_to_the_live_wire_shape() {
+        let minimal = serde_json::to_value(GetWindowStateInput {
+            pid: 42,
+            window_id: 7,
+            session: None,
+            query: None,
+            include_screenshot: None,
+            screenshot_out_file: None,
+            max_elements: None,
+            max_depth: None,
+            app_context: None,
+            observation_revision: None,
+        })
+        .unwrap();
+        assert_eq!(minimal, serde_json::json!({ "pid": 42, "window_id": 7 }));
+
+        let revision = serde_json::to_value(GetWindowStateInput {
+            pid: 42,
+            window_id: 7,
+            session: Some("s1".into()),
+            query: None,
+            include_screenshot: Some(false),
+            screenshot_out_file: None,
+            max_elements: None,
+            max_depth: None,
+            app_context: None,
+            observation_revision: Some(ObservationRevisionInput {
+                version: 1,
+                serializer_version: "accessibility-render-v1".into(),
+                projection_version: "full-tree-v1".into(),
+                base_revision_id: Some("r_1".into()),
+                force_full: None,
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            revision,
+            serde_json::json!({
+                "pid": 42,
+                "window_id": 7,
+                "session": "s1",
+                "include_screenshot": false,
+                "observation_revision": {
+                    "version": 1,
+                    "serializer_version": "accessibility-render-v1",
+                    "projection_version": "full-tree-v1",
+                    "base_revision_id": "r_1"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn manifest_is_sorted_and_versioned() {
         let manifest = manifest();
         let names: Vec<_> = manifest
@@ -293,7 +358,7 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
-        assert_eq!(manifest.contract_version, "0.6.0");
+        assert_eq!(manifest.contract_version, "0.7.0");
         assert!(manifest.experimental);
     }
 
@@ -343,6 +408,45 @@ mod tests {
     }
 
     #[test]
+    fn portable_action_sessions_explain_named_multi_call_runs() {
+        for name in [
+            "click",
+            "clipboard_read",
+            "clipboard_write",
+            "drag",
+            "get_cursor_position",
+            "get_desktop_state",
+            "get_screen_size",
+            "hotkey",
+            "invoke_menu",
+            "move_cursor",
+            "press_key",
+            "scroll",
+            "set_window_frame",
+            "type_text",
+        ] {
+            let contract = tool_contract(name).expect("portable action contract");
+            let description = contract.input_schema["properties"]["session"]["description"]
+                .as_str()
+                .expect("portable session description")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(description, MULTI_CALL_SESSION_DESCRIPTION, "{name}");
+        }
+
+        let verify = tool_contract("verify_state").expect("verify_state contract");
+        let description = verify.input_schema["properties"]["session"]["description"]
+            .as_str()
+            .expect("verify_state session description")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(description.starts_with(MULTI_CALL_SESSION_DESCRIPTION));
+        assert!(description.contains("never selects capture modality or authorization"));
+    }
+
+    #[test]
     fn every_contract_has_success_schema_and_platforms() {
         for tool in manifest().tools {
             assert!(!tool.platforms.is_empty(), "{} has no platform", tool.name);
@@ -376,6 +480,40 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn text_operations_are_exact_mac_only_actions() {
+        for name in ["paste", "select_text"] {
+            let contract = tool_contract(name).unwrap();
+            assert_eq!(contract.platforms, vec![Platform::Macos]);
+            assert_eq!(contract.schema_mode, SchemaMode::CanonicalRuntime);
+            assert!(!contract.annotations.read_only);
+            assert!(is_action_result_tool(name));
+            assert_eq!(contract.input_schema["properties"]["pid"]["minimum"], 1);
+            assert_eq!(
+                contract.input_schema["properties"]["window_id"]["minimum"],
+                1
+            );
+            assert!(contract.input_schema["properties"]
+                .get("delivery_mode")
+                .is_none());
+        }
+        let paste: PasteInput =
+            serde_json::from_value(serde_json::json!({"pid":1,"window_id":2,"text":"hello"}))
+                .unwrap();
+        assert_eq!(paste.format, PasteFormat::Text);
+        assert_eq!(paste.app_context, None);
+        let select: SelectTextInput = serde_json::from_value(
+            serde_json::json!({"pid":1,"window_id":2,"element_token":"token","text":"hello"}),
+        )
+        .unwrap();
+        assert_eq!(select.selection, TextSelection::Text);
+        assert!(serde_json::from_value::<PasteInput>(
+            serde_json::json!({"pid":1,"window_id":2,"text":"hello","format":"rtf"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<SelectTextInput>(serde_json::json!({"pid":1,"window_id":2,"element_token":"token","text":"hello","selection":"all"})).is_err());
     }
 
     #[test]

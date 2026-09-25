@@ -8,6 +8,14 @@ const job = (name) => {
   return workflow.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 
+const step = (block, name) => {
+  const marker = `      - name: '${name}'`;
+  const start = block.indexOf(marker);
+  if (start < 0) throw new Error(`Missing workflow step: ${name}`);
+  const next = block.slice(start + 1).search(/\n {6}- name:/);
+  return block.slice(start, next < 0 ? undefined : start + 1 + next);
+};
+
 describe('SDK Java self-hosted workflow guards', () => {
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
     const block = job(name);
@@ -28,4 +36,51 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(block).toContain(fragment);
     }
   });
+
+  it('serializes latency-sensitive tests on each physical ECS host', () => {
+    const block = job('test');
+    expect(block).toContain(
+      'if: "${{ runner.environment == \'self-hosted\' }}"',
+    );
+    expect(block).toContain(
+      'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+    );
+    expect(block).toContain('flock --wait 1200 9');
+    expect(block).toContain(
+      '::error::sdk-java host lock not acquired within 20 minutes',
+    );
+    expect(block).toContain(
+      'if: "${{ runner.environment == \'github-hosted\' }}"',
+    );
+  });
+
+  it('runs Runtime Broker tests from the sibling module on self-hosted Java 21', () => {
+    const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
+    expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
+    expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
+    expect(block).toContain(
+      'mvn --batch-mode --no-transfer-progress clean test\n' +
+        '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
+        '            cd ../runtime-broker\n' +
+        '            mvn --batch-mode --no-transfer-progress clean test\n' +
+        '          fi',
+    );
+  });
+
+  it.each(['test', 'daemon-e2e'])(
+    'keeps setup-java Maven files job-local in the %s job',
+    (name) => {
+      const block = job(name);
+      expect(block).toContain(
+        "settings-path: '${{ runner.temp }}/setup-java-m2'",
+      );
+      expect(
+        block.match(
+          /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+        ),
+      ).toHaveLength(name === 'test' ? 6 : 1);
+      expect(block).not.toContain('Drop shared Maven toolchains.xml');
+      expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
+    },
+  );
 });

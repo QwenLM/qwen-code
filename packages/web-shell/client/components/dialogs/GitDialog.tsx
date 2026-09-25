@@ -11,7 +11,7 @@ import {
   useState,
   type KeyboardEvent,
 } from 'react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonWorkspaceGitDiffFile } from '@qwen-code/sdk/daemon';
 import {
   ChevronDownIcon,
@@ -21,27 +21,36 @@ import {
   SearchIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { Markdown } from '../messages/Markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { DialogShell } from './DialogShell';
 import { GitDiffContent } from './GitDiffDialog';
 import { GitLogContent } from './GitLogDialog';
 import { GitHubPrsContent } from './GitHubPrsDialog';
+import { GitWorktreesContent } from './GitWorktreesDialog';
 import styles from './GitDialog.module.css';
 
-export type GitDialogView = 'diff' | 'log' | 'prs' | 'commit';
+export type GitDialogView = 'diff' | 'log' | 'prs' | 'worktrees' | 'commit';
 
 const GITHUB_PRS_FEATURE = 'workspace_github_prs';
+const GIT_WORKTREES_FEATURE = 'workspace_git_worktrees';
 
 const TITLE_KEYS: Record<GitDialogView, string> = {
   diff: 'gitDiff.title',
   log: 'gitLog.title',
   prs: 'githubPrs.title',
+  worktrees: 'gitWorktrees.title',
   commit: 'gitCommit.title',
 };
 
 /** Tabs visible in the tab bar — commit is a mode, not a regular tab. */
-const TAB_VIEWS: Exclude<GitDialogView, 'commit'>[] = ['diff', 'log', 'prs'];
+const TAB_VIEWS: Exclude<GitDialogView, 'commit'>[] = [
+  'diff',
+  'log',
+  'prs',
+  'worktrees',
+];
 const MAX_SUMMARY_CHARS = 3500;
 
 export function GitDialog({
@@ -50,6 +59,8 @@ export function GitDialog({
   initialView,
   sessionId,
   resolveSessionForWorkspace,
+  onOpenSession,
+  onNewWorktreeSession,
   onClose,
 }: {
   workspaceCwd: string;
@@ -60,15 +71,24 @@ export function GitDialog({
     cwd: string,
     forceCreate?: boolean,
   ) => Promise<string | undefined>;
+  /** Worktrees tab: switch to a session that lives in a worktree. */
+  onOpenSession?: (sessionId: string) => void;
+  /** Worktrees tab: start a new session in a fresh worktree. */
+  onNewWorktreeSession?: () => void;
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const { client, capabilities } = useWorkspace();
   const prsSupported =
     capabilities?.features?.includes(GITHUB_PRS_FEATURE) === true;
-  const tabViews = prsSupported
-    ? TAB_VIEWS
-    : TAB_VIEWS.filter((v) => v !== 'prs');
+  const worktreesSupported =
+    capabilities?.features?.includes(GIT_WORKTREES_FEATURE) === true;
+  const tabViews = TAB_VIEWS.filter(
+    (v) =>
+      (v !== 'prs' || prsSupported) &&
+      (v !== 'worktrees' || worktreesSupported),
+  );
   const [view, setView] = useState(initialView);
   const [subtitle, setSubtitle] = useState<string>();
   const [commitMsg, setCommitMsg] = useState('');
@@ -101,7 +121,12 @@ export function GitDialog({
   const resolveSessionRef = useRef(resolveSessionForWorkspace);
   resolveSessionRef.current = resolveSessionForWorkspace;
   const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  // Reset only when the prop actually changes — an unconditional render-body
+  // sync would clobber the fresh id the dialog resolves for its own side
+  // queries (commit-message generation) before the PR binding reads it.
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   // btwSession with automatic retry: if the resolved session is stale
   // (daemon restarted, session evicted), force-create a new one and retry.
@@ -533,6 +558,31 @@ export function GitDialog({
         url: result.url,
       });
       setPrFormOpen(false);
+      // Bind the PR to the current session so the sidebar can badge and
+      // search sessions by PR number. Best-effort: a binding failure must
+      // not shadow the successful PR creation. Binding never creates a
+      // session — when the dialog has no session context (workspace-level
+      // open), the PR simply stays unbound. A session from another
+      // workspace is rejected by the daemon route's workspace-conflict
+      // check and surfaces here as a warning only.
+      if (typeof result.number === 'number' && result.url) {
+        // Newly created → the snapshot starts open; the daemon's refresh
+        // timer advances it to merged/closed.
+        const pr = {
+          number: result.number,
+          url: result.url,
+          state: 'open' as const,
+        };
+        const sid = sessionIdRef.current;
+        if (sid) {
+          ws.updateSessionMetadata(sid, { pr }).catch((err: unknown) => {
+            console.warn(
+              'Failed to bind PR to session:',
+              err instanceof Error ? err.message : String(err),
+            );
+          });
+        }
+      }
     } catch (err) {
       setPrStatus({
         msg: err instanceof Error ? err.message : String(err),
@@ -612,6 +662,13 @@ export function GitDialog({
             <GitLogContent
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
+              onSubtitleChange={setSubtitle}
+            />
+          ) : clampedTab === 'worktrees' ? (
+            <GitWorktreesContent
+              workspaceCwd={workspaceCwd}
+              onOpenSession={onOpenSession}
+              onNewWorktreeSession={onNewWorktreeSession}
               onSubtitleChange={setSubtitle}
             />
           ) : (
@@ -781,6 +838,7 @@ export function GitDialog({
                     href={prStatus.url}
                     target="_blank"
                     rel="noopener noreferrer"
+                    onClick={(event) => openExternalLink(event, prStatus.url)}
                   >
                     {prStatus.msg}
                   </a>

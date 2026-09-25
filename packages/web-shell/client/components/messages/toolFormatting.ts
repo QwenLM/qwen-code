@@ -12,6 +12,7 @@ export { isActiveToolStatus } from '../../adapters/toolClassification';
  * write, …) are web-shell-only conveniences with no core equivalent.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  exec: 'Exec',
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
@@ -23,6 +24,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   todo_write: 'TodoList',
   get_goal: 'Goal',
   update_goal: 'UpdateGoal',
+  propose_goal: 'ProposeGoal',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',
@@ -45,6 +47,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   monitor: 'Monitor',
   notebook_edit: 'NotebookEdit',
   tool_search: 'ToolSearch',
+  tool_call: 'ToolCall',
   read_mcp_resource: 'ReadMcpResource',
   enter_worktree: 'EnterWorktree',
   exit_worktree: 'ExitWorktree',
@@ -55,11 +58,29 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   team_create: 'TeamCreate',
   team_delete: 'TeamDelete',
   team_plan_approval: 'TeamPlanApproval',
+  request_shutdown: 'RequestShutdown',
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
+  record_source: 'RecordSource',
+  report_findings: 'ReportFindings',
   web_search: 'WebSearch',
   image_gen: 'ImageGen',
+  omni_downsample_image: 'DownsampleImage',
+  omni_downscale_video: 'DownscaleVideo',
+  omni_downsample_audio: 'DownsampleAudio',
+  omni_extract_keyframes: 'ExtractKeyframes',
+  omni_extract_audio: 'ExtractAudio',
+  omni_clip_video: 'ClipVideo',
+  omni_convert_image: 'ConvertImage',
+  omni_transcribe_audio: 'TranscribeAudio',
+  omni_clip_image: 'ClipImage',
+  omni_clip_audio: 'ClipAudio',
+  omni_caption_image: 'CaptionImage',
+  omni_caption_audio: 'CaptionAudio',
+  omni_ocr_image: 'OcrImage',
+  omni_understand_video_segments: 'UnderstandVideoSegments',
+  omni_recall_media_memory: 'RecallMediaMemory',
   display_image: 'DisplayImage',
   bash: 'Shell',
   shell: 'Shell Command',
@@ -137,6 +158,41 @@ export function localizeToolDisplayName(
 export function isAskUserQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+}
+
+export function isCompletedAskUserQuestion(tool: ACPToolCall): boolean {
+  return (
+    tool.status === 'completed' && isAskUserQuestionToolName(tool.toolName)
+  );
+}
+
+export function getQuestionAnswerResult(tool: ACPToolCall): {
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+} | null {
+  const output = tool.rawOutput;
+  if (
+    !output ||
+    typeof output !== 'object' ||
+    !('type' in output) ||
+    output.type !== 'ask_user_question_answers' ||
+    !('text' in output) ||
+    typeof output.text !== 'string' ||
+    !('answers' in output) ||
+    !Array.isArray(output.answers) ||
+    !output.answers.every(
+      (entry: unknown): entry is { question: string; answer: string } =>
+        !!entry &&
+        typeof entry === 'object' &&
+        'question' in entry &&
+        typeof entry.question === 'string' &&
+        'answer' in entry &&
+        typeof entry.answer === 'string',
+    )
+  ) {
+    return null;
+  }
+  return { text: output.text, answers: output.answers };
 }
 
 export function truncateText(text: string, max: number): string {
@@ -348,7 +404,8 @@ function getDescriptionFromArgs(
     return description;
   }
   if (args.file_path) {
-    if (args.description) return String(args.description);
+    const description = getStringArg(args, 'description');
+    if (description) return description;
     return pathForDisplay(String(args.file_path), workspaceCwd);
   }
   if (args.url) {
@@ -366,8 +423,7 @@ function getDescriptionFromArgs(
     const candidate = args.path || args.directory || '';
     return pathForDisplay(String(candidate), workspaceCwd);
   }
-  if (args.description) return String(args.description);
-  return '';
+  return getStringArg(args, 'description');
 }
 
 function getStringArg(
@@ -376,6 +432,17 @@ function getStringArg(
 ): string {
   const value = args?.[key];
   return typeof value === 'string' ? value.trim().replace(/\n/g, ' ') : '';
+}
+
+/**
+ * Like every other is*ToolName helper, normalizes case so callers can pass
+ * the raw wire name. One predicate on purpose: ToolGroup gates the detail
+ * view, the ToolLine route and the collapsed keep-mounted behaviour on
+ * this, and three hand-inlined copies could diverge on a rename with no
+ * compile error — routing would then disagree with mounting.
+ */
+export function isWorkflowToolName(name: string): boolean {
+  return name.toLowerCase() === 'workflow';
 }
 
 export function isShellToolName(name: string): boolean {
@@ -411,8 +478,10 @@ function formatDescriptionPaths(
     return pathForDisplay(trimmed, workspaceCwd);
   }
 
-  return trimmed.replace(/(?:[A-Za-z]:)?\/[^\s'")]+/g, (match) =>
-    pathForDisplay(match, workspaceCwd),
+  return trimmed.replace(
+    /(^|[\s'"(])((?:[A-Za-z]:)?\/[^\s'")]+)/g,
+    (_match, prefix: string, filePath: string) =>
+      prefix + pathForDisplay(filePath, workspaceCwd),
   );
 }
 
@@ -486,6 +555,33 @@ export function isAgentCancelled(agent: ACPToolCall): boolean {
   );
 }
 
+export function getSubagentDetailsUnavailableReason(
+  agent: ACPToolCall,
+): string | undefined {
+  if (agent.subagentSessionReady !== false) return undefined;
+  const rawStatus =
+    agent.rawOutput && typeof agent.rawOutput === 'object'
+      ? (agent.rawOutput as Record<string, unknown>)['status']
+      : undefined;
+  // Safe projections can map cancellation to failed while retaining this flag.
+  if (
+    agent.wasCancelled ||
+    (typeof rawStatus === 'string' &&
+      ['cancelled', 'canceled'].includes(rawStatus.toLowerCase()))
+  )
+    return 'subagent.cancelled';
+  if (
+    agent.status === 'failed' ||
+    getTaskExecutionRecord(agent.rawOutput)?.['status'] === 'failed'
+  )
+    return 'subagent.failed';
+  if (isAgentCancelled(agent)) return 'subagent.cancelled';
+  // Successful teammate launches use a different session mechanism and may
+  // complete without publishing readiness.
+  if (agent.status === 'completed') return undefined;
+  return 'subagent.creating';
+}
+
 export function getAgentDisplayStatus(
   agent: ACPToolCall,
 ): ACPToolCall['status'] {
@@ -512,6 +608,13 @@ export function getAgentType(agent: ACPToolCall): string {
   const subagentType = agent.args?.subagent_type;
   if (typeof subagentType === 'string' && subagentType) return subagentType;
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
+}
+
+// 'task' is getAgentType's other untyped-agent fallback and has no i18n key.
+export function isDefaultAgentType(agentType: string): boolean {
+  return (
+    agentType.toLowerCase() === DEFAULT_SUBAGENT_TYPE || agentType === 'task'
+  );
 }
 
 /**

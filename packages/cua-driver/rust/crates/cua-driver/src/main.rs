@@ -25,6 +25,7 @@ mod doctor;
 mod mcp_http;
 mod private_worker;
 mod proxy;
+mod release_channel;
 mod responsibility;
 mod sdk_adapter;
 mod serve;
@@ -47,9 +48,8 @@ fn init_logging() {
 fn configure_startup_permission_mode(
     permission_mode: Option<&str>,
     dangerously_bypass_approvals: bool,
-    allow_legacy_existing_profile_approval: bool,
-    session_policy: Option<&str>,
-    approve_session_policy: bool,
+    capability_manifest: Option<&str>,
+    approve_capability_manifest: bool,
     grants: &[String],
 ) -> anyhow::Result<()> {
     if let Some(mode) = permission_mode {
@@ -69,21 +69,15 @@ fn configure_startup_permission_mode(
     if dangerously_bypass_approvals {
         std::env::set_var(cua_driver_core::authorization::DANGEROUS_BYPASS_ENV, "1");
     }
-    if allow_legacy_existing_profile_approval {
+    if let Some(path) = capability_manifest {
         std::env::set_var(
-            cua_driver_core::authorization::LEGACY_EXISTING_PROFILE_APPROVAL_ENV,
-            "1",
-        );
-    }
-    if let Some(path) = session_policy {
-        std::env::set_var(
-            cua_driver_core::session_manifest::SESSION_POLICY_FILE_ENV,
+            cua_driver_core::session_manifest::CAPABILITY_MANIFEST_FILE_ENV,
             path,
         );
     }
-    if approve_session_policy {
+    if approve_capability_manifest {
         std::env::set_var(
-            cua_driver_core::session_manifest::SESSION_POLICY_APPROVED_ENV,
+            cua_driver_core::session_manifest::CAPABILITY_MANIFEST_APPROVED_ENV,
             "1",
         );
     }
@@ -150,14 +144,14 @@ fn run_telemetry_command(command: cli::TelemetryCommand) {
         cli::TelemetryCommand::Enable => match telemetry::set_enabled(true) {
             Ok(()) => println!("Telemetry enabled. The retained installation ID will be reused."),
             Err(error) => {
-                eprintln!("cua-driver: failed to enable telemetry: {error}");
+                eprintln!("qwen-cua-driver: failed to enable telemetry: {error}");
                 std::process::exit(1);
             }
         },
         cli::TelemetryCommand::Disable => match telemetry::set_enabled(false) {
             Ok(()) => println!("Telemetry disabled. The local installation ID was retained; run `qwen-cua-driver telemetry reset-id` to erase it."),
             Err(error) => {
-                eprintln!("cua-driver: failed to disable telemetry: {error}");
+                eprintln!("qwen-cua-driver: failed to disable telemetry: {error}");
                 std::process::exit(1);
             }
         },
@@ -175,14 +169,14 @@ fn run_telemetry_command(command: cli::TelemetryCommand) {
         cli::TelemetryCommand::ResetId => match telemetry::reset_id() {
             Ok(()) => println!("Telemetry installation ID and event markers erased. The enable/disable preference was retained."),
             Err(error) => {
-                eprintln!("cua-driver: failed to reset telemetry ID: {error}");
+                eprintln!("qwen-cua-driver: failed to reset telemetry ID: {error}");
                 std::process::exit(1);
             }
         },
         cli::TelemetryCommand::Inspect { event } => match telemetry::inspect_event(&event) {
             Ok(payload) => println!("{}", serde_json::to_string_pretty(&payload).expect("serialize telemetry payload")),
             Err(error) => {
-                eprintln!("cua-driver: {error}");
+                eprintln!("qwen-cua-driver: {error}");
                 std::process::exit(64);
             }
         },
@@ -193,7 +187,7 @@ fn run_cursor_theme_command(args: &[String]) -> ! {
     let executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("cua-driver: cannot locate cursor-theme compiler: {error}");
+            eprintln!("qwen-cua-driver: cannot locate cursor-theme compiler: {error}");
             std::process::exit(1);
         }
     };
@@ -210,7 +204,7 @@ fn run_cursor_theme_command(args: &[String]) -> ! {
         Ok(status) => status,
         Err(error) => {
             eprintln!(
-                "cua-driver: cursor-theme compiler is unavailable at {}: {error}",
+                "qwen-cua-driver: cursor-theme compiler is unavailable at {}: {error}",
                 sidecar.display()
             );
             eprintln!("Reinstall Qwen Cua Driver so the matching authoring sidecar is present.");
@@ -511,9 +505,8 @@ fn main() {
             socket,
             permission_mode,
             dangerously_bypass_approvals,
-            allow_legacy_existing_profile_approval,
-            session_policy,
-            approve_session_policy,
+            capability_manifest,
+            approve_capability_manifest,
             no_permissions_gate,
             claude_code_compat,
             grants,
@@ -521,12 +514,11 @@ fn main() {
             if let Err(error) = configure_startup_permission_mode(
                 permission_mode.as_deref(),
                 dangerously_bypass_approvals,
-                allow_legacy_existing_profile_approval,
-                session_policy.as_deref(),
-                approve_session_policy,
+                capability_manifest.as_deref(),
+                approve_capability_manifest,
                 &grants,
             ) {
-                eprintln!("cua-driver: authorization startup error: {error}");
+                eprintln!("qwen-cua-driver: authorization startup error: {error}");
                 std::process::exit(64);
             }
             responsibility::reexec_disclaimed_if_needed();
@@ -577,7 +569,7 @@ fn main() {
             ) {
                 Ok(driver) => driver,
                 Err(error) => {
-                    eprintln!("cua-driver: cannot create desktop runtime: {error}");
+                    eprintln!("qwen-cua-driver: cannot create desktop runtime: {error}");
                     std::process::exit(1);
                 }
             };
@@ -657,9 +649,9 @@ fn main() {
                 );
             }
             if let Err(e) = gate_result {
-                eprintln!("[cua-driver] permissions gate: {e}");
+                eprintln!("[qwen-cua-driver] permissions gate: {e}");
                 eprintln!(
-                    "[cua-driver] continuing — tool calls touching AX or \
+                    "[qwen-cua-driver] continuing — tool calls touching AX or \
                            Screen Recording fail until you grant the missing TCC \
                            permissions."
                 );
@@ -704,6 +696,10 @@ fn main() {
             let pid_path = serve::default_pid_file_path();
             serve::run_status_cmd(&sp, &pid_path);
         }
+        cli::Command::Sessions { json, socket } => {
+            let sp = socket.unwrap_or_else(serve::default_socket_path);
+            serve::run_sessions_list_cmd(&sp, json);
+        }
         cli::Command::Recording {
             subcommand,
             args,
@@ -720,6 +716,13 @@ fn main() {
         }
         cli::Command::CheckUpdate { json, no_cache } => {
             cli::run_check_update_cmd(json, no_cache);
+        }
+        cli::Command::Channel {
+            subcommand,
+            value,
+            json,
+        } => {
+            cli::run_channel_cmd(&subcommand, value.as_deref(), json);
         }
         cli::Command::Doctor { json } => {
             // Long-running interactive entry point — kick off the
@@ -745,23 +748,6 @@ fn main() {
         }
         cli::Command::CursorTheme { args } => {
             run_cursor_theme_command(&args);
-        }
-        cli::Command::BrowserApprove {
-            pid,
-            strategy,
-            window_id,
-            session,
-            profile_mode,
-            profile_name,
-        } => {
-            cli::run_browser_approve(
-                pid,
-                strategy.as_deref(),
-                window_id,
-                session.as_deref(),
-                profile_mode.as_deref(),
-                profile_name.as_deref(),
-            );
         }
         cli::Command::Config {
             subcommand,
@@ -789,7 +775,7 @@ fn main() {
             let result = match mcp_uses_direct_runtime(socket.as_deref(), direct) {
                 Ok(true) => {
                     if let Err(error) =
-                        configure_startup_permission_mode(None, false, false, None, false, &grants)
+                        configure_startup_permission_mode(None, false, None, false, &grants)
                     {
                         Err(error)
                     } else {
@@ -818,7 +804,7 @@ fn main() {
                 ),
             };
             if let Err(e) = result {
-                eprintln!("cua-driver-rs: {e}");
+                eprintln!("qwen-cua-driver: {e}");
                 telemetry::flush_pending(std::time::Duration::from_millis(750));
                 std::process::exit(1);
             }
@@ -892,9 +878,8 @@ fn main() -> anyhow::Result<()> {
             socket,
             permission_mode,
             dangerously_bypass_approvals,
-            allow_legacy_existing_profile_approval,
-            session_policy,
-            approve_session_policy,
+            capability_manifest,
+            approve_capability_manifest,
             no_permissions_gate,
             claude_code_compat,
             grants,
@@ -902,9 +887,8 @@ fn main() -> anyhow::Result<()> {
             configure_startup_permission_mode(
                 permission_mode.as_deref(),
                 dangerously_bypass_approvals,
-                allow_legacy_existing_profile_approval,
-                session_policy.as_deref(),
-                approve_session_policy,
+                capability_manifest.as_deref(),
+                approve_capability_manifest,
                 &grants,
             )?;
             responsibility::reexec_disclaimed_if_needed();
@@ -958,6 +942,11 @@ fn main() -> anyhow::Result<()> {
             serve::run_status_cmd(&sp, &pid_path);
             return Ok(());
         }
+        cli::Command::Sessions { json, socket } => {
+            let sp = socket.unwrap_or_else(serve::default_socket_path);
+            serve::run_sessions_list_cmd(&sp, json);
+            return Ok(());
+        }
         cli::Command::Recording {
             subcommand,
             args,
@@ -977,6 +966,14 @@ fn main() -> anyhow::Result<()> {
         }
         cli::Command::CheckUpdate { json, no_cache } => {
             cli::run_check_update_cmd(json, no_cache);
+            return Ok(());
+        }
+        cli::Command::Channel {
+            subcommand,
+            value,
+            json,
+        } => {
+            cli::run_channel_cmd(&subcommand, value.as_deref(), json);
             return Ok(());
         }
         cli::Command::Doctor { json } => {
@@ -1008,24 +1005,6 @@ fn main() -> anyhow::Result<()> {
         cli::Command::CursorTheme { args } => {
             run_cursor_theme_command(&args);
         }
-        cli::Command::BrowserApprove {
-            pid,
-            strategy,
-            window_id,
-            session,
-            profile_mode,
-            profile_name,
-        } => {
-            cli::run_browser_approve(
-                pid,
-                strategy.as_deref(),
-                window_id,
-                session.as_deref(),
-                profile_mode.as_deref(),
-                profile_name.as_deref(),
-            );
-            return Ok(());
-        }
         cli::Command::Config {
             subcommand,
             key,
@@ -1052,7 +1031,7 @@ fn main() -> anyhow::Result<()> {
             version_check::maybe_announce_update();
             let result = match mcp_uses_direct_runtime(socket.as_deref(), direct) {
                 Ok(true) => {
-                    configure_startup_permission_mode(None, false, false, None, false, &grants)?;
+                    configure_startup_permission_mode(None, false, None, false, &grants)?;
                     telemetry::capture_mcp_startup_completed(
                         "sdk_owned_runtime",
                         "not_applicable",
@@ -1077,7 +1056,7 @@ fn main() -> anyhow::Result<()> {
                 ),
             };
             if let Err(e) = result {
-                eprintln!("cua-driver-rs: {e}");
+                eprintln!("qwen-cua-driver: {e}");
                 telemetry::flush_pending(std::time::Duration::from_millis(750));
                 std::process::exit(1);
             }

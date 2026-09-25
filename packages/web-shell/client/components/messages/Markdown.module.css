@@ -8,6 +8,14 @@
   overflow-wrap: break-word;
 }
 
+.streamingPlainText {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .content > :first-child {
   margin-top: 0;
 }
@@ -19,7 +27,7 @@
 .content strong,
 .content b {
   color: var(--foreground);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .content h1,
@@ -289,6 +297,24 @@
   border-radius: 0;
 }
 
+/* The box that carries the diagram. The zoom wrapper is the canvas and the only
+   scroller, so this one holds no chrome and no scroll region of its own: it is
+   only scaled, and its overflow therefore reaches the wrapper.
+   Its width comes from the rendered svg (see the measurement in Markdown.tsx);
+   `fit-content` only covers the moments before that lands. Hugging the diagram is
+   what keeps the scroll range honest: a box as wide as the row would scale its
+   own empty width into the range, letting a diagram that still fits be scrolled
+   away. */
+.mermaidBlock.mermaidStage {
+  width: fit-content;
+  margin: 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  overflow: visible;
+}
+
 .mermaidBlock :global(svg) {
   max-width: none;
   height: auto;
@@ -315,11 +341,22 @@
 }
 
 .mermaidZoomWrapper {
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 8px 0;
-  cursor: grab;
+  /* The canvas: the row's full width, the diagram's unscaled height, and the
+     only scroller. The diagram keeps its own layout size and is scaled inside,
+     so the scroll range follows what scaling paints — zooming out shrinks the
+     diagram, not the area the viewer can pan in. */
+  overflow: auto;
+  padding: 16px;
+  background: var(--popover);
+  border-radius: var(--radius);
   user-select: none;
+}
+
+/* Panning moves the scroll position, so the grab cursor is only honest while
+   part of the diagram is out of view: a diagram that already fits cannot be
+   moved, and offering to drag it reads as broken. */
+.mermaidPannable {
+  cursor: grab;
 }
 
 .mermaidDragging {

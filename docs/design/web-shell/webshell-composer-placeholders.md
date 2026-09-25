@@ -19,7 +19,7 @@ translations.
 `WebShellProps` accepts an optional `composerPlaceholders` map:
 
 ```ts
-type WebShellComposerPlaceholderState = 'idle' | 'loading' | 'processing';
+type WebShellComposerPlaceholderState = 'idle' | 'processing';
 
 type WebShellComposerPlaceholders = Partial<
   Record<WebShellComposerPlaceholderState, string>
@@ -36,12 +36,10 @@ The composer resolves one semantic state before resolving copy:
 
 | State        | Condition                                              |
 | ------------ | ------------------------------------------------------ |
-| `loading`    | The connection is catching up.                         |
 | `processing` | A prompt is being prepared or a response is streaming. |
 | `idle`       | Neither of the above applies.                          |
 
-`loading` takes precedence over `processing`, matching the existing
-placeholder-key behavior. A configured value is used only when it contains
+A configured value is used only when it contains
 non-whitespace text; absent or blank values fall back to the corresponding
 localized WebShell placeholder.
 

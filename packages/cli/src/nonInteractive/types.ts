@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type {
-  ActiveGoal,
+  ApprovalModeValue,
   GoalSnapshotV2,
   SubagentConfig,
   McpToolProgressData,
@@ -145,7 +145,7 @@ export interface CLISystemMessage {
     status: string;
   }>;
   model?: string;
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   slash_commands?: string[];
   qwen_code_version?: string;
   output_style?: string;
@@ -250,11 +250,6 @@ export interface ToolProgressStreamEvent {
   content: McpToolProgressData | ShellProgressData;
 }
 
-export interface ActiveGoalStreamEvent {
-  type: 'active_goal';
-  active_goal: ActiveGoal | null;
-}
-
 export interface GoalStateStreamEvent {
   type: 'goal_state';
   goal_state: GoalSnapshotV2;
@@ -267,8 +262,7 @@ export type StreamEvent =
   | ContentBlockStopEvent
   | MessageStopStreamEvent
   | ToolProgressStreamEvent
-  | GoalStateStreamEvent
-  | ActiveGoalStreamEvent;
+  | GoalStateStreamEvent;
 
 export interface CLIPartialAssistantMessage {
   type: 'stream_event';
@@ -278,7 +272,7 @@ export interface CLIPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
+export type PermissionMode = ApprovalModeValue;
 
 /**
  * Permission suggestion for tool use requests
@@ -354,6 +348,7 @@ export interface CLIMcpServerConfig {
   headers?: Record<string, string>;
   tcp?: string;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];

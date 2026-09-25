@@ -13,7 +13,7 @@ import {
   detectLineEnding,
   ensureCrlfLineEndings,
 } from './fileSystemService.js';
-import { encodeTextFileContent } from '../utils/sync-file-encoding.js';
+import { encodeTextFileContent } from './sync-file-encoding.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
 const mockGetSystemEncoding = vi.hoisted(() =>

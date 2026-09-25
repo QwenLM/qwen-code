@@ -35,6 +35,8 @@ describe('coding plan provider', () => {
       modelIds: getDefaultModelIds(codingPlanProvider),
     });
 
+    expect(codingPlanProvider.supportsModelDiscovery).toBe(true);
+
     expect(plan.providerId).toBe('coding-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [CODING_PLAN_ENV_KEY]: 'sk-coding' });
@@ -73,5 +75,11 @@ describe('coding plan provider', () => {
         envKey: 'CUSTOM_API_KEY',
       }),
     ).toBe(false);
+  });
+
+  it('declares no built-in web search backend', () => {
+    // Whether the Coding Plan endpoints serve the Responses API search tools
+    // has not been verified; declaring it would turn the tool on implicitly.
+    expect(codingPlanProvider.webSearch).toBeUndefined();
   });
 });

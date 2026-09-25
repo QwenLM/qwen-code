@@ -577,7 +577,7 @@ const slashCommands = await getAvailableCommands(
 
 ### 9.3 不变的文件
 
-- `packages/cli/src/utils/commands.ts`（`parseSlashCommand` 无需修改）
+- `packages/cli/src/ui/commands/commands.ts`（`parseSlashCommand` 无需修改）
 - `packages/cli/src/ui/hooks/slashCommandProcessor.ts`（interactive 路径无需修改）
 - `packages/cli/src/ui/noninteractive/nonInteractiveUi.ts`（stub UI 无需修改）
 - 所有命令的 `action` 实现（Phase 1 不修改任何命令行为）

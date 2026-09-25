@@ -274,10 +274,10 @@ The complete first-use path is:
    `qwen3.5-omni-plus-realtime` and optionally change the global shortcut.
 3. Turn on Live Voice and confirm that the signed native Host will be
    installed.
-4. The daemon downloads the architecture-matching release from the fixed
-   Qwen Code release origin, verifies its manifest checksum, bundle identity,
-   signature, and Gatekeeper acceptance, installs it atomically in
-   `/Applications`, and launches it.
+4. The daemon downloads the architecture-matching release from the Aliyun OSS
+   mirror, with the fixed Qwen Code GitHub release feed as fallback. It verifies
+   the manifest checksum, bundle identity, signature, and Gatekeeper acceptance,
+   installs it atomically in `/Applications`, and launches it.
 5. The Host guides the user through Microphone, Accessibility, and Screen
    Recording authorization. macOS remains the sole grant authority; the
    application cannot pre-grant or bypass TCC permissions.
@@ -298,9 +298,11 @@ bounded Realtime connection for the user's enable action; status polling and
 Host readiness must never open provider connections or retry billable traffic.
 
 The settings UI reuses WebShell primitives and adds one compact Live Voice
-card to Experimental settings. The card owns only enablement, masked key
-replacement, shortcut capture, install progress, and permission/readiness
-status. Native permission actions remain in the Host, and ordinary WebShell
+card to Experimental settings. The card owns enablement, the Realtime base URL
+(empty for the default; DashScope and `*.maas.aliyuncs.com` hosts only), masked
+key replacement, the Realtime model and voice, shortcut capture, install
+progress, and permission/readiness status. The base URL and model follow a
+`realtimeOnly` route when one is selected and are then read-only. Native permission actions remain in the Host, and ordinary WebShell
 dictation remains visible and unchanged.
 
 Release publishing must include notarized arm64 and x64 Host ZIP/DMG assets and

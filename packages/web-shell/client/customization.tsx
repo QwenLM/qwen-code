@@ -1,3 +1,4 @@
+import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
   useContext,
@@ -11,8 +12,14 @@ import type {
   MarkdownChartLabelOverrides,
 } from '@datafe-open/markdown-chart';
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonInputAnnotation,
+  DaemonSessionArtifact,
+  DaemonSessionAttachmentReference,
+  SessionSource,
+  GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -21,6 +28,12 @@ export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
+  /**
+   * 当前消息的生成态；历史或静态内容为 false。所属 MessageList 空闲
+   * （isResponding=false）时，恢复 replay 中残留的 streaming 标记也会被
+   * 收口为 false，且已收口的行在会话重新响应时、内容不变的前提下保持收口。
+   */
+  isStreaming: boolean;
 }
 
 export interface WebShellCodeBlockRenderInfo {
@@ -64,7 +77,63 @@ export interface WebShellMarkdownChartCustomization {
   chartStyle?: CSSProperties;
 }
 
+export interface WebShellFootnote {
+  readonly id: string;
+  readonly number: number;
+  readonly definitionMarkdown: string;
+  readonly title?: string;
+  readonly summary: string;
+  readonly href?: string;
+  readonly source?: string;
+  readonly image?: string;
+}
+
+/** Synchronous, side-effect-free selection for a complete group of footnotes. */
+export type WebShellFootnoteIconResolver = (
+  footnotes: readonly WebShellFootnote[],
+) => WebShellIconSource | null | undefined;
+
+export type WebShellSource =
+  | { readonly type: 'source'; readonly source: SessionSource }
+  | {
+      readonly type: 'attachment';
+      readonly attachment: DaemonSessionAttachmentReference;
+    };
+
+export interface WebShellSourceReference {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly sourceId: string;
+}
+
+export type WebShellSourceIconResolver = (
+  sources: readonly WebShellSource[],
+) => WebShellIconSource | null | undefined;
+
+export interface WebShellFootnotePreviewInfo {
+  readonly footnotes: readonly WebShellFootnote[];
+  readonly footnote: WebShellFootnote;
+  readonly index: number;
+  readonly title: string;
+  readonly sourceLabel: string;
+  /** Place this Qwen-managed element in the layout without replacing its children. */
+  readonly sourceLink: HTMLElement;
+}
+
+export interface WebShellFootnotePreviewHandle {
+  update(info: WebShellFootnotePreviewInfo): void;
+  dispose(): void;
+}
+
+/** Mounts current-page content only. Keep this synchronous function stable. */
+export type WebShellFootnotePreviewMount = (
+  container: HTMLElement,
+  info: WebShellFootnotePreviewInfo,
+) => WebShellFootnotePreviewHandle | null | undefined;
+
 export interface WebShellMarkdownCustomization {
+  getInlineFootnoteIcon?: WebShellFootnoteIconResolver;
+  mountFootnotePreview?: WebShellFootnotePreviewMount;
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
@@ -79,7 +148,9 @@ export interface WebShellMarkdownCustomization {
   /**
    * Custom markdown components override Web Shell's built-ins. In particular,
    * `components.code` replaces the default code renderer, so `renderCodeBlock`
-   * will not be called for that source.
+   * will not be called for that source. Internal footnote references and
+   * backreferences keep the built-in link behavior. Providing `components.sup`
+   * disables footnote grouping.
    */
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];
@@ -115,27 +186,47 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
-export type WebShellChatHeaderItem = 'title' | 'environment' | 'rightPanel';
+export type WebShellChatHeaderItem =
+  | 'title'
+  | 'environment'
+  | 'rightPanel'
+  | 'tokenUsage'
+  | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Defaults to all actions. */
+  /** Show the mobile-access QR entry in chat headers. Defaults to false. */
+  showMobileAccess?: boolean;
+  /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask';
+export type WebShellRightPanelItem =
+  | 'review'
+  | 'sideTask'
+  | 'terminal'
+  | 'webPreview'
+  | 'trajectory';
 
 export interface WebShellRightPanelOptions {
-  /** Empty-state actions to show. Defaults to all actions. */
+  /** Empty-state actions to show. Defaults to review and sideTask. */
   items?: readonly WebShellRightPanelItem[];
 }
 
 export type WebShellEnvironmentPanelItem =
   | 'environment'
+  | 'sources'
   | 'subagents'
-  | 'backgroundTasks';
+  | 'backgroundTasks'
+  /** Legacy attachment-only view in the Sources section. */
+  | 'attachments'
+  | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
-  /** Sections to show. Defaults to all sections. */
+  /**
+   * Panel sections to show. Sources includes attachments; both keys render one
+   * section. Omitting both keys does not disable the turn source footer or its
+   * metadata loading.
+   */
   items?: readonly WebShellEnvironmentPanelItem[];
 }
 
@@ -157,6 +248,12 @@ export interface ChatHeaderRenderInfo {
   onEnvironmentPanelOpenChange: (open: boolean) => void;
   /** Opens or closes the right extension panel. */
   onRightPanelOpenChange: (open: boolean) => void;
+  /** Opens token usage for the current session, when available. */
+  onOpenTokenUsage?: () => void;
+  /** Opens context usage for the current session, when available. */
+  onOpenContextUsage?: () => void;
+  /** Opens Settings deep-linked to Local Control (Daemon category). */
+  onOpenLocalControlSettings?: () => void;
 }
 
 /**
@@ -168,7 +265,25 @@ export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
+  files?: readonly {
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (
@@ -192,15 +307,96 @@ export interface WebShellAssistantMessageInfo {
   timestamp?: number;
 }
 
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Final visible assistant message when retained in the mounted transcript. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
 export interface WebShellAssistantTurnFooterRenderInfo {
   /** User-message id for the head of the completed turn. */
   turnId: string;
   message: WebShellAssistantMessageInfo;
 }
 
+export type WebShellSessionArtifactsChangeReason = 'restore' | 'change';
+
+export interface WebShellSessionArtifactsChange {
+  reason: WebShellSessionArtifactsChangeReason;
+  sessionId: string;
+  sequence: number;
+  artifacts: readonly DaemonSessionArtifact[];
+  artifactsByTurn: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+}
+
 export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
+
+export type WebShellAssistantFeedbackRating = 'up' | 'down';
+
+/** The prompt that started a marked turn. */
+export interface WebShellAssistantFeedbackUserMessage {
+  /**
+   * The prompt's most recent characters, or a placeholder naming what the
+   * prompt carried when it had no text at all.
+   */
+  text: string;
+  /** Wall-clock epoch ms of the prompt, when the transcript knows it. */
+  timestamp?: number;
+}
+
+export interface WebShellAssistantFeedbackInfo {
+  /** The new mark; `null` when the user cleared it by clicking the lit icon. */
+  rating: WebShellAssistantFeedbackRating | null;
+  /** The mark the turn carried before this change, when there was one. */
+  previousRating?: WebShellAssistantFeedbackRating;
+  /** The session the marked turn belongs to. */
+  sessionId?: string;
+  /**
+   * Admitted prompt id of the marked turn. This is the daemon's own per-turn
+   * identity: unlike a transcript block id it survives a reload, and it is
+   * what the daemon addresses a turn by (`/session/:id/turns/:promptId`).
+   */
+  promptId: string;
+  /** The prompt that started the marked turn. */
+  userMessage: WebShellAssistantFeedbackUserMessage;
+}
+
+export type AssistantFeedbackHandler = (
+  info: WebShellAssistantFeedbackInfo,
+) => void;
+
+export interface WebShellAssistantFeedbackOptions {
+  /** Passing the object shows the icons; `false` hides them again. */
+  enabled?: boolean;
+  /**
+   * Notified after every change, including clearing a mark. This is a
+   * notification, not a gate: the icon is already lit (or dark) when it runs,
+   * and neither a throw nor a later rejection changes that.
+   */
+  onRate?: AssistantFeedbackHandler;
+}
+
+/** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
+export type ArtifactImageRenderer = (
+  artifact: DaemonSessionArtifact,
+) => ReactNode | null | undefined;
+
+export interface WebShellArtifactCustomization {
+  renderImage?: ArtifactImageRenderer;
+}
 
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
@@ -263,6 +459,12 @@ export type WebShellComposerTagPlacement = 'top' | 'inline';
 
 export interface WebShellComposerTagOptions {
   placement?: WebShellComposerTagPlacement;
+  /**
+   * Inline placement only: insert at the caret (default, synchronous user
+   * gestures) or append after the document end (asynchronous producers,
+   * which must not interrupt typing or steal focus).
+   */
+  position?: 'caret' | 'end';
 }
 
 export interface WebShellComposerTextOptions {
@@ -273,6 +475,7 @@ export interface WebShellComposerInput {
   text?: string;
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
+  clearAttachments?: boolean;
   submit?: boolean;
 }
 
@@ -338,6 +541,7 @@ export interface WebShellAtProvider {
 }
 
 export interface WebShellComposerApi {
+  focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
   addTags(
@@ -416,10 +620,27 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
   exitCode?: number;
 }
 
+export interface WebShellWorkflowTask extends WebShellTaskBase {
+  kind: 'workflow';
+  status:
+    | 'running'
+    | 'pausing'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  currentPhase?: string;
+  agentsDispatched: number;
+  agentsCompleted: number;
+  tokensSpent: number;
+  tokenBudgetTotal?: number;
+}
+
 export type WebShellTaskInfo =
   | WebShellAgentTask
   | WebShellShellTask
-  | WebShellMonitorTask;
+  | WebShellMonitorTask
+  | WebShellWorkflowTask;
 
 // ---- Model info (public type for footer renderer) ----
 
@@ -444,6 +665,9 @@ export interface WebShellFooterRenderInfo {
   model: string;
   streamingState: DaemonStreamingState;
   contextUsageRatio: number;
+  /** Canonical daemon-owned Goal state for the active session. */
+  goalSnapshot: GoalSnapshotV2 | null;
+  /** @deprecated Prefer goalSnapshot. */
   activeGoal: { condition: string; setAt: number } | null;
   tasks: readonly WebShellTaskInfo[];
   availableModes: readonly string[];
@@ -469,16 +693,33 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  filterArtifact?: ArtifactFilter;
+  artifact?: WebShellArtifactCustomization;
+  /** Host-specific label for the Ask User Question free-text choice. */
+  askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  /**
+   * Built-in / host @ mention providers. Split-view panes share this context
+   * so they match the main composer without ChatPane prop drilling.
+   */
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  atProviders?: readonly WebShellAtProvider[];
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  /**
+   * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
+   * object to leave Web Shell's answer footer unchanged.
+   */
+  assistantFeedback?: WebShellAssistantFeedbackOptions;
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  sourceReferences?: readonly WebShellSourceReference[];
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
@@ -486,6 +727,7 @@ export interface WebShellCustomization {
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
+  hostOwnsEditDiffPreview?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving
@@ -496,6 +738,30 @@ export interface WebShellCustomization {
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
+  /**
+   * Controls whether the composer's file-upload entry points (drag-and-drop
+   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Works alongside the daemon's
+   * `workspace_file_upload` capability, not instead of it: setting `false`
+   * force-disables upload even when the daemon advertises the capability,
+   * while `true`/omitted still requires the capability (and the workspace
+   * trust / qualified-route safety checks) to be satisfied.
+   */
+  fileUploadEnabled?: boolean;
+  /** Preferred file-drop destination. Omitted: ask only when both are available.
+   * If the preference is unavailable, use the sole available destination.
+   */
+  fileDropAction?: 'upload' | 'attach';
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});

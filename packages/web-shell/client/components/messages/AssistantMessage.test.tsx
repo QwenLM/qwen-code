@@ -4,10 +4,15 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+  type TranscriptRenderMode,
+} from '../../transcriptRenderMode';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-vi.mock('../../App', async () => {
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     CompactModeContext: createContext(false),
@@ -32,12 +37,25 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
+function render(
+  node: ReactNode,
+  language: 'en' | 'zh-CN' = 'en',
+  renderMode: TranscriptRenderMode = 'interactive',
+  documentExpanded = true,
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<I18nProvider language={language}>{node}</I18nProvider>);
+    root.render(
+      <I18nProvider language={language}>
+        <TranscriptRenderModeProvider value={renderMode}>
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            {node}
+          </TranscriptDocumentExpandedProvider>
+        </TranscriptRenderModeProvider>
+      </I18nProvider>,
+    );
   });
   mounted.push({ root, container });
   return container;
@@ -55,7 +73,6 @@ function renderCompletedThinking(
   const tree = (isStreaming: boolean) => (
     <I18nProvider language={language}>
       <ThinkingMessage
-        messageId={`completed-${durationMs}-${language}`}
         content="private chain of thought"
         isStreaming={isStreaming}
         timestamp={0}
@@ -95,15 +112,36 @@ describe('AssistantMessage thinking logic', () => {
 
   it('keeps replayed completed thinking durationless', () => {
     const container = render(
-      <ThinkingMessage
-        messageId="replayed"
-        content="private chain of thought"
-        timestamp={0}
-      />,
+      <ThinkingMessage content="private chain of thought" timestamp={0} />,
     );
 
     expect(container.textContent).toContain('Done thinking');
     expect(container.textContent).not.toContain('Thought for');
+  });
+
+  it('keeps thinking content expanded and inert in document mode', () => {
+    const container = render(
+      <ThinkingMessage content="document thinking detail" timestamp={0} />,
+      'en',
+      'document',
+    );
+
+    expect(container.textContent).toContain('document thinking detail');
+    expect(container.querySelector('[aria-expanded]')).toBeNull();
+  });
+
+  it('honors the document-wide collapsed state without enabling controls', () => {
+    const container = render(
+      <ThinkingMessage content="document thinking detail" timestamp={0} />,
+      'en',
+      'document',
+      false,
+    );
+
+    expect(container.textContent).not.toContain('document thinking detail');
+    expect(container.querySelector('button')?.hasAttribute('disabled')).toBe(
+      true,
+    );
   });
 
   it.each([
@@ -133,7 +171,6 @@ describe('AssistantMessage thinking logic', () => {
 
     const container = render(
       <ThinkingMessage
-        messageId="running"
         content="private chain of thought"
         isStreaming
         timestamp={0}
@@ -151,6 +188,55 @@ describe('AssistantMessage thinking logic', () => {
     act(() => toggle?.parentElement?.click());
     expect(toggle?.getAttribute('aria-expanded')).toBe('false');
     expect(container.textContent).not.toContain('private chain of thought');
+  });
+
+  it('does not recreate the elapsed timer on every streamed chunk', () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const tree = (content: string, isStreaming: boolean) => (
+      <I18nProvider language="en">
+        <ThinkingMessage
+          content={content}
+          isStreaming={isStreaming}
+          timestamp={0}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(tree('first', true)));
+    const intervalCountAfterMount = setIntervalSpy.mock.calls.length;
+
+    act(() => root.render(tree('first second', true)));
+    act(() => root.render(tree('first second third', true)));
+
+    expect(setIntervalSpy.mock.calls.length).toBe(intervalCountAfterMount);
+  });
+
+  it('does not start the elapsed timer for undefined content', () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const intervalCountBeforeRender = setIntervalSpy.mock.calls.length;
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ThinkingMessage
+            content={undefined as unknown as string}
+            isStreaming
+            timestamp={0}
+          />
+        </I18nProvider>,
+      ),
+    );
+
+    expect(setIntervalSpy.mock.calls.length).toBe(intervalCountBeforeRender);
   });
 
   it('only translates completed thinking and reuses the in-memory result', async () => {
@@ -186,7 +272,6 @@ describe('AssistantMessage thinking logic', () => {
     });
     const container = render(
       <ThinkingMessage
-        messageId="translated-thinking"
         content="private chain of thought"
         generateContent={generateContent}
       />,
@@ -227,7 +312,6 @@ describe('AssistantMessage thinking logic', () => {
   it('only offers translation when the UI language is Chinese', () => {
     const container = render(
       <ThinkingMessage
-        messageId="english-thinking"
         content="private chain of thought"
         generateContent={async function* () {}}
       />,
@@ -253,8 +337,7 @@ describe('AssistantMessage thinking logic', () => {
     };
     const container = render(
       <ThinkingMessage
-        messageId="empty-translation"
-        content="private chain of thought"
+        content="private chain of thought that fails"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -292,8 +375,7 @@ describe('AssistantMessage thinking logic', () => {
     });
     const container = render(
       <ThinkingMessage
-        messageId="cancel-translation"
-        content="private chain of thought"
+        content="private chain of thought to cancel"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -350,8 +432,7 @@ describe('AssistantMessage thinking logic', () => {
     };
     const container = render(
       <ThinkingMessage
-        messageId="thinking-translation"
-        content="private chain of thought"
+        content="private chain of thought with thinking status"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -376,7 +457,6 @@ describe('AssistantMessage thinking logic', () => {
   it('does not offer translation while thinking is streaming', () => {
     const container = render(
       <ThinkingMessage
-        messageId="still-running"
         content="private chain of thought"
         isStreaming
         generateContent={async function* () {}}
@@ -434,6 +514,69 @@ describe('AssistantMessage streaming markdown', () => {
   });
 });
 
+describe('AssistantMessage branch action', () => {
+  it('disables the selected action while the branch request is pending', async () => {
+    let resolveBranch!: () => void;
+    const onBranchSession = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveBranch = resolve;
+        }),
+    );
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showBranchAction
+        onBranchSession={onBranchSession}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="Branch"]',
+    );
+
+    act(() => button?.click());
+    expect(button?.disabled).toBe(true);
+    expect(onBranchSession).toHaveBeenCalledOnce();
+
+    await act(async () => resolveBranch());
+    expect(button?.disabled).toBe(false);
+  });
+
+  it('does not leak host branch handler rejections', async () => {
+    const onBranchSession = vi
+      .fn()
+      .mockRejectedValue(new Error('host failure'));
+    const unhandled = vi.fn();
+    window.addEventListener('unhandledrejection', unhandled);
+    try {
+      const container = render(
+        <AssistantMessage
+          content="answer"
+          showFooterActions
+          showBranchAction
+          onBranchSession={onBranchSession}
+        />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Branch"]',
+      );
+
+      await act(async () => {
+        button?.click();
+      });
+      // Flush microtasks so a leaked rejection would surface.
+      await act(async () => {});
+
+      expect(onBranchSession).toHaveBeenCalledOnce();
+      expect(button?.disabled).toBe(false);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('unhandledrejection', unhandled);
+    }
+  });
+});
+
 describe('AssistantMessage markdown tables', () => {
   const tableMarkdown = [
     '| Team | Score |',
@@ -461,5 +604,214 @@ describe('AssistantMessage markdown tables', () => {
 
     expect(container.querySelector('table')).not.toBeNull();
     expect(container.textContent).not.toContain('Copy table');
+  });
+});
+
+describe('AssistantMessage copy reset timer', () => {
+  it('leaves no pending reset timer behind on unmount', async () => {
+    vi.useFakeTimers();
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    try {
+      const container = render(
+        <AssistantMessage content="copy me" showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Copy"]',
+      );
+      await act(async () => {
+        button?.click();
+        await Promise.resolve();
+      });
+      // The 2s reset is pending; unmounting must clear it, or it fires
+      // after the file's environment is torn down and the unit suites'
+      // unhandled-error gate turns an all-green run red.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      const { root, container: mountedContainer } = mounted.pop()!;
+      act(() => root.unmount());
+      mountedContainer.remove();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(navigator, 'clipboard', descriptor);
+      }
+    }
+  });
+});
+
+describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
+  it('falls back to execCommand and still shows the copied state', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    let copiedViaFallback: string | null = null;
+    const originalExecCommand = document.execCommand;
+    const execCommandMock = vi.fn().mockImplementation((command: string) => {
+      if (command === 'copy') {
+        copiedViaFallback = document.querySelector('textarea')?.value ?? null;
+      }
+      return true;
+    });
+    document.execCommand = execCommandMock;
+
+    try {
+      const container = render(
+        <AssistantMessage content="copy me" showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Copy"]',
+      );
+      expect(button).not.toBeNull();
+
+      await act(async () => {
+        button?.click();
+      });
+
+      expect(execCommandMock).toHaveBeenCalledWith('copy');
+      expect(copiedViaFallback).toBe('copy me');
+      // The button should flip to the check icon even without the async API.
+      expect(
+        button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
+      ).not.toBeNull();
+    } finally {
+      document.execCommand = originalExecCommand;
+      if (descriptor) {
+        Object.defineProperty(navigator, 'clipboard', descriptor);
+      }
+    }
+  });
+});
+
+describe('AssistantMessage satisfied / not-satisfied marks', () => {
+  const find = (container: HTMLElement, title: string) =>
+    container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+
+  it('offers no marks unless the host opts in', () => {
+    const container = render(
+      <AssistantMessage content="answer" showFooterActions />,
+    );
+    expect(find(container, 'Satisfied')).toBeNull();
+    expect(find(container, 'Not satisfied')).toBeNull();
+  });
+
+  it('offers both marks and marks the pressed one', () => {
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="up"
+      />,
+    );
+    expect(find(container, 'Satisfied')?.getAttribute('aria-pressed')).toBe(
+      'true',
+    );
+    expect(find(container, 'Not satisfied')?.getAttribute('aria-pressed')).toBe(
+      'false',
+    );
+  });
+
+  it('releases focus after a pointer click but keeps it for keyboard activation', () => {
+    const onRate = vi.fn();
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+        onAssistantFeedbackRate={onRate}
+      />,
+    );
+    const button = find(container, 'Satisfied')!;
+    act(() => button.focus());
+    expect(document.activeElement).toBe(button);
+
+    // Keyboard activation: focus stays, so the hover-only row is still
+    // reachable from the keyboard.
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(document.activeElement).toBe(button);
+
+    // Pointer click: a focused button would hold the row open through
+    // `:focus-within` after the pointer leaves.
+    act(() => {
+      button.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    expect(document.activeElement).not.toBe(button);
+    expect(onRate).toHaveBeenCalledTimes(2);
+  });
+
+  it('colours the mark by direction', () => {
+    const unmarked = render(
+      <AssistantMessage content="a1" showFooterActions showAssistantFeedback />,
+    );
+    expect(find(unmarked, 'Satisfied')?.className).toContain('feedbackButton');
+    expect(find(unmarked, 'Satisfied')?.className).not.toContain(
+      'feedbackButtonActiveUp',
+    );
+
+    const satisfied = render(
+      <AssistantMessage
+        content="a2"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="up"
+      />,
+    );
+    expect(find(satisfied, 'Satisfied')?.className).toContain(
+      'feedbackButtonActiveUp',
+    );
+    expect(find(satisfied, 'Not satisfied')?.className).not.toContain(
+      'feedbackButtonActiveDown',
+    );
+
+    const dissatisfied = render(
+      <AssistantMessage
+        content="a3"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="down"
+      />,
+    );
+    expect(find(dissatisfied, 'Not satisfied')?.className).toContain(
+      'feedbackButtonActiveDown',
+    );
+  });
+
+  it('reports the click to the host, and a repeat as a clear', () => {
+    const onRate = vi.fn();
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="down"
+        onAssistantFeedbackRate={onRate}
+      />,
+    );
+    act(() => find(container, 'Not satisfied')?.click());
+    expect(onRate).toHaveBeenCalledWith(null);
+    act(() => find(container, 'Satisfied')?.click());
+    expect(onRate).toHaveBeenLastCalledWith('up');
+  });
+
+  it('translates the mark titles', () => {
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+      />,
+      'zh-CN',
+    );
+    expect(find(container, '满意')).not.toBeNull();
+    expect(find(container, '不满意')).not.toBeNull();
   });
 });

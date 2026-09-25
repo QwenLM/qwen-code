@@ -5,18 +5,25 @@ import {
   useConnection,
   useTranscriptBlocks,
   useTranscriptHistory,
-} from '@qwen-code/webui/daemon-react-sdk';
+  useWorkspace,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../../constants/sessions';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import {
+  isModelSetupCommand,
+  isModelCommandSnapshotReady,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from '../../modelManagement';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
+import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
 interface SideTaskPanelProps {
   tabId: string;
@@ -41,10 +48,13 @@ interface SideTaskPanelProps {
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  modelManagement?: WebShellModelManagementOptions;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /** Policy refused the stored initial prompt; the parent drops it from the tab. */
+  onInitialPromptRefused?: (tabId: string) => void;
 }
 
 const FIRST_PROMPT_RENAME_ATTEMPTS = 3;
@@ -64,6 +74,9 @@ export function SideTaskPanel({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
+  onImageIngestionNotice,
+  onInitialPromptRefused,
 }: SideTaskPanelProps) {
   if (!sessionId) {
     return (
@@ -101,6 +114,9 @@ export function SideTaskPanel({
         onArtifactsChange={onArtifactsChange}
         onError={onError}
         sessionWorkflowEnabled={sessionWorkflowEnabled}
+        modelManagement={modelManagement}
+        onImageIngestionNotice={onImageIngestionNotice}
+        onInitialPromptRefused={onInitialPromptRefused}
       />
     </DaemonSessionProvider>
   );
@@ -127,7 +143,15 @@ function SideTaskCreation({
   const { t } = useI18n();
   const creatingRef = useRef(false);
   const didAttemptCreateRef = useRef(false);
+  const mountedRef = useRef(true);
   const [creationError, setCreationError] = useState<unknown>();
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const create = useCallback(async () => {
     if (creatingRef.current) return;
@@ -136,8 +160,11 @@ function SideTaskCreation({
     try {
       const created = await createSession(tabId, parentSessionId, title);
       onCreated(tabId, created.sessionId);
-      if (created.displayName) onTitleChange(tabId, created.displayName);
+      if (mountedRef.current && created.displayName) {
+        onTitleChange(tabId, created.displayName);
+      }
     } catch (error) {
+      if (!mountedRef.current) return;
       setCreationError(error);
       onError?.(error, t('sideTask.createFailed'));
     } finally {
@@ -193,6 +220,9 @@ function SideTaskSession({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
+  onImageIngestionNotice,
+  onInitialPromptRefused,
 }: Omit<
   SideTaskPanelProps,
   'sessionId' | 'parentSessionId' | 'createSession' | 'onCreated'
@@ -200,9 +230,25 @@ function SideTaskSession({
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
+  const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const blocks = useTranscriptBlocks();
   const transcriptHistory = useTranscriptHistory();
-  const hasUserPrompt = blocks.some((block) => block.kind === 'user');
+  const catalogOwnerCwd =
+    connection.workspaceCwd &&
+    workspaceCwd &&
+    connection.workspaceCwd !== workspaceCwd
+      ? undefined
+      : (connection.workspaceCwd ?? workspaceCwd);
+  const hasTextualUserPrompt = blocks.some(
+    (block) =>
+      block.kind === 'user' &&
+      (typeof block.text === 'string'
+        ? block.text.trim().length > 0
+        : !block.images?.length),
+  );
   const restoredEmptySession =
     connection.status === 'connected' &&
     !connection.loadingTranscript &&
@@ -211,9 +257,10 @@ function SideTaskSession({
     !transcriptHistory.hasMore &&
     !transcriptHistory.capacityReached &&
     !transcriptHistory.paginationError &&
-    !hasUserPrompt;
+    !hasTextualUserPrompt;
   const canNameFromFirstPrompt =
-    !hasUserPrompt && (shouldNameFromFirstPrompt || restoredEmptySession);
+    !hasTextualUserPrompt &&
+    (shouldNameFromFirstPrompt || restoredEmptySession);
   useEffect(() => {
     const displayName = connection.displayName?.trim();
     if (displayName) onTitleChange(tabId, displayName);
@@ -232,26 +279,87 @@ function SideTaskSession({
         ) {
           try {
             await actions.renameSession(nextTitle);
+            if (connection.sessionId && catalogOwnerCwd) {
+              sessionCatalogController.renamed(
+                catalogOwnerCwd,
+                connection.sessionId,
+                nextTitle,
+              );
+            }
             onTitleChange(tabId, nextTitle, true);
             return;
           } catch (error) {
             lastError = error;
           }
         }
+        if (catalogOwnerCwd) {
+          sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);
+        }
         onError?.(lastError, t('sideTask.renameFailed'));
       })();
     },
-    [actions, onError, onTitleChange, t, tabId],
+    [
+      actions,
+      catalogOwnerCwd,
+      connection.sessionId,
+      onError,
+      onTitleChange,
+      sessionCatalogController,
+      t,
+      tabId,
+    ],
   );
   const initialPromptSentRef = useRef(false);
+  const waitingForCommandSnapshot = Boolean(
+    initialPrompt?.trim() &&
+      restoredEmptySession &&
+      !initialPromptSentRef.current &&
+      !resolveModelManagement(modelManagement).allowAdd &&
+      !isModelCommandSnapshotReady(connection.commands) &&
+      isModelSetupCommand(initialPrompt),
+  );
+  const commandWaitNoticeRef = useRef(onImageIngestionNotice);
+  commandWaitNoticeRef.current = onImageIngestionNotice;
+  useEffect(() => {
+    if (!waitingForCommandSnapshot) return;
+    const timer = setTimeout(() => {
+      commandWaitNoticeRef.current?.(
+        'warning',
+        t('sideTask.commandsLoadingTimedOut'),
+      );
+    }, 5_000);
+    return () => clearTimeout(timer);
+  }, [waitingForCommandSnapshot, initialPrompt, connection.sessionId, t]);
+
   useEffect(() => {
     const prompt = initialPrompt?.trim();
-    if (!prompt || !restoredEmptySession || initialPromptSentRef.current)
+    if (
+      !prompt ||
+      !restoredEmptySession ||
+      initialPromptSentRef.current ||
+      waitingForCommandSnapshot
+    )
       return;
     initialPromptSentRef.current = true;
+    if (
+      !resolveModelManagement(modelManagement).allowAdd &&
+      isModelSetupCommand(prompt, connection.commands)
+    ) {
+      onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+      onInitialPromptRefused?.(tabId);
+      return;
+    }
     actions
       .sendPrompt(prompt, {
-        onAdmitted: () => nameFromFirstPrompt(prompt),
+        onAdmitted: () => {
+          if (connection.sessionId && catalogOwnerCwd) {
+            sessionCatalogController.promptAdmitted(
+              catalogOwnerCwd,
+              connection.sessionId,
+            );
+          }
+          nameFromFirstPrompt(prompt);
+        },
       })
       .catch((error: unknown) => {
         initialPromptSentRef.current = false;
@@ -259,11 +367,20 @@ function SideTaskSession({
       });
   }, [
     actions,
+    catalogOwnerCwd,
+    connection.commands,
+    connection.sessionId,
     initialPrompt,
+    modelManagement,
+    onImageIngestionNotice,
+    onInitialPromptRefused,
     nameFromFirstPrompt,
     onError,
     restoredEmptySession,
+    waitingForCommandSnapshot,
+    sessionCatalogController,
     t,
+    tabId,
   ]);
 
   if (!connection.sessionId) {
@@ -278,6 +395,7 @@ function SideTaskSession({
       title={connection.displayName?.trim() || title}
       workspaceCwd={workspaceCwd}
       onError={onError}
+      onImageIngestionNotice={onImageIngestionNotice}
       embedded
       onFirstPromptAdmitted={
         canNameFromFirstPrompt ? nameFromFirstPrompt : undefined
@@ -285,6 +403,7 @@ function SideTaskSession({
       onRightPanelOpen={onRightPanelOpen}
       onPaneArtifactsChange={onArtifactsChange}
       sessionWorkflowEnabled={sessionWorkflowEnabled}
+      modelManagement={modelManagement}
     />
   );
 }

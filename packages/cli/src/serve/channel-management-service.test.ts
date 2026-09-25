@@ -8,12 +8,17 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PairingStore } from '@qwen-code/channel-base';
+import type { CreatePairingRequestResult } from '@qwen-code/channel-base';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChannelSettingsSnapshot } from './channel-settings-store.js';
 import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
 } from './channel-management-service.js';
+import {
+  createChannelRestoreFailures,
+  type ChannelRestoreFailures,
+} from './channel-restore-failures.js';
 
 const WORKSPACE = '/ws/primary';
 
@@ -39,6 +44,7 @@ function setup(options: {
   snapshot?: ChannelSettingsSnapshot;
   committedNames?: string[];
   workspaceCwd?: string;
+  restoreFailures?: ChannelRestoreFailures;
 }) {
   let persisted = options.snapshot ?? settingsSnapshot();
   const store = {
@@ -134,8 +140,18 @@ function setup(options: {
     workspaceCwd: WORKSPACE,
     store,
     manager,
+    ...(options.restoreFailures
+      ? { restoreFailures: options.restoreFailures }
+      : {}),
   });
   return { service, store, manager, persisted: () => persisted };
+}
+
+function codeOf(result: CreatePairingRequestResult): string {
+  if ('code' in result) return result.code;
+  throw new Error(
+    `expected a pairing code, got rejection "${result.rejected}"`,
+  );
 }
 
 describe('createChannelManagementService', () => {
@@ -267,6 +283,31 @@ describe('createChannelManagementService', () => {
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
+  it('rejects an upsert that omits cwd on a stored cross-workspace config', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          bot: {
+            type: 'dingtalk',
+            cwd: '../secondary',
+            senderPolicy: 'pairing',
+          },
+        },
+      }),
+    });
+
+    await expect(
+      service.upsert('bot', {
+        expectedRevision: 'rev-1',
+        config: { type: 'dingtalk', senderPolicy: 'open' },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_workspace_mismatch' });
+
+    expect(store.upsert).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
   it('fails closed for lifecycle and pairing on a legacy cross-workspace config', async () => {
     const { service, store, manager } = setup({
       committedNames: ['bot'],
@@ -306,7 +347,10 @@ describe('createChannelManagementService', () => {
       code: 'channel_workspace_mismatch',
     });
     await expect(
-      service.revokePairingApproval('bot', 'sender-1'),
+      service.revokePairingApproval('bot', {
+        type: 'user',
+        id: 'sender-1',
+      }),
     ).rejects.toMatchObject({
       code: 'channel_workspace_mismatch',
     });
@@ -335,8 +379,9 @@ describe('createChannelManagementService', () => {
         }),
       });
       const pairing = new PairingStore('bot', WORKSPACE);
-      const code = pairing.createRequest('sender-1', 'Alice');
-      expect(code).toBeTypeOf('string');
+      const created = pairing.createRequest('sender-1', 'Alice');
+      expect(created).toEqual({ code: expect.any(String) });
+      const code = codeOf(created);
 
       await expect(service.pairingRequests('bot')).resolves.toEqual({
         requests: [
@@ -347,23 +392,127 @@ describe('createChannelManagementService', () => {
           }),
         ],
       });
-      await expect(service.approvePairing('bot', code!)).resolves.toEqual({
+      await expect(service.approvePairing('bot', code)).resolves.toEqual({
         approved: expect.objectContaining({ senderId: 'sender-1', code }),
         requests: [],
       });
       expect(pairing.isApproved('sender-1')).toBe(true);
       await expect(service.pairingApprovals('bot')).resolves.toEqual({
         senderIds: ['sender-1'],
+        groupIds: [],
       });
       await expect(
-        service.revokePairingApproval('bot', 'sender-1'),
+        service.revokePairingApproval('bot', {
+          type: 'user',
+          id: 'sender-1',
+        }),
       ).resolves.toEqual({
         revoked: 'sender-1',
         senderIds: [],
+        groupIds: [],
       });
       expect(pairing.isApproved('sender-1')).toBe(false);
       await expect(
-        service.revokePairingApproval('bot', 'sender-1'),
+        service.revokePairingApproval('bot', {
+          type: 'user',
+          id: 'sender-1',
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_pairing_approval_not_found',
+      });
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      await fs.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('manages group pairing when groupPolicy uses pairing mode', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'channel-management-group-pairing-'),
+    );
+    process.env['QWEN_HOME'] = qwenHome;
+    try {
+      const { service } = setup({
+        snapshot: settingsSnapshot({
+          channels: {
+            bot: {
+              type: 'dingtalk',
+              senderPolicy: 'open',
+              groupPolicy: 'pairing',
+            },
+          },
+        }),
+      });
+      const pairing = new PairingStore('bot', WORKSPACE);
+      const code = codeOf(
+        pairing.createGroupRequest(
+          'group-1',
+          'Release Team',
+          'sender-1',
+          'Alice',
+        ),
+      );
+      const secondCode = codeOf(
+        pairing.createGroupRequest(
+          'group-2',
+          'Platform Team',
+          'sender-2',
+          'Bob',
+        ),
+      );
+
+      await expect(service.pairingRequests('bot')).resolves.toEqual({
+        requests: [
+          expect.objectContaining({
+            senderId: 'sender-1',
+            subject: {
+              type: 'group',
+              id: 'group-1',
+              name: 'Release Team',
+            },
+          }),
+          expect.objectContaining({
+            senderId: 'sender-2',
+            subject: {
+              type: 'group',
+              id: 'group-2',
+              name: 'Platform Team',
+            },
+          }),
+        ],
+      });
+      await expect(service.approvePairing('bot', code)).resolves.toEqual({
+        approved: expect.objectContaining({
+          subject: { type: 'group', id: 'group-1', name: 'Release Team' },
+        }),
+        requests: [
+          expect.objectContaining({
+            subject: { type: 'group', id: 'group-2', name: 'Platform Team' },
+          }),
+        ],
+      });
+      await service.approvePairing('bot', secondCode);
+      await expect(service.pairingApprovals('bot')).resolves.toEqual({
+        senderIds: [],
+        groupIds: ['group-1', 'group-2'],
+      });
+      await expect(
+        service.revokePairingApproval('bot', {
+          type: 'group',
+          id: 'group-1',
+        }),
+      ).resolves.toEqual({
+        revoked: 'group-1',
+        senderIds: [],
+        groupIds: ['group-2'],
+      });
+      await expect(
+        service.revokePairingApproval('bot', {
+          type: 'group',
+          id: 'group-1',
+        }),
       ).rejects.toMatchObject({
         code: 'channel_pairing_approval_not_found',
       });
@@ -422,6 +571,105 @@ describe('createChannelManagementService', () => {
     });
 
     expect(result.instance.runtime).toEqual({ state: 'connected' });
+  });
+
+  it('lists a channel that failed to restore as an error, not stopped', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+      // Another workspace's same-name channel is not this one.
+      {
+        workspaceCwd: '/ws/other',
+        channel: 'bot',
+        message: 'unrelated',
+      },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'gateway did not answer',
+    });
+  });
+
+  it('reports a committed channel from its worker, not a restore failure', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'stale',
+      },
+    ]);
+    const { service } = setup({ committedNames: ['bot'], restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'connected',
+    });
+  });
+
+  it.each([
+    {
+      operation: 'start',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.start('bot'),
+    },
+    {
+      operation: 'stop',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.stop('bot'),
+    },
+    {
+      operation: 'upsert',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.upsert('bot', {
+          expectedRevision: 'rev-1',
+          config: { type: 'dingtalk', clientId: 'client-id' },
+        }),
+    },
+    {
+      operation: 'remove',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.remove('bot', { expectedRevision: 'rev-1' }),
+    },
+  ])(
+    'forgets a restore failure once an operator uses $operation',
+    async ({ act }) => {
+      const restoreFailures = createChannelRestoreFailures();
+      restoreFailures.record([
+        {
+          workspaceCwd: WORKSPACE,
+          channel: 'bot',
+          message: 'x',
+        },
+      ]);
+      const { service } = setup({ restoreFailures });
+
+      await act(service);
+
+      expect(restoreFailures.get(WORKSPACE, 'bot')).toBeUndefined();
+    },
+  );
+
+  it('keeps a restore failure when only the startup flag changes', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      { workspaceCwd: WORKSPACE, channel: 'bot', message: 'x' },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(restoreFailures.get(WORKSPACE, 'bot')).toMatchObject({
+      message: 'x',
+    });
   });
 
   it('does not delete config when worker stop is unconfirmed', async () => {
@@ -578,6 +826,72 @@ describe('createChannelManagementService', () => {
       code: 'channel_worker_not_enabled',
     });
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('retries a channel whose restore failed by starting it', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+    ]);
+    const { service, manager } = setup({ committedNames: [], restoreFailures });
+
+    const result = await service.restart('bot');
+
+    // Nothing is running to restart; the listed error is what retry acts on.
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
+    );
+    expect(result.instance.runtime).toEqual({ state: 'connected' });
+    expect(restoreFailures.get(WORKSPACE, 'bot')).toBeUndefined();
+  });
+
+  it('keeps the restore failure when retrying it fails to start', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+    ]);
+    const { service, manager } = setup({ committedNames: [], restoreFailures });
+    manager.setChannelEnabled.mockRejectedValueOnce(new Error('still down'));
+
+    await expect(service.restart('bot')).rejects.toThrow('still down');
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'gateway did not answer',
+    });
+  });
+
+  it('retries a replacement that was rolled back by starting it', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.reloadWorkspace.mockRejectedValueOnce(new Error('bad config'));
+    const failed = await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: { type: 'dingtalk', clientId: 'client-id' },
+    });
+    // The failed reload stopped the channel and kept its error.
+    expect(failed.instance.runtime).toEqual({
+      state: 'error',
+      lastError: 'bad config',
+    });
+    manager.setChannelEnabled.mockClear();
+
+    const result = await service.restart('bot');
+
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
+    );
+    expect(result.instance.runtime).toEqual({ state: 'connected' });
   });
 
   it('rejects restart of a configured channel that is not enabled', async () => {
@@ -813,7 +1127,12 @@ describe('createChannelManagementService', () => {
       const { service } = setup({
         snapshot: settingsSnapshot({
           channels: {
-            bot: { type: 'dingtalk', senderPolicy: 'pairing' },
+            bot: {
+              type: 'dingtalk',
+              privatePolicy: 'pairing',
+              senderPolicy: 'open',
+              dmPolicy: 'disabled',
+            },
           },
         }),
       });
@@ -829,25 +1148,37 @@ describe('createChannelManagementService', () => {
   });
 
   it('rejects pairing operations on a channel without pairing mode', async () => {
-    const { service } = setup({
-      snapshot: settingsSnapshot({
-        channels: {
-          bot: { type: 'dingtalk', senderPolicy: 'open' },
-        },
-      }),
-    });
+    for (const config of [
+      { type: 'dingtalk', privatePolicy: 'open', senderPolicy: 'pairing' },
+      { type: 'dingtalk', privatePolicy: 'disabled', senderPolicy: 'pairing' },
+      { type: 'dingtalk', dmPolicy: 'disabled', senderPolicy: 'pairing' },
+      { type: 'dingtalk', senderPolicy: 'open' },
+      { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'allowlist' },
+      { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'disabled' },
+    ]) {
+      const { service } = setup({
+        snapshot: settingsSnapshot({
+          channels: {
+            bot: config,
+          },
+        }),
+      });
 
-    await expect(service.pairingRequests('bot')).rejects.toMatchObject({
-      code: 'channel_pairing_not_enabled',
-    });
-    await expect(
-      service.approvePairing('bot', 'ABCDEFGH'),
-    ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
-    await expect(service.pairingApprovals('bot')).rejects.toMatchObject({
-      code: 'channel_pairing_not_enabled',
-    });
-    await expect(
-      service.revokePairingApproval('bot', 'sender-1'),
-    ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
+      await expect(service.pairingRequests('bot')).rejects.toMatchObject({
+        code: 'channel_pairing_not_enabled',
+      });
+      await expect(
+        service.approvePairing('bot', 'ABCDEFGH'),
+      ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
+      await expect(service.pairingApprovals('bot')).rejects.toMatchObject({
+        code: 'channel_pairing_not_enabled',
+      });
+      await expect(
+        service.revokePairingApproval('bot', {
+          type: 'user',
+          id: 'sender-1',
+        }),
+      ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
+    }
   });
 });

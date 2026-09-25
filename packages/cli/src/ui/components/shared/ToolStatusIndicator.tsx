@@ -7,7 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { ToolCallStatus } from '../../types.js';
-import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
+import { RespondingSpinner } from '../RespondingSpinner.js';
 import {
   TOOL_STATUS,
   SHELL_COMMAND_NAME,
@@ -42,7 +42,7 @@ export const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
         <Text color={theme.status.success}>{TOOL_STATUS.PENDING}</Text>
       )}
       {status === ToolCallStatus.Executing && (
-        <GeminiRespondingSpinner
+        <RespondingSpinner
           spinnerType="toggle"
           nonRespondingDisplay={TOOL_STATUS.EXECUTING}
         />

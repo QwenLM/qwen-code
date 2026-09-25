@@ -11,8 +11,30 @@ import { DialogContent, DialogOverlay } from './dialog';
 import { DrawerContent, DrawerOverlay } from './drawer';
 import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
 import { Input } from './input';
-import { PopoverAnchor, PopoverContent, PopoverTrigger } from './popover';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from './popover';
 import { SelectTrigger } from './select';
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from './table';
+import { TabsList } from './tabs';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './tooltip';
 
 const FORWARD_REF_TYPE = Symbol.for('react.forward_ref');
 
@@ -35,6 +57,17 @@ describe('React 18 ref compatibility', () => {
     ['DropdownMenuTrigger', DropdownMenuTrigger],
     ['DropdownMenuSubTrigger', DropdownMenuSubTrigger],
     ['SelectTrigger', SelectTrigger],
+    ['Table', Table],
+    ['TableHeader', TableHeader],
+    ['TableBody', TableBody],
+    ['TableFooter', TableFooter],
+    ['TableRow', TableRow],
+    ['TableHead', TableHead],
+    ['TableCell', TableCell],
+    ['TableCaption', TableCaption],
+    ['TabsList', TabsList],
+    ['TooltipTrigger', TooltipTrigger],
+    ['TooltipContent', TooltipContent],
   ])('%s forwards refs', (_name, Component) => {
     expect(Component).toHaveProperty('$$typeof', FORWARD_REF_TYPE);
   });
@@ -61,6 +94,100 @@ describe('React 18 ref compatibility', () => {
     act(() => root.render(<Checkbox ref={ref} />));
     expect(ref.current).toBeInstanceOf(HTMLButtonElement);
 
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards a Table ref to its DOM element', () => {
+    const ref = React.createRef<HTMLTableElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => root.render(<Table ref={ref} />));
+    expect(ref.current).toBeInstanceOf(HTMLTableElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards an asChild TooltipTrigger ref to its DOM element', () => {
+    const ref = React.createRef<HTMLButtonElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() =>
+      root.render(
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger ref={ref} asChild>
+              <button type="button">Trigger</button>
+            </TooltipTrigger>
+          </Tooltip>
+        </TooltipProvider>,
+      ),
+    );
+    expect(ref.current).toBeInstanceOf(HTMLButtonElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards a TooltipContent ref to its DOM element', () => {
+    const ref = React.createRef<HTMLDivElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() =>
+      root.render(
+        <TooltipProvider>
+          <Tooltip open>
+            <TooltipTrigger>Trigger</TooltipTrigger>
+            <TooltipContent ref={ref}>Content</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>,
+      ),
+    );
+    expect(ref.current).toBeInstanceOf(HTMLDivElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards slotted PopoverAnchor and portaled content refs to their DOM elements', () => {
+    const anchorRef =
+      React.createRef<React.ComponentRef<typeof PopoverAnchor>>();
+    const contentRef = React.createRef<HTMLDivElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() =>
+      root.render(
+        <Popover open>
+          <PopoverAnchor asChild ref={anchorRef}>
+            <Button>Context ring</Button>
+          </PopoverAnchor>
+          <PopoverContent ref={contentRef} showArrow>
+            Content
+          </PopoverContent>
+        </Popover>,
+      ),
+    );
+    expect(anchorRef.current).toBe(container.querySelector('button'));
+    expect(contentRef.current).toBe(
+      document.body.querySelector('[data-slot="popover-content"]'),
+    );
+    expect(contentRef.current).toBeInstanceOf(HTMLDivElement);
+    const arrow = contentRef.current!.querySelector('svg')!;
+    expect(arrow.querySelectorAll('path')).toHaveLength(2);
+    expect(arrow.style.transform).toBe(
+      'translateY(var(--floating-arrow-offset))',
+    );
+    expect(contentRef.current!.className).toContain(
+      '[--floating-arrow-offset:-1px]',
+    );
     act(() => root.unmount());
     container.remove();
   });

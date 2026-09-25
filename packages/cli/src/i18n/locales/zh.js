@@ -143,6 +143,7 @@ export default {
   'from {{marketplace}}': '来自 {{marketplace}}',
   installed: '已安装',
   '{{count}} Agents': '{{count}} 个智能体',
+  '{{count}} Workflows': '{{count}} 个工作流',
   '{{count}} Commands': '{{count}} 个命令',
   '{{count}} MCP': '{{count}} 个 MCP',
   '{{count}} Skills': '{{count}} 个技能',
@@ -169,6 +170,7 @@ export default {
   // acronyms are kept in English (Agent, Grep, Glob, LSP), as is a product name
   // inside an otherwise-translated label (e.g. `Notebook`).
   // ============================================================================
+  'toolDisplayName.Exec': '执行代码',
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
@@ -180,10 +182,13 @@ export default {
   'toolDisplayName.TodoList': '任务清单',
   'toolDisplayName.Goal': '目标',
   'toolDisplayName.UpdateGoal': '更新目标',
+  'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
+  'toolDisplayName.RecordSource': '记录来源',
+  'toolDisplayName.ReportFindings': '上报评审发现',
   'toolDisplayName.DisplayImage': '显示图片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
@@ -207,15 +212,34 @@ export default {
   'toolDisplayName.TeamDelete': '删除团队',
   'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
+  'toolDisplayName.RequestShutdown': '请求下线',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
   'toolDisplayName.ToolSearch': '工具搜索',
+  'toolDisplayName.ToolCall': '工具调用',
   'toolDisplayName.EnterWorktree': '进入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.DownsampleImage': '降采样图像',
+  'toolDisplayName.DownscaleVideo': '降采样视频',
+  'toolDisplayName.DownsampleAudio': '降采样音频',
+  'toolDisplayName.ExtractKeyframes': '提取关键帧',
+  'toolDisplayName.ExtractAudio': '提取音轨',
+  'toolDisplayName.ClipVideo': '剪辑视频',
+  'toolDisplayName.ClipImage': '裁剪图像',
+  'toolDisplayName.ClipAudio': '剪辑音频',
+  'toolDisplayName.CaptionImage': '描述图像',
+  'toolDisplayName.CaptionAudio': '描述音频',
+  'toolDisplayName.OcrImage': '识别图像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解视频',
+  'toolDisplayName.ConvertImage': '转换图像',
+  'toolDisplayName.TranscribeAudio': '转写音频',
+  'toolDisplayName.RecallMediaMemory': '召回媒体记忆',
+  '[fixed-only: runs via media policies, not the model]':
+    '［仅固定策略：由媒体策略调用，不开放给模型］',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -346,11 +370,10 @@ export default {
   'Search:': '搜索：',
   'type to filter…': '输入以过滤…',
   'No skills are currently available.': '当前没有可用的技能。',
-  'All available skills are locked at a higher scope (see below).':
-    '所有可用技能都被更高范围锁定（详见下方）。',
   'No skills match the search.': '没有匹配搜索的技能。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '被更高范围设置锁定（此处无法切换）：',
+  'Locked by settings entries you cannot toggle here:':
+    '被无法在此切换的设置条目锁定：',
+  '{{count}} locked not shown': '{{count}} 个已锁定技能未显示',
   'higher scope': '更高范围',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已锁定：{{scope}}]',
@@ -720,6 +743,7 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Code Mode Only (Experimental)': '仅代码模式（实验性）',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',
@@ -734,6 +758,7 @@ export default {
   'Hide Window Title': '隐藏窗口标题',
   'Show Status in Title': '在标题中显示状态',
   'Hide Tips': '隐藏提示',
+  'Show Tool Call Arguments': '显示工具调用参数',
   'Show Line Numbers in Code': '在代码中显示行号',
   'Show Citations': '显示引用',
   'Custom Witty Phrases': '自定义诙谐短语',
@@ -766,6 +791,7 @@ export default {
   'Tool Output Truncation Lines': '工具输出截断行数',
   'Folder Trust': '文件夹信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未设置',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   'Auto (follow user input)': '自动（跟随用户输入）',
@@ -888,6 +914,10 @@ export default {
   'This extension will install the following skills:': '此扩展将安装以下技能：',
   'This extension will install the following subagents:':
     '此扩展将安装以下子智能体：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此扩展将安装以下工作流（可启动子智能体的 JavaScript 脚本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流脚本与已安装版本相比有改动：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
@@ -959,6 +989,7 @@ export default {
   'Context files:': '上下文文件：',
   'Skills:': '技能：',
   'Agents:': '智能体：',
+  'Workflows:': '工作流：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '链接扩展安装失败。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1053,6 +1084,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新打开此菜单可重新加载 Hook 定义。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制项和 HTTP 安全设置需要重启后生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新加载 Hook 定义失败：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
   // Hooks - Detail Step
   'Exit codes:': '退出码：',
@@ -1069,6 +1106,20 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已开启，本会话不会运行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精简模式已开启，本会话不会运行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 设置禁用。',
+  'Timeout:': '超时：',
+  'Status message:': '状态消息：',
+  'Condition:': '条件：',
+  'Options:': '选项：',
+  'Skill:': '技能：',
+  'runs in background': '后台运行',
+  'runs once': '只运行一次',
+  sequential: '顺序执行',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
@@ -1118,8 +1169,8 @@ export default {
     '命令输入为包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令输入为包含通知消息和类型的 JSON。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（受支持交互式 TUI 的提交文本投影）。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（在受支持的提交边界捕获的文本投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令输入为包含 command_name、command_args 和展开后提示文本的 JSON。',
   'Input to command is JSON with session start source.':
@@ -1323,6 +1374,11 @@ export default {
   'Clear Authentication': '清空认证',
   disabled: '已禁用',
   enabled: '已启用',
+  'disabled (bare mode)': '已禁用（精简模式）',
+  'disabled (safe mode)': '已禁用（安全模式）',
+  'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (folder not trusted)': '已禁用（文件夹未受信任）',
+  'disabled (turned off for this session)': '已禁用（本会话中已关闭）',
   'Server:': '服务器：',
   'Error:': '错误：',
   tool: '工具',
@@ -1543,6 +1599,12 @@ export default {
     '聊天历史压缩未能减小大小。这可能表明压缩提示存在问题。',
   'Could not compress chat history due to a token counting error.':
     '由于 token 计数错误，无法压缩聊天历史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由于压缩摘要为空，无法压缩聊天历史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由于压缩摘要被截断，无法压缩聊天历史。',
+  'Could not compress chat history due to an API error.':
+    '由于 API 错误，无法压缩聊天历史。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1810,6 +1872,7 @@ export default {
     'Ctrl+Q 排到下一轮 · ↑ 编辑排队消息',
   'Enter to steer · Ctrl+Q to queue':
     'Enter 追加到当前任务 · Ctrl+Q 排到下一轮',
+  '{{count}} queued': '{{count}} 条已排队',
   'Queue message for the next turn': '将消息排到下一轮',
 
   // ============================================================================
@@ -2136,6 +2199,9 @@ export default {
   'Memory files': '记忆文件',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '启动上下文',
+  Unattributed: '未归因',
+  'Cached prefix': '缓存前缀',
   tokens: 'tokens',
   'Estimated pre-conversation overhead': '预估对话前开销',
   'No API response yet. Send a message to see actual usage.':
@@ -2222,8 +2288,10 @@ export default {
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
-  'Set a goal — keep working until the condition is met':
-    '设定目标 — 持续工作直到条件满足',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    '选择用于塑造回答表达方式的输出风格（{{styles}}，或自定义风格名称）。',
+  'It is saved but does not apply while this workspace is untrusted.':
+    '已保存，但此工作区不受信任时不会生效。',
   'Set or control a session goal': '设定或控制会话目标',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',
@@ -2238,6 +2306,17 @@ export default {
   // === Core: added from PR #3328 ===
   'Ask a quick side question without affecting the main conversation':
     '在不影响主对话的情况下快速问一个旁支问题',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '让审查模型对当前对话给出第二意见',
+  'Consulting advisor...': '正在咨询审查模型...',
+  'Advisor review failed: {{error}}': '审查失败：{{error}}',
+  'No conversation context available for /advisor':
+    '没有可供 /advisor 使用的对话上下文',
+  'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一个操作正在进行中，请等待其完成后再运行 /advisor',
+  'No response received.': '未收到回复。',
+  'No model configured.': '未配置模型。',
   'Manage Arena sessions': '管理 Arena 会话',
   'Start an Arena session with multiple models competing on the same task':
     '启动一个 Arena 会话，让多个模型在同一任务上竞争',
@@ -2308,11 +2387,26 @@ export default {
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
   'needs approval': '待审批',
+  'Large workflow': '大型工作流',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流：已排定 {{agents}} 个 agent（告警阈值 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流：预计输出 ~{{tokens}} 个 token（告警阈值 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
+  'from nested agent': '来自嵌套 agent',
   Running: '运行中',
+  Pausing: '暂停中',
   Paused: '已暂停',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '暂停是协作式的；在工作流暂停之前，进行中的工作可能会先完成。等待工具审批的 agent 调用会让运行保持在此状态，且在审批得到响应前仍会计入活跃时间上限。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '已暂停：不会启动新的 agent；agent 调用之间的脚本代码会继续运行。按 p 恢复。/clear、/branch 以及切换会话会取消已暂停的运行。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '暂停/恢复被拒绝；工作流状态已变化。请重试。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    '提示：使用 `/workflows p <runId>`，或在后台任务中按 p 协作暂停/恢复；使用 `/workflows <runId>` 查看详情。',
   Completed: '已完成',
   Failed: '失败',
   Stopped: '已停止',
@@ -2512,6 +2606,8 @@ export default {
   '{{count}} skills': '{{count}} 个技能',
   '{{count}} agent': '{{count}} 个代理',
   '{{count}} agents': '{{count}} 个代理',
+  '{{count}} workflow': '{{count}} 个工作流',
+  '{{count}} workflows': '{{count}} 个工作流',
   '{{count}} hook': '{{count}} 个钩子',
   '{{count}} hooks': '{{count}} 个钩子',
   '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',
@@ -2598,4 +2694,7 @@ export default {
     '安全模式下禁止更改自动技能管理器。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '仅受信任的工作区可以更改自动技能管理器。请通过 `/trust` 信任此文件夹后重试。',
+  'Kept model as {{model}}': '模型保持为 {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
 };

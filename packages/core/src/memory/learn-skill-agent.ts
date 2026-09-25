@@ -140,7 +140,7 @@ export async function buildLearnSkillPrompt(
     existingLine,
     'Instructions:',
     '- If the source is a URL, use web_fetch to retrieve the content.',
-    '- If the source is a file/directory path, use read_file / list_directory to read it.',
+    '- If the source is a file/directory path, use read_file / glob to read it.',
     '- If the source is a text description, use it directly.',
     '- Distill the knowledge into a well-structured SKILL.md file.',
     '',

@@ -239,6 +239,26 @@ describe('AtMentionPanel', () => {
     expect(onSelectTab).toHaveBeenCalledWith('hg');
   });
 
+  it('renders the upload item with an upload icon', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'upload-file',
+        label: 'Upload file',
+        kind: 'upload',
+        insertText: '',
+        description: 'Upload a file into this folder',
+      },
+    ];
+    mount(menu);
+
+    expect(document.body.textContent).toContain('Upload file');
+    expect(document.body.textContent).toContain(
+      'Upload a file into this folder',
+    );
+    expect(document.body.querySelector('svg.lucide-upload')).not.toBeNull();
+  });
+
   it('guards image icon sources', () => {
     const menu = itemsMenu();
     menu.items = [
@@ -378,6 +398,25 @@ describe('AtMentionPanel', () => {
 
     expect(onBack).toHaveBeenCalledOnce();
     expect(onAccept).toHaveBeenCalledWith(0);
+  });
+
+  it('honours a declared zero popover safe top', async () => {
+    mount(categoriesMenu());
+    const panel = document.body.querySelector<HTMLElement>('[role="region"]')!;
+    const remeasure = async (top: number) => {
+      anchor!.getBoundingClientRect = vi.fn(
+        () => ({ top, left: 20, width: 400 }) as DOMRect,
+      );
+      await act(async () => {
+        window.dispatchEvent(new Event('resize'));
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      return panel.style.getPropertyValue('--at-panel-max-height');
+    };
+
+    expect(await remeasure(200)).toBe('144px');
+    anchor!.style.setProperty('--web-shell-popover-safe-top', '0px');
+    expect(await remeasure(200)).toBe('192px');
   });
 
   it('shows loading state', () => {

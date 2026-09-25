@@ -22,6 +22,36 @@ export enum MCPServerStatus {
 const serverStatuses: Map<string, MCPServerStatus> = new Map();
 
 /**
+ * The most recent connect/discovery failure message per server. Discovery is
+ * best-effort and swallows connect errors (logged only via `debugLogger`),
+ * so the status enum alone cannot tell a consumer WHY a server is not
+ * CONNECTED. Producers that fail a connect/discovery record the cause here;
+ * consumers that observe a non-CONNECTED status (e.g. `qwen mcp reconnect`)
+ * can read it back. Entries are dropped automatically when the server
+ * reaches CONNECTED or is removed from the registry.
+ */
+const serverLastErrors: Map<string, string> = new Map();
+
+/**
+ * Record the most recent connect/discovery failure message for a server.
+ */
+export function recordMCPServerLastError(
+  serverName: string,
+  message: string,
+): void {
+  serverLastErrors.set(serverName, message);
+}
+
+/**
+ * The most recently recorded connect/discovery failure message for a server,
+ * or `undefined` when nothing is recorded (never failed, last attempt
+ * succeeded, or the server was removed from the registry).
+ */
+export function getMCPServerLastError(serverName: string): string | undefined {
+  return serverLastErrors.get(serverName);
+}
+
+/**
  * Event listeners for MCP server status changes.
  * `status` is `undefined` when the server has been removed from the registry
  * (e.g. disabled via `/mcp`), so consumers can drop it from their snapshots
@@ -62,6 +92,11 @@ export function updateMCPServerStatus(
   status: MCPServerStatus,
 ): void {
   serverStatuses.set(serverName, status);
+  if (status === MCPServerStatus.CONNECTED) {
+    // A live connection invalidates any previously recorded failure cause;
+    // keeping it would let a stale error shadow a recovered server.
+    serverLastErrors.delete(serverName);
+  }
   // Snapshot the listener list so a listener that detaches itself (or
   // attaches a new one) during dispatch doesn't mutate the array we're
   // iterating.
@@ -76,6 +111,7 @@ export function updateMCPServerStatus(
  * longer shows up in the Footer's MCP health pill as offline.
  */
 export function removeMCPServerStatus(serverName: string): void {
+  serverLastErrors.delete(serverName);
   if (!serverStatuses.has(serverName)) {
     return;
   }

@@ -20,6 +20,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { summarizeReplayEvent } from './replay-summary.js';
 
 export interface SessionReplaySnapshot {
   compactedTurns: BridgeEvent[];
@@ -34,6 +35,8 @@ export interface SessionReplaySnapshot {
   degraded?: true;
 }
 
+export type LiveReplayMode = 'full' | 'summary';
+
 export interface CompactionEngine {
   /**
    * `byteLength` is the serialized size the bus already computed for the
@@ -43,8 +46,20 @@ export interface CompactionEngine {
    */
   ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
-  snapshot(): SessionReplaySnapshot;
+  snapshot(liveReplayMode?: LiveReplayMode): SessionReplaySnapshot;
+  /**
+   * In-flight journal only — events ingested since the last turn
+   * boundary — without flattening the compacted replay window. Optional:
+   * consumers fall back to `snapshot()` semantics when absent.
+   */
+  liveJournalSnapshot?(liveReplayMode?: LiveReplayMode): BridgeEvent[];
   close(): void;
+  /**
+   * Current live-journal caps — may exceed the configured baseline when
+   * adaptive growth raised them mid-turn. Optional: engines without a
+   * journal concept simply omit it.
+   */
+  journalLimits?(): { maxEvents: number; maxBytes: number };
 }
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
@@ -102,7 +117,48 @@ export interface SubscribeOptions {
    * with a final `client_evicted` event. Defaults to 256.
    */
   maxQueued?: number;
+  /**
+   * Receives low-frequency, per-subscriber queue diagnostics. Return `true`
+   * after emitting the human-facing diagnostic; `false` (or a throw) keeps the
+   * EventBus legacy stderr fallback.
+   */
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
 }
+
+export interface EventBusSlowClientWarningData {
+  queueSize: number;
+  maxQueued: number;
+  lastEventId: number;
+  queuedBytes: number;
+  maxQueuedBytes: number;
+  threshold: QueueWarningThreshold;
+  triggerEventType: string;
+  triggerEventBytes: number;
+}
+
+export interface EventBusClientEvictedData {
+  reason: 'queue_overflow' | 'queue_bytes_overflow';
+  droppedAfter: number;
+  queueSize: number;
+  maxQueued: number;
+  queuedBytes: number;
+  maxQueuedBytes: number;
+  eventBytes?: number;
+  triggerEventType: string;
+  triggerEventBytes: number;
+}
+
+export type EventBusSubscriberDiagnostic =
+  | {
+      type: 'slow_client_warning';
+      data: EventBusSlowClientWarningData;
+    }
+  | {
+      type: 'client_evicted';
+      data: EventBusClientEvictedData;
+    };
 
 export interface EventBusOptions {
   maxQueuedBytes?: number;
@@ -138,13 +194,11 @@ export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
  * can emit hundreds of frames (test plan reports 13 for a short
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
- * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set for chatty Stage 1
- * sessions, with ~30–60× headroom over a typical-but-busy turn at
- * the cost of a few hundred KB of RAM per session. Operators can
- * override per-daemon via `qwen serve --event-ring-size <n>`.
+ * be exhausted by a moderate turn before the client reconnected.
+ * 8000 is the current daemon design target; operators with very
+ * long agentic turns can raise it via `qwen serve --event-ring-size <n>`.
  */
-export const DEFAULT_RING_SIZE = 8000;
+export const DEFAULT_RING_SIZE = 8_000;
 /**
  * Fraction of the frame and byte caps at which a `slow_client_warning`
  * synthetic frame is force-pushed to the at-risk subscriber. The warning
@@ -227,7 +281,7 @@ function logSubscriberEvicted(data: Record<string, unknown>): void {
   }
 }
 
-type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
+export type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
 
 function logSlowClientWarning(data: Record<string, unknown>): void {
   try {
@@ -268,6 +322,9 @@ interface InternalSub {
    * that recovers and then lags again gets a fresh warning.
    */
   warned: boolean;
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
   /**
    * Note: cleanup hook for the eviction path (overflow → close queue
    * → remove from `subs`). Without this, the abort listener registered
@@ -279,6 +336,17 @@ interface InternalSub {
    * The eviction path calls this to break that retention.
    */
   dispose: () => void;
+}
+
+function subscriberDiagnosticHandled(
+  sub: InternalSub,
+  diagnostic: EventBusSubscriberDiagnostic,
+): boolean {
+  try {
+    return sub.onSubscriberDiagnostic?.(diagnostic) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -333,12 +401,41 @@ export class EventBus {
     this.onCompactionError = opts.onCompactionError;
   }
 
-  snapshotReplay(): SessionReplaySnapshot | undefined {
-    const snapshot = this.compactionEngine?.snapshot();
+  snapshotReplay(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): SessionReplaySnapshot | undefined {
+    const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
     if (snapshot && this.compactionDegraded) {
       return { ...snapshot, degraded: true };
     }
     return snapshot;
+  }
+
+  /**
+   * Events ingested since the last turn boundary (the boundary itself is
+   * folded into the replay window), without flattening that window.
+   * Undefined when no compaction engine is wired or it exposes no journal
+   * snapshot.
+   */
+  liveJournalSnapshot(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): BridgeEvent[] | undefined {
+    return this.compactionEngine?.liveJournalSnapshot?.(liveReplayMode);
+  }
+
+  /**
+   * The engine's current live-journal caps — may have grown past the
+   * configured baseline under adaptive growth. Read by the bridge's
+   * growth policy to account granted headroom across its live sessions
+   * and by daemon status for the per-session effective limits.
+   */
+  journalLimits(): { maxEvents: number; maxBytes: number } | undefined {
+    return this.compactionEngine?.journalLimits?.();
+  }
+
+  /** The byte half of `journalLimits()`; the growth-policy hot path. */
+  journalLimitBytes(): number | undefined {
+    return this.journalLimits()?.maxBytes;
   }
 
   private markCompactionDegraded(err: unknown): void {
@@ -399,14 +496,21 @@ export class EventBus {
     return events;
   }
 
+  private eventDetailMode: LiveReplayMode = 'full';
+
+  setEventDetailMode(mode: LiveReplayMode): void {
+    this.eventDetailMode = mode;
+  }
+
   /**
    * Publish an event to the bus. Returns the constructed `BridgeEvent`
-   * (with `id` + `v` assigned) on success, or `undefined` when the
-   * bus is closed.
+   * (with `id` + `v` assigned) on success, or `undefined` when the bus
+   * is closed, the event is unserializable, or summary mode filters it.
+   * Filtering is a normal no-op; rejected events do not consume an ID.
    *
-   * **Never throws** (never-throws contract). Closing the bus mid-publish
-   * is the only abnormal path and is handled as a return-undefined
-   * no-op; subscriber-enqueue failures are caught internally and
+   * **Never throws** (never-throws contract). Closed-bus and unserializable
+   * events are handled as return-undefined no-ops;
+   * subscriber-enqueue failures are caught internally and
    * translated to per-subscriber eviction. Call sites can rely on
    * this — the historical `try { publish(...) } catch {}` blocks in
    * `httpAcpBridge.ts` are defense-in-depth, not load-bearing, and
@@ -427,7 +531,7 @@ export class EventBus {
     // to anyway.
     if (this.closed) return undefined;
     const existingMeta = input._meta;
-    const event: BridgeEvent = {
+    let event: BridgeEvent = {
       // Read WITHOUT incrementing: a rejected event must not burn an id —
       // other subscribers would see a sequence gap (3 → 5) that resume
       // logic misreads as ring eviction. `nextId` advances only after the
@@ -440,6 +544,11 @@ export class EventBus {
         serverTimestamp: getServerTimestamp(existingMeta),
       },
     };
+    if (this.eventDetailMode === 'summary') {
+      const projected = summarizeReplayEvent(event);
+      if (!projected) return undefined;
+      event = projected;
+    }
     // Eager sizing doubles as the serializability gate (DAEMON-011): an
     // event JSON.stringify cannot represent would bypass every byte cap
     // at weight 0 and then fail at SSE send time anyway. Reject it here —
@@ -491,7 +600,7 @@ export class EventBus {
         // `id` is absent.
         const evictionData = {
           reason: pushResult.reason,
-          droppedAfter: event.id,
+          droppedAfter: event.id as number,
           queueSize: pushResult.liveSize,
           maxQueued: sub.maxQueued,
           queuedBytes: pushResult.liveBytes,
@@ -500,7 +609,17 @@ export class EventBus {
             ? { eventBytes: pushResult.eventBytes }
             : {}),
         };
-        logSubscriberEvicted(evictionData);
+        const evictionDiagnostic: EventBusSubscriberDiagnostic = {
+          type: 'client_evicted',
+          data: {
+            ...evictionData,
+            triggerEventType: event.type,
+            triggerEventBytes: eventBytes,
+          },
+        };
+        if (!subscriberDiagnosticHandled(sub, evictionDiagnostic)) {
+          logSubscriberEvicted(evictionData);
+        }
         const evictionFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'client_evicted',
@@ -580,7 +699,17 @@ export class EventBus {
           maxQueuedBytes: sub.maxQueuedBytes,
           threshold,
         };
-        logSlowClientWarning(warningData);
+        const warningDiagnostic: EventBusSubscriberDiagnostic = {
+          type: 'slow_client_warning',
+          data: {
+            ...warningData,
+            triggerEventType: event.type,
+            triggerEventBytes: eventBytes,
+          },
+        };
+        if (!subscriberDiagnosticHandled(sub, warningDiagnostic)) {
+          logSlowClientWarning(warningData);
+        }
         const warningFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'slow_client_warning',
@@ -641,6 +770,7 @@ export class EventBus {
       warnBytesThreshold: WARN_THRESHOLD_RATIO * this.maxQueuedBytes,
       warnBytesResetThreshold: WARN_RESET_RATIO * this.maxQueuedBytes,
       warned: false,
+      onSubscriberDiagnostic: opts.onSubscriberDiagnostic,
       dispose: () => {},
     };
     this.subs.add(sub);

@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
+import {
+  ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
+} from './acp-http/pre-attach-budget.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
 import type {
   DaemonLogger,
@@ -23,10 +31,23 @@ import {
   recommendedChildShareMb,
   type DaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type {
+  ChildHeapMode,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import {
+  computeDaemonMemoryPressure,
+  type DaemonMemoryPressure,
+} from './daemon-memory-pressure.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
+import {
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+} from './channel-worker-startup-ipc.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
@@ -35,6 +56,7 @@ import type {
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
@@ -86,9 +108,11 @@ export interface DaemonStatusIssue {
     | 'workspace_status_unavailable'
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
+    | 'channel_restore_failed'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
-    | 'daemon_log_degraded';
+    | 'daemon_log_degraded'
+    | 'daemon_memory_pressure';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -118,9 +142,15 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
+  maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  /** Returns undefined when no policy was built — direct-embed, or no budget. */
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  getCommittedAcpChildCount?: () => number;
+  childAdmissionEnforced?: boolean;
 }
 
 interface DaemonStatusSection<T> {
@@ -138,6 +168,7 @@ type WorkspaceStatusSection = DaemonStatusSection<unknown>;
 
 interface FullDaemonStatus {
   sessions: BridgeDaemonStatusSnapshot['sessions'];
+  acpMounts: AcpHttpSnapshot['mounts'];
   acpConnections: AcpHttpSnapshot['connections'];
   workspace: Record<string, WorkspaceStatusSection>;
   auth: {
@@ -148,6 +179,7 @@ interface FullDaemonStatus {
 
 interface WorkspaceBridgeStatusSnapshot {
   workspaceCwd: string;
+  internal?: boolean;
   snapshot: BridgeDaemonStatusSnapshot;
   lastActivity: number | null;
 }
@@ -162,6 +194,8 @@ interface DaemonStatusSecurity {
 }
 
 interface DaemonStatusLimits {
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
   maxSessions: number | null;
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
@@ -174,23 +208,75 @@ interface DaemonStatusLimits {
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
   acpConnectionCap: number | null;
+  acpPreAttachMaxFramesPerStream: number | null;
+  acpPreAttachMaxFramesPerConnection: number | null;
+  acpPreAttachMaxFramesGlobal: number | null;
+  acpPreAttachMaxPayloadBytesPerConnection: number | null;
+  acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
-   * The daemon's resolved memory figures. Observed and reported only: nothing
-   * consumes them to size a child. `null` on paths that resolve none, such as
-   * direct-embed bridges.
+   * The daemon's resolved memory figures and child policy. `null` on paths
+   * that resolve none, such as direct-embed bridges.
    */
   memory: DaemonStatusMemoryLimits | null;
 }
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False, and required. Every figure in this section is resolved input or a
-   * model of a policy that does not exist yet; nothing here is applied to a
-   * process. The flag exists so a client can never mistake the `limits`
-   * namespace for enforcement that has not shipped.
+   * True only when managed child-count admission and the fixed old-space
+   * ceiling are both applied. Does not bound total process RSS. Adaptive
+   * journal growth is reported separately under `journalGrowth`.
    */
-  enforced: false;
+  enforced: boolean;
+  /**
+   * Adaptive live-journal growth derived from this budget: session caps really do
+   * grow within this pool mid-turn (per-session effective limits appear on
+   * each session diagnostic in `detail=full`). `null` when growth is
+   * disabled (an operator-pinned journal cap, or a budget that leaves no
+   * usable pool). The pool is owned daemon-wide: every workspace bridge
+   * accounts its sessions against the same single aggregate.
+   */
+  journalGrowth: {
+    poolBytes: number;
+    hardCapBytes: number;
+    baselineMaxEvents: number;
+    baselineMaxBytes: number;
+  } | null;
+  /**
+   * The fixed per-child heap partition, applied only under `enforce`.
+   * `null` when no policy was built.
+   */
+  childHeap: {
+    mode: ChildHeapMode;
+    admissionEnforced: boolean;
+    /**
+     * Children the pool could host at once. 0 when no partition can be
+     * modeled — either the pool cannot cover one child at the minimum heap,
+     * or the ceiling would land under that minimum once capped at today's
+     * host-derived one. `null` under `off`, which models nothing and so is
+     * not the same claim as a pool that hosts zero children.
+     */
+    maxConcurrentChildren: number | null;
+    /**
+     * What each receives under `enforce`. Never 0 and never below
+     * `modeled.minChildHeapMb`; `null` instead, both under `off` and wherever
+     * the partition cannot be modeled within that floor.
+     */
+    perChildCeilingMb: number | null;
+    /**
+     * Spawns that would have exceeded `maxConcurrentChildren`. Admission
+     * pressure only: 0 does **not** prove the workload fits the ceiling.
+     * Under `observe` and `admit`, children retain the legacy heap arguments.
+     *
+     * Two known sources of counts that are not capacity pressure: a channel
+     * swap on a daemon already at `maxConcurrentChildren` books one, because
+     * the terminating child is counted until it exits; and on a host too
+     * small to model a partition this equals the total ACP spawn count, with
+     * `insufficientMemory` as the field that says why.
+     */
+    refusals: number;
+  } | null;
   /** What was asked for: the flag value, or half of available memory. */
   configuredBudgetMb: number;
   /** `configured` capped at resolved cgroup/host memory. */
@@ -201,9 +287,8 @@ export interface DaemonStatusMemoryLimits {
   availableMemorySource: 'constrained' | 'host';
   insufficientMemory: boolean;
   /**
-   * Derived figures for a capacity policy that has not shipped. Grouped, and
-   * named for what they are, so they cannot read as memory already reserved or
-   * limits already applied.
+   * Derived memory model used to calculate child-count admission and the
+   * fixed old-space ceiling. These values do not reserve physical memory.
    */
   modeled: {
     rootReserveMb: number;
@@ -221,10 +306,23 @@ export interface DaemonStatusMemoryLimits {
 
 export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
+  childHeap?: ChildHeapPolicySnapshot,
+  journalGrowth?: DaemonStatusMemoryLimits['journalGrowth'],
+  admissionEnforced = false,
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    enforced: false,
+    enforced: admissionEnforced && childHeap?.mode === 'enforce',
+    journalGrowth: journalGrowth ?? null,
+    childHeap: childHeap
+      ? {
+          mode: childHeap.mode,
+          admissionEnforced,
+          maxConcurrentChildren: childHeap.maxConcurrentChildren,
+          perChildCeilingMb: childHeap.perChildCeilingMb,
+          refusals: childHeap.refusals,
+        }
+      : null,
     configuredBudgetMb: budget.configuredBudgetMb,
     effectiveBudgetMb: budget.effectiveBudgetMb,
     budgetSource: budget.budgetSource,
@@ -267,6 +365,16 @@ interface DaemonStatusRuntime {
       sseStreams: number;
       wsStreams: number;
       pendingClientRequests: number;
+      preAttach: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
     };
   };
   rateLimit: {
@@ -316,15 +424,90 @@ interface DaemonStatusRuntimeMemory {
    * need an in-flight spawn count to admit without racing.
    */
   activeAcpChildren: number;
+  committedAcpChildren: number | null;
   /**
-   * Which children the daemon's RSS sampling actually covers. Only the primary
-   * ACP child is sampled today, so this section must not be read as
-   * process-tree observation. Sampling is gated on an active SSE/WS watcher;
-   * when no client is observing, childRssBytes reads 0 even for the primary.
-   * The drop is not instant: after the last watcher detaches, the last sampled
-   * value persists until it ages out of the staleness window (~30s).
+   * Which children the daemon's RSS sampling covers: every ACP child with a
+   * live channel, i.e. the same set `activeAcpChildren` counts. Still not
+   * process-tree observation — channel workers and the children's own MCP
+   * descendants report nothing (see `children`).
+   *
+   * Sampling is gated on an active SSE/WS watcher; with no client observing,
+   * `children.sampled` falls to 0 even though children are live. The drop is
+   * not instant: after the last watcher detaches, each reading persists until
+   * it ages out of the staleness window (~30s).
    */
-  childRssCoverage: 'primary_only';
+  childRssCoverage: 'active_children';
+  /**
+   * Aggregate RSS across the children `childRssCoverage` names.
+   *
+   * Read it as a floor and an over-count at the same time. Over, because
+   * summing per-process RSS double-counts pages the children share (the node
+   * binary, libc). Under, because each child reports only its own process —
+   * MCP servers it spawned are invisible here, and channel workers have no
+   * reporting path at all. It is not "the daemon tree's memory".
+   */
+  children: {
+    /**
+     * Sum over children that produced a reading. When `sampled` is below the
+     * sibling `activeAcpChildren`, this is a floor rather than a total.
+     */
+    rssBytes: number;
+    /**
+     * How many children contributed. The denominator is `activeAcpChildren`,
+     * deliberately not repeated here. 0 with live children means nothing was
+     * measured — either no watcher is gating the sampler open, or the daemon
+     * was built without a workspace registry to enumerate.
+     */
+    sampled: number;
+    /**
+     * Age of the oldest reading in the sum, so a caller can tell how far apart
+     * its parts were taken. `null` when nothing was sampled — and also when
+     * every contributor predates the field, so `null` never means "fresh".
+     */
+    oldestReadingAgeMs: number | null;
+    /**
+     * Lifetime V8 old-generation high-water marks across the sampled children,
+     * as a **maximum, not a sum**. A heap ceiling applies per child, and the
+     * peaks were reached at different times, so a total answers no question
+     * anybody has; each field is an independent maximum, not a portrait of
+     * one child. A per-child ceiling is judged against each axis on its own.
+     *
+     * `null` — never a zeroed object — when no sampled child reported. The
+     * gating on `childRssCoverage` makes this the common case rather than an
+     * edge one: with no SSE/WS watcher attached the daemon takes no sample at
+     * all while children keep running. Publishing zeros there would assert
+     * that no child needs any heap.
+     *
+     * Observational. Nothing in this block sizes a child or refuses a spawn;
+     * `limits.memory.enforced` reports whether the modeled child ceiling is
+     * currently applied.
+     */
+    heap: {
+      /** Committed high-water. Rises with the ceiling the child was given, so
+       *  it bounds what the workload needs rather than stating it. */
+      peakOldGenerationBytes: number;
+      /** Retained-after-major-GC high-water, independent of the ceiling. The
+       *  figure able to say a child cannot fit one. */
+      peakLiveSetBytes: number;
+      /** `total_heap_size` high-water. Includes the young generation. */
+      peakTotalHeapBytes: number;
+      majorGcCount: number;
+      majorGcMs: number;
+      /**
+       * Union across the sampled children of heap spaces none of them could
+       * classify. Non-empty means the byte figures are incomplete and must not
+       * be read as a full measurement — a V8 taxonomy change is the way this
+       * goes wrong, and it under-counts, making a child look like it fits.
+       */
+      unclassifiedSpaceNames: string[];
+      /**
+       * How many of `children.sampled` contributed a heap report. Below
+       * `sampled` when some children predate the fields, so the maxima above
+       * cover only part of the sampled set.
+       */
+      reported: number;
+    } | null;
+  };
   /**
    * Modeled per-child shares. Advisory; nothing applies them. Each is capped
    * at the legacy child ceiling, and floored at the minimum child heap only
@@ -338,6 +521,33 @@ interface DaemonStatusRuntimeMemory {
     /** `null` when no ACP child is active — there is no share to divide. */
     recommendedShareAtActiveMb: number | null;
   };
+  /**
+   * The daemon root's own memory pressure. Reported in both modes; only
+   * `observe` also raises a status issue from it. Covers the root process
+   * alone: these figures are `process.memoryUsage()` of this process, so a
+   * daemon whose children are the ones growing still reports `normal`.
+   * Compare against `children.rssBytes` to see that gap.
+   *
+   * The computed shape is referenced rather than restated so the two cannot
+   * drift: a field added or renamed in `daemon-memory-pressure.ts` would not
+   * be caught by a hand copy, since spreading an object with an extra property
+   * is not an excess-property error. `availableBytes` is the same figure as
+   * `limits.memory.availableMemoryMb`, repeated here in bytes so the ratio can
+   * be checked without cross-referencing.
+   *
+   * Nested here rather than at `runtime`, so it is absent whenever no budget
+   * resolved — even though the heap half of the signal needs no budget. That
+   * reaches direct-embed callers, and also the bootstrap `/daemon/status`
+   * route — which omits `runtime.memory` wholesale even though the budget is
+   * resolved before the bootstrap app exists, so `limits.memory` is populated
+   * there while `pressure` is not. That window is not only startup: a daemon
+   * whose runtime fails to start keeps serving the bootstrap app for its
+   * lifetime, which is exactly when the reading would explain the most. Do
+   * not write a client against "budget resolved implies pressure present".
+   * Hoisting it out would restructure the block for a path that does not need
+   * the reading.
+   */
+  pressure: DaemonMemoryPressure & { mode: 'off' | 'observe' };
 }
 
 export interface DaemonPipeStatsSnapshot {
@@ -428,9 +638,12 @@ export async function buildDaemonStatusResponse(
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const lastActivity = input.bridge.lastActivityAt ?? null;
   const workspaceRuntimes = input.workspaceRegistry?.list();
+  const aggregateRuntimes =
+    input.workspaceRegistry?.listAll?.() ?? workspaceRuntimes;
   const workspaceSnapshots: WorkspaceBridgeStatusSnapshot[] =
-    workspaceRuntimes?.map((runtime) => ({
+    aggregateRuntimes?.map((runtime) => ({
       workspaceCwd: runtime.workspaceCwd,
+      internal: isInternalWorkspaceRuntime(runtime),
       snapshot:
         runtime.bridge === input.bridge
           ? bridgeSnapshot
@@ -474,12 +687,109 @@ export async function buildDaemonStatusResponse(
           .length
       : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
     const registeredWorkspaceCount = input.workspaceRegistry
-      ? input.workspaceRegistry.listEntries().length
+      ? (
+          input.workspaceRegistry.listAllEntries?.() ??
+          input.workspaceRegistry.listEntries()
+        ).length
       : workspaceSnapshots.length;
+    // Summed in the SAME synchronous pass that produced `activeAcpChildCount`
+    // above, over the same array. Keep it that way: an `await` slipped between
+    // them would not break `sampled <= activeAcpChildren` — a child that dies
+    // drops out of the sum, and one that starts has no cached reading yet — it
+    // would instead make the two figures describe different instants, so the
+    // gap between them would quietly absorb children that came or went while
+    // the response was being built. That gap is the entire reason `sampled` is
+    // reported, and no assertion would catch it going wrong.
+    let childRssBytesTotal = 0;
+    let childRssSampled = 0;
+    let oldestChildReadingAgeMs: number | null = null;
+    // Maxima, not running totals — see the `heap` field docs. `heapReported`
+    // is tracked separately from `childRssSampled` because a sampled child
+    // that predates the fields contributes rss but no heap.
+    let heapReported = 0;
+    let peakOldGenerationBytes = 0;
+    let peakLiveSetBytes = 0;
+    let peakTotalHeapBytes = 0;
+    let heapMajorGcCount = 0;
+    let heapMajorGcMs = 0;
+    const heapUnclassified = new Set<string>();
+    for (const runtime of managedRuntimes ?? []) {
+      // Gate on the same predicate `activeAcpChildCount` used, rather than
+      // trusting `getChildResourceSnapshot` to return nothing for a dead
+      // channel. It does today, but that is another package's internal, and
+      // leaning on it would make `sampled <= activeAcpChildren` — the one
+      // thing this block promises — hold by coincidence instead of by
+      // construction.
+      if (!runtime.bridge.isChannelLive()) continue;
+      const snapshot = runtime.bridge.getChildResourceSnapshot?.();
+      if (!snapshot) continue;
+      childRssBytesTotal += snapshot.rssBytes;
+      childRssSampled += 1;
+      // Absent on bridges predating the field; such a child still counts
+      // toward the sum, it just cannot say how old its reading is.
+      if (snapshot.ageMs !== undefined) {
+        oldestChildReadingAgeMs = Math.max(
+          oldestChildReadingAgeMs ?? 0,
+          snapshot.ageMs,
+        );
+      }
+      // Absent on a child spawned without the daemon marker or predating the
+      // fields. Skipped rather than counted as zero, so `reported` stays an
+      // honest denominator for the maxima.
+      const heap = snapshot.heap;
+      if (!heap) continue;
+      heapReported += 1;
+      peakOldGenerationBytes = Math.max(
+        peakOldGenerationBytes,
+        heap.peakOldGenerationBytes,
+      );
+      peakLiveSetBytes = Math.max(peakLiveSetBytes, heap.peakLiveSetBytes);
+      peakTotalHeapBytes = Math.max(
+        peakTotalHeapBytes,
+        heap.peakTotalHeapBytes,
+      );
+      heapMajorGcCount = Math.max(heapMajorGcCount, heap.majorGcCount);
+      heapMajorGcMs = Math.max(heapMajorGcMs, heap.majorGcMs);
+      // Union, not max: one child seeing an unknown space is enough to make
+      // the aggregate incomplete, and naming which space is the whole point.
+      for (const name of heap.unclassifiedSpaceNames) {
+        heapUnclassified.add(name);
+      }
+    }
+    const pressureMode = input.opts.memoryPressureMode ?? 'observe';
+    // One reading for the two figures of a single ratio. Reading twice would
+    // divide an rss and a heapUsed sampled at different instants.
+    //
+    // Deliberately not shared with `runtime.process` further down: a
+    // `detail=full` request awaits the workspace sections between here and
+    // there, so reusing this snapshot would silently change which instant that
+    // pre-existing field reports. A second syscall is cheaper than a semantics
+    // change to a field this PR is not about.
+    const pressureMemory = process.memoryUsage();
     runtimeMemory = {
       registeredWorkspaces: registeredWorkspaceCount,
       activeAcpChildren: activeAcpChildCount,
-      childRssCoverage: 'primary_only',
+      committedAcpChildren: input.getCommittedAcpChildCount?.() ?? null,
+      childRssCoverage: 'active_children',
+      children: {
+        rssBytes: childRssBytesTotal,
+        sampled: childRssSampled,
+        oldestReadingAgeMs: oldestChildReadingAgeMs,
+        // `null` on zero reporters, so an unmeasured daemon never publishes a
+        // zeroed object that reads as "no child needs any heap".
+        heap:
+          heapReported > 0
+            ? {
+                peakOldGenerationBytes,
+                peakLiveSetBytes,
+                peakTotalHeapBytes,
+                majorGcCount: heapMajorGcCount,
+                majorGcMs: heapMajorGcMs,
+                unclassifiedSpaceNames: [...heapUnclassified],
+                reported: heapReported,
+              }
+            : null,
+      },
       modeled: {
         recommendedShareAtRegisteredMb:
           registeredWorkspaceCount > 0
@@ -489,6 +799,22 @@ export async function buildDaemonStatusResponse(
           activeAcpChildCount > 0
             ? recommendedChildShareMb(memoryBudget, activeAcpChildCount)
             : null,
+      },
+      pressure: {
+        ...computeDaemonMemoryPressure({
+          rssBytes: pressureMemory.rss,
+          heapUsedBytes: pressureMemory.heapUsed,
+          // `availableMemoryMb`, not `effectiveBudgetMb`: pressure asks how
+          // close this process is to being killed, and what kills it is the
+          // cgroup limit or host memory. An operator's budget is a policy
+          // number — exceeding it is not fatal, so classifying against it
+          // would report `critical` for a daemon in no danger.
+          // Note the unit change: the budget carries megabytes.
+          availableBytes: memoryBudget.availableMemoryMb * 1024 * 1024,
+        }),
+        // After the spread, so the flag stays authoritative if the computed
+        // shape ever grows a field of this name.
+        mode: pressureMode,
       },
     };
   }
@@ -523,7 +849,7 @@ export async function buildDaemonStatusResponse(
     derivedQueuedPromptsByWorkspace[index] = derivedQueuedPromptsForWorkspace;
   }
   const queuedPrompts =
-    workspaceRuntimes?.reduce(
+    aggregateRuntimes?.reduce(
       (sum, runtime, index) =>
         sum +
         (runtime.bridge.pendingPromptTotal ??
@@ -559,6 +885,42 @@ export async function buildDaemonStatusResponse(
     totalAdmissionSnapshot,
     workspaceSnapshots,
   );
+  // Only `observe` turns the level into an issue. `off` still reported the
+  // figures above; what it withholds is the effect on `rollupStatus`, which
+  // any one issue flips from `ok` to `warning`. The thresholds are inherited
+  // from an interactive-CLI monitor and are not yet calibrated for a
+  // long-running daemon, so a deployment that alerts on the top-level status
+  // needs a way to take the reading without the verdict.
+  if (
+    runtimeMemory &&
+    runtimeMemory.pressure.mode === 'observe' &&
+    runtimeMemory.pressure.level !== 'normal'
+  ) {
+    const { level, ratio, source } = runtimeMemory.pressure;
+    issues.push({
+      code: 'daemon_memory_pressure',
+      // `warning` at every level, including `critical`. An `error` severity
+      // makes `rollupStatus` return `error` for the whole daemon, which is a
+      // strong claim to stake on thresholds borrowed from an interactive-CLI
+      // monitor and not yet calibrated here. The level itself is reported in
+      // `runtime.memory.pressure`, so nothing is lost by keeping the rollup
+      // at `warning` until the numbers have been checked against real
+      // deployments — which is what this phase is for.
+      severity: 'warning',
+      // Name the denominator, not the numerator: "% of the rss limit" would
+      // call the measured value a limit. `section` is omitted because every
+      // other use of it names a workspace status section, and this is a
+      // daemon-level concern — the same reason `daemon_log_degraded` omits it.
+      // One decimal, not zero: at 0 decimals a ratio of 0.795 rounds to "80%"
+      // while `level` still reads `hard`, and 80% is critical's documented
+      // threshold. An oncall engineer comparing the two sees a contradiction
+      // in the one feature whose whole purpose is trustworthy triage.
+      message:
+        `Daemon memory pressure is ${level} at ` +
+        `${(ratio * 100).toFixed(1)}% of ` +
+        `${source === 'heap' ? 'the V8 heap limit' : 'available memory'}.`,
+    });
+  }
   if (daemonLogStatus?.health === 'degraded') {
     issues.push({
       code: 'daemon_log_degraded',
@@ -572,7 +934,9 @@ export async function buildDaemonStatusResponse(
     full = await buildFullStatus(
       input,
       acpAggregate,
-      workspaceSnapshots.flatMap((item) => item.snapshot.sessions),
+      workspaceSnapshots
+        .filter((item) => item.internal !== true)
+        .flatMap((item) => item.snapshot.sessions),
     );
     pushFullIssues(issues, full);
   }
@@ -624,6 +988,11 @@ export async function buildDaemonStatusResponse(
       sessionShellCommandEnabled: input.sessionShellCommandEnabled,
     },
     limits: {
+      maxRegisteredWorkspaces:
+        input.opts.maxRegisteredWorkspaces ?? MAX_REGISTERED_WORKSPACES,
+      ...(input.maxChannelControlWorkspaces !== undefined
+        ? { maxChannelControlWorkspaces: input.maxChannelControlWorkspaces }
+        : {}),
       maxSessions: bridgeSnapshot.limits.maxSessions,
       maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
       maxPendingPromptsPerSession:
@@ -637,8 +1006,37 @@ export async function buildDaemonStatusResponse(
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
+      sessionPromptSettledCloseGraceMs:
+        bridgeSnapshot.limits.sessionPromptSettledCloseGraceMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
-      memory: toDaemonStatusMemoryLimits(memoryBudget),
+      acpPreAttachMaxFramesPerStream:
+        acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM : null,
+      acpPreAttachMaxFramesPerConnection:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION
+          : null,
+      acpPreAttachMaxFramesGlobal:
+        acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL : null,
+      acpPreAttachMaxPayloadBytesPerConnection:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION
+          : null,
+      acpPreAttachMaxPayloadBytesGlobal:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL
+          : null,
+      memory: toDaemonStatusMemoryLimits(
+        memoryBudget,
+        input.getChildHeapPolicySnapshot?.(),
+        bridgeSnapshot.limits.journalGrowth
+          ? {
+              ...bridgeSnapshot.limits.journalGrowth,
+              baselineMaxEvents: bridgeSnapshot.limits.maxJournalEvents,
+              baselineMaxBytes: bridgeSnapshot.limits.maxJournalBytes,
+            }
+          : null,
+        input.childAdmissionEnforced,
+      ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
       ? {
@@ -683,6 +1081,17 @@ export async function buildDaemonStatusResponse(
           sseStreams: acpAggregate?.sseStreams ?? 0,
           wsStreams: acpAggregate?.wsStreams ?? 0,
           pendingClientRequests: acpAggregate?.pendingClientRequests ?? 0,
+          preAttach: {
+            bufferedConnectionFrames:
+              acpAggregate?.bufferedConnectionFrames ?? 0,
+            bufferedSessionFrames: acpAggregate?.bufferedSessionFrames ?? 0,
+            pendingDeliveryFrames: acpAggregate?.pendingDeliveryFrames ?? 0,
+            usedFrames: acpAggregate?.preAttach.usedFrames ?? 0,
+            usedBytes: acpAggregate?.preAttach.usedBytes ?? 0,
+            highWaterFrames: acpAggregate?.preAttach.highWaterFrames ?? 0,
+            highWaterBytes: acpAggregate?.preAttach.highWaterBytes ?? 0,
+            guardFailures: acpAggregate?.preAttach.guardFailures ?? 0,
+          },
         },
       },
       rateLimit: {
@@ -695,7 +1104,7 @@ export async function buildDaemonStatusResponse(
         : {}),
       activity: {
         activePrompts:
-          workspaceRuntimes?.reduce(
+          aggregateRuntimes?.reduce(
             (sum, runtime) => sum + (runtime.bridge.activePromptCount ?? 0),
             0,
           ) ??
@@ -780,6 +1189,7 @@ async function buildFullStatus(
 
   return {
     sessions,
+    acpMounts: acpSnapshot?.mounts ?? [],
     acpConnections: acpSnapshot?.connections ?? [],
     workspace: {
       mcp,
@@ -855,7 +1265,7 @@ function pushRuntimeIssues(
   totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
   workspaceSnapshots: readonly WorkspaceBridgeStatusSnapshot[],
 ): void {
-  for (const { workspaceCwd, snapshot } of workspaceSnapshots) {
+  for (const { workspaceCwd, internal, snapshot } of workspaceSnapshots) {
     if (
       snapshot.limits.maxSessions !== null &&
       snapshot.limits.maxSessions > 0 &&
@@ -867,7 +1277,9 @@ function pushRuntimeIssues(
         severity: 'warning',
         message:
           workspaceSnapshots.length > 1
-            ? `Workspace ${workspaceCwd} active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
+            ? internal
+              ? `An internal runtime's active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
+              : `Workspace ${workspaceCwd} active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
             : `Active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`,
       });
     }
@@ -933,7 +1345,9 @@ function pushRuntimeIssues(
       severity: 'error',
       message:
         downWorkspaces.length === 1
-          ? `Active sessions exist but the ACP channel is not live for ${downWorkspaces[0]!.workspaceCwd}.`
+          ? downWorkspaces[0]!.internal
+            ? 'Active sessions exist but the ACP channel is not live for an internal runtime.'
+            : `Active sessions exist but the ACP channel is not live for ${downWorkspaces[0]!.workspaceCwd}.`
           : `Active sessions exist but the ACP channel is not live for ${downWorkspaces.length} workspace(s).`,
     });
   }
@@ -951,6 +1365,47 @@ function pushRuntimeIssues(
   const workers = groupedWorkers ?? [channelWorker];
   for (const worker of workers) {
     pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+  pushChannelRestoreIssues(issues, input.getChannelRestoreFailures?.() ?? []);
+}
+
+// A channel that failed to restore has no worker, so nothing above sees it.
+// One issue per workspace, naming each channel with its own error; the same
+// error is the channel's `runtime.lastError` in the workspace channel list.
+// Exported because the bootstrap status route builds its own response, and
+// boot records are written before the runtime app that serves the other one.
+export function pushChannelRestoreIssues(
+  issues: DaemonStatusIssue[],
+  failures: readonly ChannelRestoreFailure[],
+): void {
+  const byWorkspace = new Map<string, ChannelRestoreFailure[]>();
+  for (const failure of failures) {
+    const list = byWorkspace.get(failure.workspaceCwd) ?? [];
+    list.push(failure);
+    byWorkspace.set(failure.workspaceCwd, list);
+  }
+  for (const [workspaceCwd, list] of byWorkspace) {
+    // Bounded the way the sibling surface bounds the same class of data: a
+    // `serve.channels` list is not length-limited, and this message is
+    // returned on every status poll.
+    const shown = list.slice(0, MAX_CHANNEL_STARTUP_FAILURES);
+    const omitted = list.length - shown.length;
+    issues.push({
+      code: 'channel_restore_failed',
+      severity: 'warning',
+      message:
+        `serve.channels for workspace ${workspaceCwd} were not restored: ` +
+        `${shown
+          .map(
+            (failure) =>
+              `${failure.channel.slice(
+                0,
+                MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+              )} (${failure.message})`,
+          )
+          .join('; ')}` +
+        `${omitted > 0 ? `; and ${omitted} more` : ''}.`,
+    });
   }
 }
 

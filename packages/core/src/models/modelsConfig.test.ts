@@ -35,6 +35,46 @@ describe('ModelsConfig', () => {
     return modelsConfig.getGenerationConfig() as ContentGeneratorConfig;
   }
 
+  it('rejects voice-only primary models and skips them during fallback', async () => {
+    const models = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [{ id: 'asr', voiceOnly: true }, { id: 'chat' }],
+      },
+    });
+    models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'missing');
+    expect(models.getModel()).toBe('chat');
+    await expect(
+      models.switchModel(AuthType.USE_OPENAI, 'asr'),
+    ).rejects.toThrow(
+      "Voice-only model 'asr' cannot be used as the primary model",
+    );
+    expect(() =>
+      models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'asr'),
+    ).toThrow("Voice-only model 'asr' cannot be used as the primary model");
+    expect(models.getModel()).toBe('chat');
+  });
+
+  it('rejects realtime-only primary models and skips them during fallback', async () => {
+    const models = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [{ id: 'omni-realtime', realtimeOnly: true }, { id: 'chat' }],
+      },
+    });
+    models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'missing');
+    expect(models.getModel()).toBe('chat');
+    await expect(
+      models.switchModel(AuthType.USE_OPENAI, 'omni-realtime'),
+    ).rejects.toThrow(
+      "Realtime-only model 'omni-realtime' cannot be used as the primary model",
+    );
+    expect(() =>
+      models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'omni-realtime'),
+    ).toThrow(
+      "Realtime-only model 'omni-realtime' cannot be used as the primary model",
+    );
+    expect(models.getModel()).toBe('chat');
+  });
+
   it('rejects image-only models as the primary model', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
@@ -50,6 +90,19 @@ describe('ModelsConfig', () => {
       "Image-only model 'image-model' cannot be used as the primary model",
     );
     expect(modelsConfig.getModel()).toBe('chat-model');
+  });
+
+  it('allows an image-generation-capable model as the primary model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'dual-role-model', supportsImageGeneration: true }],
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'dual-role-model');
+
+    expect(modelsConfig.getModel()).toBe('dual-role-model');
   });
 
   it('rejects an image-only model during auth refresh without changing state', () => {
@@ -68,6 +121,21 @@ describe('ModelsConfig', () => {
     );
     expect(modelsConfig.getCurrentAuthType()).toBe(AuthType.USE_ANTHROPIC);
     expect(modelsConfig.getModel()).toBe('previous-model');
+  });
+
+  it('allows a dual-role model during auth refresh', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_ANTHROPIC,
+      modelProvidersConfig: {
+        openai: [{ id: 'dual-role-model', supportsImageGeneration: true }],
+      },
+      generationConfig: { model: 'previous-model' },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'dual-role-model');
+
+    expect(modelsConfig.getCurrentAuthType()).toBe(AuthType.USE_OPENAI);
+    expect(modelsConfig.getModel()).toBe('dual-role-model');
   });
 
   it('does not choose an image-only model as the auth default', () => {

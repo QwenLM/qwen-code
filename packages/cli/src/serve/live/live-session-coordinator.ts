@@ -37,21 +37,28 @@ import {
   type RealtimeOutputTextEvent,
   type RealtimeTranscriptEntry,
 } from './qwen-realtime-session.js';
+import type {
+  LiveScreenFeedMessage,
+  LiveScreenFeedPhase,
+  LiveProviderReadiness,
+  LiveSessionLocator,
+} from './types.js';
 import { buildRealtimeStartupContext } from './realtime-startup-context.js';
 import type { LiveProviderCredential } from './provider-credentials.js';
 import {
   isCompatibleLiveSessionSource,
   LIVE_SESSION_SOURCE_PREFIX,
-} from './session-source.js';
-import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
+} from '../../runtime/live-session-source.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { getErrorMessage } from '../../utils/errors.js';
 
-export { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
+export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;
 const COORDINATOR_TURN_TIMEOUT_MS = 10 * 60_000;
 const BACKEND_CONTEXT_FLUSH_MS = 200;
-const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 30_000;
+const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 5_000;
 const SESSION_SCAN_SIZE = 100;
 const MAX_LIVE_CAPTION_CHARS = 8_192;
 
@@ -117,6 +124,12 @@ function closeLiveAudioCapture(
 }
 
 export interface LiveSessionHostControl {
+  setScreenFeedState?(
+    epoch: number,
+    feedId: string,
+    phase: LiveScreenFeedPhase,
+    message?: string,
+  ): boolean;
   setCallState(
     epoch: number,
     state:
@@ -156,10 +169,18 @@ export interface LiveSessionCoordinatorOptions {
 }
 
 interface LiveCallContext {
+  screenFeed?: {
+    id: string;
+    phase: 'starting' | 'streaming';
+    pendingImage?: string;
+    lastSentAt?: number;
+    timer?: ReturnType<typeof setTimeout>;
+  };
   epoch: number;
   callId: string;
   mode: 'resume' | 'new';
   callAbort: AbortController;
+  turnAborts: Set<AbortController>;
   credential?: LiveProviderCredential;
   runtime?: WorkspaceRuntime;
   runtimePromise?: Promise<WorkspaceRuntime>;
@@ -172,6 +193,7 @@ interface LiveCallContext {
   coordinatorLease?: BridgeSession;
   coordinatorFresh: boolean;
   coordinatorPromptAdmitted: boolean;
+  coordinatorEstablished: boolean;
   observerAbort?: AbortController;
   pendingPermissionRequestIds: Set<string>;
   workers: LiveSessionLocator[];
@@ -200,6 +222,7 @@ interface LiveCallContext {
   pendingCommittedInputItemIds: Set<string>;
   unattributedCommittedInputCount: number;
   stopDrainTimer?: ReturnType<typeof setTimeout>;
+  stopFinalizing?: boolean;
 }
 
 interface DelegateAdmission {
@@ -258,9 +281,11 @@ interface CollectedTurn {
 }
 
 function errorMessage(error: unknown): string {
-  return stripTerminalControlSequences(
-    error instanceof Error ? error.message : String(error),
-  ).slice(0, 500);
+  // The ACP bridge rejects with the JSON-RPC error object itself rather than an
+  // Error, and `String()` renders that as "[object Object]", hiding the cause
+  // from everything downstream: the call banner, the provider blocker and the
+  // daemon log. `getErrorMessage` reads `message` off such an object.
+  return stripTerminalControlSequences(getErrorMessage(error)).slice(0, 500);
 }
 
 type ProviderFailureBlocker =
@@ -294,6 +319,12 @@ function updateSource(update: Record<string, unknown>): string | undefined {
     return undefined;
   const source = (meta as Record<string, unknown>)['source'];
   return typeof source === 'string' ? source : undefined;
+}
+
+function isDiscreteMessageUpdate(update: Record<string, unknown>): boolean {
+  const meta = update['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  return (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true;
 }
 
 function updateBackgroundTaskId(
@@ -435,6 +466,7 @@ export class LiveSessionCoordinator {
   private readonly turnTimeoutMs: number;
   private readonly gracefulStopDrainMs: number;
   private readonly inFlightTurnAborts = new Set<AbortController>();
+  private readonly closedCoordinatorSessionIds = new Set<string>();
   private active?: LiveCallContext;
 
   constructor(private readonly options: LiveSessionCoordinatorOptions) {
@@ -447,21 +479,144 @@ export class LiveSessionCoordinator {
     );
   }
 
-  async speakToUser(callerSessionId: string, message: string): Promise<void> {
+  handleScreenFeed(message: LiveScreenFeedMessage): void {
     const context = this.active;
     if (
       !context ||
       !this.isActive(context) ||
       context.stopping ||
-      context.coordinator?.sessionId !== callerSessionId ||
-      !context.realtime
-    ) {
+      context.epoch !== message.epoch
+    )
+      return;
+    if (message.type === 'host.screen_feed_start') {
+      this.stopScreenFeed(context);
+      if (!context.realtime) {
+        this.options.host.setScreenFeedState?.(
+          context.epoch,
+          message.feedId,
+          'error',
+          'The Live conversation is not ready.',
+        );
+        return;
+      }
+      context.screenFeed = { id: message.feedId, phase: 'starting' };
+      try {
+        if (
+          !context.realtime.sendBackendContext(
+            '[SCREEN_SHARE] Screen sharing started. New images are passive screen context for this voice conversation. Do not speak or act just because sharing started or a frame arrived.',
+          )
+        ) {
+          this.stopScreenFeed(
+            context,
+            'error',
+            'The realtime connection is unavailable.',
+          );
+          return;
+        }
+      } catch {
+        this.stopScreenFeed(
+          context,
+          'error',
+          'The realtime connection is unavailable.',
+        );
+        return;
+      }
+      this.options.host.setScreenFeedState?.(
+        context.epoch,
+        message.feedId,
+        'starting',
+      );
+      this.armScreenFeedTimeout(context);
+      return;
+    }
+    const feed = context.screenFeed;
+    if (feed?.id !== message.feedId) return;
+    if (message.type === 'host.screen_feed_stop') {
+      this.stopScreenFeed(context);
+      return;
+    }
+    this.armScreenFeedTimeout(context);
+    feed.pendingImage = message.image;
+  }
+
+  private armScreenFeedTimeout(context: LiveCallContext): void {
+    const feed = context.screenFeed;
+    if (!feed) return;
+    clearTimeout(feed.timer);
+    feed.timer = setTimeout(() => {
+      if (!this.isActive(context) || context.screenFeed !== feed) return;
+      this.stopScreenFeed(
+        context,
+        'error',
+        'Screen frames stopped arriving. Stop sharing and share again.',
+      );
+    }, 15_000);
+    feed.timer.unref?.();
+  }
+
+  private forwardScreenFrame(context: LiveCallContext, image: string): void {
+    const feed = context.screenFeed;
+    if (!feed || context.stopping || !this.isActive(context)) return;
+    // Bound provider traffic even if a browser sends a burst of frames.
+    const now = Date.now();
+    if (feed.lastSentAt !== undefined && now - feed.lastSentAt < 900) return;
+    feed.lastSentAt = now;
+    feed.pendingImage = undefined;
+    try {
+      const accepted = context.realtime?.pushImage(image) === true;
+      const phase = accepted ? 'streaming' : 'starting';
+      if (phase !== feed.phase) {
+        feed.phase = phase;
+        this.options.host.setScreenFeedState?.(context.epoch, feed.id, phase);
+      }
+    } catch {
+      this.stopScreenFeed(
+        context,
+        'error',
+        'The realtime connection could not accept the screen. Stop sharing and share again.',
+      );
+    }
+  }
+
+  private stopScreenFeed(
+    context: LiveCallContext,
+    phase: 'stopped' | 'error' = 'stopped',
+    message?: string,
+  ): void {
+    const feed = context.screenFeed;
+    if (!feed) return;
+    clearTimeout(feed.timer);
+    context.screenFeed = undefined;
+    if (!context.stopping) {
+      try {
+        context.realtime?.sendBackendContext(
+          '[SCREEN_SHARE] Screen sharing stopped. Previous images are historical context, not the current screen. Do not speak just because sharing stopped.',
+        );
+      } catch {
+        // Local capture must stop even when the provider socket is gone.
+      }
+    }
+    this.options.host.setScreenFeedState?.(
+      context.epoch,
+      feed.id,
+      phase,
+      message,
+    );
+  }
+
+  async speakToUser(
+    callerSessionId: string,
+    message: string,
+  ): Promise<boolean> {
+    const context = this.active;
+    if (context?.coordinator?.sessionId !== callerSessionId) {
+      if (this.closedCoordinatorSessionIds.has(callerSessionId)) return false;
       throw new Error('No active Live conversation owns this backend session.');
     }
+    if (!this.isActive(context) || context.stopping || !context.realtime)
+      return false;
     context.flushBackendContext?.();
-    if (!context.realtime.speakToUser(message)) {
-      throw new Error('The active Live conversation could not speak.');
-    }
+    return context.realtime.speakToUser(message);
   }
 
   async start(call: {
@@ -473,9 +628,11 @@ export class LiveSessionCoordinator {
     const context: LiveCallContext = {
       ...call,
       callAbort: new AbortController(),
+      turnAborts: new Set(),
       realtimeGeneration: 0,
       coordinatorFresh: false,
       coordinatorPromptAdmitted: false,
+      coordinatorEstablished: false,
       pendingPermissionRequestIds: new Set(),
       workers: [],
       workerIds: new Set(),
@@ -500,6 +657,16 @@ export class LiveSessionCoordinator {
       context.credential = this.options.getProviderCredential();
       context.runtimePromise = this.prepareConversationRuntime(context);
       const coordinator = await this.ensureCoordinator(context);
+      if (context.coordinatorFresh) {
+        try {
+          context.runtime?.bridge.updateSessionMetadata(coordinator.sessionId, {
+            displayName: 'Voice chat',
+            titleSource: 'auto',
+          });
+        } catch {
+          /* the session remains usable when a title write fails */
+        }
+      }
       const runtime = context.runtime;
       const currentCwd = context.coordinatorLease?.currentCwd;
       if (!runtime || !currentCwd) {
@@ -515,16 +682,7 @@ export class LiveSessionCoordinator {
       );
       await this.connectRealtime(context);
       if (!this.isActive(context) || context.stopping) return;
-      if (context.coordinatorFresh && context.coordinator) {
-        try {
-          context.runtime?.bridge.updateSessionMetadata(
-            context.coordinator.sessionId,
-            { displayName: 'Voice chat' },
-          );
-        } catch {
-          /* the session remains usable when a title write fails */
-        }
-      }
+      context.coordinatorEstablished = true;
       this.options.host.setProviderReachability(undefined);
       this.options.host.setCaption(context.epoch, '');
       this.options.host.setStatusText(context.epoch);
@@ -593,7 +751,14 @@ export class LiveSessionCoordinator {
       context.diagnosticInputCapture.hash.update(call.pcm16);
       context.diagnosticInputCapture.stream.write(Buffer.from(call.pcm16));
     }
-    return context.realtime?.pushAudio(call.pcm16) ?? false;
+    const accepted = context.realtime?.pushAudio(call.pcm16) ?? false;
+    if (accepted) {
+      const pending = context.screenFeed?.pendingImage;
+      if (pending) {
+        this.forwardScreenFrame(context, pending);
+      }
+    }
+    return accepted;
   }
 
   dispose(): void {
@@ -685,6 +850,12 @@ export class LiveSessionCoordinator {
         if (itemId) context.pendingCommittedInputItemIds.add(itemId);
         else context.unattributedCommittedInputCount += 1;
       },
+      onInputCancelled: ({ itemId }) => {
+        if (!this.isCurrentSocket(context, generation)) return;
+        this.resolveCommittedInput(context, itemId);
+        context.completedInputTranscripts.delete(itemId);
+        this.maybeFinishGracefulStop(context);
+      },
       onInputTranscriptDelta: ({ itemId, text }) => {
         if (this.isCurrentSocket(context, generation)) {
           const partialItemId =
@@ -698,8 +869,6 @@ export class LiveSessionCoordinator {
       },
       onInputTranscriptDone: ({ itemId, text }) => {
         if (this.isCurrentSocket(context, generation)) {
-          context.speechInProgress = false;
-          context.inputCommitPending = false;
           const completedItemId =
             itemId ??
             context.activePartialInputItemId ??
@@ -1059,24 +1228,26 @@ export class LiveSessionCoordinator {
       return context.stopCompletion;
     }
     context.stopping = true;
+    this.options.host.setProviderReachability(undefined);
+    for (const abort of context.turnAborts) abort.abort();
+    this.stopScreenFeed(context);
     closeLiveAudioCapture(context.diagnosticInputCapture, 'call_stopping');
     context.diagnosticInputCapture = undefined;
     this.options.host.clearOutput(context.epoch);
+    context.stopDrainTimer = setTimeout(() => {
+      this.forceFinishGracefulStop(
+        context,
+        context.stopFinalizing
+          ? 'Live Voice could not finish stopping before the stop deadline.'
+          : 'Live Voice could not confirm the final spoken input before the stop deadline.',
+        !context.stopFinalizing,
+      );
+    }, this.gracefulStopDrainMs);
+    context.stopDrainTimer.unref?.();
     if (!this.hasPendingStopTail(context)) {
       void this.finishGracefulStop(context);
       return context.stopCompletion;
     }
-    context.stopDrainTimer = setTimeout(() => {
-      void this.finishGracefulStop(
-        context,
-        {
-          error:
-            'Live Voice could not confirm the final spoken input before the stop deadline.',
-        },
-        true,
-      );
-    }, this.gracefulStopDrainMs);
-    context.stopDrainTimer.unref?.();
     if (context.speechInProgress || context.inputCommitPending) {
       let committed = false;
       try {
@@ -1173,13 +1344,13 @@ export class LiveSessionCoordinator {
     outcome?: { error: string },
     discardPendingInput = false,
   ): Promise<void> {
-    if (!this.isActive(context) || !context.finishStop) return;
-    const finish = context.finishStop;
-    context.finishStop = undefined;
-    if (context.stopDrainTimer) {
-      clearTimeout(context.stopDrainTimer);
-      context.stopDrainTimer = undefined;
-    }
+    if (
+      !this.isActive(context) ||
+      !context.finishStop ||
+      context.stopFinalizing
+    )
+      return;
+    context.stopFinalizing = true;
     const realtime = context.realtime;
     const transcriptTail = realtime?.takeTranscriptTail() ?? [];
     try {
@@ -1192,12 +1363,41 @@ export class LiveSessionCoordinator {
         error: 'Live Voice could not persist the final transcript.',
       };
     }
+    if (!this.isActive(context)) return;
     if (discardPendingInput) {
       this.invalidateRealtime(context);
       realtime?.close({ discardPendingInput: true });
     }
     await this.closeContext(context);
+    if (!this.isActive(context) && !context.finishStop) return;
+    if (context.stopDrainTimer) clearTimeout(context.stopDrainTimer);
+    context.stopDrainTimer = undefined;
+    const finish = context.finishStop;
+    context.finishStop = undefined;
     finish?.(outcome);
+  }
+
+  private forceFinishGracefulStop(
+    context: LiveCallContext,
+    error: string,
+    discardPendingInput: boolean,
+  ): void {
+    if (!this.isActive(context) || !context.finishStop) return;
+    context.stopDrainTimer = undefined;
+    if (discardPendingInput) {
+      const realtime = context.realtime;
+      this.invalidateRealtime(context);
+      realtime?.close({ discardPendingInput: true });
+    }
+    if (context.runtime && context.coordinator) {
+      void context.runtime.bridge
+        .setSessionLiveConversationActive(context.coordinator.sessionId, false)
+        .catch(() => undefined);
+    }
+    this.closeContextNow(context);
+    const finish = context.finishStop;
+    context.finishStop = undefined;
+    finish({ error });
   }
 
   private failContext(
@@ -1210,6 +1410,7 @@ export class LiveSessionCoordinator {
       void this.finishGracefulStop(context, { error: message }, true);
     } else {
       context.stopping = true;
+      this.stopScreenFeed(context);
       this.options.host.failCall(context.epoch, message);
       void this.closeContext(context);
     }
@@ -1255,9 +1456,56 @@ export class LiveSessionCoordinator {
       event.request,
       event.activeTranscript,
     );
+    const runAsNextTurn = async (notifyAdmission: boolean) => {
+      if (
+        !this.isCurrentSocket(context, generation) ||
+        context.realtime !== source
+      ) {
+        return false;
+      }
+      let admitted = false;
+      await this.runCoordinatorTurn(
+        context,
+        locator,
+        event.request,
+        modelPrompt,
+        () => {
+          admitted = true;
+          if (notifyAdmission) onPromptAdmitted();
+        },
+        (message) => {
+          if (this.isCurrentSocket(context, generation)) {
+            source.sendBackendContext(message);
+          }
+        },
+      );
+      return admitted;
+    };
+    // `queueOnly`: if the turn already settled, promotion would run this
+    // steering as a bare prompt no coordinator collector subscribes to — the
+    // response would never reach the Realtime source, and no turn deadline
+    // would apply. Rejecting the idle case keeps the `runCoordinatorTurn`
+    // fallback in charge of the next turn.
     const routed = runtime.bridge.enqueueMidTurnMessage(
       locator.sessionId,
       modelPrompt,
+      undefined,
+      undefined,
+      {
+        queueOnly: true,
+        onSettledWithoutDrain: () => {
+          void runAsNextTurn(false).catch((error: unknown) => {
+            if (
+              this.isCurrentSocket(context, generation) &&
+              context.realtime === source
+            ) {
+              source.sendBackendContext(
+                `The Qwen Code agent could not complete the request: ${errorMessage(error)}`,
+              );
+            }
+          });
+        },
+      },
     );
     if (routed.accepted) {
       onPromptAdmitted();
@@ -1265,29 +1513,7 @@ export class LiveSessionCoordinator {
     }
 
     await activeHandoff.turnComplete;
-    if (
-      !this.isCurrentSocket(context, generation) ||
-      context.realtime !== source
-    ) {
-      return false;
-    }
-    let admitted = false;
-    await this.runCoordinatorTurn(
-      context,
-      locator,
-      event.request,
-      modelPrompt,
-      () => {
-        admitted = true;
-        onPromptAdmitted();
-      },
-      (message) => {
-        if (this.isCurrentSocket(context, generation)) {
-          source.sendBackendContext(message);
-        }
-      },
-    );
-    return admitted;
+    return runAsNextTurn(true);
   }
 
   private async handleDelegate(
@@ -1382,7 +1608,7 @@ export class LiveSessionCoordinator {
     if (candidate) {
       try {
         const resumed = await runtime.bridge.resumeSession({
-          sessionId: candidate.sessionId,
+          sessionId: normalizeSessionIdForLookup(candidate.sessionId),
           workspaceCwd: runtime.workspaceCwd,
           ...(candidate.parentSessionId
             ? { parentSessionId: candidate.parentSessionId }
@@ -1537,9 +1763,10 @@ export class LiveSessionCoordinator {
     if (!sessionClosed) return;
     if (removeFreshTranscript) {
       try {
-        await new SessionService(runtime.workspaceCwd).removeSession(
-          session.sessionId,
-        );
+        const transcriptRemoved = await new SessionService(
+          runtime.workspaceCwd,
+        ).removeSession(session.sessionId);
+        if (transcriptRemoved) bridge.markSessionCatalogChanged();
       } catch {
         /* preserve the original setup failure */
       }
@@ -1559,12 +1786,16 @@ export class LiveSessionCoordinator {
     onPromptAdmitted?: () => void,
     onAgentMessage?: (text: string) => void,
   ): Promise<CollectedTurn> {
+    if (!this.isActive(context) || context.stopping) {
+      throw new DOMException('Live call ended.', 'AbortError');
+    }
     const runtime = context.runtime;
     if (!runtime) throw new Error('Conversation workspace is unavailable.');
     const bridge = runtime.bridge;
     const promptId = randomUUID();
     const lastEventId = bridge.getSessionLastEventId(locator.sessionId);
     const turnAbort = new AbortController();
+    context.turnAborts.add(turnAbort);
     this.inFlightTurnAborts.add(turnAbort);
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -1605,6 +1836,10 @@ export class LiveSessionCoordinator {
         const update = sessionUpdate(event);
         this.updateCoordinatorStatus(context, update);
         if (update?.['sessionUpdate'] === 'agent_message_chunk') {
+          // Discrete frames (background status, realtime transcript echoes)
+          // carry the live RPC's promptId when a same-turn background result
+          // is consumed inline; they are never the turn's answer.
+          if (isDiscreteMessageUpdate(update)) continue;
           const chunk = updateText(update);
           text = appendBounded(text, chunk);
           agentMessage = appendBounded(agentMessage, chunk);
@@ -1678,6 +1913,7 @@ export class LiveSessionCoordinator {
       clearTimeout(timer);
       turnAbort.abort();
       await collect.catch(() => undefined);
+      context.turnAborts.delete(turnAbort);
       this.inFlightTurnAborts.delete(turnAbort);
     }
   }
@@ -1732,9 +1968,19 @@ export class LiveSessionCoordinator {
           if (update?.['sessionUpdate'] === 'agent_message_chunk') {
             const source = updateSource(update);
             if (source === 'background_notification') {
-              announcement = updateText(update);
-              response = '';
-              backgroundTaskId = updateBackgroundTaskId(update);
+              const text = updateText(update);
+              announcement = announcement
+                ? appendBounded(announcement, `\n${text}`)
+                : text;
+              // A frame arriving after reply chunks is a same-execution
+              // inline consumption, not a new announcement: keep the
+              // accumulated response and the worker-gate key so the
+              // executing turn's reply stays speakable. Cycle state resets
+              // on `background_notification_turn_complete`.
+              if (response === '') {
+                const taskId = updateBackgroundTaskId(update);
+                if (taskId !== undefined) backgroundTaskId = taskId;
+              }
             } else if (source === 'background_notification_response') {
               response = appendBounded(response, updateText(update));
             }
@@ -1910,6 +2156,7 @@ export class LiveSessionCoordinator {
       !runtime ||
       !session ||
       !context.coordinatorFresh ||
+      context.coordinatorEstablished ||
       context.coordinatorPromptAdmitted
     ) {
       return;
@@ -1921,6 +2168,11 @@ export class LiveSessionCoordinator {
   }
 
   private closeContextNow(context: LiveCallContext): void {
+    for (const abort of context.turnAborts) abort.abort();
+    if (context.coordinatorEstablished && context.coordinator) {
+      this.closedCoordinatorSessionIds.add(context.coordinator.sessionId);
+    }
+    this.stopScreenFeed(context);
     closeLiveAudioCapture(context.diagnosticInputCapture, 'context_closed');
     context.diagnosticInputCapture = undefined;
     this.discardProvisionalCoordinator(context);
@@ -1933,6 +2185,7 @@ export class LiveSessionCoordinator {
   }
 
   private async closeContext(context: LiveCallContext): Promise<void> {
+    this.stopScreenFeed(context);
     const runtime = context.runtime;
     const sessionId = context.coordinator?.sessionId;
     if (runtime && sessionId) {
@@ -1947,6 +2200,9 @@ export class LiveSessionCoordinator {
     const context = this.active;
     if (!context) return;
     context.stopping = true;
+    this.options.host.setProviderReachability(undefined);
+    for (const abort of context.turnAborts) abort.abort();
+    this.stopScreenFeed(context);
     await this.closeContext(context);
   }
 }

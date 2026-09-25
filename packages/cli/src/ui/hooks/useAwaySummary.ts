@@ -6,11 +6,7 @@
 
 import { useEffect, useRef } from 'react';
 import { generateSessionRecap, type Config } from '@qwen-code/qwen-code-core';
-import type {
-  HistoryItem,
-  HistoryItemAwayRecap,
-  HistoryItemWithoutId,
-} from '../types.js';
+import type { HistoryItemAwayRecap, HistoryItemWithoutId } from '../types.js';
 
 const DEFAULT_AWAY_THRESHOLD_MINUTES = 5;
 
@@ -23,6 +19,15 @@ const DEFAULT_AWAY_THRESHOLD_MINUTES = 5;
 const MIN_USER_MESSAGES_TO_FIRE = 3;
 const MIN_USER_MESSAGES_SINCE_LAST_RECAP = 2;
 
+/**
+ * The transcript rows the dedup gate reads. ink passes its own history items;
+ * the OpenTUI leg maps its live transcript onto the same two fields.
+ */
+export interface RecapGateItem {
+  type: string;
+  sentToModel?: boolean;
+}
+
 export interface UseAwaySummaryOptions {
   enabled: boolean;
   config: Config | null;
@@ -34,7 +39,7 @@ export interface UseAwaySummaryOptions {
    * the dedup gate; not added to the effect's deps so it doesn't re-fire
    * on every history change.
    */
-  history: HistoryItem[];
+  history: readonly RecapGateItem[];
   /**
    * Minutes the terminal must be blurred before an auto-recap fires on
    * the next focus-in. Falsy / non-positive values fall back to the
@@ -47,7 +52,7 @@ export interface UseAwaySummaryOptions {
  * Whether enough new user activity has happened since the last recap to
  * justify another one. Mirrors Claude Code's `Ic1` gate.
  */
-function shouldFireRecap(history: HistoryItem[]): boolean {
+function shouldFireRecap(history: readonly RecapGateItem[]): boolean {
   let userMessageCount = 0;
   let lastRecapIndex = -1;
   for (let i = 0; i < history.length; i++) {

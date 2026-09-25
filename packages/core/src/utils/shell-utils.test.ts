@@ -11,6 +11,7 @@ import {
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
   detectSelfKillCommand,
+  doesToolInvocationMatch,
   escapeShellArg,
   getCommandRoot,
   getCommandRoots,
@@ -25,6 +26,8 @@ import {
   stripShellWrapper,
 } from './shell-utils.js';
 import type { Config } from '../config/config.js';
+import { ReadFileTool } from '../tools/read-file.js';
+import type { AnyToolInvocation } from '../tools/tools.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockHomedir = vi.hoisted(() => vi.fn());
@@ -64,6 +67,90 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe('doesToolInvocationMatch', () => {
+  it('should not match a partial command prefix', () => {
+    const invocation = {
+      params: { command: 'git commitsomething' },
+    } as AnyToolInvocation;
+    const patterns = ['ShellTool(git commit)'];
+    const result = doesToolInvocationMatch(
+      'run_shell_command',
+      invocation,
+      patterns,
+    );
+    expect(result).toBe(false);
+  });
+
+  it('should match an exact command', () => {
+    const invocation = {
+      params: { command: 'git status' },
+    } as AnyToolInvocation;
+    const patterns = ['ShellTool(git status)'];
+    const result = doesToolInvocationMatch(
+      'run_shell_command',
+      invocation,
+      patterns,
+    );
+    expect(result).toBe(true);
+  });
+
+  it('should match a command that is a prefix', () => {
+    const invocation = {
+      params: { command: 'git status -v' },
+    } as AnyToolInvocation;
+    const patterns = ['ShellTool(git status)'];
+    const result = doesToolInvocationMatch(
+      'run_shell_command',
+      invocation,
+      patterns,
+    );
+    expect(result).toBe(true);
+  });
+
+  describe('for non-shell tools', () => {
+    const readFileTool = new ReadFileTool({} as Config);
+    const invocation = {
+      params: { file: 'test.txt' },
+    } as AnyToolInvocation;
+
+    it('should match by tool name', () => {
+      const patterns = ['read_file'];
+      const result = doesToolInvocationMatch(
+        readFileTool,
+        invocation,
+        patterns,
+      );
+      expect(result).toBe(true);
+    });
+
+    it('should match by tool class name', () => {
+      const patterns = ['ReadFileTool'];
+      const result = doesToolInvocationMatch(
+        readFileTool,
+        invocation,
+        patterns,
+      );
+      expect(result).toBe(true);
+    });
+
+    it('should not match if neither name is in the patterns', () => {
+      const patterns = ['some_other_tool', 'AnotherToolClass'];
+      const result = doesToolInvocationMatch(
+        readFileTool,
+        invocation,
+        patterns,
+      );
+      expect(result).toBe(false);
+    });
+
+    it('should match by tool name when passed as a string', () => {
+      const patterns = ['read_file'];
+      const result = doesToolInvocationMatch('read_file', invocation, patterns);
+      expect(result).toBe(true);
+    });
+  });
 });
 
 describe('isCommandAllowed', () => {
@@ -154,6 +241,29 @@ describe('isCommandAllowed', () => {
       const result = await isCommandAllowed('echo $(rm -rf /)', config);
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain('Command substitution');
+    });
+
+    it('should block the two substitution forms from issue #8582', async () => {
+      for (const command of [
+        'echo "$\\\n(touch /tmp/pwned)"',
+        'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+      ]) {
+        const result = await isCommandAllowed(command, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      }
+    });
+
+    it('should keep literal twins of issue #8582 allowed', async () => {
+      config.getCoreTools = () => ['ShellTool(echo)'];
+      for (const command of [
+        'echo "\\$\\\n(touch /tmp/pwned)"',
+        'echo "$$\\\n(touch /tmp/pwned)"',
+        "echo '$\\\n(touch /tmp/pwned)'",
+        "echo '${two@P}'",
+      ]) {
+        expect((await isCommandAllowed(command, config)).allowed).toBe(true);
+      }
     });
 
     it('should block command substitution using `<(...)`', async () => {
@@ -632,6 +742,33 @@ describe('stripShellWrapper', () => {
 
   it('should not strip anything if no wrapper is present', async () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
+  });
+
+  // Bash treats these as ordinary word characters, so at the edge of a command
+  // they are part of the last word — for `echo x >\u00a0` the redirection
+  // target — and trimming them off discards it (#11865).
+  it('should keep edge characters bash does not treat as whitespace', async () => {
+    expect(stripShellWrapper('echo x >\u00a0')).toEqual('echo x >\u00a0');
+    expect(stripShellWrapper('echo x >\v')).toEqual('echo x >\v');
+    expect(stripShellWrapper('echo x >\f')).toEqual('echo x >\f');
+  });
+
+  it('should still trim plain whitespace and CRLF at the edges', async () => {
+    expect(stripShellWrapper('  echo x  ')).toEqual('echo x');
+    expect(stripShellWrapper('echo x\r\n')).toEqual('echo x');
+  });
+
+  // The `$`-anchored `g` regex this replaced retried its end-anchored
+  // alternative at every index, which is quadratic inside an *interior*
+  // whitespace run: ~3.2 s at 64 k characters, synchronously, on
+  // model-controlled input, in the permission gate. The two-pointer trim is
+  // linear; 500 ms is orders of magnitude above its cost and far below the
+  // regex's.
+  it('should trim a long interior whitespace run in linear time', async () => {
+    const command = `echo x${' '.repeat(64_000)}&& rm -rf /tmp/x`;
+    const started = Date.now();
+    expect(stripShellWrapper(command)).toEqual(command);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   it('should strip absolute-path wrapper /bin/bash -c', async () => {

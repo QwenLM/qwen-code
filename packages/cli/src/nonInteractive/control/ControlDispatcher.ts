@@ -36,7 +36,7 @@ import type {
   ControlResponse,
   ControlRequestPayload,
 } from '../types.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('CONTROL_DISPATCHER');
 
@@ -78,6 +78,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     new Map();
 
   private abortHandler: (() => void) | null = null;
+  private isShutdown = false;
 
   constructor(context: IControlContext) {
     this.context = context;
@@ -237,6 +238,10 @@ export class ControlDispatcher implements IPendingRequestRegistry {
    * Stops all pending requests and cleans up all controllers
    */
   shutdown(): void {
+    if (this.isShutdown) {
+      return;
+    }
+    this.isShutdown = true;
     debugLogger.debug('[ControlDispatcher] Shutting down');
 
     // Remove abort listener to prevent memory leak

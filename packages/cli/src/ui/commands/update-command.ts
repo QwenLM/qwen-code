@@ -28,7 +28,7 @@ export const updateCommand: SlashCommand = {
     ] = await Promise.all([
       import('../utils/updateCheck.js'),
       import('../../utils/processUtils.js'),
-      import('../../utils/standalone-update.js'),
+      import('../standalone-update.js'),
       import('../../utils/installationInfo.js'),
     ]);
     const { formatUpdateInstructions, getInstallationInfo } = installationInfo;

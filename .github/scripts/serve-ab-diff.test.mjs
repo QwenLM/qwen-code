@@ -5,12 +5,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
+  DRIVE_COMPLETE_MARKER,
   buildComment,
   diffCaptureDirs,
   diffJson,
@@ -229,4 +232,139 @@ test('diffCaptureDirs: a base-only (removed) scenario is surfaced, not dropped',
     body,
     /Present in the base but absent from this PR: `capabilities`/,
   );
+});
+
+test('diffCaptureDirs: status-only change is a reported diff', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  // Same body, different status — invisible before `_status` was captured.
+  writeFileSync(
+    join(before, 'restore.json'),
+    JSON.stringify({ _status: 200, code: undefined }),
+  );
+  writeFileSync(join(after, 'restore.json'), JSON.stringify({ _status: 409 }));
+  const { sections } = diffCaptureDirs(before, after);
+  assert.deepEqual(sections[0].changes, [
+    { path: '_status', kind: 'changed', before: 200, after: 409 },
+  ]);
+});
+
+test('diffCaptureDirs: a scenario absent from the base reports as an addition', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  // New scenario: no base capture at all — every field reads as added.
+  writeFileSync(
+    join(after, 'new-scenario.json'),
+    JSON.stringify({ _status: 400, code: 'reserved_session_source' }),
+  );
+  writeFileSync(join(before, 'health.json'), JSON.stringify({ status: 'ok' }));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ status: 'ok' }));
+  const { sections } = diffCaptureDirs(before, after);
+  const added = sections.find((s) => s.scenario === 'new-scenario');
+  assert.ok(added.changes.some((c) => c.path === '_status'));
+});
+
+test('diffCaptureDirs: a base that never finished is reported as incomplete', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  // The base drive stopped after one scenario; the head captured two. Without
+  // the completion marker the second reads as "this PR adds this response".
+  writeFileSync(join(before, 'health.json'), JSON.stringify({ _status: 200 }));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ _status: 200 }));
+  writeFileSync(join(after, 'restore.json'), JSON.stringify({ _status: 409 }));
+  const partial = diffCaptureDirs(before, after);
+  assert.equal(partial.baselineIncomplete, true);
+  assert.equal(partial.baselineMissing, false);
+  assert.match(
+    buildComment(partial.sections, {
+      shortSha: 'x',
+      baselineIncomplete: partial.baselineIncomplete,
+    }),
+    /PR-base drive did not finish/,
+  );
+
+  // With the marker the same dirs are a complete baseline and say nothing.
+  writeFileSync(join(before, DRIVE_COMPLETE_MARKER), '');
+  const complete = diffCaptureDirs(before, after);
+  assert.equal(complete.baselineIncomplete, false);
+  assert.doesNotMatch(
+    buildComment(complete.sections, {
+      shortSha: 'x',
+      baselineIncomplete: complete.baselineIncomplete,
+    }),
+    /PR-base drive did not finish/,
+  );
+});
+
+test('diffCaptureDirs: an empty base stays "missing", not "incomplete"', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ _status: 200 }));
+  const r = diffCaptureDirs(before, after);
+  assert.equal(r.baselineMissing, true);
+  assert.equal(r.baselineIncomplete, false);
+});
+
+test('the marker is not itself enumerated as a scenario', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  for (const d of [before, after]) {
+    writeFileSync(join(d, 'health.json'), JSON.stringify({ _status: 200 }));
+    writeFileSync(join(d, DRIVE_COMPLETE_MARKER), '');
+  }
+  const { sections } = diffCaptureDirs(before, after);
+  assert.deepEqual(
+    sections.map((s) => s.scenario),
+    ['health'],
+  );
+});
+
+// The `comment` subcommand is the ONLY invocation path in CI, and every test
+// above builds the buildComment ctx by hand — so the glue between
+// diffCaptureDirs and buildComment (destructure → pass-through) is exercised by
+// nothing. A dropped or misspelled flag there loses a degraded-baseline warning
+// while the whole suite stays green.
+const CLI = join(dirname(fileURLToPath(import.meta.url)), 'serve-ab-diff.mjs');
+const runComment = (before, after) => {
+  const bodyFile = join(mkdtempSync(join(tmpdir(), 'sa-body-')), 'body.md');
+  execFileSync(
+    process.execPath,
+    [CLI, 'comment', before, after, 'abc1234', bodyFile],
+    {
+      stdio: 'pipe',
+    },
+  );
+  return readFileSync(bodyFile, 'utf8');
+};
+
+test('comment CLI: a marker-less baseline carries the truncation warning', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  writeFileSync(join(before, 'health.json'), JSON.stringify({ _status: 200 }));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ _status: 200 }));
+  writeFileSync(join(after, 'restore.json'), JSON.stringify({ _status: 409 }));
+  assert.match(runComment(before, after), /PR-base drive did not finish/);
+});
+
+test('comment CLI: a complete baseline carries no degraded-baseline warning', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  for (const d of [before, after]) {
+    writeFileSync(join(d, 'health.json'), JSON.stringify({ _status: 200 }));
+    writeFileSync(join(d, DRIVE_COMPLETE_MARKER), '');
+  }
+  const body = runComment(before, after);
+  assert.doesNotMatch(body, /PR-base drive did not finish/);
+  assert.doesNotMatch(body, /could not be built this run/);
+  assert.match(
+    body,
+    /No response changes against the PR base across 1 scenario/,
+  );
+});
+
+test('comment CLI: an empty baseline reports the diff as skipped', () => {
+  const before = mkdtempSync(join(tmpdir(), 'sa-before-'));
+  const after = mkdtempSync(join(tmpdir(), 'sa-after-'));
+  writeFileSync(join(after, 'health.json'), JSON.stringify({ _status: 200 }));
+  assert.match(runComment(before, after), /could not be built this run/);
 });

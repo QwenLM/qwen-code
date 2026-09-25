@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useI18n } from '../../i18n';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
 import {
@@ -11,8 +12,20 @@ import {
   FieldLabel,
 } from '../ui/field';
 import { Input } from '../ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
 import { Switch } from '../ui/switch';
-import { FolderOpenIcon } from 'lucide-react';
+import {
+  CornerLeftUpIcon,
+  FolderOpenIcon,
+  LaptopIcon,
+  ServerIcon,
+} from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -26,10 +39,21 @@ export interface WorkspacePathSuggestions {
   truncated: boolean;
 }
 
+export interface WorkspaceLocationOption {
+  origin: string;
+  label: string;
+  remote: boolean;
+}
+
 interface AddWorkspaceDialogProps {
+  browseDirectories?: boolean;
+  initialPath?: string;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   displayNameEnabled?: boolean;
+  locations?: WorkspaceLocationOption[];
+  selectedLocation?: string;
+  onLocationChange?: (origin: string) => boolean | void;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
@@ -46,24 +70,35 @@ const LISTBOX_ID = 'add-workspace-suggestions';
 const SUGGEST_DEBOUNCE_MS = 150;
 
 function isAbsoluteLike(value: string): boolean {
-  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value);
+  return (
+    value.startsWith('/') ||
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    value.startsWith('ssh://')
+  );
 }
 
 export function AddWorkspaceDialog({
+  browseDirectories = false,
+  initialPath = '',
   onClose,
   onAdd,
   displayNameEnabled = false,
+  locations,
+  selectedLocation,
+  onLocationChange,
   onSuggest,
   onPick,
   persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
-  const [path, setPath] = useState('');
+  const [path, setPath] = useState(initialPath);
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [persist, setPersist] = useState(true);
   const [suggestions, setSuggestions] = useState<WorkspacePathSuggestion[]>([]);
+  const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
   const [hostSep, setHostSep] = useState('/');
@@ -72,29 +107,65 @@ export function AddWorkspaceDialog({
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
   const suggestSeqRef = useRef(0);
-  // Set when a suggestion is accepted or the list is dismissed, so the
-  // path-change effect knows whether to reopen the list for that update.
+  // Set while Browse is in flight, so the path-change effect keeps the
+  // pick-triggered lookup closed until the first edit; blur dismissal
+  // invalidates in-flight lookups via suggestSeqRef instead.
   const suppressNextFetchOpenRef = useRef(false);
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  const cancelBlurDismiss = useCallback(() => {
+    if (blurTimeoutRef.current !== undefined) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = undefined;
+    }
+  }, []);
+
+  useEffect(() => () => cancelBlurDismiss(), [cancelBlurDismiss]);
 
   const closeList = useCallback(() => {
     setListOpen(false);
     setHighlight(-1);
   }, []);
 
+  // Reset the path when the location changes, since each daemon has its own
+  // filesystem. The effect below re-fetches suggestions for the new root.
+  const prevLocationRef = useRef(selectedLocation);
+  useEffect(() => {
+    if (prevLocationRef.current === selectedLocation) return;
+    prevLocationRef.current = selectedLocation;
+    setPath(initialPath || '/');
+    setError(null);
+    setSuggestions([]);
+    setSuggestionsLoaded(false);
+    setSuggestionsError(false);
+    closeList();
+  }, [selectedLocation, initialPath, closeList]);
+
   // Debounced suggestion fetch, keyed off the current path value. A stale
   // response (older sequence number) never overwrites a newer one.
   useEffect(() => {
     if (!onSuggest) return undefined;
-    if (!isAbsoluteLike(path)) {
+    if (!isAbsoluteLike(path) || path.trim().startsWith('ssh://')) {
+      ++suggestSeqRef.current;
       setSuggestions([]);
+      setSuggestionsLoaded(false);
+      setSuggestionsError(false);
       closeList();
       return undefined;
     }
     const seq = ++suggestSeqRef.current;
+    // Browse mode drives the list from the typed path, so results for the
+    // previous directory must not linger. The typed-path autocomplete keeps its
+    // previous list visible until the next answer instead of blanking here.
+    if (browseDirectories) setSuggestions([]);
+    setSuggestionsLoaded(false);
+    setSuggestionsError(false);
     const openOnResult = !suppressNextFetchOpenRef.current;
     suppressNextFetchOpenRef.current = false;
     const timer = setTimeout(() => {
@@ -102,28 +173,40 @@ export function AddWorkspaceDialog({
         (result) => {
           if (seq !== suggestSeqRef.current) return;
           setSuggestions(result.suggestions);
+          setSuggestionsLoaded(true);
+          setSuggestionsError(false);
           setHostSep(result.sep || '/');
           setHighlight(-1);
-          if (openOnResult || listOpenRef.current) {
+          const input = inputRef.current;
+          if (
+            browseDirectories ||
+            (input !== null &&
+              getShadowAwareActiveElement(input) === input &&
+              (openOnResult || listOpenRef.current))
+          ) {
             setListOpen(result.suggestions.length > 0);
           }
         },
         () => {
           if (seq !== suggestSeqRef.current) return;
-          // Autocomplete is best-effort; a failed lookup just yields no list.
           setSuggestions([]);
+          setSuggestionsLoaded(true);
+          setSuggestionsError(browseDirectories);
           closeList();
         },
       );
     }, SUGGEST_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [path, onSuggest, closeList]);
+  }, [browseDirectories, path, onSuggest, closeList]);
 
   // Radix listens for Escape on document capture; intercept one step earlier
   // (window capture) so an open suggestion list consumes the Escape instead
   // of closing the whole dialog (DialogShell skips `defaultPrevented`).
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      // Browse mode keeps the list open by design, so there is nothing for
+      // Escape to dismiss there — leave it to close the dialog instead.
+      if (browseDirectories) return;
       if (event.key !== 'Escape' || !listOpenRef.current) return;
       if (event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
@@ -132,7 +215,7 @@ export function AddWorkspaceDialog({
     window.addEventListener('keydown', handler, { capture: true });
     return () =>
       window.removeEventListener('keydown', handler, { capture: true });
-  }, [closeList]);
+  }, [browseDirectories, closeList]);
 
   const acceptSuggestion = useCallback(
     (suggestion: WorkspacePathSuggestion) => {
@@ -149,22 +232,37 @@ export function AddWorkspaceDialog({
 
   const pickDirectory = useCallback(async () => {
     if (!onPick) return;
+    inputRef.current?.blur();
+    // The blur above scheduled the delayed dismiss; cancel it and apply the
+    // close + suppress now so the timer cannot fire after the outcome below.
+    cancelBlurDismiss();
+    closeList();
+    suppressNextFetchOpenRef.current = true;
     setBrowsing(true);
     setError(null);
+    let pickedPath: string | undefined;
     try {
-      const selectedPath = await onPick();
-      if (selectedPath) {
+      pickedPath = await onPick();
+      if (pickedPath && pickedPath !== path) {
+        // Leave the suppress flag set: the path-change effect consumes it,
+        // keeping the pick-triggered lookup closed until the first edit.
         ++suggestSeqRef.current;
-        setPath(selectedPath);
+        setPath(pickedPath);
         setSuggestions([]);
-        closeList();
+      } else {
+        // Cancelled, failed, or same-value pick: the first edit must open.
+        // A same-value pick keeps the typed path, so invalidate any lookup
+        // already in flight from before Browse was clicked.
+        if (pickedPath) ++suggestSeqRef.current;
+        suppressNextFetchOpenRef.current = false;
       }
     } catch {
+      suppressNextFetchOpenRef.current = false;
       setError(t('sidebar.addWorkspaceBrowseError'));
     } finally {
       setBrowsing(false);
     }
-  }, [onPick, closeList, t]);
+  }, [onPick, path, closeList, cancelBlurDismiss, t]);
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -200,12 +298,42 @@ export function AddWorkspaceDialog({
         return;
       }
       if (event.key === 'Enter' && open && highlight >= 0) {
-        // Enter accepts the highlighted directory instead of submitting.
         event.preventDefault();
         acceptSuggestion(suggestions[highlight]);
+        return;
+      }
+      if (
+        event.key === 'Enter' &&
+        browseDirectories &&
+        !path.trim().startsWith('ssh://') &&
+        !event.nativeEvent.isComposing
+      ) {
+        // Enter opens the typed directory rather than submitting: registering a
+        // workspace stays a deliberate button press. Give it a visible outcome
+        // in every case, or the key reads as broken.
+        event.preventDefault();
+        const trimmed = path.trim();
+        if (!isAbsoluteLike(trimmed)) {
+          setError(t('sidebar.addWorkspaceAbsError'));
+          return;
+        }
+        if (!/[\\/]$/.test(trimmed)) {
+          setPath(trimmed + hostSep);
+          return;
+        }
+        if (suggestions.length > 0) setHighlight(0);
       }
     },
-    [listOpen, suggestions, highlight, acceptSuggestion],
+    [
+      listOpen,
+      suggestions,
+      highlight,
+      acceptSuggestion,
+      browseDirectories,
+      path,
+      hostSep,
+      t,
+    ],
   );
 
   const handleSubmit = useCallback(
@@ -250,16 +378,59 @@ export function AddWorkspaceDialog({
     ],
   );
 
-  const showList = listOpen && suggestions.length > 0;
+  const showList = (browseDirectories || listOpen) && suggestions.length > 0;
 
   return (
     <DialogShell
       title={t('sidebar.addWorkspaceTitle')}
       size="md"
+      dismissible={!submitting}
       onClose={onClose}
     >
       <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
         <FieldGroup>
+          {browseDirectories &&
+            locations &&
+            locations.length > 0 &&
+            selectedLocation &&
+            onLocationChange && (
+              <Field>
+                <FieldLabel id="workspace-location-label">
+                  {t('workspaceHost.source')}
+                </FieldLabel>
+                <Select
+                  value={selectedLocation}
+                  disabled={submitting}
+                  onValueChange={(origin) => {
+                    if (origin === selectedLocation) return;
+                    if (onLocationChange(origin) === false) {
+                      setError(t('workspaceHost.navigationUnavailable'));
+                    }
+                  }}
+                >
+                  <SelectTrigger
+                    className="w-full"
+                    aria-labelledby="workspace-location-label"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {locations.map((location) => {
+                      const Icon = location.remote ? ServerIcon : LaptopIcon;
+                      return (
+                        <SelectItem
+                          key={location.origin}
+                          value={location.origin}
+                        >
+                          <Icon aria-hidden="true" />
+                          {location.label}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
           <Field data-invalid={error ? true : undefined}>
             <FieldLabel htmlFor="add-workspace-path">
               {t('sidebar.addWorkspacePath')}
@@ -270,17 +441,28 @@ export function AddWorkspaceDialog({
                   ref={inputRef}
                   id="add-workspace-path"
                   type="text"
-                  placeholder="/absolute/path/to/project"
+                  placeholder="/absolute/path or ssh://user@host/project"
                   value={path}
                   onChange={(e) => {
                     setPath(e.target.value);
                     if (error) setError(null);
                   }}
                   onKeyDown={handleInputKeyDown}
+                  onFocus={cancelBlurDismiss}
                   onBlur={() => {
+                    if (browseDirectories) return;
                     // Delay so a mousedown on a suggestion wins over blur.
-                    setTimeout(() => {
-                      suppressNextFetchOpenRef.current = true;
+                    cancelBlurDismiss();
+                    blurTimeoutRef.current = setTimeout(() => {
+                      blurTimeoutRef.current = undefined;
+                      // Invalidate in-flight lookups via the sequence counter
+                      // rather than suppressing the next fetch, which would
+                      // leak into the first edit after the user refocuses.
+                      ++suggestSeqRef.current;
+                      // Drop the stale entries too: the invalidated lookup
+                      // never refreshes them, and ArrowDown would reopen
+                      // whatever is left against the current input.
+                      setSuggestions([]);
                       closeList();
                     }, 100);
                   }}
@@ -300,6 +482,33 @@ export function AddWorkspaceDialog({
                   aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
                   aria-invalid={error ? true : undefined}
                 />
+                {browseDirectories && !path.trim().startsWith('ssh://') && (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    title={t('workspaceHost.parent')}
+                    aria-label={t('workspaceHost.parent')}
+                    disabled={submitting}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      const trimmed = path.replace(/[\\/]+$/, '');
+                      if (/^[A-Za-z]:$/.test(trimmed)) {
+                        setPath(`${trimmed}\\`);
+                        return;
+                      }
+                      const index = Math.max(
+                        trimmed.lastIndexOf('/'),
+                        trimmed.lastIndexOf('\\'),
+                      );
+                      setPath(
+                        index >= 0 ? trimmed.slice(0, index + 1) : hostSep,
+                      );
+                    }}
+                  >
+                    <CornerLeftUpIcon aria-hidden="true" />
+                  </Button>
+                )}
                 {onPick && (
                   <Button
                     type="button"
@@ -313,12 +522,23 @@ export function AddWorkspaceDialog({
                   </Button>
                 )}
               </div>
+              {browseDirectories && (
+                // Above the list, because it points at it. A plain paragraph
+                // rather than FieldDescription, whose last-child margin rules
+                // are written for the end of a Field.
+                <p
+                  id={HINT_ID}
+                  className="mt-2 text-sm leading-normal text-muted-foreground"
+                >
+                  {t('workspaceHost.browseHint')}
+                </p>
+              )}
               {showList && (
                 <ul
                   id={LISTBOX_ID}
                   role="listbox"
                   aria-label={t('sidebar.addWorkspaceSuggestions')}
-                  className="absolute inset-x-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
+                  className={`${browseDirectories ? 'relative' : 'absolute inset-x-0 top-full z-50'} mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md`}
                 >
                   {suggestions.map((suggestion, index) => (
                     <li
@@ -339,14 +559,32 @@ export function AddWorkspaceDialog({
                       }}
                       onMouseEnter={() => setHighlight(index)}
                     >
+                      {browseDirectories && (
+                        <FolderOpenIcon
+                          className="mr-2 inline size-4"
+                          aria-hidden="true"
+                        />
+                      )}
                       {suggestion.name}
                       <span className="text-muted-foreground">{hostSep}</span>
                     </li>
                   ))}
                 </ul>
               )}
+              {browseDirectories && suggestionsLoaded && !showList && (
+                <div
+                  role={suggestionsError ? 'alert' : 'status'}
+                  className="mt-1 rounded-md border px-3 py-3 text-sm text-muted-foreground"
+                >
+                  {t(
+                    suggestionsError
+                      ? 'workspaceHost.folderListError'
+                      : 'workspaceHost.noFolders',
+                  )}
+                </div>
+              )}
             </div>
-            <FieldDescription id={HINT_ID}>
+            <FieldDescription id={browseDirectories ? undefined : HINT_ID}>
               {t('sidebar.addWorkspaceHint')}
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
@@ -360,6 +598,11 @@ export function AddWorkspaceDialog({
                 id="add-workspace-display-name"
                 type="text"
                 value={displayName}
+                placeholder={
+                  browseDirectories
+                    ? path.split(/[\\/]/).filter(Boolean).pop()
+                    : undefined
+                }
                 onChange={(event) => setDisplayName(event.target.value)}
                 disabled={submitting}
                 maxLength={256}
@@ -390,19 +633,28 @@ export function AddWorkspaceDialog({
             </Field>
           )}
         </FieldGroup>
-        <div className="flex justify-end gap-2">
+        <div className="flex w-full justify-end gap-2">
           <Button
             type="button"
             variant="outline"
+            className="flex-1 sm:flex-none"
             onClick={onClose}
             disabled={submitting}
           >
             {t('sidebar.addWorkspaceCancel')}
           </Button>
-          <Button type="submit" disabled={submitting || !path.trim()}>
+          <Button
+            type="submit"
+            className="flex-1 sm:flex-none"
+            disabled={submitting || !path.trim()}
+          >
             {submitting
               ? t('sidebar.addWorkspaceAdding')
-              : t('sidebar.addWorkspaceRegister')}
+              : t(
+                  browseDirectories
+                    ? 'workspaceHost.addFolder'
+                    : 'sidebar.addWorkspaceRegister',
+                )}
           </Button>
         </div>
       </form>

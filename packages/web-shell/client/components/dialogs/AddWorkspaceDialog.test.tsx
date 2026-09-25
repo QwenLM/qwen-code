@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
+import { WebShellPortalRootContext } from '../../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -74,6 +75,26 @@ describe('AddWorkspaceDialog', () => {
     expect(document.activeElement).toBe(input());
   });
 
+  it('renders no Browse… button when the host cannot pick a directory', () => {
+    // #9406 R1-7: every other browseButton() call site passes onPick, and
+    // App.test.tsx mocks this dialog out entirely, so nothing observed the
+    // `{onPick && (` guard — turning it into an unconditional render shipped
+    // green. On a headless daemon host that puts back the dead affordance
+    // this PR exists to remove: a Browse… button whose handler returns
+    // immediately.
+    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
+
+    expect(browseButton()).toBeUndefined();
+  });
+
+  it('renders the Browse… button when the host can pick a directory', () => {
+    mount(
+      <AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} onPick={vi.fn()} />,
+    );
+
+    expect(browseButton()).toBeDefined();
+  });
+
   it('hides the display name field unless the daemon supports it', () => {
     mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
 
@@ -97,7 +118,9 @@ describe('AddWorkspaceDialog', () => {
     submit();
 
     const err = alert();
-    expect(err?.textContent).toBe('Path must be absolute');
+    expect(err?.textContent).toBe(
+      'Enter an absolute path or an SSH workspace URL.',
+    );
     expect(input().getAttribute('aria-invalid')).toBe('true');
     expect(input().getAttribute('aria-describedby')).toBe(
       'add-workspace-error add-workspace-hint',
@@ -281,6 +304,216 @@ describe('AddWorkspaceDialog', () => {
       vi.useRealTimers();
     });
 
+    it('submits an SSH URL with Enter without browsing the local filesystem', async () => {
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+          browseDirectories
+          initialPath="/local/"
+        />,
+      );
+      await settle();
+      expect(onSuggest).toHaveBeenCalledWith('/local/');
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).not.toBeNull();
+      expect(document.body.textContent).toContain('ssh://');
+      onSuggest.mockClear();
+      const url = 'ssh://alice@build-box:2222/srv/project';
+      type(`  ${url}  `);
+      await settle();
+      expect(onSuggest).not.toHaveBeenCalled();
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).toBeNull();
+      const enter = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        input().dispatchEvent(enter);
+      });
+      expect(enter.defaultPrevented).toBe(false);
+      expect(input().value.trim()).toBe(url);
+      await act(async () => {
+        input().form!.requestSubmit();
+      });
+      expect(onAdd).toHaveBeenCalledWith(url, true);
+    });
+
+    it('renders a persistent remote directory browser', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          locations={[
+            {
+              origin: 'http://localhost',
+              label: 'This computer',
+              remote: false,
+            },
+            {
+              origin: 'https://remote.example:4170',
+              label: 'remote.example:4170',
+              remote: true,
+            },
+          ]}
+          selectedLocation="https://remote.example:4170"
+          onLocationChange={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      await settle();
+
+      expect(input().value).toBe('/home/me/');
+      expect(listbox()).not.toBeNull();
+      expect(document.body.textContent).toContain('Folder source');
+      expect(document.body.textContent).toContain('remote.example:4170');
+      expect(document.body.textContent).toContain(
+        'Choose a folder below, or type an absolute path.',
+      );
+      expect(submitButton().textContent).toBe('Add this folder');
+
+      act(() => input().blur());
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('switches the folder source from inside the browser', async () => {
+      const onLocationChange = vi.fn();
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          locations={[
+            {
+              origin: 'http://localhost',
+              label: 'This computer',
+              remote: false,
+            },
+            {
+              origin: 'https://remote.example:4170',
+              label: 'remote.example:4170',
+              remote: true,
+            },
+          ]}
+          selectedLocation="http://localhost"
+          onLocationChange={onLocationChange}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={vi.fn().mockResolvedValue(SUGGESTIONS)}
+        />,
+      );
+
+      act(() => {
+        document
+          .querySelector<HTMLButtonElement>(
+            'button[aria-labelledby="workspace-location-label"]',
+          )!
+          .click();
+      });
+      const remote = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((option) => option.textContent === 'remote.example:4170');
+      act(() => remote!.click());
+
+      expect(onLocationChange).toHaveBeenCalledWith(
+        'https://remote.example:4170',
+      );
+    });
+
+    it('navigates to the parent directory without submitting', async () => {
+      const onAdd = vi.fn();
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/code/"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => {
+        document
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Parent folder"]',
+          )!
+          .click();
+      });
+
+      expect(input().value).toBe('/home/me/');
+      expect(onAdd).not.toHaveBeenCalled();
+    });
+
+    it('opens the typed directory on Enter instead of registering it', async () => {
+      const onAdd = vi.fn();
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => {
+        input().dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+      });
+
+      expect(input().value).toBe('/home/me/');
+      expect(onAdd).not.toHaveBeenCalled();
+    });
+
+    it('hides stale remote suggestions as soon as the path changes', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      type('/other/');
+      expect(listbox()).toBeNull();
+    });
+
+    it('reports a failed remote directory lookup', async () => {
+      const onSuggest = vi.fn().mockRejectedValue(new Error('offline'));
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      await settle();
+
+      expect(alert()?.textContent).toContain('Could not read folders');
+    });
+
     it('debounces a suggestion fetch for an absolute prefix and lists directories', async () => {
       const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
@@ -306,11 +539,13 @@ describe('AddWorkspaceDialog', () => {
 
     it('opens the system picker and fills the selected absolute path', async () => {
       const onPick = vi.fn().mockResolvedValue('/Users/me/code');
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
         <AddWorkspaceDialog
           onClose={vi.fn()}
           onAdd={vi.fn()}
           onPick={onPick}
+          onSuggest={onSuggest}
         />,
       );
 
@@ -321,6 +556,254 @@ describe('AddWorkspaceDialog', () => {
 
       expect(onPick).toHaveBeenCalledTimes(1);
       expect(input().value).toBe('/Users/me/code');
+      expect(document.activeElement).not.toBe(input());
+      await settle();
+      expect(listbox()).toBeNull();
+    });
+
+    it('keeps suggestions closed when a lookup finishes after blur', async () => {
+      let resolveSuggestions!: (value: typeof SUGGESTIONS) => void;
+      const onSuggest = vi.fn(
+        () =>
+          new Promise<typeof SUGGESTIONS>((resolve) => {
+            resolveSuggestions = resolve;
+          }),
+      );
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
+
+      expect(listbox()).toBeNull();
+    });
+
+    it('closes the suggestion list when the input blurs', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      expect(listbox()).toBeNull();
+    });
+
+    it('cancels the pending blur dismiss when focus returns to the input', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      act(() => input().blur());
+      act(() => input().focus());
+      // Cross the blur timer's deadline: a still-pending timer would close
+      // the list and invalidate in-flight lookups via the sequence counter.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(listbox()).not.toBeNull();
+
+      type('/home/me/cod');
+      await settle();
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('opens suggestions on the first edit after a re-blur within the blur window', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => input().blur());
+      act(() => input().focus());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60);
+      });
+      // Second blur while the first blur timer is still pending: it must
+      // cancel that timer rather than stack a second one on top of it.
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20);
+      });
+      act(() => input().focus());
+      // Cross the first timer's original deadline: an uncancelled timer
+      // would have bumped the sequence counter by now.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(40);
+      });
+
+      type('/home/me/co');
+      await settle();
+
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('opens suggestions on the first edit after the blur dismiss fired', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      // Stay blurred past the dismiss window so the timer fires.
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(listbox()).toBeNull();
+
+      // Returning and editing must reopen the list on the first edit.
+      act(() => input().focus());
+      type('/home/me/cod');
+      await settle();
+
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('keeps suggestions closed when a pre-blur lookup resolves after refocus', async () => {
+      let resolveSuggestions!: (value: typeof SUGGESTIONS) => void;
+      const onSuggest = vi.fn(
+        () =>
+          new Promise<typeof SUGGESTIONS>((resolve) => {
+            resolveSuggestions = resolve;
+          }),
+      );
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      // Let the debounce fire so the lookup is in flight, then blur past the
+      // dismiss window so the timer fires while the lookup is pending.
+      await settle();
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      // Refocus before the stale lookup resolves: the dismiss must
+      // invalidate it, not let it pop the list open with zero edits.
+      act(() => input().focus());
+      await act(async () => {
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
+
+      expect(listbox()).toBeNull();
+    });
+
+    it('drops stale suggestions on blur dismiss so refocus cannot reopen them', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      // Blur past the dismiss window while the second lookup is still
+      // debounced: the timer invalidates it, so it never refreshes the
+      // stale entries from the first prefix.
+      type('/home/me/cod');
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // Refocusing without editing must not reopen the stale entries.
+      act(() => input().focus());
+      keydown('ArrowDown');
+
+      expect(listbox()).toBeNull();
+    });
+
+    it('opens suggestions for a focused input in a shadow-DOM portal root', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      const host = document.createElement('div');
+      document.body.append(host);
+      container = host;
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      const portalRoot = document.createElement('div');
+      shadowRoot.append(portalRoot);
+      const dialogContainer = document.createElement('div');
+      shadowRoot.append(dialogContainer);
+      root = createRoot(dialogContainer);
+      act(() => {
+        root!.render(
+          <WebShellPortalRootContext.Provider value={portalRoot}>
+            <I18nProvider language="en">
+              <AddWorkspaceDialog
+                onClose={vi.fn()}
+                onAdd={vi.fn()}
+                onSuggest={onSuggest}
+              />
+            </I18nProvider>
+          </WebShellPortalRootContext.Provider>,
+        );
+      });
+
+      const shadowInput = shadowRoot.querySelector<HTMLInputElement>(
+        '#add-workspace-path',
+      )!;
+      // document.activeElement retargets to the shadow host in this mode.
+      expect(shadowRoot.activeElement).toBe(shadowInput);
+      expect(document.activeElement).toBe(host);
+
+      typeInto(shadowInput, '/home/me/co');
+      await settle();
+
+      expect(shadowRoot.querySelector('[role="listbox"]')).not.toBeNull();
     });
 
     it('leaves the path unchanged when the system picker is cancelled', async () => {
@@ -341,16 +824,204 @@ describe('AddWorkspaceDialog', () => {
       expect(input().value).toBe('');
     });
 
-    it('shows an error when the system picker fails', async () => {
-      const onPick = vi.fn().mockRejectedValue(new Error('boom'));
+    it('opens suggestions on the first edit after a cancelled picker', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
         <AddWorkspaceDialog
           onClose={vi.fn()}
           onAdd={vi.fn()}
           onPick={onPick}
+          onSuggest={onSuggest}
         />,
       );
 
+      act(() => {
+        browseButton().click();
+      });
+      // Simulate the picker staying open well past the blur window.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      await act(async () => {
+        resolvePick(undefined);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => input().focus());
+      type('/home/me/co');
+      await settle();
+
+      expect(onSuggest).toHaveBeenCalledWith('/home/me/co');
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('opens suggestions on the first edit after picking the typed path', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      act(() => {
+        browseButton().click();
+      });
+      // Browse closes the open list while the picker is up.
+      expect(listbox()).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      await act(async () => {
+        // Same value as typed: setPath bails out, so no path-change effect.
+        resolvePick('/home/me/co');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => input().focus());
+      type('/home/me/cod');
+      await settle();
+
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('does not pop suggestions open on refocus when a same-value pick raced an in-flight lookup', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      let resolveSuggestions!: (value: typeof SUGGESTIONS) => void;
+      const onSuggest = vi.fn(
+        () =>
+          new Promise<typeof SUGGESTIONS>((resolve) => {
+            resolveSuggestions = resolve;
+          }),
+      );
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      // Browse while the first lookup is still debounced, then let the
+      // debounce fire so the lookup is in flight while the picker is open.
+      act(() => {
+        browseButton().click();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      await act(async () => {
+        resolvePick('/home/me/co');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => input().focus());
+      await act(async () => {
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
+
+      // The lookup predates Browse; the same-value pick must invalidate it
+      // so a bare refocus cannot pop the list open.
+      expect(listbox()).toBeNull();
+
+      type('/home/me/cod');
+      await settle();
+      await act(async () => {
+        // resolveSuggestions now points at the second lookup's resolver.
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('keeps the pick-triggered lookup closed until the first edit', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => {
+        browseButton().click();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      await act(async () => {
+        resolvePick('/Users/me/code');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(input().value).toBe('/Users/me/code');
+      // Refocusing to fine-tune the picked path while its lookup is still
+      // pending must not pop the list open; only a real edit may.
+      act(() => input().focus());
+      await settle();
+      expect(listbox()).toBeNull();
+
+      type('/Users/me/code/s');
+      await settle();
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('shows an error when the system picker fails', async () => {
+      const onPick = vi.fn().mockRejectedValue(new Error('boom'));
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      // The picker rejects instantly (e.g. no zenity/osascript on a
+      // headless host).
       await act(async () => {
         browseButton().click();
         await Promise.resolve();
@@ -360,6 +1031,20 @@ describe('AddWorkspaceDialog', () => {
       expect(alert()?.textContent).toContain(
         'Unable to open the system folder picker',
       );
+
+      // No blur timer is pending here — pickDirectory cancels it right
+      // after blur(). Cross the dismiss deadline anyway: even a leaked
+      // dismiss must not stop the first edit below from opening the list.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      act(() => input().focus());
+      type('/home/me/co');
+      await settle();
+
+      expect(onSuggest).toHaveBeenCalledWith('/home/me/co');
+      expect(listbox()).not.toBeNull();
     });
 
     it('never queries for a non-absolute value', async () => {
@@ -493,7 +1178,8 @@ describe('AddWorkspaceDialog', () => {
           resolveAdd = resolve;
         }),
     );
-    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={onAdd} />);
+    const onClose = vi.fn();
+    mount(<AddWorkspaceDialog onClose={onClose} onAdd={onAdd} />);
 
     type('/abs/project');
     submit();
@@ -504,10 +1190,22 @@ describe('AddWorkspaceDialog', () => {
     expect(submitButton().textContent).toBe('Adding…');
     expect(submitButton().disabled).toBe(true);
     expect(input().disabled).toBe(true);
+    expect(document.querySelector('button[aria-label="Close"]')).toBeNull();
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onClose).not.toHaveBeenCalled();
 
     resolveAdd();
     await act(async () => {
       await Promise.resolve();
     });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

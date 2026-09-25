@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { nextSettingIdx, type FlatRow } from './SettingsMessage';
-import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSettingDescriptor } from '@qwen-code/web-shell/daemon-react-sdk';
 
 function setting(key: string): DaemonSettingDescriptor {
   return {

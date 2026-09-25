@@ -5,11 +5,12 @@
  */
 
 import type React from 'react';
+import { createRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { Text } from 'ink';
-import { ScrollableList } from './ScrollableList.js';
+import { ScrollableList, type ScrollableListRef } from './ScrollableList.js';
 import { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 
@@ -102,6 +103,38 @@ describe('<ScrollableList /> mouse scrolling', () => {
     });
     await flushScrollFrame();
     expect(lastFrame()).toContain('item-0');
+  });
+
+  it('preserves the full delta of a coalesced wheel burst', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(200)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    await act(async () => {
+      for (let i = 0; i < 30; i++) stdin.write(wheelUp(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(105);
   });
 
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {

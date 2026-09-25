@@ -15,6 +15,15 @@ describe('DingTalk markdown utilities', () => {
       expect(splitChunks('')).toEqual(['']);
     });
 
+    it.each([1, 4, 7])(
+      'rejects code-fence limit %i when it cannot make progress',
+      (chunkLimit) => {
+        expect(() => splitChunks('```\nabc\n```', chunkLimit)).toThrow(
+          RangeError,
+        );
+      },
+    );
+
     it('splits long text into chunks', () => {
       const line = 'a'.repeat(100) + '\n';
       const text = line.repeat(50); // 5050 chars > 3800
@@ -32,6 +41,20 @@ describe('DingTalk markdown utilities', () => {
       expect(chunks.join('')).toBe(text);
       chunks.forEach((chunk) => {
         expect(chunk.length).toBeLessThanOrEqual(3800);
+      });
+    });
+
+    it('does not split surrogate pairs at an odd chunk boundary', () => {
+      const text = '😀'.repeat(2500);
+      const chunks = splitChunks(text, 3799);
+
+      expect(chunks.join('')).toBe(text);
+      chunks.forEach((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(3799);
+        const last = chunk.charCodeAt(chunk.length - 1);
+        const first = chunk.charCodeAt(0);
+        expect(last < 0xd800 || last > 0xdbff).toBe(true);
+        expect(first < 0xdc00 || first > 0xdfff).toBe(true);
       });
     });
 

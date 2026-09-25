@@ -9,11 +9,19 @@ const platforms = {};
 const platformArtifacts = [
   [
     'darwin-aarch64',
-    selectArtifact(assets, /-aarch64-apple-darwin\.app\.tar\.gz$/i, 'darwin-aarch64'),
+    selectArtifact(
+      assets,
+      /-aarch64-apple-darwin\.app\.tar\.gz$/i,
+      'darwin-aarch64',
+    ),
   ],
   [
     'darwin-x86_64',
-    selectArtifact(assets, /-x86_64-apple-darwin\.app\.tar\.gz$/i, 'darwin-x86_64'),
+    selectArtifact(
+      assets,
+      /-x86_64-apple-darwin\.app\.tar\.gz$/i,
+      'darwin-x86_64',
+    ),
   ],
   ['windows-x86_64', selectArtifact(assets, /-setup\.exe$/i, 'windows-x86_64')],
   ['linux-x86_64', selectArtifact(assets, /\.AppImage$/i, 'linux-x86_64')],
@@ -25,8 +33,10 @@ for (const [platform, artifact] of platformArtifacts) {
     throw new Error(`Missing updater signature for ${artifact}`);
   }
   platforms[platform] = {
-    signature: fs.readFileSync(path.join(options.assets, signatureFile), 'utf8').trim(),
-    url: `https://github.com/${options.repository}/releases/download/${options.tag}/${encodeURIComponent(artifact)}`,
+    signature: fs
+      .readFileSync(path.join(options.assets, signatureFile), 'utf8')
+      .trim(),
+    url: `${releaseBaseUrl(options)}/${encodeURIComponent(artifact)}`,
   };
 }
 
@@ -45,6 +55,12 @@ function selectArtifact(assets, pattern, platform) {
     );
   }
   return matches[0];
+}
+
+function releaseBaseUrl(options) {
+  return options['base-url']
+    ? options['base-url'].replace(/\/+$/, '')
+    : `https://github.com/${options.repository}/releases/download/${options.tag}`;
 }
 
 function parseArguments(args) {

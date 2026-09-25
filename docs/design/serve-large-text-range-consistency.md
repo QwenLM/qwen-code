@@ -82,7 +82,14 @@ reaching this boundary:
 
 - `GET /file`
 - ACP HTTP `_qwen/file/read`
-- the injected ACP `readTextFile` adapter
+
+The injected ACP `readTextFile` adapter is no longer a production consumer:
+same-host daemon runtimes advertise `readTextFile: false`, so agent text reads
+are served by the child's regular CLI filesystem service and never reach this
+boundary. The adapter's read path is kept as a fail-closed guard for an
+unexpected or capability-violating delegated read, but the concurrent-append,
+truncation, and symlink-replacement guarantees verified below no longer apply
+to any agent read. See [daemon local text reads](./daemon-local-text-reads.md).
 
 Windowless reads used by workspace setup retain the existing 256 KiB
 full-snapshot refusal.

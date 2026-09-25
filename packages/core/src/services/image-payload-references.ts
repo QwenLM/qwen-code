@@ -4,15 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, ContentListUnion } from '@google/genai';
 import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
 const IMAGE_ID_LENGTH = 12;
+// Anchor the match to the full output of `imageReferenceText` so only the
+// markers eviction actually wrote resolve against the store. A bare
+// `Image #<id>` echo (a model reply quoting the id, or a post-compaction
+// summary that retained marker text) must not resurrect the stored payload.
 const IMAGE_REFERENCE_PATTERN = new RegExp(
-  `Image #([a-f0-9]{${IMAGE_ID_LENGTH}})`,
+  `\\[Image #([a-f0-9]{${IMAGE_ID_LENGTH}}): [^\\]]+\\]`,
   'gi',
 );
 
@@ -49,16 +53,7 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
 
 export function countAllInlineImages(contents: Content[]): number {
   let count = 0;
-  for (const content of contents) {
-    for (const part of content.parts ?? []) {
-      if (part.inlineData?.mimeType?.startsWith('image/')) count++;
-      const nested = getFunctionResponseParts(part);
-      if (!nested) continue;
-      for (const inner of nested) {
-        if (inner.inlineData?.mimeType?.startsWith('image/')) count++;
-      }
-    }
-  }
+  for (const _part of inlineImageParts(contents)) count++;
   return count;
 }
 
@@ -76,66 +71,107 @@ export function replaceImagePayloadsInPlace(
   skipContent?: Content,
 ): StoredImagePayload[] {
   const replaced: StoredImagePayload[] = [];
-  for (const content of contents) {
-    if (content === skipContent) continue;
-    if (!content.parts) continue;
-    for (let i = 0; i < content.parts.length; i++) {
-      const part = content.parts[i]!;
-      if (
-        part.inlineData?.mimeType?.startsWith('image/') &&
-        part.inlineData.data
-      ) {
-        const stored = store.put(part);
-        replaced.push(stored);
-        content.parts[i] = { text: imageReferenceText(stored) };
-        continue;
-      }
-      const nested = getFunctionResponseParts(part);
-      if (!nested) continue;
-      for (let j = 0; j < nested.length; j++) {
-        const inner = nested[j]!;
-        if (
-          inner.inlineData?.mimeType?.startsWith('image/') &&
-          inner.inlineData.data
-        ) {
-          const stored = store.put(inner);
-          replaced.push(stored);
-          nested[j] = { text: imageReferenceText(stored) };
-        }
-      }
-    }
+  for (const part of inlineImageParts(contents, skipContent)) {
+    const stored = store.put(part);
+    replaced.push(stored);
+    part.text = imageReferenceText(stored);
+    delete part.inlineData;
   }
   return replaced;
 }
 
 /**
- * Build the reattach parts for the most recent unique images from a
- * replacement pass. Used after `replaceImagePayloadsInPlace` to append
- * recent image bytes to the outgoing request.
+ * Build reattach parts from images replaced in the current pass and stored
+ * payloads referenced by markers in `referencedContents`, even when the
+ * current pass replaced nothing.
  */
 export function buildReattachParts(
   replaced: StoredImagePayload[],
   maxRecentImages: number,
+  referencedContents: Content[] = [],
+  store?: ImagePayloadStore,
 ): Part[] {
-  if (maxRecentImages <= 0 || replaced.length === 0) return [];
-  const recent: StoredImagePayload[] = [];
-  const seen = new Set<string>();
-  for (let i = replaced.length - 1; i >= 0; i--) {
-    const img = replaced[i]!;
-    if (seen.has(img.id)) continue;
-    seen.add(img.id);
-    recent.push(img);
-    if (recent.length === maxRecentImages) break;
+  const referencedIds = collectReferencedImageIds(referencedContents);
+  if (replaced.length === 0 && (!store || referencedIds.size === 0)) return [];
+  const inlineIds = collectInlineImageIds(referencedContents);
+  const last = referencedContents.at(-1);
+  const lastReferencedIds = collectReferencedImageIds(
+    last?.role === 'user' ? [last] : [],
+  );
+  const candidates: CollectedImage[] = replaced
+    .filter(
+      (image) => !inlineIds.has(image.id) && !lastReferencedIds.has(image.id),
+    )
+    .map((stored) => ({ stored }));
+
+  if (store) {
+    for (const id of referencedIds) {
+      if (inlineIds.has(id) || lastReferencedIds.has(id)) continue;
+      const stored = store.get(id);
+      if (stored) candidates.push({ stored });
+    }
   }
-  recent.reverse();
+  const recent = recentUniqueImages(candidates, maxRecentImages).map(
+    ({ stored }) => stored,
+  );
+  const reattachLimit = Math.max(maxRecentImages, 1);
+  if (store) {
+    for (const id of lastReferencedIds) {
+      if (inlineIds.has(id) || recent.some((image) => image.id === id)) {
+        continue;
+      }
+      const stored = store.get(id);
+      if (stored) {
+        if (recent.length >= reattachLimit) recent.shift();
+        recent.push(stored);
+      }
+    }
+  }
+  if (recent.length === 0) return [];
   return [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        recent.map((img) => `Image #${img.id}`).join(', '),
+      text: reattachContextText(recent.map((img) => img.id)),
+      partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
-    ...recent.map(storedImageToPart),
+    ...recent.flatMap(labeledReattachParts),
   ];
+}
+
+/**
+ * `partMetadata` key stamped on the leading text marker of the volatile
+ * reattach region. `buildReattachParts` re-generates that region on every
+ * request, so the DashScope cache pass uses this marker to place the
+ * conversation breakpoint *before* the reattached images instead of after
+ * them — keeping the cached prefix stable across turns (issue #11627).
+ * It is client-side metadata only: the OpenAI-compatible converters never
+ * serialize `partMetadata`, and the native SDK generator strips it in
+ * `LlmContentGenerator.stripPartFields` before the request is built, so it
+ * never reaches the wire.
+ */
+export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
+
+/**
+ * Number of trailing parts of the last content that belong to the reattach
+ * region, or 0 when the request ends without one. Each reattach part (one
+ * text marker, then a text label and an inline image per replayed image)
+ * converts to exactly one OpenAI content block, so this equals the
+ * trailing reattach block count on the wire.
+ */
+export function trailingReattachPartCount(contents: ContentListUnion): number {
+  const last = Array.isArray(contents) ? contents.at(-1) : undefined;
+  const parts =
+    last && typeof last === 'object' && 'parts' in last
+      ? last.parts
+      : undefined;
+  if (!Array.isArray(parts) || parts.length === 0) return 0;
+  const firstMarked = parts.findIndex(
+    (part) =>
+      typeof part === 'object' &&
+      part !== null &&
+      part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true,
+  );
+  if (firstMarked === -1) return 0;
+  return parts.length - firstMarked;
 }
 
 export function prepareImagePayloadsForRequest(
@@ -147,7 +183,9 @@ export function prepareImagePayloadsForRequest(
     store: ImagePayloadStore;
   },
 ): Content[] {
-  const referencedIds = collectReferencedImageIds(contents.at(-1));
+  const referencedIds = collectReferencedImageIds(
+    contents.at(-1) ? [contents.at(-1)!] : [],
+  );
   const collected: CollectedImage[] = [];
   const transformed = contents.map((content, index) => {
     if (index === options.preserveImagePartsForContentIndex) {
@@ -199,11 +237,9 @@ export function prepareImagePayloadsForRequest(
 
   const reattachParts: Part[] = [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        [...reattachById.keys()].map((id) => `Image #${id}`).join(', '),
+      text: reattachContextText([...reattachById.keys()]),
     },
-    ...[...reattachById.values()].map(storedImageToPart),
+    ...[...reattachById.values()].flatMap(labeledReattachParts),
   ];
 
   const last = transformed.at(-1);
@@ -243,15 +279,52 @@ function transformPart(
   return part;
 }
 
-function collectReferencedImageIds(content: Content | undefined): Set<string> {
+function collectInlineImageIds(contents: Content[]): Set<string> {
   const ids = new Set<string>();
-  for (const part of content?.parts ?? []) {
-    const text = part.text;
-    if (!text) continue;
-    for (const match of text.matchAll(IMAGE_REFERENCE_PATTERN)) {
-      const id = match[1];
-      if (id) ids.add(id.toLowerCase());
+  for (const part of inlineImageParts(contents)) {
+    ids.add(imagePartToStoredPayload(part).id);
+  }
+  return ids;
+}
+
+function* inlineImageParts(
+  contents: Content[],
+  skipContent?: Content,
+): Generator<Part> {
+  for (const content of contents) {
+    if (content === skipContent) continue;
+    for (const part of content.parts ?? []) {
+      if (
+        part.inlineData?.mimeType?.startsWith('image/') &&
+        part.inlineData.data
+      ) {
+        yield part;
+      }
+      for (const inner of getFunctionResponseParts(part) ?? []) {
+        if (
+          inner.inlineData?.mimeType?.startsWith('image/') &&
+          inner.inlineData.data
+        ) {
+          yield inner;
+        }
+      }
     }
+  }
+}
+
+function collectReferencedImageIds(contents: Content[]): Set<string> {
+  const ids = new Set<string>();
+  const collect = (parts: Part[] | undefined): void => {
+    for (const part of parts ?? []) {
+      for (const match of part.text?.matchAll(IMAGE_REFERENCE_PATTERN) ?? []) {
+        const id = match[1];
+        if (id) ids.add(id.toLowerCase());
+      }
+      collect(getFunctionResponseParts(part));
+    }
+  };
+  for (const content of contents) {
+    collect(content.parts);
   }
   return ids;
 }
@@ -294,6 +367,29 @@ function imagePartToStoredPayload(part: Part): StoredImagePayload {
 
 function imageReferenceText(stored: StoredImagePayload): string {
   return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
+}
+
+function reattachContextText(ids: readonly string[]): string {
+  return (
+    'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
+    ids.map((id) => `Image #${id}`).join(', ') +
+    '. Each one is labeled with its id below.'
+  );
+}
+
+// A lone id list above N unlabeled images cannot be mapped back to them, so
+// a one-image turn followed by several replays reads as "the old images are
+// the new ones" (#12544). Label every replayed image with its id. The label
+// deliberately makes no claim about which turn an image belongs to: this
+// module cannot tell where the current turn starts, and a wrong claim in
+// either direction misleads the model more than the header's caveat does.
+function labeledReattachParts(stored: StoredImagePayload): Part[] {
+  return [
+    {
+      text: `Image #${stored.id}: replayed snapshot from earlier in this session, may be OUTDATED`,
+    },
+    storedImageToPart(stored),
+  ];
 }
 
 function safeImageMimeType(mimeType: string): string {

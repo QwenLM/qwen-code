@@ -15,21 +15,40 @@ mints session-scoped tab and element capabilities.
 The canonical loop is:
 
 ```text
-start_session
+start_session(session?)                                  # optional; can name before acting
 list_windows or launch_app
-get_browser_state(pid, window_id, session)       # bind
-get_browser_state(target_id, tab_id, session,
-                  snapshot_format=semantic_v2)  # snapshot
+get_browser_state(pid, window_id, session?)               # bind
+get_browser_state(target_id, tab_id, session?,
+                  snapshot_format=semantic_v2)            # snapshot
 browser_navigate / browser_click / browser_type / browser_pointer
 browser_dialog / browser_set_input_files / browser_download
-get_browser_state(target_id, tab_id, session,
-                  snapshot_format=semantic_v2)  # verify and refresh refs
-end_session
+get_browser_state(target_id, tab_id, session?,
+                  snapshot_format=semantic_v2)            # verify and refresh refs
+end_session(session?)                                     # optional cleanup
 ```
 
-Use one explicit `session` value throughout. Never substitute a raw CDP
-target id, tab ordinal, URL match, or remembered ref for a capability returned
-by `get_browser_state`.
+For a multi-call browser workflow, prefer a short `session` label and pass the
+same value on every call that accepts it. Passing it once is not sticky; a later
+omitted value uses the transport's implicit session. One long-lived MCP or SDK
+transport may omit `session` for one-off or deliberately unlabeled work; its
+first admitted call creates one implicit session and later unnamed calls reuse
+it. Direct one-shot CLI calls use disposable transports. Never substitute a raw
+CDP target id, tab ordinal, URL match, or remembered ref for a capability
+returned by `get_browser_state`.
+
+### Copy page content to the system clipboard
+
+If the requested outcome is exact page content on the system clipboard—not a
+literal text-selection gesture—read the content from a fresh semantic browser
+snapshot, call `clipboard_write` with the exact observed value, and verify it
+with `clipboard_read`. This path is background-safe and does not require a
+clickable ref: passive headings and text nodes are evidence sources, not
+controls that must be clicked before their value can be copied.
+
+Fall back to visual text selection and the platform copy hotkey only when the
+user explicitly requires that gesture or clipboard tools are unavailable.
+That fallback is native input, not a typed page mutation, and may require the
+foreground escalation rules in `SKILL.md`.
 
 ### Browser recording feedback
 
@@ -88,14 +107,16 @@ Prefer an isolated profile when the task does not need the user's existing
 cookies or login state:
 
 ```bash
-# Direct CLI/raw clients mint this token interactively. MCP hosts can use their
-# destructive-tool approval flow instead.
-qwen-cua-driver browser-approve --pid 4242 --profile-mode isolated_new
-
 qwen-cua-driver browser_prepare \
   '{"pid":4242,"session":"browser-run-1","allow_launch":true,
-    "profile":{"mode":"isolated_new"},"approval_token":"<token>"}'
+    "profile":{"mode":"isolated_new"}}'
 ```
+
+Isolated preparation follows the runtime permission mode and optional
+capability manifest. Standard mode treats it as routine, bounded mode requires
+a matching manifest, and unrestricted mode requires the launcher's dangerous
+acknowledgement. `allow_launch: true` states that this call may create the
+separate process; it does not widen runtime authorization.
 
 Use `isolated_named` with a path-safe `name` for a reusable driver-managed
 profile. Preparation launches a separate browser and never copies, modifies,
@@ -282,9 +303,11 @@ qwen-cua-driver browser_click \
 
 `dom_event` calls the page element's click behavior without pretending that a
 trusted pointer event occurred. It requires a ref and is the full-background
-alternative where supported. Never silently change trust class after a
-refusal. Coordinate clicks accept viewport CSS `x` and `y`, but only on the
-trusted route; prefer refs.
+alternative where supported. Dispatch is not proof that the control activated:
+trust-gated controls can ignore synthetic events, so refresh page state and
+verify the expected postcondition. Never silently change trust class or
+foreground the browser after a refusal. Coordinate clicks accept viewport CSS
+`x` and `y`, but only on the trusted route; prefer refs.
 
 ### Type
 
@@ -409,8 +432,9 @@ result from the current host, process, window, session, and tab.
 - `browser_requires_setup`: obtain explicit approval and call
   `browser_prepare`; never make setup a hidden read side effect.
 - `browser_consent_required`: restart standard mode with the trusted launch
-  grant, use a matching bounded manifest, or let the embedding host decide the
-  attested request. Do not automate a generic approval dialog.
+  grant, use a capability manifest that admits the exact resource while the
+  selected profile remains independently binding, or let the embedding host
+  decide the attested request. Do not automate a generic approval dialog.
 - `browser_binding_ambiguous` or heuristic binding: resolve the native-window
   ambiguity and bind again; do not mutate.
 - `browser_ref_stale`: snapshot again and use a new ref.

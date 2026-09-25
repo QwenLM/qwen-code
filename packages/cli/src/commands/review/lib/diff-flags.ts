@@ -16,13 +16,47 @@
 /**
  * Config overrides that have no command-line equivalent.
  *
- * `diff.suppressBlankEmpty` is the only one so far: with it set, git prints a
- * blank context line as a physically empty record rather than a lone space, and
- * the parser's new-side cursor must know which it is getting.
+ * `diff.suppressBlankEmpty`: with it set, git prints a blank context line as a
+ * physically empty record rather than a lone space, and the parser's new-side
+ * cursor must know which it is getting.
+ *
+ * `core.quotePath=false`: git's DEFAULT is to C-style-quote any path with a
+ * non-ASCII byte — `"docs/\\346\\236\\266\\346\\236\\204.md"`. Nothing
+ * downstream is broken by that on its own; `parseDiff` unquotes, so the chunk
+ * plan and the containment oracle name such a path correctly either way. The
+ * pin is about there being ONE shape rather than two: it is the capture, not
+ * each reader, that decides how a path is spelled, so a consumer that reads
+ * the raw diff text — or a new one written against the unquoted form, which is
+ * what every existing reader assumes — cannot be silently wrong for the subset
+ * of repositories that have a non-ASCII filename.
  */
 export const PINNED_DIFF_CONFIG: readonly string[] = [
   '-c',
   'diff.suppressBlankEmpty=false',
+  '-c',
+  'core.quotePath=false',
+  // The HUNK SHAPE, which the flags above do not pin: `diff.algorithm` and
+  // `diff.indentHeuristic` move where a hunk starts and ends with the blobs,
+  // the mode and the attributes all standing still. Pinned to git's own
+  // defaults so two checkouts render one diff the same way.
+  //
+  // These two are NOT the boundary of the per-file verdict identity, and
+  // that identity is not a class to be closed one knob at a time. It
+  // certifies CONTENT: the `<mode> <oid>` pair, plus the attributes that
+  // decide whether the content is rendered at all (`binary`, `-diff`,
+  // `text`, a driver's `binary`) — and the knobs that could HIDE content
+  // from a reviewer are pinned by the flags below (`--no-ext-diff`,
+  // `--no-textconv`, `--ignore-submodules=none`). Every remaining diff knob
+  // — inter-hunk context, an order file, function-name headers, a
+  // driver-scoped algorithm, the rename limit — changes how the same changed
+  // lines are grouped, ordered or labelled, never which lines changed (a
+  // rename the limit demotes to delete+add shows MORE of the file, and the
+  // added side's absent base never transfers, per `changedPairs`).
+  // Presentation is not certified, so it is not recorded.
+  '-c',
+  'diff.algorithm=myers',
+  '-c',
+  'diff.indentHeuristic=true',
 ];
 
 /**

@@ -59,11 +59,10 @@ export QQ_APP_SECRET=<your-app-secret>
       "appID": "YOUR_APP_ID",
       "appSecret": "$QQ_APP_SECRET",
       "sandbox": false,
-      "senderPolicy": "open",
+      "privatePolicy": "open",
       "sessionScope": "thread",
       "cwd": "/path/to/your/project",
       "instructions": "你是一个通过 QQ Bot 对话的 AI 助手。回复控制在 2000 字符以内。",
-      "blockStreaming": "on",
       "groupPolicy": "disabled",
       "groups": {
         "*": { "requireMention": true }
@@ -84,7 +83,7 @@ export QQ_APP_SECRET=<your-app-secret>
 | `sandbox`   | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`) |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
-`senderPolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`, `blockStreaming`, `blockStreamingChunk`, `blockStreamingCoalesce`.
+`privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
 
 ## Running
 
@@ -102,9 +101,10 @@ Open QQ and send a message to your bot. You should see the response arrive in yo
 
 To use the bot in QQ groups:
 
-1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. Add the bot to a QQ group via the QQ Bot Open Platform dashboard or by having a group admin invite it
 3. Group members must **@mention** the bot to trigger a response
+4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot by default (restrict with the group's `senders: "allowlist"` and `allowedUsers`); `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved group.
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
 
@@ -145,7 +145,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 - **Use Markdown freely** — Unlike WeChat, QQ renders Markdown natively. Bold, code blocks, lists, and links all work.
 - **Keep responses under 2000 characters** — Longer responses are automatically split into chunks. Adding a length hint to your instructions helps the agent stay concise.
 - **Sandbox for testing** — Set `"sandbox": true` to use the sandbox API during development. No production messages will be affected.
-- **Restrict access** — Use `senderPolicy: "allowlist"` for a fixed set of QQ users, or `"pairing"` to approve new users from the CLI. See [DM Pairing](./overview#dm-pairing) for details.
+- **Restrict access** — Use `privatePolicy: "allowlist"` for a fixed set of QQ users, or `"pairing"` to approve new users from the CLI. See [DM Pairing](./overview#dm-pairing) for details.
 
 ## Key Differences from Telegram
 
@@ -164,12 +164,13 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 
 - Check the terminal output for errors
 - Verify the channel is running (`qwen channel status`)
-- If using `senderPolicy: "allowlist"`, make sure your QQ user ID is in `allowedUsers`
+- If using `privatePolicy: "allowlist"`, make sure your QQ user ID is in `allowedUsers`
 - On first start, a QR code will appear in the terminal — scan it with your QQ app
 
 ### Bot doesn't respond in groups
 
-- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- Check that `groupPolicy` is set to `"allowlist"`, `"pairing"`, or `"open"` (default is `"disabled"`)
+- If using `"pairing"`, verify the group's pairing request has been approved
 - **You must @mention the bot** — QQ only delivers messages that tag the bot
 - Verify the bot has been added to the group
 

@@ -12,6 +12,19 @@ export interface ExternalContextProvider {
   }): Promise<readonly ExternalContextItem[]>;
 }
 
+export interface ExternalMemoryWriter {
+  remember(input: {
+    content: string;
+    signal: AbortSignal;
+  }): Promise<RememberResult>;
+}
+
+export type RememberResult =
+  | { status: 'stored'; providerOperationId?: string }
+  | { status: 'accepted'; providerOperationId: string }
+  | { status: 'failed' }
+  | { status: 'unknown' };
+
 export interface ExternalContextItem {
   id: string;
   content: string;
@@ -25,6 +38,9 @@ export interface ExternalContextConfigV1 {
   version: 1;
   timeoutMs: number;
   provider: ProviderConfig;
+  write?: {
+    enabled: true;
+  };
 }
 
 export interface ExternalContextConfigV2 {
@@ -43,13 +59,41 @@ export interface AutoRecallConfig {
   timeoutMs: number;
 }
 
-export type ProviderConfig = Mem0ProviderConfig | GenericHttpProviderConfig;
+export type ProviderConfig =
+  | Mem0ProviderConfig
+  | Mem0CompatibleProviderConfig
+  | GenericHttpProviderConfig;
 
 export interface Mem0ProviderConfig {
   type: 'mem0-platform-v3';
   apiKeyEnv: string;
   apiKey: string;
   appId: string;
+}
+
+export const MEM0_PRESET_IDS = [
+  'mem0-platform-v3',
+  'mem0-oss-rest-2026-08',
+  'aliyun-polardb-mysql-2026-08',
+] as const;
+
+export type Mem0PresetId = (typeof MEM0_PRESET_IDS)[number];
+
+export interface Mem0CompatibleProviderConfig {
+  type: 'mem0';
+  preset: Mem0PresetId;
+  endpoint: {
+    origin: string;
+    basePath: string;
+    allowInsecureHttp?: boolean;
+  };
+  credentialEnv: string;
+  credential: string;
+  scope: {
+    userId?: string;
+    agentId?: string;
+    appId?: string;
+  };
 }
 
 export interface GenericHttpProviderConfig {

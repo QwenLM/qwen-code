@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Keep build info OUT of outDir so it is not published in the tarball.
+    "tsBuildInfoFile": "./tsconfig.build.tsbuildinfo",
+    // Sourcemaps would reference ../src, which is not shipped; drop them from
+    // the published artifact rather than ship dangling maps.
+    "sourceMap": false,
+    "declarationMap": false
+  },
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+}

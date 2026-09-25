@@ -8,12 +8,14 @@ import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
 import { GOAL_STATUS_KINDS, MessageType } from '../../types.js';
-import { GoalStatusMessage } from './GoalStatusMessage.js';
+import { theme } from '../../semantic-colors.js';
+import { GoalStatusMessage, goalCardThemeColor } from './GoalStatusMessage.js';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
   activity: GoalSnapshotV2['activity'] = 'idle',
   lastReason?: string,
+  overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
 ): GoalSnapshotV2 {
   return {
     v: 2,
@@ -26,9 +28,11 @@ function snapshot(
       evidenceCursor: { recordId: 'record-1' },
       turnCount: 4,
       activeTimeMs: 12_000,
+      tokensUsed: 0,
       createdAt: 1_000,
       updatedAt: 13_000,
       ...(lastReason ? { lastReason } : {}),
+      ...overrides,
     },
   };
 }
@@ -143,5 +147,143 @@ describe('<GoalStatusMessage />', () => {
     if (value.goal?.lastReason) {
       expect(output).toContain(`Reason: ${value.goal.lastReason}`);
     }
+  });
+
+  it.each([
+    [3, 20, 723_000, 1_800_000, '3/20 turns · 12m 3s/30m'],
+    [1, 20, 0, undefined, '1/20 turns'],
+    [1, 1, 0, undefined, '1/1 turn'],
+    [3, undefined, 723_000, undefined, '3 turns · 12m 3s'],
+  ])(
+    'shows turn and active-time budgets (%s/%s)',
+    (turnCount, turnBudget, activeTimeMs, activeTimeBudgetMs, expected) => {
+      const { lastFrame } = render(
+        <GoalStatusMessage
+          snapshot={snapshot('paused', 'idle', undefined, {
+            turnCount,
+            turnBudget,
+            activeTimeMs,
+            activeTimeBudgetMs,
+          })}
+        />,
+      );
+      expect(lastFrame()).toContain(expected);
+    },
+  );
+
+  it('hides unused turn and active-time budgets', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'idle', undefined, {
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        })}
+      />,
+    );
+    expect(lastFrame()).not.toContain('turns');
+    expect(lastFrame()).not.toContain('/30m');
+  });
+
+  it('reports spend against the budget on a lifecycle card', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('4 turns · 12s · 1.2k/30.0m tokens');
+  });
+
+  it('reports spend alone when the Goal has no budget', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', undefined, {
+          tokensUsed: 1_234,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('1.2k tokens');
+    expect(lastFrame()).not.toContain('1.2k/');
+  });
+
+  it('says nothing about spend before a turn has billed', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          tokenBudget: 30_000_000,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('4 turns · 12s');
+    expect(lastFrame()).not.toContain('tokens');
+  });
+
+  it('never writes control characters from a stop reason to the terminal', () => {
+    // A pause reason can embed a raw provider error.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot(
+          'paused',
+          'idle',
+          'paused\r\u001b]52;c;ZXh0cmFjdGVk\u0007 by user',
+        )}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Reason: paused');
+    expect(frame).not.toContain('\r');
+    expect(frame).not.toContain('\u0007');
+  });
+
+  it('says nothing about checkpoints on a healthy card', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage snapshot={snapshot('active', 'running')} />,
+    );
+
+    expect(lastFrame()).not.toContain('Checkpoint');
+  });
+
+  it('leaves the legacy card without spend it cannot know', () => {
+    // The legacy props carry an iteration count and nothing else; there is no
+    // record behind them to read a spend off.
+    const { lastFrame } = render(
+      <GoalStatusMessage kind="set" condition="finish the refactor" />,
+    );
+
+    expect(lastFrame()).not.toContain('tokens');
+  });
+
+  it('maps every palette slot of a card view to its theme colour', () => {
+    expect({
+      secondary: goalCardThemeColor('secondary'),
+      accent: goalCardThemeColor('accent'),
+      warning: goalCardThemeColor('warning'),
+      error: goalCardThemeColor('error'),
+      success: goalCardThemeColor('success'),
+    }).toEqual({
+      secondary: theme.text.secondary,
+      accent: theme.text.accent,
+      warning: theme.status.warning,
+      error: theme.status.error,
+      success: theme.status.success,
+    });
+    // Five slots, five colours: no two states may look alike.
+    expect(
+      new Set([
+        theme.text.secondary,
+        theme.text.accent,
+        theme.status.warning,
+        theme.status.error,
+        theme.status.success,
+      ]).size,
+    ).toBe(5);
   });
 });

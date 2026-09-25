@@ -61,9 +61,12 @@ const wasmBinaryPlugin = {
 // both OTLP protocol chains (~2 MiB) back into the sdk-impl static closure
 // and defeat the per-protocol dynamic imports in
 // `packages/core/src/telemetry/sdk-{impl,exporters-grpc,exporters-http}.ts`
-// (issue #7264). qwen-code always passes explicit `spanProcessors` /
+// (issue #7264). From sdk-node 0.221 the env auto-configuration helpers were
+// additionally extracted into `@opentelemetry/configuration` and the two
+// `otlp-*exporter-base` packages, which sdk-node requires eagerly; they get
+// the same treatment. qwen-code always passes explicit `spanProcessors` /
 // `logRecordProcessors` to NodeSDK, so those env code paths are unreachable
-// for traces and logs. Stub the exporter packages ONLY when imported by
+// for traces and logs. Stub the packages ONLY when imported by
 // sdk-node itself — our own protocol modules keep resolving the real ones.
 // The stubbed constructors throw so an unexpectedly reached env path (e.g.
 // `OTEL_METRICS_EXPORTER=otlp`) fails loudly instead of exporting nowhere;
@@ -72,12 +75,18 @@ const wasmBinaryPlugin = {
 const sdkNodeExporterStubPlugin = {
   name: 'sdk-node-exporter-stub',
   setup(build) {
-    build.onResolve({ filter: /^@opentelemetry\/exporter-/ }, (args) => {
-      if (!isStubbedSdkNodeExporterImport(args.path, args.importer)) {
-        return null;
-      }
-      return { path: args.path, namespace: 'sdk-node-exporter-stub' };
-    });
+    build.onResolve(
+      {
+        filter:
+          /^@opentelemetry\/(exporter-|configuration$|otlp-(grpc-)?exporter-base$)/,
+      },
+      (args) => {
+        if (!isStubbedSdkNodeExporterImport(args.path, args.importer)) {
+          return null;
+        }
+        return { path: args.path, namespace: 'sdk-node-exporter-stub' };
+      },
+    );
     build.onLoad(
       { filter: /.*/, namespace: 'sdk-node-exporter-stub' },
       (args) => ({
@@ -120,7 +129,7 @@ const syncFileEncodingTreeShakePlugin = {
   name: 'sync-file-encoding-tree-shake',
   setup(build) {
     build.onResolve(
-      { filter: /^\.\/utils\/sync-file-encoding\.js$/ },
+      { filter: /^\.\/services\/sync-file-encoding\.js$/ },
       (args) => {
         if (
           !/[\\/]packages[\\/]core[\\/](?:src|dist[\\/]src)[\\/]index\.(?:ts|js)$/.test(
@@ -147,6 +156,7 @@ const external = [
   'node-pty',
   '@lydell/node-pty-darwin-arm64',
   '@lydell/node-pty-darwin-x64',
+  '@lydell/node-pty-linux-arm64',
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
@@ -170,7 +180,10 @@ const external = [
 const BUNDLE_CHUNK_DIR = 'chunks';
 
 const mainBuild = esbuild.build({
-  entryPoints: { cli: 'packages/cli/src/cli.ts' },
+  entryPoints: {
+    cli: 'packages/cli/src/cli.ts',
+    'execution-worker': 'packages/core/src/services/execution-worker-main.ts',
+  },
   bundle: true,
   outdir: 'dist',
   entryNames: '[name]',
@@ -267,7 +280,33 @@ const workerBuild = esbuild.build({
   keepNames: true,
 });
 
-Promise.all([mainBuild, workerBuild])
+const codeModeHostBuild = esbuild.build({
+  entryPoints: ['packages/core/src/code-mode/host.ts'],
+  bundle: true,
+  outfile: 'dist/codeModeHost.js',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  packages: 'bundle',
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: { js: `"use strict";` },
+  write: true,
+  keepNames: true,
+});
+
+const sandboxWorkersBuild = esbuild.build({
+  entryPoints: {
+    sandboxBwrapRelay: 'packages/core/src/sandbox/bwrap-relay.ts',
+    sandboxFileWorker: 'packages/core/src/sandbox/file-worker.ts',
+  },
+  bundle: true,
+  outdir: 'dist',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+});
+
+Promise.all([mainBuild, workerBuild, codeModeHostBuild, sandboxWorkersBuild])
   .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));

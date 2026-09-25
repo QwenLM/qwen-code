@@ -346,6 +346,29 @@ describe('daemon trust policy', () => {
     });
   });
 
+  it('uses the most-specific trust rule for descendant workspaces', async () => {
+    installFiles({
+      '/config/user.json': JSON.stringify({
+        security: { folderTrust: { enabled: true } },
+      }),
+      '/config/trusted.json': JSON.stringify({
+        '/projects': TrustLevel.TRUST_FOLDER,
+        '/projects/evil': TrustLevel.DO_NOT_TRUST,
+      }),
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+
+    expect(
+      evaluateDaemonWorkspaceTrust(snapshot, '/projects/evil/packages/foo'),
+    ).toMatchObject({
+      state: 'untrusted',
+      targetTrusted: false,
+      source: 'file',
+      explicitTrustLevel: TrustLevel.DO_NOT_TRUST,
+    });
+  });
+
   it('fails closed for malformed trusted folders when file trust is needed', async () => {
     installFiles({
       '/config/user.json': JSON.stringify({

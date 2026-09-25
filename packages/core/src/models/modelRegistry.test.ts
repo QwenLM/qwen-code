@@ -150,6 +150,7 @@ describe('ModelRegistry', () => {
             name: 'GPT-4 Turbo',
             baseUrl: 'https://api.openai.com/v1',
             generationConfig: {
+              streamIdleTimeoutMs: 600000,
               samplingParams: {
                 temperature: 0.8,
                 max_tokens: 4096,
@@ -176,6 +177,7 @@ describe('ModelRegistry', () => {
 
       expect(model?.generationConfig.samplingParams?.temperature).toBe(0.8);
       expect(model?.generationConfig.samplingParams?.max_tokens).toBe(4096);
+      expect(model?.generationConfig.streamIdleTimeoutMs).toBe(600000);
       // No defaults are applied - only the configured values are present
       expect(model?.generationConfig.samplingParams?.top_p).toBeUndefined();
       expect(model?.generationConfig.timeout).toBeUndefined();
@@ -348,6 +350,18 @@ describe('ModelRegistry', () => {
   });
 
   describe('getDefaultModelForAuthType', () => {
+    it('does not use service-only entries when no conversation default exists', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          { id: 'asr', voiceOnly: true },
+          { id: 'image', imageOnly: true },
+        ],
+      });
+      expect(
+        registry.getDefaultModelForAuthType(AuthType.USE_OPENAI),
+      ).toBeUndefined();
+    });
+
     it('should return coder-model for qwen-oauth', () => {
       const registry = new ModelRegistry();
       const defaultModel = registry.getDefaultModelForAuthType(
@@ -798,6 +812,27 @@ describe('ModelRegistry', () => {
       expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeDefined();
     });
 
+    it('keeps the previous registry when a replacement model is invalid', () => {
+      const registry = new ModelRegistry(
+        { idealab: [{ id: 'old-model' }] } as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(() =>
+        registry.reloadModels(
+          {
+            idealab: [{ id: 'new-model' }, { id: '' }],
+          } as ModelProvidersConfig,
+          { idealab: 'gemini' },
+        ),
+      ).toThrow('missing required field: id');
+
+      expect(registry.getModel(AuthType.USE_OPENAI, 'old-model')).toBeDefined();
+      expect(
+        registry.getModel(AuthType.USE_GEMINI, 'new-model'),
+      ).toBeUndefined();
+    });
+
     it('should correctly reload same-id different-baseUrl models', () => {
       const registry = new ModelRegistry({
         openai: [
@@ -855,6 +890,26 @@ describe('ModelRegistry', () => {
       expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
         QWEN_OAUTH_MODELS.length,
       );
+    });
+
+    it('exposes the applied providers config so hot-reload can diff against registry state', () => {
+      const boot: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      };
+      const registry = new ModelRegistry(boot);
+      expect(registry.getModelProvidersConfig()).toBe(boot);
+
+      const next: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-5', name: 'GPT-5' }],
+      };
+      registry.reloadModels(next);
+      // The copy in reloadModels is load-bearing: without it the hot-reload
+      // gate in registerModelProvidersHotReload would diff against a stale
+      // value and rebuild the registry on every settings event.
+      expect(registry.getModelProvidersConfig()).toBe(next);
+
+      registry.reloadModels(undefined);
+      expect(registry.getModelProvidersConfig()).toBeUndefined();
     });
 
     it('should handle reload replacing same-id entries when baseUrls change', () => {
@@ -1016,6 +1071,32 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
   });
 
+  it('keeps realtimeOnly routes out of the selectable list but resolvable by id', () => {
+    const registry = new ModelRegistry({
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'omni-realtime', name: 'Omni Realtime', realtimeOnly: true },
+      ],
+    });
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_OPENAI).map((m) => m.id),
+    ).toEqual(['gpt-4o']);
+    // Still resolvable, so naming it as a chat model fails with a clear error
+    // instead of "not found".
+    expect(
+      registry.getModel(AuthType.USE_OPENAI, 'omni-realtime')?.realtimeOnly,
+    ).toBe(true);
+  });
+
+  it('never picks a realtimeOnly route as the default model', () => {
+    const registry = new ModelRegistry({
+      openai: [{ id: 'omni-realtime', realtimeOnly: true }],
+    });
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.USE_OPENAI),
+    ).toBeUndefined();
+  });
+
   it('should propagate imageOnly flag to AvailableModel', () => {
     const config: ModelProvidersConfig = {
       openai: [
@@ -1029,6 +1110,23 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(
       registry.getModelsForAuthType(AuthType.USE_OPENAI)[0]?.imageOnly,
     ).toBe(true);
+  });
+
+  it('should propagate image generation capability without excluding the default model', () => {
+    const registry = new ModelRegistry({
+      openai: [
+        {
+          id: 'dual-role-model',
+          supportsImageGeneration: true,
+        },
+      ],
+    });
+
+    const available = registry.getModelsForAuthType(AuthType.USE_OPENAI)[0];
+    expect(available?.supportsImageGeneration).toBe(true);
+    expect(registry.getDefaultModelForAuthType(AuthType.USE_OPENAI)?.id).toBe(
+      'dual-role-model',
+    );
   });
 
   it('should warn when both fastOnly and voiceOnly are set', () => {
@@ -1233,11 +1331,14 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       { idealab: 'openai' },
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'openai' });
+
     // Hot reload carrying only modelProviders (the existing reload callers).
     registry.reloadModels({
       idealab: [{ id: 'qwen3.7-max' }, { id: 'qwen3.7-coder' }],
     } as unknown as ModelProvidersConfig);
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'openai' });
     expect(
       registry
         .getModelsForAuthType(AuthType.USE_OPENAI)
@@ -1257,6 +1358,7 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       { idealab: 'gemini' },
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'gemini' });
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
     expect(
       registry.getModelsForAuthType(AuthType.USE_GEMINI).map((m) => m.id),
@@ -1290,6 +1392,7 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       {},
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({});
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 

@@ -256,6 +256,11 @@ Events are emitted as JSON Lines (one object per line). The schema is the same
 one used by the non-interactive `--output-format=stream-json` mode, with
 `includePartialMessages` always enabled.
 
+Protocol version 2 bounds textual `tool_result.content` values to 65,536 UTF-8
+bytes after JSON string serialization. Oversized values become deterministic
+head/tail previews; the event type and field schema are unchanged. This is a
+field limit, not a universal JSONL frame-size limit.
+
 The first event on the channel is always `system` / `session_start`, emitted
 when the bridge is constructed. Use it to correlate the channel with a
 session id before any other event arrives.

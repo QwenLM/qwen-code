@@ -41,6 +41,18 @@ type SetIntFieldFn = unsafe extern "C" fn(*mut c_void, u32, i64);
 /// `uint32_t CGSMainConnectionID(void)`
 type ConnectionIDFn = unsafe extern "C" fn() -> u32;
 
+/// `uint64_t CGSGetActiveSpace(uint32_t cid)`
+type GetActiveSpaceFn = unsafe extern "C" fn(u32) -> u64;
+
+/// `CFArrayRef SLSCopySpacesForWindows(uint32_t cid, int selector, CFArrayRef windowIDs)`
+type CopySpacesForWindowsFn = unsafe extern "C" fn(u32, i32, *const c_void) -> *mut c_void;
+
+/// `CFStringRef SLSCopyManagedDisplayForWindow(uint32_t cid, uint32_t wid)`
+type CopyManagedDisplayForWindowFn = unsafe extern "C" fn(u32, u32) -> *mut c_void;
+
+/// `uint64_t SLSManagedDisplayGetCurrentSpace(uint32_t cid, CFStringRef display)`
+type ManagedDisplayGetCurrentSpaceFn = unsafe extern "C" fn(u32, *const c_void) -> u64;
+
 // ── NSMenu shortcut activation SPIs ──────────────────────────────────────────
 
 /// `OSStatus SLPSSetFrontProcessWithOptions(const void *psn, uint32_t windowID, uint32_t options)`
@@ -138,6 +150,42 @@ fn set_int_field_fn() -> Option<SetIntFieldFn> {
 fn connection_id_fn() -> Option<ConnectionIDFn> {
     static SYM: OnceLock<Option<ConnectionIDFn>> = OnceLock::new();
     *SYM.get_or_init(|| find_sym(b"CGSMainConnectionID\0").map(|p| unsafe { as_fn(p) }))
+}
+
+fn get_active_space_fn() -> Option<GetActiveSpaceFn> {
+    static SYM: OnceLock<Option<GetActiveSpaceFn>> = OnceLock::new();
+    *SYM.get_or_init(|| {
+        find_sym(b"SLSGetActiveSpace\0")
+            .or_else(|| find_sym(b"CGSGetActiveSpace\0"))
+            .map(|p| unsafe { as_fn(p) })
+    })
+}
+
+fn copy_spaces_for_windows_fn() -> Option<CopySpacesForWindowsFn> {
+    static SYM: OnceLock<Option<CopySpacesForWindowsFn>> = OnceLock::new();
+    *SYM.get_or_init(|| {
+        find_sym(b"SLSCopySpacesForWindows\0")
+            .or_else(|| find_sym(b"CGSCopySpacesForWindows\0"))
+            .map(|p| unsafe { as_fn(p) })
+    })
+}
+
+fn copy_managed_display_for_window_fn() -> Option<CopyManagedDisplayForWindowFn> {
+    static SYM: OnceLock<Option<CopyManagedDisplayForWindowFn>> = OnceLock::new();
+    *SYM.get_or_init(|| {
+        find_sym(b"SLSCopyManagedDisplayForWindow\0")
+            .or_else(|| find_sym(b"CGSCopyManagedDisplayForWindow\0"))
+            .map(|p| unsafe { as_fn(p) })
+    })
+}
+
+fn managed_display_get_current_space_fn() -> Option<ManagedDisplayGetCurrentSpaceFn> {
+    static SYM: OnceLock<Option<ManagedDisplayGetCurrentSpaceFn>> = OnceLock::new();
+    *SYM.get_or_init(|| {
+        find_sym(b"SLSManagedDisplayGetCurrentSpace\0")
+            .or_else(|| find_sym(b"CGSManagedDisplayGetCurrentSpace\0"))
+            .map(|p| unsafe { as_fn(p) })
+    })
 }
 
 fn factory_msg_send_fn() -> Option<FactoryMsgSendFn> {
@@ -332,6 +380,112 @@ pub fn main_connection_id() -> Option<u32> {
     connection_id_fn().map(|f| unsafe { f() })
 }
 
+/// Return the current active macOS Space (desktop) ID.
+///
+/// Uses the private `CGSGetActiveSpace` SPI from SkyLight.  Returns `None`
+/// when the symbol is unavailable (future macOS version that removes it).
+pub fn get_active_space() -> Option<u64> {
+    let cid = main_connection_id()?;
+    nonzero_space_id(get_active_space_fn().map(|f| unsafe { f(cid) }))
+}
+
+fn nonzero_space_id(space_id: Option<u64>) -> Option<u64> {
+    space_id.filter(|id| *id != 0)
+}
+
+/// A consistent WindowServer connection and active-Space snapshot for one
+/// enumeration. Space membership must be queried one window at a time:
+/// `SLSCopySpacesForWindows` returns the set union for its input window list,
+/// not a positionally aligned result.
+pub(crate) struct SpaceQuery {
+    connection_id: u32,
+    current_space_id: Option<u64>,
+    copy_spaces_for_windows: Option<CopySpacesForWindowsFn>,
+    copy_managed_display_for_window: Option<CopyManagedDisplayForWindowFn>,
+    managed_display_get_current_space: Option<ManagedDisplayGetCurrentSpaceFn>,
+}
+
+impl SpaceQuery {
+    pub(crate) fn new() -> Option<Self> {
+        let connection_id = main_connection_id()?;
+        let current_space_id =
+            nonzero_space_id(get_active_space_fn().map(|f| unsafe { f(connection_id) }));
+        Some(Self {
+            connection_id,
+            current_space_id,
+            copy_spaces_for_windows: copy_spaces_for_windows_fn(),
+            copy_managed_display_for_window: copy_managed_display_for_window_fn(),
+            managed_display_get_current_space: managed_display_get_current_space_fn(),
+        })
+    }
+
+    pub(crate) fn current_space_id(&self) -> Option<u64> {
+        self.current_space_id
+    }
+
+    /// Return every Space containing `window_id`.
+    pub(crate) fn window_space_ids(&self, window_id: u32) -> Option<Vec<u64>> {
+        use core_foundation::{
+            array::CFArray,
+            base::{CFGetTypeID, CFTypeRef, TCFType},
+            number::CFNumber,
+        };
+
+        let copy_spaces = self.copy_spaces_for_windows?;
+        let window_number = CFNumber::from(window_id as i64);
+        let window_ref = window_number.as_concrete_TypeRef() as *const c_void;
+        let windows = CFArray::<CFTypeRef>::from_copyable(&[window_ref]);
+        let result_ptr = unsafe {
+            copy_spaces(
+                self.connection_id,
+                0x7,
+                windows.as_concrete_TypeRef() as *const c_void,
+            )
+        };
+        if result_ptr.is_null() {
+            return None;
+        }
+
+        let result: CFArray<CFTypeRef> =
+            unsafe { CFArray::wrap_under_create_rule(result_ptr as _) };
+        let mut space_ids = Vec::with_capacity(result.len() as usize);
+        for item in result.iter() {
+            let item = *item;
+            if unsafe { CFGetTypeID(item) } != CFNumber::type_id() {
+                return None;
+            }
+            let number = unsafe { CFNumber::wrap_under_get_rule(item as _) };
+            let space_id = u64::try_from(number.to_i64()?).ok()?;
+            if space_id != 0 {
+                space_ids.push(space_id);
+            }
+        }
+
+        (!space_ids.is_empty()).then_some(space_ids)
+    }
+
+    /// Return the active Space on the display WindowServer associates with
+    /// `window_id`. This avoids comparing every window against the main
+    /// display's active Space when displays use independent Spaces.
+    pub(crate) fn current_space_for_window(&self, window_id: u32) -> Option<u64> {
+        use core_foundation::{base::TCFType, string::CFString};
+
+        let copy_display = self.copy_managed_display_for_window?;
+        let get_current_space = self.managed_display_get_current_space?;
+        let display_ptr = unsafe { copy_display(self.connection_id, window_id) };
+        if display_ptr.is_null() {
+            return None;
+        }
+        let display = unsafe { CFString::wrap_under_create_rule(display_ptr as _) };
+        nonzero_space_id(Some(unsafe {
+            get_current_space(
+                self.connection_id,
+                display.as_concrete_TypeRef() as *const c_void,
+            )
+        }))
+    }
+}
+
 // ── Focus-without-raise ───────────────────────────────────────────────────────
 
 /// Activate `target_pid`'s window `target_wid` without raising any windows
@@ -423,6 +577,151 @@ pub fn get_process_psn_for_window(window_id: u32, pid: libc::pid_t, out_psn: &mu
     false
 }
 
+/// Return whether WindowServer currently considers the exact window's process
+/// frontmost. Unlike `NSWorkspace.frontmostApplication`, this query does not
+/// depend on the caller's AppKit run loop processing an activation update.
+pub fn front_process_matches(target_pid: libc::pid_t, target_wid: u32) -> Option<bool> {
+    let get_front = get_front_process_fn()?;
+    let mut front_psn = [0u8; 8];
+    if unsafe { get_front(front_psn.as_mut_ptr() as *mut c_void) } != 0 {
+        return None;
+    }
+    let mut target_psn = [0u8; 8];
+    if !get_process_psn_for_window(target_wid, target_pid, &mut target_psn) {
+        return None;
+    }
+    Some(front_psn == target_psn)
+}
+
+/// Prime AppKit's application-active state without making the process frontmost.
+/// This notification precedes input; it must never replay an unconfirmed action.
+pub(crate) fn prepare_background_keyboard(pid: pid_t, window_id: u32) -> anyhow::Result<()> {
+    crate::ax::exact_target::validate_keyboard_target(pid, window_id)?;
+    let sent = super::app_focus::prepare(pid, window_id, |preparation| {
+        post_focus_preparation(pid, window_id, preparation)
+    })?;
+    // PID posts are asynchronous. Let AppKit consume the notification before
+    // validating its current first responder and sending the requested keys.
+    if sent {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    crate::ax::exact_target::validate_keyboard_target(pid, window_id)
+}
+
+pub(crate) fn prepare_background_pointer(pid: pid_t, window_id: u32) -> anyhow::Result<()> {
+    use cua_driver_core::background_input::{
+        decide_background_input, BackgroundAction, BackgroundInputDecision, ExactWindowTarget,
+    };
+    let validate = || -> anyhow::Result<()> {
+        match decide_background_input(
+            ExactWindowTarget { pid, window_id },
+            &crate::ax::exact_target::gather_background_facts(pid, window_id, None),
+            BackgroundAction::WindowPointer,
+        ) {
+            BackgroundInputDecision::Execute { .. } => Ok(()),
+            BackgroundInputDecision::Refuse(refusal) => {
+                anyhow::bail!("{}: {}", refusal.code, refusal.reason)
+            }
+        }
+    };
+    validate()?;
+    if super::app_focus::prepare(pid, window_id, |preparation| {
+        post_focus_preparation(pid, window_id, preparation)
+    })? {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    validate()
+}
+
+pub(super) fn key_focus_matches(pid: pid_t, window_id: u32) -> Option<bool> {
+    type GetKeyFocus = unsafe extern "C" fn(*mut c_void, *mut u8) -> i32;
+    static GET: OnceLock<Option<GetKeyFocus>> = OnceLock::new();
+    let get =
+        (*GET.get_or_init(|| find_sym(b"SLPSGetKeyFocusProcess\0").map(|p| unsafe { as_fn(p) })))?;
+    let mut target = [0u8; 8];
+    let mut focused = [0u8; 8];
+    let mut flag = 0u8;
+    if !get_process_psn_for_window(window_id, pid, &mut target)
+        || unsafe { get(focused.as_mut_ptr() as *mut c_void, &mut flag) } != 0
+    {
+        return None;
+    }
+    Some(focused == target)
+}
+
+fn post_focus_preparation(
+    pid: pid_t,
+    window_id: u32,
+    preparation: super::app_focus::Preparation,
+) -> anyhow::Result<()> {
+    let point = if preparation == super::app_focus::Preparation::Activate {
+        window_activation_point(pid, window_id)
+    } else {
+        None
+    };
+    let events = super::app_pointer::focus_events(preparation, window_id, point)?;
+    for event in &events {
+        super::app_pointer::post(pid, event);
+    }
+    Ok(())
+}
+
+fn window_activation_point(pid: pid_t, window_id: u32) -> Option<((f64, f64), (f64, f64))> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return None;
+        }
+        let mut target = None;
+        for candidate in copy_ax_windows(app) {
+            if target.is_none() && ax_get_window_id(candidate) == Some(window_id) {
+                target = Some(candidate);
+            } else {
+                CFRelease(candidate as CFTypeRef);
+            }
+        }
+        CFRelease(app as CFTypeRef);
+        let window = target?;
+        let frame = element_screen_rect(window);
+        let mut value: CFTypeRef = std::ptr::null();
+        let status = AXUIElementCopyAttributeValue(
+            window,
+            CFString::new("AXActivationPoint").as_concrete_TypeRef(),
+            &mut value,
+        );
+        CFRelease(window as CFTypeRef);
+        if value.is_null() {
+            return None;
+        }
+        let mut point = core_graphics::geometry::CGPoint::new(0.0, 0.0);
+        let valid = status == kAXErrorSuccess
+            && CFGetTypeID(value) == AXValueGetTypeID()
+            && AXValueGetType(value as AXValueRef) == kAXValueCGPointType
+            && AXValueGetValue(
+                value as AXValueRef,
+                kAXValueCGPointType,
+                &mut point as *mut _ as *mut c_void,
+            );
+        CFRelease(value);
+        let [x, y, width, height] = frame?;
+        if !valid
+            || ![point.x, point.y, x, y, width, height]
+                .iter()
+                .all(|v| v.is_finite())
+            || point.x < x
+            || point.x > x + width
+            || point.y < y
+            || point.y > y + height
+        {
+            return None;
+        }
+        Some(((point.x, point.y), (point.x - x, point.y - y)))
+    }
+}
+
 /// Make `target_pid` and `target_wid` WindowServer-frontmost and leave them
 /// there. Unlike [`with_foreground_assist`], this deliberately does not save or
 /// restore the previous process. It is the persistent counterpart required by
@@ -490,15 +789,34 @@ pub fn make_exact_window_key(target_pid: libc::pid_t, target_wid: u32) -> bool {
     true
 }
 
-/// Tool-agnostic foreground-assist: briefly front `window_id`, run `body` (which
-/// posts the synthetic input), then restore the prior frontmost process.
+/// Tool-agnostic foreground-assist: briefly front `window_id`, wait for the
+/// activation to actually land, run `body` (which posts the synthetic input),
+/// then restore the prior frontmost process.
 ///
 /// This is the `delivery_mode:"foreground"` rung of the best-effort-background
-/// ladder, shared by `type_text` and `click`. It is the same brief front →
-/// act → restore primitive `press_key`/`hotkey` use for NSMenu key dispatch —
-/// see [`with_menu_shortcut_activation`], which this delegates to. Reached only
-/// when the agent has seen the background rungs fail (clicks) or the field is
-/// unverifiable + focus-sensitive (Catalyst typing).
+/// ladder, shared by `type_text` and `click`. Reached only when the agent has
+/// seen the background rungs fail (clicks) or the field is unverifiable +
+/// focus-sensitive (Catalyst typing).
+///
+/// ## Why this does not delegate to [`with_menu_shortcut_activation`]
+///
+/// It used to. That helper posts `set_front` and calls `action` immediately,
+/// which is correct for its own purpose: NSMenu key dispatch only needs the key
+/// event *enqueued* in the target's run-loop queue, so first-responder identity
+/// is irrelevant and the sub-millisecond front → act → restore is a feature.
+///
+/// Input delivery has the opposite requirement. `set_front` is asynchronous, so
+/// running the body straight away means the body's `AXFocused` write races
+/// AppKit's own activation. AppKit wins: when activation completes it installs
+/// the window's remembered first responder and clobbers the write. The
+/// keystrokes then land wherever the app chose — for a Catalyst app such as
+/// WhatsApp, the message list rather than the composer, which silently scrolls
+/// the transcript instead of typing.
+///
+/// So this waits for the activation to be observable before running `body`, the
+/// same ordering [`with_foreground_hid_activation`] already relies on. The wait
+/// is a bounded poll rather than a fixed sleep: an app that activates in 10 ms
+/// pays 10 ms, and a slow Catalyst/RDP surface still gets its full budget.
 ///
 /// Returns `Ok(true)` when the brief activation happened, `Ok(false)` when the
 /// fronting SPIs are unavailable (the body still ran, just without a front).
@@ -507,7 +825,81 @@ pub fn with_foreground_assist(
     target_wid: u32,
     body: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<bool> {
-    with_menu_shortcut_activation(target_pid, target_wid, body)
+    let set_front = match set_front_process_fn() {
+        Some(f) => f,
+        None => {
+            // SPIs unavailable — run body anyway without activation.
+            body()?;
+            return Ok(false);
+        }
+    };
+
+    let mut prev_psn = [0u8; 8];
+    let prev_ok = get_front_process_fn()
+        .map(|f| unsafe { f(prev_psn.as_mut_ptr() as *mut c_void) } == 0)
+        .unwrap_or(false);
+
+    let mut target_psn = [0u8; 8];
+    if !get_process_psn_for_window(target_wid, target_pid, &mut target_psn) {
+        body()?;
+        return Ok(false);
+    }
+
+    unsafe { set_front(target_psn.as_ptr() as *const c_void, target_wid, 0x400) };
+    // `set_front` moves WindowServer's front process but does not make the
+    // target's NSWindow key, and AppKit installs a first responder only for a
+    // key window. Without this the app is "frontmost" to WindowServer while
+    // remaining, from AppKit's point of view, unfocused — so the AXFocused
+    // write in the body has no responder chain to attach to.
+    make_exact_window_key(target_pid, target_wid);
+    await_window_focused(target_pid, target_wid);
+
+    let result = body();
+
+    if prev_ok {
+        unsafe { set_front(prev_psn.as_ptr() as *const c_void, 0, 0x400) };
+    }
+
+    result?;
+    Ok(true)
+}
+
+/// Upper bound on how long [`with_foreground_assist`] waits for a requested
+/// activation to become observable. Chosen to cover a Catalyst app's activation
+/// plus key-window install; past this the caller proceeds anyway so a stubborn
+/// target degrades to the old behavior instead of hanging.
+const ACTIVATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Poll interval for [`await_window_focused`]. Short enough that a fast native
+/// app pays roughly one tick, long enough not to spin on the WindowServer.
+const ACTIVATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Block until `target_wid` is the application's focused AX window, or the
+/// timeout expires. Returns whether that state was observed.
+///
+/// The predicate is deliberately `AXFocusedWindow` and not
+/// `NSWorkspace.frontmostApplication`. The latter does not observe a
+/// SkyLight-level front-process change at all: polling it every 15ms across a
+/// full foreground `type_text` against WhatsApp showed zero transitions while
+/// the target was demonstrably being fronted, so a frontmost-based wait always
+/// burns its whole timeout and never actually gates on anything. `AXFocusedWindow`
+/// is the same proof [`preserves_exact_existing_focus`] already trusts to decide
+/// whether a window is focused.
+///
+/// A `false` return is not fatal: the caller proceeds with delivery regardless,
+/// because a target that never reports focus is exactly the case the pre-existing
+/// best-effort contract already covered.
+fn await_window_focused(pid: libc::pid_t, window_id: u32) -> bool {
+    let deadline = std::time::Instant::now() + ACTIVATION_WAIT_TIMEOUT;
+    loop {
+        if crate::ax::bindings::focused_window_id_of_pid(pid) == Some(window_id) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(ACTIVATION_POLL_INTERVAL);
+    }
 }
 
 /// Activate an exact target window for a global HID keyboard action.
@@ -551,7 +943,14 @@ pub fn with_foreground_hid_activation(
         anyhow::bail!("WindowServer rejected foreground HID activation");
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(40));
+    make_exact_window_key(target_pid, target_wid);
+    if !await_window_focused(target_pid, target_wid) {
+        if prev_ok {
+            unsafe { set_front(prev_psn.as_ptr() as *const c_void, 0, 0x400) };
+        }
+        anyhow::bail!("exact target window did not become focused for foreground HID delivery");
+    }
+
     let result = action();
     std::thread::sleep(std::time::Duration::from_millis(40));
 

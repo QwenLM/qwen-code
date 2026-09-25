@@ -151,10 +151,20 @@ describe('SDK MCP Server Integration (E2E)', () => {
           };
         }
         if (requestIndex === 1) {
+          // Invoke the selected deferred tools through the tool_call bridge
+          // envelope — the documented path after `select:` — so this test
+          // exercises resolveDeferredToolCall end-to-end through query(), not
+          // just the declaration side (R2-15).
           return {
             toolCalls: [
-              fakeToolCall(MCP_CALCULATE_SUM, { a: 25, b: 17 }),
-              fakeToolCall(MCP_REVERSE_STRING, { text: 'hello world' }),
+              fakeToolCall('tool_call', {
+                name: MCP_CALCULATE_SUM,
+                arguments: { a: 25, b: 17 },
+              }),
+              fakeToolCall('tool_call', {
+                name: MCP_REVERSE_STRING,
+                arguments: { text: 'hello world' },
+              }),
             ],
           };
         }
@@ -185,18 +195,32 @@ describe('SDK MCP Server Integration (E2E)', () => {
           }
         }
 
-        expect(advertisedToolNames(fakeServer, 1)).toEqual(
-          expect.arrayContaining([MCP_CALCULATE_SUM, MCP_REVERSE_STRING]),
-        );
+        // ToolSearch + ToolCall bridge contract: tools fetched via
+        // `select:` stay hidden from the model-facing declaration list so
+        // the prompt-cache prefix remains stable; the model reaches them
+        // through `tool_call` (direct invocation by name still executes).
+        const advertisedAfterSelect = advertisedToolNames(fakeServer, 1);
+        // Positive controls (R2-9): the snapshot must be the post-select
+        // declaration list — non-empty and carrying both alwaysLoad bridge
+        // tools — otherwise the not.toContain assertions below would pass
+        // vacuously on an emptied or shifted request.
+        expect(advertisedAfterSelect).toContain('tool_search');
+        expect(advertisedAfterSelect).toContain('tool_call');
+        expect(advertisedAfterSelect).not.toContain(MCP_CALCULATE_SUM);
+        expect(advertisedAfterSelect).not.toContain(MCP_REVERSE_STRING);
 
-        const toolResults = findToolResults(messages, MCP_CALCULATE_SUM);
-        expect(toolResults).toHaveLength(1);
-        expect(toolResults[0]?.isError).toBe(false);
-        expect(toolResults[0]?.content).toContain('42');
-        const stringResults = findToolResults(messages, MCP_REVERSE_STRING);
-        expect(stringResults).toHaveLength(1);
-        expect(stringResults[0]?.isError).toBe(false);
-        expect(stringResults[0]?.content).toContain('dlrow olleh');
+        // The envelope invocation surfaces under the model-facing name
+        // ('tool_call') in the SDK transcript — the scheduler keeps
+        // modelFacingName on the wire and only resolves the target for
+        // execution — so pair the results by that name and check contents.
+        const bridgeResults = findToolResults(messages, 'tool_call');
+        expect(bridgeResults).toHaveLength(2);
+        expect(bridgeResults.every((r) => !r.isError)).toBe(true);
+        const bridgeContents = bridgeResults.map((r) => r.content);
+        expect(bridgeContents.some((c) => c.includes('42'))).toBe(true);
+        expect(bridgeContents.some((c) => c.includes('dlrow olleh'))).toBe(
+          true,
+        );
         expect(
           systemMessage?.mcp_servers?.some(
             (server) => server.name === 'sdk-calculator',
@@ -205,6 +229,112 @@ describe('SDK MCP Server Integration (E2E)', () => {
         assertSuccessfulCompletion(messages);
       } finally {
         await q.close();
+      }
+    });
+
+    it('keeps previously used MCP tools available when resuming a session', async () => {
+      // Resume needs a persisted transcript; the rest of this suite keeps
+      // recording disabled so enable it only for this case.
+      testDir = await helper.setup('sdk-mcp-server-integration', {
+        chatRecording: true,
+      });
+
+      const calculatorTool = tool(
+        'calculate_sum',
+        'Calculate the sum of two numbers',
+        z.object({
+          a: z.number().describe('First number'),
+          b: z.number().describe('Second number'),
+        }).shape,
+        async (args) => ({
+          content: [{ type: 'text', text: String(args.a + args.b) }],
+        }),
+      );
+      const serverConfig = createSdkMcpServer({
+        name: 'sdk-calculator',
+        version: '1.0.0',
+        tools: [calculatorTool],
+      });
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('tool_search', {
+                query: `select:${MCP_CALCULATE_SUM}`,
+              }),
+            ],
+          };
+        }
+        if (requestIndex === 1) {
+          return {
+            toolCalls: [fakeToolCall(MCP_CALCULATE_SUM, { a: 25, b: 17 })],
+          };
+        }
+        if (requestIndex === 3) {
+          // The resumed model calls the historical tool directly, without a
+          // second tool_search request.
+          return {
+            toolCalls: [fakeToolCall(MCP_CALCULATE_SUM, { a: 8, b: 5 })],
+          };
+        }
+        return { content: 'Done.' };
+      };
+
+      const firstQuery = query({
+        prompt: 'Calculate 25 + 17.',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
+          cwd: testDir,
+          mcpServers: { 'sdk-calculator': serverConfig },
+        },
+      });
+      const firstMessages: SDKMessage[] = [];
+      const sessionId = firstQuery.getSessionId();
+      try {
+        for await (const message of firstQuery) {
+          firstMessages.push(message);
+        }
+        expect(
+          findToolResults(firstMessages, MCP_CALCULATE_SUM)[0]?.content,
+        ).toContain('42');
+        assertSuccessfulCompletion(firstMessages);
+      } finally {
+        await firstQuery.close();
+      }
+
+      const resumedQuery = query({
+        prompt: 'Now calculate 8 + 5 with the same tool.',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
+          cwd: testDir,
+          resume: sessionId,
+          mcpServers: { 'sdk-calculator': serverConfig },
+        },
+      });
+      const resumedMessages: SDKMessage[] = [];
+      try {
+        for await (const message of resumedQuery) {
+          resumedMessages.push(message);
+        }
+
+        expect(advertisedToolNames(fakeServer, 3)).toContain(MCP_CALCULATE_SUM);
+        const resumedResults = findToolResults(
+          resumedMessages,
+          MCP_CALCULATE_SUM,
+        );
+        expect(resumedResults).toHaveLength(1);
+        expect(resumedResults[0]?.isError).toBe(false);
+        expect(resumedResults[0]?.content).toContain('13');
+        assertSuccessfulCompletion(resumedMessages);
+      } finally {
+        await resumedQuery.close();
       }
     });
   });
@@ -272,7 +402,14 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
         }
 
-        expect(advertisedToolNames(fakeServer, 1)).toContain(MCP_MAYBE_FAIL);
+        // Bridge contract: selected deferred tools remain hidden from the
+        // advertised declaration list (stable prompt-cache prefix). Positive
+        // controls (R2-9) keep the not.toContain assertion honest: the
+        // snapshot must be a real, non-empty post-select declaration list.
+        const advertisedAfterSelect = advertisedToolNames(fakeServer, 1);
+        expect(advertisedAfterSelect).toContain('tool_search');
+        expect(advertisedAfterSelect).toContain('tool_call');
+        expect(advertisedAfterSelect).not.toContain(MCP_MAYBE_FAIL);
         const toolResults = findToolResults(messages, MCP_MAYBE_FAIL);
         expect(toolResults).toHaveLength(1);
         expect(toolResults[0]?.isError).toBe(true);
@@ -355,9 +492,14 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
         }
 
-        expect(advertisedToolNames(fakeServer, 1)).toContain(
-          MCP_DELAYED_RESPONSE,
-        );
+        // Bridge contract: selected deferred tools remain hidden from the
+        // advertised declaration list (stable prompt-cache prefix). Positive
+        // controls (R2-9) keep the not.toContain assertion honest: the
+        // snapshot must be a real, non-empty post-select declaration list.
+        const advertisedAfterSelect = advertisedToolNames(fakeServer, 1);
+        expect(advertisedAfterSelect).toContain('tool_search');
+        expect(advertisedAfterSelect).toContain('tool_call');
+        expect(advertisedAfterSelect).not.toContain(MCP_DELAYED_RESPONSE);
         const toolResults = findToolResults(messages, MCP_DELAYED_RESPONSE);
         expect(toolResults).toHaveLength(1);
         expect(toolResults[0]?.isError).toBe(false);

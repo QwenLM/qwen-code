@@ -22,6 +22,7 @@ import type {
 import {
   formatVisionBridgeNoticeDisplay,
   isVisionBridgeNoticeDisplay,
+  toolResultBoundaryArtifact,
   ToolNames,
   Kind,
 } from '@qwen-code/qwen-code-core';
@@ -30,6 +31,7 @@ import {
   createTranscriptToolCallStartUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
+import { associateAcpToolResultArtifact } from '../../../nonInteractive/tool-result-boundary-diagnostics.js';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -50,6 +52,36 @@ const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Agent]: 'other',
   [Kind.Other]: 'other',
 };
+
+function stripBoundaryArtifactsFromRawOutput(resultDisplay: unknown): unknown {
+  if (
+    typeof resultDisplay !== 'object' ||
+    resultDisplay === null ||
+    !('type' in resultDisplay) ||
+    resultDisplay.type !== 'task_execution' ||
+    !('toolCalls' in resultDisplay) ||
+    !Array.isArray(resultDisplay.toolCalls)
+  ) {
+    return resultDisplay;
+  }
+
+  let changed = false;
+  const toolCalls = resultDisplay.toolCalls.map((toolCall) => {
+    if (
+      typeof toolCall !== 'object' ||
+      toolCall === null ||
+      !('boundaryArtifact' in toolCall)
+    ) {
+      return toolCall;
+    }
+    const rawOutputToolCall: Record<string, unknown> = { ...toolCall };
+    delete rawOutputToolCall['boundaryArtifact'];
+    changed = true;
+    return rawOutputToolCall;
+  });
+
+  return changed ? { ...resultDisplay, toolCalls } : resultDisplay;
+}
 
 /**
  * Unified tool call event emitter.
@@ -111,7 +143,13 @@ export class ToolCallEmitter extends BaseEmitter {
         timestamp: params.timestamp,
         asUpdate: updatesPreparedCall,
         extra: {
+          ...(params.startedAt !== undefined
+            ? { startedAt: params.startedAt }
+            : {}),
           ...(params.phase ? { phase: params.phase } : {}),
+          ...(params.toolName === ToolNames.AGENT && !params.subagentMeta
+            ? { subagentSessionReady: false }
+            : {}),
           ...params.subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
@@ -187,24 +225,37 @@ export class ToolCallEmitter extends BaseEmitter {
       params.toolName,
       params.subagentMeta,
     );
-    await this.sendUpdate(
-      createTranscriptToolCallResultUpdate({
-        toolName: params.toolName,
-        callId: params.callId,
-        success: params.success,
-        message: params.message,
-        resultDisplay: params.resultDisplay,
-        errorMessage: params.error?.message,
-        artifacts: params.artifacts,
-        contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
-        timestamp: params.timestamp,
-        extra: {
-          ...params.subagentMeta,
-          provenance: provenance.provenance,
-          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        },
-      }),
+    const update = createTranscriptToolCallResultUpdate({
+      toolName: params.toolName,
+      callId: params.callId,
+      success: params.success,
+      message: params.message,
+      resultDisplay: stripBoundaryArtifactsFromRawOutput(params.resultDisplay),
+      errorMessage: params.error?.message,
+      artifacts: params.artifacts,
+      contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
+      timestamp: params.timestamp,
+      extra: {
+        ...(params.startedAt !== undefined
+          ? { startedAt: params.startedAt }
+          : {}),
+        ...(params.durationMs !== undefined
+          ? { durationMs: params.durationMs }
+          : {}),
+        ...params.subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
+    associateAcpToolResultArtifact(
+      update,
+      params.boundaryArtifact ??
+        toolResultBoundaryArtifact(
+          params.persistedOutputFiles,
+          params.artifacts,
+        ),
     );
+    await this.sendUpdate(update);
   }
 
   /**
@@ -221,6 +272,7 @@ export class ToolCallEmitter extends BaseEmitter {
     toolName: string,
     error: Error,
     subagentMeta?: SubagentMeta,
+    timing?: { startedAt: number; durationMs: number },
   ): Promise<void> {
     this.preparedCallIds.delete(callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
@@ -234,12 +286,51 @@ export class ToolCallEmitter extends BaseEmitter {
         success: false,
         errorMessage: error.message,
         extra: {
+          ...timing,
           ...subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         },
       }),
     );
+  }
+
+  /**
+   * Emits a progress update for a parent tool call (e.g., subagent execution).
+   * This allows standard ACP clients to show live progress inside the parent tool card,
+   * bridging the gap for clients that do not support nested tool calls.
+   *
+   * @param parentToolCallId - The tool call ID of the parent (e.g., Agent tool)
+   * @param subagentType - The type of subagent
+   * @param message - Progress message to display
+   */
+  async emitProgressUpdate(
+    parentToolCallId: string,
+    subagentType: string,
+    message: string,
+    toolName?: string,
+  ): Promise<void> {
+    if (toolName && this.isTodoWriteTool(toolName)) return;
+
+    await this.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: parentToolCallId,
+      status: 'in_progress',
+      content: [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: sanitizeTerminalText(message),
+          },
+        },
+      ],
+      _meta: {
+        subagentType,
+        provenance: 'subagent',
+        subagentProgress: true,
+      },
+    });
   }
 
   /**

@@ -19,6 +19,7 @@ import type { Config } from '../config/config.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  PromptCacheSharingParameters,
 } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
@@ -81,7 +82,7 @@ export interface GenerateTextOptions {
   model: string;
   /**
    * Task-specific system instructions. Passed through to the underlying
-   * content generator without the geminiClient main-prompt fallback or
+   * content generator without the llmClient main-prompt fallback or
    * user-memory wrapping that `getCustomSystemPrompt` applies.
    */
   systemInstruction?: GenerateContentConfig['systemInstruction'];
@@ -108,6 +109,12 @@ export interface GenerateTextOptions {
    * deltas are collected into the same `{ text, usage }` result.
    */
   stream?: boolean;
+  /**
+   * Let the OpenAI adapter mark the unchanged history prefix for cache reuse.
+   * This is only for requests ending in a non-reusable trailing directive;
+   * the adapter deliberately excludes the final message from cache marking.
+   */
+  promptCacheSharing?: boolean;
   /**
    * When true, throw instead of silently falling back to the main generator if
    * a distinct generator for `model` can't be created (model not registered, or
@@ -358,7 +365,7 @@ export class BaseLlmClient {
   /**
    * Free-form text generation primitive used by `runSideQuery` text mode.
    *
-   * Distinct from `GeminiClient.generateContent`: this calls the underlying
+   * Distinct from `LlmClient.generateContent`: this calls the underlying
    * `ContentGenerator` directly, so the caller's `systemInstruction` is sent
    * through verbatim — no `getCustomSystemPrompt` wrapping (which would append
    * user memory) and no main-session-prompt fallback when omitted. Side queries
@@ -396,10 +403,11 @@ export class BaseLlmClient {
     ).slimmedHistory;
 
     try {
-      const request = {
+      const request: PromptCacheSharingParameters = {
         model: requestModel,
         config: requestConfig,
         contents: requestContents,
+        ...(options.promptCacheSharing && { promptCacheSharing: true }),
       };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single

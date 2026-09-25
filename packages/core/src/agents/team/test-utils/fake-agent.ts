@@ -17,7 +17,9 @@ import {
   AgentEventEmitter,
   AgentEventType,
 } from '../../runtime/agent-events.js';
+import type { AgentRoundTextEvent } from '../../runtime/agent-events.js';
 import { AgentStatus, isTerminalStatus } from '../../runtime/agent-types.js';
+import type { AgentMessage } from '../../runtime/agent-types.js';
 import type { AgentStatsSummary } from '../../runtime/agent-statistics.js';
 
 /**
@@ -63,6 +65,7 @@ export class FakeAgent {
   private script: FakeAgentScript;
   private error: string | undefined;
   private lastRoundError: string | undefined;
+  private readonly messages: AgentMessage[] = [];
 
   /** Resolvers waiting for a specific message count. */
   private messageWaiters: Array<{
@@ -91,6 +94,29 @@ export class FakeAgent {
 
     this.completionPromise = new Promise<void>((resolve) => {
       this.completionResolve = resolve;
+    });
+
+    // Mirror AgentCore.setupStateListeners: every ROUND_TEXT event
+    // appends its visible text to the message history. TeamManager
+    // reads getMessages() to recover round text emitted before its
+    // event bridge attached, so the fake must keep the same record
+    // the real runtime does.
+    this.emitter.on(AgentEventType.ROUND_TEXT, (event: AgentRoundTextEvent) => {
+      if (event.thoughtText) {
+        this.messages.push({
+          role: 'assistant',
+          content: event.thoughtText,
+          timestamp: Date.now(),
+          thought: true,
+        });
+      }
+      if (event.text) {
+        this.messages.push({
+          role: 'assistant',
+          content: event.text,
+          timestamp: Date.now(),
+        });
+      }
     });
   }
 
@@ -124,6 +150,11 @@ export class FakeAgent {
 
   getError(): string | undefined {
     return this.error;
+  }
+
+  /** Conversation message history (mirrors AgentInteractive). */
+  getMessages(): readonly AgentMessage[] {
+    return this.messages;
   }
 
   getLastRoundError(): string | undefined {

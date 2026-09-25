@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,18 +14,17 @@ import wrapAnsi from 'wrap-ansi';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
-  Config,
-  EditorType,
-} from '@qwen-code/qwen-code-core';
-import {
-  IdeClient,
-  ToolConfirmationOutcome,
-  buildHumanReadableRuleLabel,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
+import { IdeClient } from '@qwen-code/qwen-code-core/ide/ide-client.js';
+import { buildHumanReadableRuleLabel } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { isEditorAvailable } from '@qwen-code/qwen-code-core/utils/editor.js';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
@@ -62,11 +61,36 @@ export const ToolConfirmationMessage: React.FC<
 }) => {
   const { onConfirm } = confirmationDetails;
   const autoModeFallback = confirmationDetails.autoModeFallback;
+  const offersSwitchToDefault =
+    autoModeFallback?.reason === 'classifier_unavailable' ||
+    autoModeFallback?.reason === 'consecutive_unavailable';
+  const hidesAlwaysAllow =
+    'hideAlwaysAllow' in confirmationDetails &&
+    confirmationDetails.hideAlwaysAllow === true;
 
   const settings = useSettings();
   const preferredEditor = settings.merged.general?.preferredEditor as
     | EditorType
     | undefined;
+  const hideModify =
+    confirmationDetails.type === 'edit'
+      ? confirmationDetails.hideModify
+      : false;
+  // Offering "Modify with external editor" for an editor that is not installed
+  // only leads to a failed launch (#10745), so probe availability first.
+  // `isEditorAvailable` shells out to look the binary up on PATH, hence the
+  // memo and the guards that skip the probe when the option can't be offered
+  // anyway (compact mode renders a fixed option list, non-edit confirmations
+  // and `hideModify` never offer it).
+  const editorAvailable = useMemo(
+    () =>
+      !compactMode &&
+      confirmationDetails.type === 'edit' &&
+      !hideModify &&
+      preferredEditor !== undefined &&
+      isEditorAvailable(preferredEditor),
+    [compactMode, confirmationDetails.type, hideModify, preferredEditor],
+  );
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
   const [isDiffingEnabled, setIsDiffingEnabled] = useState(false);
@@ -93,7 +117,12 @@ export const ToolConfirmationMessage: React.FC<
     // (e.g. ProceedAlways) is processed first.  resolveDiffFromCli would
     // otherwise trigger the scheduler's ideConfirmation .then() handler
     // with ProceedOnce, racing with the intended CLI outcome.
-    onConfirm(outcome);
+    //
+    // Hold the rejection here: the scheduler re-throws after terminalizing a
+    // call the trust gate refused, and an unhandled rejection trips the
+    // process-level handler (llm.tsx), which shows a "file a bug report"
+    // banner and opens the debug console over a correctly-refused action.
+    void Promise.resolve(onConfirm(outcome)).catch(() => {});
 
     if (
       confirmationDetails.type === 'edit' &&
@@ -177,15 +206,15 @@ export const ToolConfirmationMessage: React.FC<
 
     // Calculate the vertical space (in lines) consumed by UI elements
     // surrounding the main body content. Compact mode drops outer padding
-    // and inter-section margins, and renders a fixed 3-option list rather
+    // and inter-section margins, and renders a reduced option list rather
     // than the full options array.
     const PADDING_OUTER_Y = compactMode ? 0 : 2;
     const MARGIN_BODY_BOTTOM = compactMode ? 0 : 1;
     const HEIGHT_QUESTION = 1;
     const MARGIN_QUESTION_BOTTOM = compactMode ? 0 : 1;
     const HEIGHT_OPTIONS = compactMode
-      ? 3
-      : options.length + (autoModeFallback ? 1 : 0);
+      ? 2 + (offersSwitchToDefault ? 1 : 0) + (hidesAlwaysAllow ? 0 : 1)
+      : options.length + (offersSwitchToDefault ? 1 : 0);
     const AUTO_MODE_FALLBACK_HEIGHT = autoModeFallback
       ? wrapAnsi(`⚠ ${autoModeFallback.message}`, warningContentWidth, {
           trim: false,
@@ -259,7 +288,7 @@ export const ToolConfirmationMessage: React.FC<
     if (
       !confirmationDetails.hideModify &&
       (!config.getIdeMode() || !isDiffingEnabled) &&
-      preferredEditor
+      editorAvailable
     ) {
       options.push({
         label: t('Modify with external editor'),
@@ -473,11 +502,17 @@ export const ToolConfirmationMessage: React.FC<
       }),
       value: ToolConfirmationOutcome.RestorePrevious,
     });
-    options.push({
-      key: 'proceed-always',
-      label: t('Yes, and auto-accept edits'),
-      value: ToolConfirmationOutcome.ProceedAlways,
-    });
+    // "Auto-accept edits" is a privileged escalation (AUTO_EDIT): in an
+    // untrusted folder the trust gate refuses it, so exit_plan_mode would only
+    // ever answer "Failed to exit plan mode". The two remaining exits
+    // (proceed once / restore previous) both stay available untrusted.
+    if (isTrustedFolder) {
+      options.push({
+        key: 'proceed-always',
+        label: t('Yes, and auto-accept edits'),
+        value: ToolConfirmationOutcome.ProceedAlways,
+      });
+    }
     options.push({
       key: 'proceed-once',
       label: t('Yes, and manually approve edits'),
@@ -571,9 +606,25 @@ export const ToolConfirmationMessage: React.FC<
 
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
-        <Text color={theme.text.link}>
-          <RenderInline text={infoProps.prompt} textColor={theme.text.link} />
-        </Text>
+        {infoProps.renderPromptAsPlainText ? (
+          <MaxSizedBox
+            maxHeight={availableBodyContentHeight()}
+            maxWidth={warningContentWidth}
+            overflowDirection="bottom"
+          >
+            {infoProps.prompt.split('\n').map((line, index) => (
+              <Box key={index}>
+                <Text color={theme.text.link} wrap="wrap">
+                  {line}
+                </Text>
+              </Box>
+            ))}
+          </MaxSizedBox>
+        ) : (
+          <Text color={theme.text.link}>
+            <RenderInline text={infoProps.prompt} textColor={theme.text.link} />
+          </Text>
+        )}
         {displayUrls && infoProps.urls && infoProps.urls.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             <Text color={theme.text.primary}>{t('URLs to fetch:')}</Text>
@@ -654,7 +705,7 @@ export const ToolConfirmationMessage: React.FC<
     });
   }
 
-  if (autoModeFallback) {
+  if (offersSwitchToDefault) {
     const cancelIndex = options.findIndex(
       (option) => option.value === ToolConfirmationOutcome.Cancel,
     );
@@ -668,6 +719,9 @@ export const ToolConfirmationMessage: React.FC<
       0,
       switchOption,
     );
+  }
+
+  if (autoModeFallback) {
     bodyContent = (
       <Box flexDirection="column">
         <Box paddingX={1} marginLeft={1} marginBottom={1}>
@@ -702,7 +756,7 @@ export const ToolConfirmationMessage: React.FC<
             label: t('Yes, allow once'),
             value: ToolConfirmationOutcome.ProceedOnce,
           },
-          ...(autoModeFallback
+          ...(offersSwitchToDefault
             ? [
                 {
                   key: 'switch-default-and-proceed-once',
@@ -713,7 +767,7 @@ export const ToolConfirmationMessage: React.FC<
                 },
               ]
             : []),
-          ...(!confirmationDetails.hideAlwaysAllow
+          ...(isTrustedFolder && !confirmationDetails.hideAlwaysAllow
             ? [
                 {
                   key: 'proceed-always',

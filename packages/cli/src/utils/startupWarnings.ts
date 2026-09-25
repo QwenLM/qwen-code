@@ -5,13 +5,12 @@
  */
 
 import fs from 'node:fs/promises';
-import os from 'node:os';
-import { join as pathJoin } from 'node:path';
 import { getErrorMessage } from '@qwen-code/qwen-code-core';
 
-const warningsFilePath = pathJoin(os.tmpdir(), 'qwen-code-warnings.txt');
-
 export async function getStartupWarnings(): Promise<string[]> {
+  const warningsFilePath = process.env['QWEN_CODE_WARNINGS_FILE'];
+  if (!warningsFilePath) return [];
+
   try {
     await fs.access(warningsFilePath); // Check if file exists
     const warningsContent = await fs.readFile(warningsFilePath, 'utf-8');

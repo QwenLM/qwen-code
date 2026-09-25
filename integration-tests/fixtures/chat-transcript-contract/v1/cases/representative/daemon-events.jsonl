@@ -1,0 +1,5 @@
+{"id":10,"v":1,"type":"session_update","data":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Inspect the contract"},"_meta":{"qwenTranscript":{"segmentId":"prompt-1:user:0"}}}}}
+{"id":20,"v":1,"type":"session_update","data":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Checking identity"},"_meta":{"qwenTranscript":{"segmentId":"prompt-1:thought:0"}}}}}
+{"id":30,"v":1,"type":"session_update","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The contract is stable."},"_meta":{"qwenTranscript":{"segmentId":"prompt-1:assistant:0"}}}}}
+{"id":40,"v":1,"type":"session_update","data":{"update":{"sessionUpdate":"tool_call","toolCallId":"read-1","title":"Read file","status":"completed","rawInput":{"path":"src/index.ts"},"_meta":{"toolName":"read"}}}}
+{"id":50,"v":1,"type":"permission_request","data":{"requestId":"permission-1","sessionId":"session-test","title":"Allow read?","options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}],"toolCall":{"toolCallId":"read-2","name":"read","kind":"read","rawInput":{"path":"src/other.ts"}}}}

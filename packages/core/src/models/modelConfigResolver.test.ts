@@ -328,6 +328,7 @@ describe('modelConfigResolver', () => {
             apiKey: 'key',
             generationConfig: {
               timeout: 60000,
+              streamIdleTimeoutMs: 300000,
               maxRetries: 5,
               samplingParams: {
                 temperature: 0.7,
@@ -338,12 +339,14 @@ describe('modelConfigResolver', () => {
         });
 
         expect(result.config.timeout).toBe(60000);
+        expect(result.config.streamIdleTimeoutMs).toBe(300000);
         expect(result.config.maxRetries).toBe(5);
         expect(result.config.retryInitialDelayMs).toBeUndefined();
         expect(result.config.retryMaxDelayMs).toBeUndefined();
         expect(result.config.samplingParams?.temperature).toBe(0.7);
 
         expect(result.sources['timeout'].kind).toBe('settings');
+        expect(result.sources['streamIdleTimeoutMs'].kind).toBe('settings');
         expect(result.sources['samplingParams'].kind).toBe('settings');
       });
 
@@ -354,6 +357,7 @@ describe('modelConfigResolver', () => {
           settings: {
             generationConfig: {
               timeout: 30000,
+              streamIdleTimeoutMs: 300000,
               retryInitialDelayMs: 60_000,
               retryMaxDelayMs: 300_000,
             },
@@ -368,6 +372,7 @@ describe('modelConfigResolver', () => {
             baseUrl: 'https://api.example.com',
             generationConfig: {
               timeout: 60000,
+              streamIdleTimeoutMs: 0,
               retryInitialDelayMs: 3_000,
               retryMaxDelayMs: 30_000,
             },
@@ -375,9 +380,13 @@ describe('modelConfigResolver', () => {
         });
 
         expect(result.config.timeout).toBe(60000);
+        expect(result.config.streamIdleTimeoutMs).toBe(0);
         expect(result.config.retryInitialDelayMs).toBe(3_000);
         expect(result.config.retryMaxDelayMs).toBe(30_000);
         expect(result.sources['timeout'].kind).toBe('modelProviders');
+        expect(result.sources['streamIdleTimeoutMs'].kind).toBe(
+          'modelProviders',
+        );
         expect(result.sources['retryInitialDelayMs'].kind).toBe(
           'modelProviders',
         );
@@ -883,6 +892,87 @@ describe('modelConfigResolver', () => {
         expect(result.config.timeout).toBe(99999);
         expect(result.sources['timeout'].kind).toBe('env');
       }
+    });
+  });
+
+  describe('enableRequestMetadata reaches the provider through configuration', () => {
+    // The DashScope provider reads enableRequestMetadata off the resolved
+    // ContentGeneratorConfig. If the field is missing from
+    // MODEL_GENERATION_CONFIG_FIELDS the resolver drops it silently, so the option is
+    // readable in the provider but unsettable by a user. These go through
+    // resolveModelConfig rather than injecting the getter, which is the path that was
+    // broken.
+    it('carries a settings generationConfig value onto the resolved config', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { enableRequestMetadata: true },
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          OPENAI_MODEL: 'ZHIPU/GLM-5.3-Flash',
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBe(true);
+      expect(result.sources['enableRequestMetadata'].kind).toBe('settings');
+    });
+
+    it('carries an explicit false, so the option can suppress as well as restore', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { enableRequestMetadata: false },
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          OPENAI_MODEL: 'qwen-max',
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBe(false);
+    });
+
+    it('lets a modelProvider generationConfig win over settings, like every other field', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {
+          generationConfig: { enableRequestMetadata: false },
+        },
+        env: {},
+        modelProvider: {
+          id: 'qwen-oauth',
+          name: 'Qwen OAuth',
+          generationConfig: { enableRequestMetadata: true },
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBe(true);
+      expect(result.sources['enableRequestMetadata'].kind).toBe(
+        'modelProviders',
+      );
+    });
+
+    it('stays undefined when nothing sets it, preserving the model-family default', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key' },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          OPENAI_MODEL: 'qwen-max',
+        },
+      });
+
+      expect(result.config.enableRequestMetadata).toBeUndefined();
     });
   });
 

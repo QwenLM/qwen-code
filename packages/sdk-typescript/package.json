@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/sdk",
-  "version": "0.1.8",
+  "version": "0.1.15",
   "description": "TypeScript SDK for programmatic access to qwen-code CLI",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -27,6 +27,11 @@
       "import": "./dist/daemon/transcript.js",
       "require": "./dist/daemon/transcript.cjs"
     },
+    "./peer": {
+      "types": "./dist/peer/index.d.ts",
+      "import": "./dist/peer/index.js",
+      "require": "./dist/peer/index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "bin": {
@@ -34,18 +39,20 @@
   },
   "files": [
     "dist",
+    "!dist/**/*.tsbuildinfo",
     "README.md"
   ],
   "scripts": {
     "build": "node scripts/build.js",
     "bundle:cli": "node scripts/bundle-cli.js",
     "test": "vitest run",
-    "test:ci": "vitest run",
+    "test:ci": "npm run typecheck:public-surface && vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src test",
     "lint:fix": "eslint src test --fix",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test-fence.json",
+    "typecheck:public-surface": "tsc --noEmit -p tsconfig.public-surface.json",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build && npm run bundle:cli",
     "prepack": "npm run build && npm run bundle:cli"

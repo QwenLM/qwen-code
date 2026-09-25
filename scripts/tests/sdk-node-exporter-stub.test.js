@@ -41,6 +41,18 @@ describe('SDK_NODE_STUBBED_EXPORTERS', () => {
     ).toBe(true);
   });
 
+  it('matches the sdk-node 0.221 env auto-configuration helper packages', () => {
+    expect(
+      SDK_NODE_STUBBED_EXPORTERS.test('@opentelemetry/configuration'),
+    ).toBe(true);
+    expect(
+      SDK_NODE_STUBBED_EXPORTERS.test('@opentelemetry/otlp-exporter-base'),
+    ).toBe(true);
+    expect(
+      SDK_NODE_STUBBED_EXPORTERS.test('@opentelemetry/otlp-grpc-exporter-base'),
+    ).toBe(true);
+  });
+
   it('does not match non-exporter or unrelated packages', () => {
     expect(SDK_NODE_STUBBED_EXPORTERS.test('@opentelemetry/sdk-node')).toBe(
       false,
@@ -50,6 +62,11 @@ describe('SDK_NODE_STUBBED_EXPORTERS', () => {
     expect(
       SDK_NODE_STUBBED_EXPORTERS.test(
         '@opentelemetry/exporter-trace-otlp-grpc/build/src/index.js',
+      ),
+    ).toBe(false);
+    expect(
+      SDK_NODE_STUBBED_EXPORTERS.test(
+        '@opentelemetry/configuration/build/src/index.js',
       ),
     ).toBe(false);
   });
@@ -84,6 +101,26 @@ describe('isStubbedSdkNodeExporterImport', () => {
         WINDOWS_OWN_MODULE_IMPORTER,
       ),
     ).toBe(false);
+  });
+
+  it('stubs the 0.221 helper packages only when sdk-node imports them', () => {
+    for (const packageName of [
+      '@opentelemetry/configuration',
+      '@opentelemetry/otlp-exporter-base',
+      '@opentelemetry/otlp-grpc-exporter-base',
+    ]) {
+      expect(
+        isStubbedSdkNodeExporterImport(packageName, POSIX_SDK_NODE_IMPORTER),
+      ).toBe(true);
+      expect(
+        isStubbedSdkNodeExporterImport(packageName, WINDOWS_SDK_NODE_IMPORTER),
+      ).toBe(true);
+      // The HTTP protocol module legitimately reaches otlp-exporter-base via
+      // the exporter packages; it must keep resolving the real one.
+      expect(
+        isStubbedSdkNodeExporterImport(packageName, POSIX_OWN_MODULE_IMPORTER),
+      ).toBe(false);
+    }
   });
 
   it('does not stub non-exporter packages even when sdk-node imports them', () => {

@@ -1696,9 +1696,15 @@ mod tests {
             value: value.map(str::to_owned),
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: actions.iter().map(|value| (*value).to_owned()).collect(),
             element_ptr: 7,
+            identity: None,
             depth: 0,
             parent_element_index: None,
             frame: None,
@@ -1709,6 +1715,8 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            focused: None,
+            focusable_or_selectable: false,
         }
     }
 
@@ -1721,8 +1729,11 @@ mod tests {
 
     fn tree(nodes: Vec<AXNode>) -> TreeWalkResult {
         TreeWalkResult {
+            incomplete_notes: Vec::new(),
             tree_markdown: String::new(),
             nodes,
+            complete: true,
+            read_complete: true,
             truncated: false,
             window_scope: Some(crate::ax::WindowScope::Matched),
         }
@@ -1849,8 +1860,11 @@ mod tests {
     #[test]
     fn pixel_fallback_requires_committed_navigation_and_complete_ax_proof() {
         let truncated = TreeWalkResult {
+            incomplete_notes: Vec::new(),
             tree_markdown: String::new(),
             nodes: Vec::new(),
+            complete: false,
+            read_complete: true,
             truncated: true,
             window_scope: Some(crate::ax::WindowScope::Matched),
         };

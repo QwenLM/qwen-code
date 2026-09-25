@@ -23,6 +23,8 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
+import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
+import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -37,9 +39,30 @@ export interface AutoMemoryExtractResult {
     | 'already_running'
     | 'queued'
     | 'memory_tool'
-    | 'memory_pressure';
+    | 'memory_pressure'
+    | 'session_mismatch';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
+}
+
+function getSessionMismatchResult(
+  sessionId: string,
+  expectedSessionId: string,
+  now: Date,
+): AutoMemoryExtractResult | null {
+  const cachedSessionId = getCacheSafeParamsSessionId();
+  if (cachedSessionId === undefined || cachedSessionId === expectedSessionId) {
+    return null;
+  }
+  debugLogger.debug('Skipping auto-memory extract: session_mismatch.');
+  return {
+    touchedTopics: [],
+    skippedReason: 'session_mismatch',
+    cursor: {
+      sessionId,
+      updatedAt: now.toISOString(),
+    },
+  };
 }
 
 async function readExtractCursor(
@@ -107,6 +130,19 @@ export async function runAutoMemoryExtract(params: {
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
+  if (!params.config) {
+    throw new Error(
+      'Managed auto-memory extraction requires config for forked-agent execution.',
+    );
+  }
+  const expectedSessionId = params.config.getSessionId();
+  const earlyMismatch = getSessionMismatchResult(
+    params.sessionId,
+    expectedSessionId,
+    now,
+  );
+  if (earlyMismatch) return earlyMismatch;
+
   // Per-project scaffold is required (extraction cursor + metadata live
   // there). User-level scaffold is optional — a brand-new user without
   // write access to `~/.qwen/memories/` should still be able to use
@@ -120,15 +156,10 @@ export async function runAutoMemoryExtract(params: {
     );
   }
 
-  if (!params.config) {
-    throw new Error(
-      'Managed auto-memory extraction requires config for forked-agent execution.',
-    );
-  }
-
   // Read the cursor first, then scan only the unprocessed slice. The old
   // code ran partToString().replace() over EVERY message but the resulting
-  // text was never read — fork agent context comes from getCacheSafeParams().
+  // text was never read — fork agent context comes from the session-scoped
+  // cache-safe params lookup.
   const currentCursor = await readExtractCursor(params.projectRoot);
   const rawOffset =
     currentCursor.sessionId === params.sessionId
@@ -156,6 +187,13 @@ export async function runAutoMemoryExtract(params: {
     await writeExtractCursor(params.projectRoot, cursor);
     return { touchedTopics: [], cursor };
   }
+
+  const lateMismatch = getSessionMismatchResult(
+    params.sessionId,
+    expectedSessionId,
+    now,
+  );
+  if (lateMismatch) return lateMismatch;
 
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
@@ -195,6 +233,9 @@ export async function runAutoMemoryExtract(params: {
         })
       : Promise.resolve();
     await Promise.all([projectRebuild, userRebuild]);
+    await refreshMemoryInstruction(params.config, {
+      logContext: 'managed auto-memory extraction',
+    });
   }
 
   const madeGenuineProgress =

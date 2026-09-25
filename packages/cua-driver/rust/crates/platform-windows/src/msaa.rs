@@ -24,7 +24,7 @@ use windows::core::{Interface, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
 
-use crate::uia::{UiaNode, UiaTreeResult};
+use crate::uia::{UiaBackend, UiaNode, UiaTreeResult};
 
 const OBJID_CLIENT: u32 = 0xFFFFFFFC;
 
@@ -87,6 +87,10 @@ unsafe fn walk_unsafe(hwnd: u64) -> UiaTreeResult {
                 "- Window <SAL/VCL — MSAA fallback failed (AccessibleObjectFromWindow hr={hr:?})>\n"
             ),
             nodes: Vec::new(),
+            backend: UiaBackend::Msaa,
+            complete: false,
+            truncated: false,
+            incomplete_notes: vec!["msaa_provider_unavailable".into()],
         };
     }
     let root: IAccessible = IAccessible::from_raw(raw_root);
@@ -110,6 +114,10 @@ unsafe fn walk_unsafe(hwnd: u64) -> UiaTreeResult {
     UiaTreeResult {
         tree_markdown,
         nodes,
+        backend: UiaBackend::Msaa,
+        complete: false,
+        truncated: total >= MAX_TOTAL_ELEMENTS,
+        incomplete_notes: vec!["msaa_full_only".into()],
     }
 }
 
@@ -192,6 +200,7 @@ unsafe fn walk(
                 automation_id: None,
                 help_text: None,
                 actions: actions.clone(),
+                runtime_id: None,
                 enabled: None,
                 selected: None,
                 element_ptr: ptr,
@@ -212,6 +221,7 @@ unsafe fn walk(
                 automation_id: None,
                 help_text: None,
                 actions: Vec::new(),
+                runtime_id: None,
                 enabled: None,
                 selected: None,
                 element_ptr: ptr,

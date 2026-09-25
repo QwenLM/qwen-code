@@ -649,6 +649,38 @@ describe('<TableRenderer />', () => {
       expectAllLinesToHaveSameVisibleWidth(output);
     });
 
+    it('stops a bare URL before glued-on CJK punctuation', () => {
+      enableHyperlinks();
+      const url = 'https://github.com/QwenLM/qwen-code/pull/8742';
+      const suffix = '（2 commits，等 CI）';
+      const output = renderTable(['PR'], [[`PR：${url}${suffix}`]], 100);
+      expect(output).toContain(`\x1b]8;;${url}\x07`);
+      expect(output).not.toContain(`\x1b]8;;${url}（`);
+      expect(stripAnsi(output)).toContain(suffix);
+    });
+
+    it('does not treat underscores around a later URL as emphasis', () => {
+      enableHyperlinks();
+      const firstUrl = 'https://a.com/x';
+      const secondUrl = 'https://b.com/y';
+      const output = renderTable(
+        ['PR'],
+        [[`见 ${firstUrl}（说明_1）和 ${secondUrl}_。`]],
+        100,
+      );
+
+      expect(output).toContain(`\x1b]8;;${firstUrl}\x07`);
+      expect(output).toContain(`\x1b]8;;${secondUrl}\x07`);
+      expect(stripAnsi(output)).toContain('（说明_1）和');
+      expect(stripAnsi(output)).toContain(`${secondUrl}_。`);
+    });
+
+    it('preserves dunder identifiers as visible text', () => {
+      const output = renderTable(['Value'], [['Python 的 __init__ 方法']], 60);
+
+      expect(stripAnsi(output)).toContain('__init__');
+    });
+
     it('falls back to legacy `label (url)` in cells on unsupported terminals', () => {
       // isTTY=false from the suite-wide beforeEach disables hyperlinks.
       const url = 'https://example.com/page';

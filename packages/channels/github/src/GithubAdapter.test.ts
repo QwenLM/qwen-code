@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   getWorkspaceScopeDirName,
+  PairingStore,
   type ChannelAgentBridge,
   type ChannelConfig,
   type Envelope,
@@ -246,6 +247,7 @@ class TestableGithubChannel extends GithubChannel {
   sourceMessageId: string | undefined;
   sourceSenderId: string | undefined;
   sourceMetadata: string | undefined;
+  inboundErrorSourceLabel: string | undefined;
   handleInboundHook: ((envelope: Envelope) => void | Promise<void>) | undefined;
 
   protected getResponseMessageId(_sessionId: string): string | undefined {
@@ -258,6 +260,12 @@ class TestableGithubChannel extends GithubChannel {
 
   protected getResponseMetadata(_sessionId: string): string | undefined {
     return this.sourceMetadata;
+  }
+
+  protected getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorSourceLabel;
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
@@ -1053,28 +1061,107 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
-    it('rejects an allowlist containing only the authenticated GitHub account', async () => {
+    it('normalizes per-group allowedUsers to lowercase for the group sender gate', async () => {
       const config = makeConfig({
-        senderPolicy: 'allowlist',
-        allowedUsers: ['TEST-BOT', 'test-bot'],
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['Alice'] } },
       });
       channel = new TestableGithubChannel('test-github', config, makeBridge());
       mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
 
-      try {
-        await expect(channel.connect()).rejects.toThrow(
-          'allowlist only contains the authenticated GitHub account "test-bot"',
-        );
-      } finally {
-        channel.disconnect();
-      }
-      expect(config.allowedUsers).toEqual(['test-bot', 'test-bot']);
+      const groupGate = (
+        channel as unknown as {
+          senderGateFor(target: { isGroup: boolean; chatId: string }): {
+            isAllowed: (senderId: string) => boolean;
+          };
+        }
+      ).senderGateFor({ isGroup: true, chatId: 'owner/repo' });
+      expect(groupGate.isAllowed('alice')).toBe(true);
+      expect(groupGate.isAllowed('bob')).toBe(false);
+      expect(config.groups['*']?.allowedUsers).toEqual(['alice']);
+      channel.disconnect();
     });
+
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+
+      expect(config.operators).toEqual(['alice']);
+      channel.disconnect();
+    });
+
+    it('ignores a bot-only private allowlist for repository access', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          privatePolicy: 'allowlist',
+          senderPolicy: 'allowlist',
+          allowedUsers: ['TEST-BOT'],
+        }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      await expect(channel.connect()).resolves.toBeUndefined();
+      channel.disconnect();
+    });
+
+    it.each(['*', 'owner/restricted'])(
+      'warns about bot-only group %s without blocking another repository',
+      async (restrictedGroup) => {
+        const config = makeConfig({
+          groupPolicy: 'allowlist',
+          groups: {
+            [restrictedGroup]: {
+              senders: 'allowlist',
+              allowedUsers: ['TEST-BOT', 'test-bot'],
+            },
+            'owner/repo': { senders: 'open' },
+          },
+        });
+        channel = new TestableGithubChannel(
+          'test-github',
+          config,
+          makeBridge(),
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await expect(channel.connect()).resolves.toBeUndefined();
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `warning: GitHub group "${restrictedGroup}" allowlist only contains the authenticated GitHub account "test-bot"`,
+            ),
+          );
+          channel.usePreflight = true;
+          await channel.handleInbound({
+            channelName: 'test-github',
+            senderId: 'alice',
+            senderName: 'Alice',
+            chatId: 'owner/repo',
+            text: 'review this',
+            isGroup: true,
+            isMentioned: true,
+            isReplyToBot: false,
+          });
+          expect(channel.inboundEnvelopes).toHaveLength(1);
+        } finally {
+          channel.disconnect();
+          stderr.mockRestore();
+        }
+        expect(config.groups[restrictedGroup]?.allowedUsers).toEqual([
+          'test-bot',
+          'test-bot',
+        ]);
+      },
+    );
 
     it('warns when the authenticated GitHub account is part of a mixed allowlist', async () => {
       const config = makeConfig({
-        senderPolicy: 'allowlist',
-        allowedUsers: ['TEST-BOT', 'operator'],
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['TEST-BOT', 'operator'] },
+        },
       });
       channel = new TestableGithubChannel('test-github', config, makeBridge());
       mockOctokit.paginate.mockResolvedValue([]);
@@ -1083,7 +1170,7 @@ describe('GithubChannel', () => {
       try {
         await channel.connect();
         expect(stderr).toHaveBeenCalledWith(
-          '[Channel:test-github] warning: authenticated GitHub account "test-bot" is allowlisted but cannot trigger this channel; use a separate operator account.\n',
+          '[Channel:test-github] warning: authenticated GitHub account "test-bot" is allowlisted in group "*" but cannot trigger this channel; use a separate operator account.\n',
         );
       } finally {
         channel.disconnect();
@@ -1105,14 +1192,12 @@ describe('GithubChannel', () => {
       expect(config.allowedUsers).toEqual(['alice']);
     });
 
-    it('forces final-only delivery and appends the publication policy', () => {
+    it('appends the publication policy', () => {
       const config = makeConfig({
-        blockStreaming: 'on',
         instructions: 'Respond in Chinese.',
       });
       new TestableGithubChannel('test-github', config, makeBridge());
 
-      expect(config.blockStreaming).toBe('off');
       expect(config.instructions).toContain('GitHub publication policy:');
       expect(config.instructions).toContain('<no-reply/>');
       expect(config.instructions).toContain('Respond in Chinese.');
@@ -1475,7 +1560,7 @@ describe('GithubChannel', () => {
           makeComment({
             id: 1002,
             node_id: 'C_1002',
-            body: '@test-bot check this review note',
+            body: '@test-bot /review check this review note',
             created_at: '2026-07-04T09:30:00.000Z',
             user: { login: 'bob' },
           }),
@@ -1503,7 +1588,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: ' check this review note',
+        text: ' /review check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -1704,6 +1789,35 @@ describe('GithubChannel', () => {
       },
     );
 
+    it('aggregates ordinary comments and preserves literal slash-prefixed text', async () => {
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ignore this' }),
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            body: '/review inspect this',
+            user: { login: 'bob' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '- @bob: /review inspect this',
+      );
+      expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
+    });
+
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({
         reasonFilter: ['mention', 'review_requested', 'assign'],
@@ -1743,10 +1857,10 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toContain('allowed comment');
     });
 
-    it('excludes comments from disallowed senders when aggregating', async () => {
+    it('excludes comments outside the group member allowlist when aggregating', async () => {
       await initWithoutLoop({
-        senderPolicy: 'allowlist',
-        allowedUsers: ['alice'],
+        privatePolicy: 'disabled',
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
       });
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1770,9 +1884,9 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).not.toContain('not allowed');
     });
 
-    it('dispatches directed follow-ups from approved pairing users without a mention', async () => {
+    it('aggregates all group members independently of private pairing', async () => {
       await initWithoutLoop({
-        senderPolicy: 'pairing',
+        privatePolicy: 'pairing',
         allowedUsers: ['alice'],
       });
       channel.usePreflight = true;
@@ -1795,8 +1909,242 @@ describe('GithubChannel', () => {
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]!.text).toBe('please take a look');
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '@alice: please take a look',
+      );
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '@bob: unapproved follow-up',
+      );
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('dispatches directed follow-ups from an approved paired repo on the aggregate lane', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      const store = new PairingStore('test-github', '/tmp/test');
+      const created = store.createGroupRequest(
+        'owner/repo',
+        'owner/repo',
+        'alice',
+        'Alice',
+      );
+      if (!('code' in created)) {
+        throw new Error(`expected a pairing code, got ${created.rejected}`);
+      }
+      store.approve(created.code);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'please take a look' }),
+          makeComment({
+            id: 1002,
+            body: 'second opinion',
+            user: { login: 'bob' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        senderId: 'alice',
+        text: 'please take a look',
+        isMentioned: true,
+      });
+      expect(channel.inboundEnvelopes[1]).toMatchObject({
+        senderId: 'bob',
+        text: 'second opinion',
+        isMentioned: true,
+      });
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('does not feed the issue body after a mentioning comment from an approved paired repo', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      const store = new PairingStore('test-github', '/tmp/test');
+      const created = store.createGroupRequest(
+        'owner/repo',
+        'owner/repo',
+        'alice',
+        'Alice',
+      );
+      if (!('code' in created)) {
+        throw new Error(`expected a pairing code, got ${created.rejected}`);
+      }
+      store.approve(created.code);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Test Issue',
+          body: '@test-bot the issue body mentions the bot too',
+          user: { login: 'alice' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        messageId: '1001',
+        senderId: 'alice',
+      });
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+    });
+
+    it('posts one pairing comment when a mentioning comment and body arrive together', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Test Issue',
+          body: '@test-bot the issue body mentions the bot too',
+          user: { login: 'alice' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('pairing code'),
+        }),
+      );
+    });
+
+    it('does not turn ambient comments into pairing requests under senderPolicy open', async () => {
+      await initWithoutLoop({ groupPolicy: 'pairing' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ambient chatter without a mention' }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        new PairingStore('test-github', '/tmp/test').listPending(),
+      ).toEqual([]);
+    });
+
+    it('posts one pairing comment when assign and body mention both trigger pairing', async () => {
+      await initWithoutLoop({ groupPolicy: 'pairing' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'assign', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([
+          makeIssueEvent({
+            event: 'assigned',
+            assigner: { login: 'maintainer' },
+            assignee: { login: 'test-bot' },
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'broken build',
+          state: 'open',
+          user: { login: 'alice' },
+          body: '@test-bot please look at this issue',
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('pairing code'),
+        }),
+      );
+      expect(
+        new PairingStore('test-github', '/tmp/test').listPending(),
+      ).toHaveLength(1);
+    });
+
+    it('does not re-feed the body when a re-listed thread already had a pairing effect', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Test Issue',
+          body: '@test-bot the issue body mentions the bot too',
+          user: { login: 'alice' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:42');
+
+      // Poll 2: marking the thread read failed, so it is listed as unread
+      // again. The mentioning comment is now outside the comment window; the
+      // body feed must stay suppressed or it would post a second identical
+      // pairing-code comment.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            last_read_at: null,
+            updated_at: '2026-07-02T11:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
     });
 
     it('bounds each aggregated comment without hiding later comments', async () => {
@@ -1817,6 +2165,57 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes[0]!.text).not.toContain('a'.repeat(401));
       expect(channel.inboundEnvelopes[0]!.text).toContain('latest');
+    });
+
+    it('sanitizes crafted comment bodies in the aggregate prompt', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            body: 'line one\u202e hidden\u200b\u0007\r\nline two [BUG] kept',
+          }),
+        ]);
+
+      await pollOnce();
+
+      const text = channel.inboundEnvelopes[0]!.text;
+      // eslint-disable-next-line no-control-regex
+      const craftedChars = /[\u202a-\u202e\u2066-\u2069\u200b\u0007\r]/;
+      expect(text).not.toMatch(craftedChars);
+      // Newlines and brackets are display content and must survive.
+      expect(text).toContain('line one');
+      expect(text).toContain('\nline two [BUG] kept');
+    });
+
+    it('truncates aggregated comments on code-point boundaries', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          // 399 ASCII + one 2-unit emoji + tail: a UTF-16 slice(0, 400) would
+          // land mid-surrogate-pair and leave a lone surrogate behind.
+          makeComment({ body: 'a'.repeat(399) + '\ud83c\udf89' + 'tail' }),
+        ]);
+
+      await pollOnce();
+
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain('a'.repeat(399) + '\ud83c\udf89');
+      expect(text).not.toContain('tail');
+      expect(text).not.toMatch(
+        /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
+      );
     });
 
     it('records aggregated comments that exceed the summary cap', async () => {
@@ -2197,6 +2596,49 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('attributes the published comment without changing raw audit metadata', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 2002, html_url: 'https://example.test/comment/2002' },
+      });
+      await connectForPublication();
+      const response = 'Reviewed the implementation.';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+            sourceLabel?: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        response,
+        'session-publication',
+        '[review_*]',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: '\\[review\\_\\*\\]\nReviewed the implementation.',
+      });
+      const audits = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(audits.at(-1)).toMatchObject({
+        bodyChars: Array.from(response).length,
+        bodySha256: createHash('sha256').update(response).digest('hex'),
+      });
+      expect(JSON.stringify(audits)).not.toContain('review_');
+    });
+
     it('uses the active prompt thread for final delivery', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
@@ -2552,8 +2994,11 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('ignores invalid pending final retry records', async () => {
-      writePending([pendingRecord(), { id: 123, bad: true }]);
+    it('preserves attribution while ignoring invalid pending retry records', async () => {
+      writePending([
+        pendingRecord({ sourceLabel: '[review_*]' }),
+        { id: 123, bad: true },
+      ]);
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: {
           id: 2004,
@@ -2568,7 +3013,7 @@ describe('GithubChannel', () => {
         owner: 'owner',
         repo: 'repo',
         issue_number: 42,
-        body: 'Final reply',
+        body: '\\[review\\_\\*\\]\nFinal reply',
       });
     });
 
@@ -3193,7 +3638,9 @@ describe('GithubChannel', () => {
     it('does not suppress first-contact body when mention is from a disallowed sender', async () => {
       channel = new TestableGithubChannel(
         'test-github',
-        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['bob'] }),
+        makeConfig({
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['bob'] } },
+        }),
         makeBridge(),
       );
       mockOctokit.paginate.mockResolvedValueOnce([]);
@@ -3253,8 +3700,9 @@ describe('GithubChannel', () => {
   });
 
   describe('error handling', () => {
-    it('posts error comment when handleInbound fails', async () => {
+    it('attributes the error comment when a named inbound turn fails', async () => {
       channel.handleInboundError = new Error('agent down');
+      channel.inboundErrorSourceLabel = '[review_*]';
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
@@ -3263,7 +3711,7 @@ describe('GithubChannel', () => {
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
         expect.objectContaining({
-          body: expect.stringContaining('Failed to process'),
+          body: '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
         }),
       );
     });
@@ -3445,6 +3893,59 @@ describe('GithubChannel', () => {
         mockOctokit.rest.activity.markNotificationsAsRead,
       ).not.toHaveBeenCalled();
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    });
+
+    it('blocks cursor commit when a persisted envelope has a non-array mentionedMemberIds', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([
+        {
+          ...task,
+          envelope: { ...task.envelope, mentionedMemberIds: 'not-an-array' },
+        },
+      ]);
+      const privateChannel = channel as unknown as {
+        inboundRecoveryPending: boolean;
+      };
+      privateChannel.inboundRecoveryPending = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+
+      await pollOnce();
+
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    });
+
+    it('recovers an envelope carrying a valid mentionedMemberIds array', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([
+        {
+          ...task,
+          envelope: { ...task.envelope, mentionedMemberIds: ['member-x'] },
+        },
+      ]);
+      const privateChannel = channel as unknown as {
+        inboundRecoveryPending: boolean;
+      };
+      privateChannel.inboundRecoveryPending = true;
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.mentionedMemberIds).toEqual([
+        'member-x',
+      ]);
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('persists cancellation as a terminal task state', async () => {

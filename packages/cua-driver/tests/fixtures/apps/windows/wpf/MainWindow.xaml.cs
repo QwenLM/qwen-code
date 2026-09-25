@@ -55,6 +55,10 @@ public partial class MainWindow : Window
         // PostMessage actually arrived and was actionable.
         var source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
         source?.AddHook(OnWindowMessage);
+        // Start with the deliberate decoy focused. Foreground element-addressed
+        // keyboard tests must move focus to their exact UIA target after the
+        // top-level activation; inheriting startup focus would hide that race.
+        Keyboard.Focus(TxtDeferredInput);
         PublishFixtureState();
     }
 
@@ -151,6 +155,11 @@ public partial class MainWindow : Window
     private void OnInputChanged(object sender, TextChangedEventArgs e)
     {
         LblInputMirror.Text = $"mirror={TxtInput.Text}";
+    }
+
+    private void OnDeferredInputChanged(object sender, TextChangedEventArgs e)
+    {
+        LblDeferredInputMirror.Text = $"deferred_mirror={TxtDeferredInput.Text}";
     }
 
     private void OnTargetLeftDown(object sender, MouseButtonEventArgs e)

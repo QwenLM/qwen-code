@@ -1,7 +1,11 @@
-import type { DaemonWorkspaceSkillStatus } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceSkillStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 
 export type SkillLevelFilter = 'all' | DaemonWorkspaceSkillStatus['level'];
 export type SkillStatusFilter = 'all' | 'enabled' | 'disabled';
+
+export function skillExtensionLabel(skill: DaemonWorkspaceSkillStatus): string {
+  return skill.extensionDisplayName ?? skill.extensionName ?? '-';
+}
 
 export function filterSkills(
   skills: readonly DaemonWorkspaceSkillStatus[],

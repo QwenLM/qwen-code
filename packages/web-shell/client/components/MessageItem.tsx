@@ -1,15 +1,33 @@
-import { memo, type ReactElement } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactElement,
+} from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
-import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
+import { CompactModeContext } from '../WebShellContexts';
+import type {
+  WebShellAssistantFeedbackRating,
+  WebShellAssistantTurnFooterRenderInfo,
+  WebShellSource,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
+import { QuestionAnswerMessage } from './messages/QuestionAnswerMessage';
+import {
+  extractText,
+  getQuestionAnswerResult,
+  isCompletedAskUserQuestion,
+} from './messages/toolFormatting';
 import {
   AssistantMessage,
   ThinkingMessage,
@@ -17,28 +35,62 @@ import {
 } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
+import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
+import { isSummaryRunId } from './summaryRunId';
 import { PlanMessage } from './messages/PlanMessage';
 import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
+import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
 
 interface MessageItemProps {
   message: Message;
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
-  isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onBranchSession?: () => void;
+  /**
+   * Open the in-place editor for this user message. Return `true` when a host
+   * owns the edit lifecycle — then the inline editor stays closed.
+   */
+  onEditUserMessage?: () => boolean | void;
+  /**
+   * Send the text the user confirmed in the inline editor. Resolves `false`
+   * when the resend was refused or failed; the editor stays open then.
+   */
+  onSubmitUserMessageEdit?: (
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
+  onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+  branchRecordId?: string;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
+  /** Turn id marks are keyed by; unset hides the marks for this message. */
+  assistantFeedbackTurnId?: string;
+  /** Admitted prompt id of the turn; unset hides the marks for this message. */
+  assistantFeedbackPromptId?: string;
+  assistantFeedbackRating?: WebShellAssistantFeedbackRating;
+  onAssistantFeedbackRate?: (
+    promptId: string,
+    turnId: string,
+    rating: WebShellAssistantFeedbackRating | null,
+  ) => void;
   isLocateFlashing?: boolean;
   assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -46,20 +98,99 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onLocateBackgroundSource,
+  onImagePreview,
+  onAttachmentPreview,
+  onTurnOutputOpen,
+  onInsightReportOpen,
   workspaceCwd,
-  isLatest = false,
   showRetryHint = false,
   onRetryClick,
   sendFailed = false,
   onRetrySend,
+  onEditUserMessage,
+  onSubmitUserMessageEdit,
   onBranchSession,
+  branchRecordId,
   showAssistantActions = false,
   showAssistantBranch = false,
+  assistantFeedbackTurnId,
+  assistantFeedbackPromptId,
+  assistantFeedbackRating,
+  onAssistantFeedbackRate,
   isLocateFlashing = false,
   assistantTurnFooterInfo,
+  turnSources,
+  onSourceOpen,
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  // The inline editor is owned here because the toggle (in the timestamp row)
+  // and the edited bubble are siblings under this row.
+  const [editingUserMessage, setEditingUserMessage] = useState(false);
+  // Held while the resend is in flight so the editor can show progress and
+  // survive a refusal instead of dropping the user's text.
+  const [submittingUserMessageEdit, setSubmittingUserMessageEdit] =
+    useState(false);
+  const openUserMessageEditor = useCallback(() => {
+    if (onEditUserMessage?.() === true) return;
+    setEditingUserMessage(true);
+  }, [onEditUserMessage]);
+  const closeUserMessageEditor = useCallback(() => {
+    setEditingUserMessage(false);
+  }, []);
+  const submitUserMessageEdit = useCallback(
+    (content: string) => {
+      if (!onSubmitUserMessageEdit) return;
+      setSubmittingUserMessageEdit(true);
+      void Promise.resolve(onSubmitUserMessageEdit(content))
+        .catch(() => false)
+        .then((accepted) => {
+          setSubmittingUserMessageEdit(false);
+          if (accepted !== false) setEditingUserMessage(false);
+        });
+    },
+    [onSubmitUserMessageEdit],
+  );
+  const boundBranchSession = useMemo(
+    () =>
+      onBranchSession && branchRecordId
+        ? () => onBranchSession(branchRecordId)
+        : undefined,
+    [onBranchSession, branchRecordId],
+  );
+  const boundFeedbackRate = useMemo(
+    () =>
+      onAssistantFeedbackRate && assistantFeedbackPromptId
+        ? (rating: WebShellAssistantFeedbackRating | null) =>
+            onAssistantFeedbackRate(
+              assistantFeedbackPromptId,
+              assistantFeedbackTurnId ?? '',
+              rating,
+            )
+        : undefined,
+    [
+      onAssistantFeedbackRate,
+      assistantFeedbackPromptId,
+      assistantFeedbackTurnId,
+    ],
+  );
+  const compactMode = useContext(CompactModeContext);
+  const questionTool =
+    message.role === 'tool_group' &&
+    message.tools.length === 1 &&
+    isCompletedAskUserQuestion(message.tools[0])
+      ? message.tools[0]
+      : undefined;
+  const questionAnswer = questionTool
+    ? getQuestionAnswerResult(questionTool)
+    : null;
+  const isUserStyled =
+    !!questionAnswer ||
+    message.role === 'user' ||
+    (message.role === 'system' &&
+      message.source === 'mid_turn_message_injected');
+  const openTurnCalls = useOpenTurnCalls();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -67,10 +198,17 @@ export const MessageItem = memo(function MessageItem({
           <UserMessage
             content={message.content}
             images={message.images}
+            files={message.files}
             inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
+            editing={editingUserMessage}
+            submittingEdit={submittingUserMessageEdit}
+            onEditSubmit={submitUserMessageEdit}
+            onEditCancel={closeUserMessageEditor}
+            onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
           />
         );
       case 'assistant':
@@ -79,17 +217,21 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
-            onBranchSession={onBranchSession}
+            onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
+            showAssistantFeedback={assistantFeedbackPromptId !== undefined}
+            assistantFeedbackRating={assistantFeedbackRating}
+            onAssistantFeedbackRate={boundFeedbackRate}
             isLocateFlashing={isLocateFlashing}
             customFooterInfo={assistantTurnFooterInfo}
+            turnSources={turnSources}
+            onSourceOpen={onSourceOpen}
           />
         );
       case 'thinking':
         return (
           <ThinkingMessage
-            messageId={message.id}
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
@@ -98,12 +240,34 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'tool_group':
+        if (
+          questionTool &&
+          !questionAnswer &&
+          !extractText(questionTool)?.trim()
+        ) {
+          return null;
+        }
+        if (questionAnswer && questionTool) {
+          if (!questionAnswer.answers.length && !questionAnswer.text.trim())
+            return null;
+          return (
+            <QuestionAnswerMessage
+              tool={questionTool}
+              result={questionAnswer}
+              isLocateFlashing={isLocateFlashing}
+            />
+          );
+        }
         return (
           <ToolGroup
             tools={message.tools}
+            onTurnOutputOpen={onTurnOutputOpen}
+            thoughts={message.thoughts}
+            compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
             isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'plan':
@@ -121,8 +285,12 @@ export const MessageItem = memo(function MessageItem({
             variant={message.variant}
             source={message.source}
             data={message.data}
+            images={message.images}
+            files={message.files}
             onShowContextDetail={onShowContextDetail}
-            isLatest={isLatest}
+            onLocateBackgroundSource={onLocateBackgroundSource}
+            onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
             showRetryHint={showRetryHint && message.retryable === true}
             onRetryClick={onRetryClick}
           />
@@ -150,7 +318,12 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'insight_ready':
-        return <InsightReady path={message.path} />;
+        return (
+          <InsightReady
+            path={message.path}
+            onInsightReportOpen={onInsightReportOpen}
+          />
+        );
       case 'insight_error':
         return (
           <div style={{ color: 'var(--error-color, #e06c75)' }}>
@@ -173,9 +346,7 @@ export const MessageItem = memo(function MessageItem({
     <ErrorBoundary
       label={`message:${message.role}`}
       resetKeys={[message]}
-      fallback={
-        <MessageRenderError align={message.role === 'user' ? 'end' : 'start'} />
-      }
+      fallback={<MessageRenderError align={isUserStyled ? 'end' : 'start'} />}
     >
       {body}
     </ErrorBoundary>
@@ -219,12 +390,40 @@ export const MessageItem = memo(function MessageItem({
     return selectableSafeBody;
   }
 
+  // A turn's identity is its leading user message's id, so the entry is
+  // available as soon as the turn exists — including while it is still running.
+  const turnCallsTurnId =
+    openTurnCalls &&
+    message.role === 'user' &&
+    isTurnCallsPrompt(message.source, message.content)
+      ? message.id
+      : undefined;
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
-      chatMode={message.role === 'user'}
-      copyText={message.role === 'user' ? message.content : undefined}
+      hideTimestamp={
+        message.role === 'system' &&
+        (message.source === 'background_task_completed' ||
+          message.source === 'background_notification_turn_started')
+      }
+      chatMode={isUserStyled}
+      toolGroupSpacing={message.role === 'tool_group' && compactMode}
+      copyText={
+        isUserStyled && 'content' in message ? message.content : undefined
+      }
       copyTitle={t('common.copy')}
+      onEdit={
+        onEditUserMessage && !editingUserMessage
+          ? openUserMessageEditor
+          : undefined
+      }
+      editTitle={t('userMessage.edit')}
+      onOpenTurnCalls={
+        openTurnCalls && turnCallsTurnId
+          ? () => openTurnCalls(turnCallsTurnId)
+          : undefined
+      }
+      turnCallsTitle={t('turnCalls.open')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -264,17 +463,39 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
+    return false;
+  if (prev.onImagePreview !== next.onImagePreview) return false;
+  if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
+  if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
-  if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
+  if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
+    return false;
+  if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
+  if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
+  if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
+    return false;
+  if (prev.assistantFeedbackPromptId !== next.assistantFeedbackPromptId)
+    return false;
+  if (prev.assistantFeedbackRating !== next.assistantFeedbackRating)
+    return false;
+  if (prev.onAssistantFeedbackRate !== next.onAssistantFeedbackRate)
+    return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   if (prev.generateContent !== next.generateContent) return false;
+  if (
+    prev.turnSources !== next.turnSources ||
+    prev.onSourceOpen !== next.onSourceOpen
+  )
+    return false;
   if (
     !areAssistantTurnFooterInfosEqual(
       prev.assistantTurnFooterInfo,
@@ -310,6 +531,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'user' &&
         prev.content === next.content &&
+        prev.source === next.source &&
         stableImagesEqual(prev.images, next.images)
       );
     case 'assistant':
@@ -331,7 +553,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         prev.variant === next.variant &&
         prev.retryable === next.retryable &&
         prev.source === next.source &&
-        prev.data === next.data
+        prev.data === next.data &&
+        stableImagesEqual(prev.images, next.images)
       );
     case 'user_shell':
       return (
@@ -363,6 +586,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
     case 'tool_group':
       return (
         next.role === 'tool_group' &&
+        areToolGroupThoughtsEqual(prev.thoughts, next.thoughts) &&
         prev.tools.length === next.tools.length &&
         prev.tools.every((tool, index) =>
           areToolCallsEqual(tool, next.tools[index]),
@@ -398,6 +622,7 @@ function areToolCallsEqual(
     prev.callId === next.callId &&
     prev.toolName === next.toolName &&
     prev.status === next.status &&
+    prev.subagentSessionReady === next.subagentSessionReady &&
     prev.title === next.title &&
     prev.kind === next.kind &&
     prev.startTime === next.startTime &&
@@ -408,6 +633,32 @@ function areToolCallsEqual(
     stableJson(prev.locations) === stableJson(next.locations) &&
     stableJson(prev.content) === stableJson(next.content) &&
     areToolListsEqual(prev.subTools, next.subTools)
+  );
+}
+
+function areToolGroupThoughtsEqual(
+  prev:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+  next:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every(
+    (thought, index) =>
+      thought.content === next[index]?.content &&
+      thought.isStreaming === next[index]?.isStreaming &&
+      thought.beforeToolCallId === next[index]?.beforeToolCallId,
   );
 }
 

@@ -10,13 +10,13 @@ The assembly order is part of the daemon contract and must stay visually auditab
 
 1. same-origin `Origin` stripping
 2. CORS and host allowlist
-3. pre-auth `/health` and `/demo` on allowed loopback setups
+3. pre-auth `/health` on allowed loopback setups
 4. access logging
 5. Web Shell static assets
 6. bearer auth
 7. rate limit
-8. JSON body parser and JSON parser error mapper
-9. post-auth `/health` and `/demo` when required
+8. post-auth `/health` when required
+9. JSON body parser and JSON parser error mapper
 10. daemon telemetry
 11. REST route groups
 12. ACP HTTP and WebSocket routes

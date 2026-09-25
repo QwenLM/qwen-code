@@ -8,7 +8,7 @@ import type { Config } from '../config/config.js';
 import {
   runForkedAgent,
   type ForkedAgentResult,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
@@ -123,7 +123,6 @@ export async function planManagedAutoMemoryDreamByAgent(
       ToolNames.READ_FILE,
       ToolNames.GREP,
       ToolNames.GLOB,
-      ToolNames.LS,
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,

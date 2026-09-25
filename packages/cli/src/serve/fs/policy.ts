@@ -61,6 +61,17 @@ export const MAX_TEXT_SCAN_BYTES = 8 * 1024 * 1024;
 export const MAX_WRITE_BYTES = 5 * 1024 * 1024;
 
 /**
+ * Maximum bytes accepted by the binary upload write path
+ * (`writeBytesAtomic`). This is a distinct binary-ingress policy, NOT an
+ * increase to the agent text-write limit: text writes keep
+ * `MAX_WRITE_BYTES`. Sized for screenshots, data files, and configs that a
+ * user drags into the Web Shell. The daemon's upload route and the fs
+ * boundary share this single constant so a request buffered under the parser
+ * cap is never rejected later under a different limit.
+ */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/**
  * Sample size used for content-based binary detection. Aligned with
  * `isBinaryFile` from `packages/core/src/utils/fileUtils.ts:414` so
  * the boundary and the existing tool layer agree on what counts as

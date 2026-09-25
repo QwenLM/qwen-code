@@ -7,12 +7,14 @@
 import * as fs from 'node:fs';
 import path from 'node:path';
 import type { Request, Response } from 'express';
+import { isWithinRoot } from '../config/path-comparison.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 export interface WorkspaceRouteContext {
   readonly runtime: WorkspaceRuntime;
@@ -26,8 +28,8 @@ export function resolveWorkspaceEntryFromParam(
   paramName = 'workspace',
 ): WorkspaceEntry | null {
   const selector = req.params[paramName] ?? '';
-  const byId = registry.getEntryByWorkspaceId(selector);
-  if (byId) return byId;
+  const entry = resolveWorkspaceEntryBySelector(registry, selector);
+  if (entry) return entry;
 
   if (!isPortableAbsolutePath(selector)) {
     res.status(400).json({
@@ -36,6 +38,17 @@ export function resolveWorkspaceEntryFromParam(
     });
     return null;
   }
+  sendWorkspaceMismatch(res, registry);
+  return null;
+}
+
+export function resolveWorkspaceEntryBySelector(
+  registry: WorkspaceRegistry,
+  selector: string,
+): WorkspaceEntry | undefined {
+  const byId = registry.getEntryByWorkspaceId(selector);
+  if (byId) return byId;
+  if (!isPortableAbsolutePath(selector)) return undefined;
 
   const exact = registry.getEntryByWorkspaceCwd(selector);
   if (exact) return exact;
@@ -56,18 +69,13 @@ export function resolveWorkspaceEntryFromParam(
     }
   }
   const normalizedSelector = normalizePortableAbsolutePath(selector);
-  const entry = registry
+  return registry
     .listEntries()
     .find(
       (candidate) =>
         normalizePortableAbsolutePath(candidate.workspaceCwd) ===
         normalizedSelector,
     );
-  if (!entry) {
-    sendWorkspaceMismatch(res, registry);
-    return null;
-  }
-  return entry;
 }
 
 export function isPortableAbsolutePath(value: string): boolean {
@@ -127,15 +135,18 @@ export function resolveManagedWorkspaceRuntimeByPathSelector(
   selector: string,
 ): WorkspaceRuntime | undefined {
   const exact = registry.getManagedByWorkspaceCwd(selector);
-  if (exact) return exact;
+  if (exact && !isInternalWorkspaceRuntime(exact)) return exact;
 
   if (path.isAbsolute(selector) && !isUncPath(selector)) {
     try {
       const canonicalSelector = canonicalizeWorkspace(selector);
       const canonicalMatch =
         registry.getManagedByWorkspaceCwd(canonicalSelector);
-      if (canonicalMatch) return canonicalMatch;
+      if (canonicalMatch && !isInternalWorkspaceRuntime(canonicalMatch)) {
+        return canonicalMatch;
+      }
       for (const runtime of registry.listManaged()) {
+        if (isInternalWorkspaceRuntime(runtime)) continue;
         if (canonicalizeWorkspace(runtime.workspaceCwd) === canonicalSelector) {
           return runtime;
         }
@@ -150,8 +161,9 @@ export function resolveManagedWorkspaceRuntimeByPathSelector(
     .listManaged()
     .find(
       (runtime) =>
+        !isInternalWorkspaceRuntime(runtime) &&
         normalizePortableAbsolutePath(runtime.workspaceCwd) ===
-        normalizedSelector,
+          normalizedSelector,
     );
 }
 
@@ -169,6 +181,59 @@ export function resolveWorkspaceRuntimeFromParam(
     return null;
   }
   return runtime;
+}
+
+export function resolveTrustedRuntime(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  const runtime = resolveWorkspaceRuntimeFromParam(
+    registry,
+    req,
+    res,
+    paramName,
+  );
+  if (!runtime) return null;
+  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
+}
+
+export function resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  if (
+    typeof registry.getManagedEntryByWorkspaceId !== 'function' ||
+    typeof registry.getManagedEntryByWorkspaceCwd !== 'function'
+  ) {
+    return resolveWorkspaceRuntimeFromParam(registry, req, res, paramName);
+  }
+  const selector = req.params[paramName] ?? '';
+  let entry = registry.getManagedEntryByWorkspaceId(selector);
+  if (!entry && isPortableAbsolutePath(selector)) {
+    entry = registry.getManagedEntryByWorkspaceCwd(selector);
+  }
+  if (!entry?.internal) {
+    return resolveWorkspaceRuntimeFromParam(registry, req, res, paramName);
+  }
+  const runtime = entry.state === 'active' ? entry.current?.runtime : undefined;
+  if (!runtime) {
+    sendConversationRuntimeUnavailable(res);
+    return null;
+  }
+  return runtime;
+}
+
+export function sendConversationRuntimeUnavailable(res: Response): void {
+  res.set('Retry-After', '1');
+  res.status(503).json({
+    error: 'The Conversations runtime is temporarily unavailable.',
+    code: 'conversation_runtime_unavailable',
+    retryable: true,
+  });
 }
 
 export function sendWorkspaceRuntimeUnavailable(
@@ -211,7 +276,7 @@ export function resolveManagedWorkspaceRuntimeFromParam(
 ): WorkspaceRuntime | null {
   const selector = req.params[paramName] ?? '';
   const byId = registry.getManagedByWorkspaceId(selector);
-  if (byId) return byId;
+  if (byId && !isInternalWorkspaceRuntime(byId)) return byId;
 
   if (!isPortableAbsolutePath(selector)) {
     res.status(400).json({
@@ -300,8 +365,7 @@ export function resolveContainedCwd(
   try {
     const resolved = fs.realpathSync(path.resolve(rawCwd));
     const root = fs.realpathSync(workspaceCwd);
-    const rel = path.relative(root, resolved);
-    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    if (isWithinRoot(resolved, root)) {
       return resolved;
     }
   } catch {
@@ -334,8 +398,7 @@ export function resolveContainedCwdOrFail(
   try {
     const resolved = fs.realpathSync(path.resolve(rawCwd));
     const root = fs.realpathSync(workspaceCwd);
-    const rel = path.relative(root, resolved);
-    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    if (isWithinRoot(resolved, root)) {
       return resolved;
     }
   } catch {

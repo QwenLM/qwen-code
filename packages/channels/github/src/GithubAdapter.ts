@@ -24,7 +24,9 @@ import type {
 import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
+  lowercaseGroupAllowedUsers,
   PollingChannelBase,
+  sanitizeDisplayText,
   sanitizeLogText,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
@@ -308,6 +310,7 @@ interface PendingFinalDelivery {
   sourceMessageId?: string;
   actor?: string;
   triggerKind?: string;
+  sourceLabel?: string;
 }
 
 type InboundTaskState =
@@ -372,6 +375,7 @@ function isInboundEnvelope(value: unknown): value is Envelope | undefined {
       typeof envelope.messageId === 'string') &&
     (envelope.referencedText === undefined ||
       typeof envelope.referencedText === 'string') &&
+    isOptionalStringArray(envelope.mentionedMemberIds) &&
     (envelope.imageBase64 === undefined ||
       typeof envelope.imageBase64 === 'string') &&
     (envelope.imageMimeType === undefined ||
@@ -462,6 +466,23 @@ function buildTriggerGuidance(reason: string): string {
   return `For ${reason}, output exactly ${NO_REPLY_SENTINEL} when a public reply is unnecessary.`;
 }
 
+function isPersistedSourceLabel(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 3 ||
+    value.length > 256 ||
+    !value.startsWith('[') ||
+    !value.endsWith(']')
+  ) {
+    return false;
+  }
+  for (let index = 1; index < value.length - 1; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
 function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
   const item = value as PendingFinalDelivery;
   return (
@@ -472,7 +493,8 @@ function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
     typeof item.chatId === 'string' &&
     typeof item.threadId === 'string' &&
     typeof item.fullText === 'string' &&
-    typeof item.sessionId === 'string'
+    typeof item.sessionId === 'string' &&
+    (item.sourceLabel === undefined || isPersistedSourceLabel(item.sourceLabel))
   );
 }
 
@@ -500,7 +522,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    config.blockStreaming = 'off';
     config.instructions = [
       config.instructions?.trim(),
       GITHUB_PUBLICATION_INSTRUCTIONS,
@@ -586,22 +607,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       u.toLowerCase(),
     );
     this.config.allowedUsers = allowed;
+    this.gate.replaceAllowedUsers(allowed);
+    lowercaseGroupAllowedUsers(this.config.groups);
     const botUsername = this.botUsername?.toLowerCase();
-    if (
-      this.config.senderPolicy === 'allowlist' &&
-      botUsername &&
-      allowed.includes(botUsername)
-    ) {
-      if (allowed.every((user) => user === botUsername)) {
-        throw new Error(
-          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.`,
+    for (const [groupId, group] of Object.entries(this.config.groups)) {
+      const defaults = this.config.groups['*'];
+      if ((group.senders ?? defaults?.senders ?? 'open') !== 'allowlist') {
+        continue;
+      }
+      const groupUsers = group.allowedUsers ?? defaults?.allowedUsers ?? [];
+      if (!botUsername || !groupUsers.includes(botUsername)) continue;
+      if (groupUsers.every((user) => user === botUsername)) {
+        process.stderr.write(
+          `[Channel:${this.name}] warning: GitHub group "${groupId}" allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this group because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.\n`,
         );
+        continue;
       }
       process.stderr.write(
-        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted but cannot trigger this channel; use a separate operator account.\n`,
+        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted in group "${groupId}" but cannot trigger this channel; use a separate operator account.\n`,
       );
     }
-    this.gate.replaceAllowedUsers(allowed);
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
     this.migrateLegacyPublicationState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;
@@ -657,20 +685,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.createIssueComment(chatId, threadId, text);
+    await this.createIssueComment(
+      chatId,
+      threadId,
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     await this.publishFinalResponse(
       chatId,
       this.getResponseThreadId(sessionId),
       text,
       sessionId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
     );
   }
 
@@ -679,6 +714,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string | undefined,
     fullText: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const threadMatch = threadId?.match(/^(issue|pr):(\d+)$/);
     const metadata = this.getResponseMetadata(sessionId);
@@ -721,7 +757,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const comment = await this.createIssueComment(
         chatId,
         threadId,
-        fullText,
+        this.formatMarkdownAttributedText(fullText, sourceLabel),
         3,
         isDefiniteNoWriteGithubError,
       );
@@ -752,6 +788,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             chatId,
             threadId,
             fullText,
+            sourceLabel,
           });
         } catch (persistError) {
           throw new Error(
@@ -801,6 +838,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       chatId: string;
       threadId: string;
       fullText: string;
+      sourceLabel?: string;
     },
   ): void {
     const record: PendingFinalDelivery = {
@@ -823,6 +861,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       sourceMessageId: input.sourceMessageId,
       actor: input.actor,
       triggerKind: input.triggerKind,
+      sourceLabel: input.sourceLabel,
     };
     const pending = this.readPendingFinalDeliveries(true).filter(
       (item) => item.id !== record.id,
@@ -867,7 +906,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const comment = await this.createIssueComment(
           record.chatId,
           record.threadId,
-          record.fullText,
+          this.formatMarkdownAttributedText(
+            record.fullText,
+            record.sourceLabel,
+          ),
           3,
           isDefiniteNoWriteGithubError,
           signal,
@@ -1314,7 +1356,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
-      const allowed = this.gate.isAllowed(senderId);
+      // The same per-conversation gate preflight applies, so an approved
+      // paired group admits its members here too.
+      const allowed = this.senderGateFor({
+        isGroup: true,
+        chatId: ctx.chatId,
+      }).isAllowed(senderId);
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -1324,7 +1371,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         messageId: String(comment.id),
         text: this.botUsername ? stripBotMention(body, this.botUsername) : body,
         isGroup: true,
-        isMentioned: hasMention || (directed && allowed),
+        // Never synthesize a mention into an unapproved pairing group: the
+        // pairing step must keep dropping ambient comments, and a synthesized
+        // mention would turn every ambient comment into a pairing request.
+        isMentioned:
+          hasMention ||
+          (directed &&
+            allowed &&
+            (this.config.groupPolicy !== 'pairing' ||
+              this.groupGate.isGroupApproved(ctx.chatId))),
         isReplyToBot: false,
         metadata: this.buildRouteMetadata(ctx),
       };
@@ -1339,7 +1394,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       if (allowed) {
         this.recordDispatchedComment(key);
-        if (hasMention) dispatched = true;
+      }
+      // A mention under group pairing has a visible effect (dispatch or a
+      // pairing code comment) even when the sender gate rejects the sender;
+      // suppress the first-contact body feed so the same intent cannot be
+      // dispatched twice. Record the body as consumed too: if the thread is
+      // later re-listed as unread (mark-read can fail), the body feed must
+      // not re-trigger the same pairing intent on a later poll.
+      if (hasMention && (allowed || this.config.groupPolicy === 'pairing')) {
+        dispatched = true;
+        this.recordDispatchedBody(`${ctx.chatId}|${ctx.threadId}`);
       }
     }
 
@@ -1389,30 +1453,35 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
-    if (this.config.senderPolicy === 'pairing') {
+    if (this.config.groupPolicy === 'pairing') {
       await this.processCommentLane(ctx, false, true);
       return;
     }
-    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const senderGate = this.senderGateFor({
+      isGroup: true,
+      chatId: ctx.chatId,
+    });
+    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        this.gate.isAllowed(sender)
+        senderGate.isAllowed(sender)
       );
     });
-    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
-    if (comments.length === 0) return;
-
-    for (const comment of allComments) {
+    for (const comment of newComments) {
       this.recordDispatchedComment(comment.node_id || String(comment.id));
     }
+    const comments = newComments
+      .map((comment) => ({ comment, body: (comment.body || '').trim() }))
+      .slice(-MAX_AGGREGATE_COMMENTS);
+    if (comments.length === 0) return;
 
-    const first = comments[0]!;
+    const first = comments[0]!.comment;
     const summary = comments
       .map(
-        (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${(comment.body || '').trim().slice(0, MAX_AGGREGATE_COMMENT_CHARS)}`,
+        ({ comment, body }) =>
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1430,7 +1499,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
 
     await this.dispatchEnvelope(envelope, ctx.issueNumber, {
-      dispatchedComments: allComments.map(
+      dispatchedComments: newComments.map(
         (comment) => comment.node_id || String(comment.id),
       ),
     });
@@ -1696,6 +1765,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
+            this.getInboundErrorSourceLabel(envelope),
           );
         }
         this.transitionInboundTask(task.id, 'failed', {
@@ -2115,6 +2185,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async postErrorComment(
     chatId: string,
     issueNumber: number,
+    sourceLabel?: string,
   ): Promise<boolean> {
     try {
       await this.githubApi(
@@ -2123,7 +2194,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             owner: chatId.split('/')[0],
             repo: chatId.split('/')[1],
             issue_number: issueNumber,
-            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            body: this.formatMarkdownAttributedText(
+              '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+              sourceLabel,
+            ),
           }),
         `postErrorComment(${chatId}#${issueNumber})`,
       );

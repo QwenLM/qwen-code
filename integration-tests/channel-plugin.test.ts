@@ -31,16 +31,15 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 
 // Import from the monorepo channel packages
-import {
-  AcpBridge,
-  SessionRouter,
-} from '../packages/channels/base/dist/index.js';
-import type { ChannelConfig } from '../packages/channels/base/dist/index.js';
+import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
 import {
   MockPluginChannel,
   createMockServer,
 } from '../packages/channels/plugin-example/src/index.js';
-import type { MockServerHandle } from '../packages/channels/plugin-example/src/index.js';
+import type {
+  MockServerHandle,
+  MockPluginConfig,
+} from '../packages/channels/plugin-example/src/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(__dirname, '..', 'dist', 'cli.js');
@@ -74,7 +73,9 @@ describe('Channel Plugin (Mock WebSocket E2E)', () => {
     await bridge.start();
 
     // 3. Create and connect MockPluginChannel via WebSocket
-    const config: ChannelConfig & Record<string, unknown> = {
+    // MockPluginConfig, not ChannelConfig: the constructor below requires
+    // `serverWsUrl`, and typing the literal as the base interface erased it.
+    const config: MockPluginConfig & Record<string, unknown> = {
       type: 'plugin-example',
       token: '',
       senderPolicy: 'open',
@@ -82,6 +83,7 @@ describe('Channel Plugin (Mock WebSocket E2E)', () => {
       sessionScope: 'user',
       cwd: testDir,
       groupPolicy: 'disabled',
+      dmPolicy: 'open',
       groups: {},
       serverWsUrl: server.wsUrl,
     };

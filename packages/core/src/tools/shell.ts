@@ -10,6 +10,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
@@ -24,18 +25,37 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
+  getSessionCommitGeneration,
+  registerSessionCommit,
+} from '../permissions/destructive-commands.js';
+import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
   ToolConfirmationOutcome,
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { truncateToolOutput } from '../utils/truncation.js';
+import { truncateToolOutput } from './truncation.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,
 } from '../services/commitAttribution.js';
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
+import {
+  commandRunsGhPrCreate,
+  ghPrCreateInlineEnv,
+  upsertSessionPrs,
+} from '../services/session-pr-service.js';
+import {
+  fetchAttributionRepoKeys,
+  fetchCurrentBranchName,
+  fetchCurrentBranchPullRequest,
+  repoKeyFromWebUrl,
+  type AttributionRepoKeys,
+  type BranchPullRequestSnapshot,
+} from '../utils/github-prs.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -45,6 +65,7 @@ import type {
 } from '../services/shellExecutionService.js';
 import {
   getShellAbortReasonKind,
+  isSignalTermination,
   ShellExecutionService,
 } from '../services/shellExecutionService.js';
 import {
@@ -72,7 +93,7 @@ import { parse, type ControlOperator } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
-  isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
   extractCommandRules,
 } from '../utils/shellAstParser.js';
 import {
@@ -87,6 +108,17 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
+const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
+// Separator between the formatted body and each appended metadata string
+// (long-run advisory, attribution warning). The reservation math and the
+// append loop share it so the two cannot drift.
+const APPENDED_METADATA_SEPARATOR = '\n\n';
+
+function getShellOutputThreshold(config: Config): number {
+  return config.isTruncateToolOutputThresholdExplicit()
+    ? config.getTruncateToolOutputThreshold()
+    : DEFAULT_SHELL_OUTPUT_THRESHOLD;
+}
 
 /**
  * Model-facing liveness guidance shared verbatim by both background
@@ -621,21 +653,101 @@ function parseGitInvocation(tokens: string[]): {
 }
 
 /**
+ * Leading tokens the loose commit recogniser skips over: shell
+ * control-flow keywords and noise words that `splitCommands` leaves at
+ * the front of a segment because it splits on operators only and has
+ * no shell-grammar notion — `if true; then git commit` yields the
+ * segment `then git commit`, `while …; do git commit; done` yields
+ * `do git commit`, and `time git commit` / `! git commit` never get
+ * split at all. The amend guard recognises every one of these
+ * spellings, so registration must recognise them too (#12514).
+ */
+const COMMIT_RECOGNITION_LEADING_NOISE: ReadonlySet<string> = new Set([
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'while',
+  'until',
+  'for',
+  'do',
+  'done',
+  'time',
+  '!',
+  '{',
+  '}',
+]);
+
+/**
+ * The program recogniser shared by `gitCommitContext` and
+ * `findAttributableCommitSegment` (#12514): skip leading
+ * control-flow/noise keywords and match the program on its
+ * basename (see `programBasename`), so `then git commit`,
+ * `time git commit`, `! git commit` and `/usr/bin/git commit` all
+ * resolve to the `git` invocation a `tokens[0] === 'git'` check
+ * misses. Returns the token slice starting at the recognised program,
+ * or `null` when the segment is nothing but noise. The slice keeps the
+ * program token at index 0 so `parseGitInvocation` applies unchanged.
+ */
+function skipCommitRecognitionNoise(tokens: string[]): string[] | null {
+  let i = 0;
+  while (
+    i < tokens.length &&
+    COMMIT_RECOGNITION_LEADING_NOISE.has(tokens[i]!)
+  ) {
+    i++;
+  }
+  if (i >= tokens.length) return null;
+  return tokens.slice(i);
+}
+
+/**
+ * Basename a program token and drop a Windows `.exe` suffix.
+ *
+ * `getCommandRoot` stops at the basename and keeps the suffix (pinned
+ * as `bar.exe` by `utils/shell-utils.test.ts`), so this deliberately
+ * goes one step further: recognition here is purely textual —
+ * `shell.ts` has no `process.platform` branch — and
+ * `"C:\Program Files\Git\cmd\git.exe" commit` is the spelling a
+ * Windows session really produces. Without the strip neither `git`
+ * branch fires, the commit lands unregistered, and the follow-up bare
+ * `git commit --amend` is hard-blocked with the false reason #12514
+ * set out to remove. Same normalisation the guard side already
+ * applies (`dangerousRules.stripWindowsExecutableSuffix`).
+ */
+function programBasename(program: string): string {
+  const base = program.split(/[\\/]/).pop()!;
+  return base.endsWith('.exe') ? base.slice(0, -'.exe'.length) : base;
+}
+
+/**
  * Classify whether a command chain (potentially compound) contains a
  * `git commit` invocation, and whether that invocation lands in the
  * tool's initial cwd.
  *
  * Two flags are returned because the answers feed different decisions:
  * - `hasCommit` is the broader "did the user try to commit anywhere
- *   in this chain?" — used to refuse background mode and to gate
- *   prompt-counter snapshotting.
+ *   in this chain?" — used to refuse background mode.
  * - `attributableInCwd` is the stricter "is it safe to capture HEAD
  *   in our cwd and write a note to that repo?" — used by the actual
- *   trailer rewrite and git-notes write.
+ *   trailer rewrite, the git-notes write, and session-commit
+ *   registration (`trackSessionCommit`).
+ *
+ * Program recognition is loose (#12514): leading control-flow/noise
+ * keywords are skipped and the program is matched on its basename (see
+ * `skipCommitRecognitionNoise`), so `if …; then git commit; fi`,
+ * `time git commit`, `! git commit` and `/usr/bin/git commit` all
+ * resolve to the `git` invocation they execute. The amend guard
+ * recognises those spellings, so every gate fed by this walk must too
+ * — a commit the guard would block must be a commit that can register.
  *
  * Walks segments in order so a `cd` AFTER an in-cwd commit doesn't
  * invalidate that commit's attribution; only a `cd` (or `git -C` /
- * `--git-dir` / `--work-tree`) BEFORE the commit shifts safety.
+ * `--git-dir` / `--work-tree`) BEFORE the commit shifts safety. The
+ * loose recognition also covers a `cd` hidden behind a noise keyword
+ * (`if …; then cd /elsewhere; fi; git commit`), which a
+ * `tokens[0]`-only walk would miss.
  *
  * `cwdShifted` is intentionally a one-way latch — it isn't reset on
  * a subsequent `cd .` or `cd ..`, so harmless cd cycles like
@@ -652,10 +764,12 @@ function gitCommitContext(command: string): {
   let cwdShifted = false;
 
   for (const sub of splitCommands(command)) {
-    const tokens = tokeniseSegment(sub);
-    if (!tokens || tokens.length === 0) continue;
+    const rawTokens = tokeniseSegment(sub);
+    if (!rawTokens || rawTokens.length === 0) continue;
 
-    const program = tokens[0]!;
+    const tokens = skipCommitRecognitionNoise(rawTokens);
+    if (!tokens) continue;
+    const program = programBasename(tokens[0]!);
 
     if (program === 'cd' || program === 'pushd') {
       // A cd / pushd before any commit might redirect a later
@@ -824,6 +938,40 @@ function isAmendCommit(command: string): boolean {
  * the `git commit ...` part, NOT later `&& git tag -m ...` or
  * earlier `git status &&` segments.
  *
+ * Recognition is the loose one shared with `gitCommitContext`
+ * (`skipCommitRecognitionNoise`, #12514): leading
+ * control-flow/noise keywords are skipped and the program is matched
+ * on its basename, so the spellings that walk accepts (`then git
+ * commit`, `time git commit`, `! git commit`, `/usr/bin/git commit`)
+ * earn their `Co-authored-by` trailer here too. The returned range
+ * covers the whole segment including any skipped keyword; the caller's
+ * `-m` rewrite is scoped by regex and unaffected by the prefix.
+ *
+ * That is recognition alignment, NOT a universal "amend-exempt implies
+ * trailer" invariant, and no edit to this function can make it one:
+ * this walk reads the RAW command while registration reads
+ * `stripShellWrapper(this.params.command)`, so a commit hidden inside a
+ * `bash -c '…'` wrapper registers (and earns the exemption) while the
+ * rewriter is deliberately a no-op — see the wrapper note in
+ * `addCoAuthorToGitCommit`.
+ *
+ * Skipping the noise keywords also NARROWS one case, deliberately: a
+ * `cd` spelled behind a keyword (`if …; then cd "$CI_DIR"; fi && git
+ * commit`) now reaches the `cdTargetMayChangeRepo` latch and suppresses
+ * recognition — the trailer here and, through the same shared helper,
+ * `gitCommitContext`'s `attributableInCwd` (registration + git-notes) —
+ * where the pre-#12514 `tokens[0]`-only walk saw `then` and ignored the
+ * `cd` entirely. That includes a branch that never executes.
+ * `splitCommands` evaluates nothing, so a false
+ * branch and a true branch produce identical segment sequences: any
+ * loosening that recovers the never-executed `cd` also recovers
+ * stamping our trailer onto a commit in a DIFFERENT repository
+ * (`if true; then cd <other>; fi && git commit`). Missing a trailer is
+ * the conservative half of that trade-off, matching `cwdShifted`'s
+ * stated intent ("better miss than corrupt unrelated repos"). Pinned by
+ * the `if false; then cd …` row in
+ * `shell.session-commit-tracking.test.ts`.
+ *
  * Used by `addCoAuthorToGitCommit` to scope the `-m` regex rewrite
  * so a later `git tag -m "..."` (different sub-command in the same
  * compound) can't be mistaken for the commit message.
@@ -851,12 +999,16 @@ function findAttributableCommitSegment(
     cursor = end;
     const tokens = tokeniseSegment(sub);
     if (!tokens || tokens.length === 0) continue;
-    const program = tokens[0]!;
+    const looseTokens = skipCommitRecognitionNoise(tokens);
+    if (!looseTokens) continue;
+    const program = programBasename(looseTokens[0]!);
     if (program === 'cd' || program === 'pushd') {
       // Mirror gitCommitContext's cd/pushd heuristic: relative paths
       // that don't escape upward are treated as in-repo, so
       // `cd subdir && git commit ...` still finds the segment.
-      if (!cwdShifted && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      if (!cwdShifted && cdTargetMayChangeRepo(looseTokens)) {
+        cwdShifted = true;
+      }
       continue;
     }
     if (program === 'popd') {
@@ -864,11 +1016,21 @@ function findAttributableCommitSegment(
       continue;
     }
     if (program === 'git') {
-      const { subcommand, changesCwd } = parseGitInvocation(tokens);
+      const { subcommand, changesCwd } = parseGitInvocation(looseTokens);
       if (subcommand === 'commit' && !cwdShifted && !changesCwd) {
         return { start, end };
       }
-      if (changesCwd && !cwdShifted) cwdShifted = true;
+      // Mirror `gitCommitContext`'s latch, which only trips on a
+      // NON-commit `git -C …`: a redirected `git -C ../other commit` is
+      // a commit this walk has already decided about (not attributable
+      // in our cwd, so not returned above), and latching on it would
+      // cost a *later* in-cwd commit its trailer — the exact chain
+      // `gitCommitContext` still calls attributable, so the two sides
+      // would disagree. `git -C ../other status` keeps latching: that
+      // is the cwd-elsewhere intent signal the latch exists for.
+      if (subcommand !== 'commit' && changesCwd && !cwdShifted) {
+        cwdShifted = true;
+      }
     }
   }
   return null;
@@ -1677,6 +1839,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   private getSedEditInfo(): SedEditInfo | null {
     if (
+      this.config.getShellExecutionSandbox?.() ||
       this.params.is_background ||
       LEADING_ENV_ASSIGNMENT_RE.test(this.params.command)
     ) {
@@ -1760,6 +1923,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         'Proposed',
       ),
       fileName: edit.fileName,
+      filePath: edit.filePath,
       originalContent: edit.originalContent,
       newContent: edit.newContent,
       diffStat,
@@ -1934,6 +2098,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: edit.filePath,
         content: edit.newContent,
+        toolWriteOrigin: 'shell_sed_edit',
         _meta: edit.meta,
       });
 
@@ -2024,6 +2189,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getShellExecutionSandbox?.()) return 'ask';
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
     // unwraps `bash -c '...'` to its inner script — so for
@@ -2039,7 +2205,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // AST-based read-only detection
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
+        command,
+        this.params.directory || this.config.getTargetDir(),
+      );
       if (isReadOnly) {
         return 'allow';
       }
@@ -2111,9 +2280,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
     for (const sub of subCommands) {
+      if (this.config.getShellExecutionSandbox?.()) {
+        confirmableSubCommands.push(sub);
+        continue;
+      }
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub);
+        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
       } catch {
         // conservative: treat unknown commands as requiring confirmation
       }
@@ -2282,9 +2455,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // are preserved through to execution; the rewriters operate at the
     // top-level shell layer and become no-ops when the commit hides
     // inside a wrapper.
-    const processedCommand = this.addAttributionToPR(
-      this.addCoAuthorToGitCommit(this.params.command.trim()),
-    );
+    const processedCommand = this.config.getShellExecutionSandbox?.()
+      ? this.params.command.trim()
+      : this.addAttributionToPR(
+          this.addCoAuthorToGitCommit(this.params.command.trim()),
+        );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
 
@@ -2307,14 +2482,52 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Capture preHead only when the commit will actually be
     // attributed in our cwd: that's the only consumer (the
     // `attributableInCwd` branch below feeds preHead into
-    // `attachCommitAttribution`). For non-attributable
-    // hasCommit cases (`cd /elsewhere && git commit`,
-    // `git -C /other commit`), no consumer reads preHead and the
-    // ~10–50 ms execFileSync is dead work that just blocks the
+    // `attachCommitAttribution` and `trackSessionCommit`). For
+    // non-attributable hasCommit cases (`cd /elsewhere && git
+    // commit`, `git -C /other commit`), no consumer reads preHead and
+    // the ~10–50 ms execFileSync is dead work that just blocks the
     // event loop before the user's real command spawns.
-    const preHead: string | null = commitCtx.attributableInCwd
-      ? this.getGitHeadSync(cwd)
-      : null;
+    // Registration must never run against a null preHead —
+    // `head.sha !== preHead` would be trivially true and exempt
+    // whatever HEAD happens to be there (the fail-open #12463's
+    // regression row ② pins).
+    const preHead: string | null =
+      !this.config.getShellExecutionSandbox?.() && commitCtx.attributableInCwd
+        ? this.getGitHeadSync(cwd)
+        : null;
+
+    // Snapshot the attribution inputs BEFORE spawn so bindGhPrCreate can
+    // tell a run that CREATED a PR from one that merely RESOLVED the
+    // branch's existing PR: the retry shape `gh pr create --fill || gh pr
+    // view` exits 0 through the view segment and prints the existing URL,
+    // and post-run gh resolution alone cannot distinguish the two. The
+    // branch name and repo identity pin what may legitimately differ
+    // post-run — a mid-command branch switch or origin retarget resolves a
+    // PR this run did not create. Awaited before spawn so every snapshot
+    // strictly precedes the command.
+    let preRunPrSnapshot: BranchPullRequestSnapshot | undefined;
+    let preRunBranch: string | undefined;
+    let preRunRepoKeys: AttributionRepoKeys | undefined;
+    let preRunGhEnv: Readonly<Record<string, string | undefined>> | undefined;
+    if (
+      !this.config.getShellExecutionSandbox?.() &&
+      commandRunsGhPrCreate(commandToExecute)
+    ) {
+      // The verification legs must authenticate the way the create itself
+      // does (inline GH_TOKEN with no ambient gh auth), or the gate's
+      // advertised token shape binds nothing. The inline record is an
+      // OVERLAY onto the full process env — the gh legs receive it as the
+      // child's ENTIRE environment, so passed alone it would drop PATH and
+      // HOME and fail every leg — and EVERY leg needs it, not just the
+      // snapshot fetch.
+      const inlineEnv = ghPrCreateInlineEnv(commandToExecute);
+      preRunGhEnv = inlineEnv ? { ...process.env, ...inlineEnv } : undefined;
+      [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
+        fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
+        fetchCurrentBranchName(cwd),
+        fetchAttributionRepoKeys(cwd, preRunGhEnv),
+      ]);
+    }
 
     let cumulativeOutput: string | AnsiOutput = '';
     let lastUpdateTime = Number.NEGATIVE_INFINITY;
@@ -2557,7 +2770,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     let executionHandle;
     try {
-      executionHandle = await ShellExecutionService.execute(
+      executionHandle = await executeRuntimeShell(
+        this.config,
         commandToExecute,
         cwd,
         onShellOutputEvent,
@@ -2695,14 +2909,38 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // redirect (so /tasks shows live output) and a settle hook (so
     // natural exit transitions the entry to `completed`/`failed`).
     if (result.promoted) {
+      // `handlePromotedForeground` takes over the still-running child
+      // and this method returns before the registration block below —
+      // hand the pre-spawn preHead over so a commit landed by the
+      // promoted command can still register when the child settles
+      // (#12514).
       const promotedToolResult = await this.handlePromotedForeground(
         result,
         cwd,
         commandToExecute,
         promoteAbortController,
         promoteArtifacts,
+        preHead,
       );
       return promotedToolResult;
+    }
+
+    // A promote refused because the command already settled still carries
+    // its full output and exit code — it runs the same binding gate as an
+    // uninterrupted foreground run.
+    const wasPromoteRefused =
+      result.aborted &&
+      getShellAbortReasonKind(combinedSignal.reason) === 'background';
+    if ((!result.aborted || wasPromoteRefused) && result.exitCode === 0) {
+      this.bindGhPrCreate(
+        commandToExecute,
+        result.output,
+        cwd,
+        preRunPrSnapshot,
+        preRunBranch,
+        preRunRepoKeys,
+        preRunGhEnv,
+      );
     }
 
     const abortReasonName = getAbortReasonName(combinedSignal);
@@ -2710,9 +2948,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       result.aborted &&
       effectiveTimeout > 0 &&
       abortReasonName === 'TimeoutError';
-    const wasPromoteRefused =
-      result.aborted &&
-      getShellAbortReasonKind(combinedSignal.reason) === 'background';
     const timeoutSummary = wasTimeout
       ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
       : undefined;
@@ -2753,7 +2988,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         : '(none)';
 
       llmContent = [
-        `Command: ${this.params.command}`,
+        ...(getCurrentToolCallSource()?.kind === 'code_mode'
+          ? []
+          : [`Command: ${this.params.command}`]),
         `Directory: ${this.params.directory || '(root)'}`,
         `Output: ${result.output || '(empty)'}`,
         `Error: ${finalError}`, // Use the cleaned error string.
@@ -2772,8 +3009,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // while the stale per-file attribution stays around for a later
     // unrelated commit. attachCommitAttribution already gates on HEAD
     // movement, so it's a no-op when no commit was actually created.
+    // A non-null attributionWarning is surfaced on the tool result below
+    // (both llmContent and the TUI display) so the user knows their commit
+    // succeeded but the per-file git note didn't land — without it, the only
+    // signal is a QWEN_DEBUG_LOG_FILE entry the user has likely never set up.
     let attributionWarning: string | null = null;
-    if (commitCtx.attributableInCwd) {
+    if (
+      !this.config.getShellExecutionSandbox?.() &&
+      commitCtx.attributableInCwd
+    ) {
+      // Registration runs ahead of attribution:
+      // `attachCommitAttribution` returns early on the
+      // `gitCoAuthor.commit` toggle, but the amend exemption must not
+      // depend on it, and an attribution failure must not cost the
+      // registration. Registration stays fail-closed: it still
+      // requires a `commit:` reflog verb plus HEAD movement against
+      // the captured preHead.
+      await this.trackSessionCommit(cwd, preHead);
       // `git commit --amend` rewrites HEAD in place, so the standard
       // parent-vs-postHead diff (`${postHead}~1..${postHead}`) would
       // span the entire amended commit (the amended commit's parent
@@ -2809,10 +3061,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //         cancel). Their own messaging is enough; a "should have
     //         been background" reminder when the agent already knows
     //         the command didn't complete is noise.
-    //       * Suppressed on external signal kills (`result.signal !=
-    //         null` with `aborted: false`, e.g. SIGTERM from container
-    //         shutdown, k8s eviction, OOM killer, sibling reaping the
-    //         process group). `shellExecutionService` only sets
+    //       * Suppressed on external signal kills
+    //         (`isSignalTermination(result.signal)` with `aborted: false`,
+    //         e.g. SIGTERM from container shutdown, k8s eviction, OOM
+    //         killer, or sibling reaping the process group). node-pty's
+    //         clean-exit signal 0 is normalized to null and does not
+    //         suppress this hint. The service only sets
     //         `aborted` when the AbortSignal we passed was triggered,
     //         so external signals fall through to the non-aborted
     //         branch — same rationale as timeout.
@@ -2836,7 +3090,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shouldAppendLongRunHint =
       longRunThreshold !== null &&
       !result.aborted &&
-      result.signal === null &&
+      !isSignalTermination(result.signal) &&
       elapsedMs >= longRunThreshold;
     // Observability: the hint decision is otherwise invisible. If a
     // user reports "my 65s command didn't get the hint" or "5s command
@@ -2877,7 +3131,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             : wasPromoteRefused
               ? 'Command finished before background-promote could be honoured.'
               : 'Command cancelled by user.';
-        } else if (result.signal) {
+        } else if (isSignalTermination(result.signal)) {
           returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
         } else if (result.error) {
           returnDisplayMessage = `Command failed: ${getErrorMessage(
@@ -2892,25 +3146,61 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     let persistedOutputFiles: string[] | undefined;
+    let outputBudgetApplied = false;
+
+    // The advisory and attribution warning are appended after the truncation
+    // below (deliberately outside the truncation envelope — see the append
+    // loop), so their size comes out of the body budget here: the marker
+    // asserts the ASSEMBLED string fits the declared budget, and a body that
+    // fits whole must still fit once they land. The reservation and the
+    // append loop both iterate this one list, so the two cannot disagree.
+    const longRunHint = shouldAppendLongRunHint
+      ? buildLongRunningForegroundHint(elapsedMs)
+      : null;
+    const appendedMetadata = [longRunHint, attributionWarning].filter(
+      (s): s is string => s !== null,
+    );
+    const appendedMetadataChars = appendedMetadata.reduce(
+      (total, s) => total + APPENDED_METADATA_SEPARATOR.length + s.length,
+      0,
+    );
 
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
+      const outputThreshold = getShellOutputThreshold(this.config);
+      // Clamp at 1: truncateToolOutput returns the body untouched on
+      // threshold <= 0, so an explicit threshold smaller than the reserved
+      // metadata (the setting has no schema minimum) would stand the pass
+      // down while outputBudgetApplied below still vouches for the body —
+      // leaving the failure path, whose only bound is that marker, unbounded.
+      // Cap the reservation at half the threshold: a sub-advisory explicit
+      // threshold would otherwise spend the whole budget on the reservation
+      // and leave a 1-char preview, dropping the trailing exit-code line
+      // the head-and-tail preview exists to keep. The assembled string can
+      // exceed the declared budget in that corner — a ~510-char truncation
+      // header already does on its own — but it stays bounded.
+      const bodyBudgetChars = Math.max(
+        1,
+        outputThreshold -
+          Math.min(appendedMetadataChars, Math.floor(outputThreshold / 2)),
+      );
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
         llmContent,
-        // Per-tool char budget; mirrors ShellTool.maxOutputChars. keep='both'
-        // preserves the command's start AND its trailing exit/error summary
+        // Per-tool char budget: ShellTool.maxOutputChars minus the metadata
+        // reserved above. keep='both' preserves the command's start AND its
+        // trailing exit/error summary
         // (where shell failures report). Kept in-tool (not deferred to the
         // scheduler) so the long-run hint below is appended OUTSIDE the
         // truncation envelope; the scheduler's sentinel makes its later pass a
         // no-op here. lines: Infinity keeps this char-only so the global line
-        // cap can't undercut the declared 30k char budget — many short lines
+        // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          threshold: 30_000,
-          previewChars: 4000,
+          threshold: bodyBudgetChars,
+          previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',
           lines: Number.POSITIVE_INFINITY,
         },
@@ -2926,54 +3216,35 @@ export class ShellToolInvocation extends BaseToolInvocation<
         persistedOutputFiles = [];
         llmContent = truncatedResult.content;
       }
+
+      // Set even when nothing was cut: the scheduler's generic gate sits BELOW
+      // this budget by default, so an unmarked body inside it gets re-bounded
+      // there under a stricter head-only policy.
+      outputBudgetApplied = true;
     }
 
-    // Append the long-run advisory AFTER truncation so the hint isn't
-    // wrapped in `truncateToolOutput`'s "Truncated part of the output"
-    // header (which the LLM might misread as part of the command's own
-    // output). The hint is process metadata about the command, not
-    // command output, so it belongs outside the truncation envelope.
-    const longRunHint = shouldAppendLongRunHint
-      ? buildLongRunningForegroundHint(elapsedMs)
-      : null;
-    if (longRunHint) {
+    // Append the metadata AFTER truncation so it isn't wrapped in
+    // `truncateToolOutput`'s "Truncated part of the output" header (which the
+    // LLM might misread as part of the command's own output). These are
+    // process metadata about the command — how long it blocked the agent, or
+    // that its commit landed but the per-file attribution note didn't — not
+    // command output, so they belong outside the truncation envelope. Both
+    // llmContent (so the agent can react) and returnDisplayMessage (so the
+    // human waiting in the TUI sees the same cue) get them, append-style,
+    // preserving any pre-existing display content (debug snapshot, truncation
+    // marker line, status line).
+    //
+    // Today shell.ts only emits string llmContent; the type union also allows
+    // structured `Part[]` content, in which case the metadata silently
+    // disappears here. Encoding it as a Part would require deciding on a
+    // rendering convention, and structured llmContent isn't on the roadmap.
+    // Revisit if someone adds a non-string return path.
+    for (const metadata of appendedMetadata) {
       if (typeof llmContent === 'string') {
-        llmContent += `\n\n${longRunHint}`;
-        // Surface the hint in the user-facing TUI too — the user is
-        // the one waiting for long commands and benefits from the
-        // same "consider backgrounding next time" cue the agent sees.
-        // Append (not replace) in BOTH modes so the truncation marker
-        // line ("Output too long and was saved to: ...") and any
-        // pre-existing returnDisplayMessage content (debug snapshot,
-        // status line, command output) are preserved.
+        llmContent += `${APPENDED_METADATA_SEPARATOR}${metadata}`;
         returnDisplayMessage +=
-          (returnDisplayMessage ? '\n\n' : '') + longRunHint;
+          (returnDisplayMessage ? APPENDED_METADATA_SEPARATOR : '') + metadata;
       }
-      // else: llmContent is a structured `Part[]` / `Part` rather than
-      // a plain string. Today shell.ts only emits string llmContent,
-      // but the type union allows structured content. If a future
-      // refactor changes that, the hint silently disappears here. We
-      // accept that risk for now — the alternative (encoding the hint
-      // as a Part) would require deciding on a rendering convention,
-      // and structured llmContent isn't on the roadmap. Revisit if
-      // someone adds a non-string return path.
-    }
-
-    // Surface AI-attribution failures (note exec failure, payload too
-    // large, diff-analysis exception, shallow clone, etc.) on the tool
-    // result so the user knows their commit succeeded but the per-file
-    // git note didn't land. Without this, the only signal is a
-    // QWEN_DEBUG_LOG_FILE entry the user has likely never set up.
-    // Appended to BOTH llmContent (so the agent can react / report) and
-    // returnDisplayMessage (so the human sees it in the TUI). Skipped
-    // when null (intentional skips like a bare `git commit` with no
-    // tracked AI edits don't need user-visible feedback).
-    if (attributionWarning) {
-      if (typeof llmContent === 'string') {
-        llmContent += `\n\n${attributionWarning}`;
-      }
-      returnDisplayMessage +=
-        (returnDisplayMessage ? '\n\n' : '') + attributionWarning;
     }
 
     // When `result.error` is set, `coreToolScheduler` builds the
@@ -3016,7 +3287,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : isShellExitError(this.params.command, result.exitCode)
+        : (!result.aborted && isSignalTermination(result.signal)) ||
+            isShellExitError(this.params.command, result.exitCode)
           ? {
               error: {
                 // Schedulers use error.message as the model-facing response.
@@ -3031,10 +3303,175 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
-      returnDisplay: returnDisplayMessage,
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: returnDisplayMessage,
+        output: result.output,
+        directory: cwd,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        pid: result.pid ?? null,
+        error:
+          timeoutSummary ??
+          (result.error
+            ? result.error.message.replace(
+                commandToExecute,
+                this.params.command,
+              )
+            : null),
+        outcome: wasTimeout
+          ? 'timed_out'
+          : result.aborted && !wasPromoteRefused
+            ? 'cancelled'
+            : result.error ||
+                isSignalTermination(result.signal) ||
+                isShellExitError(this.params.command, result.exitCode)
+              ? 'failed'
+              : 'completed',
+        notices: appendedMetadata,
+        truncated: false,
+        outputFiles: persistedOutputFiles ?? [],
+      },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+      ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
       ...executionError,
     };
+  }
+
+  /**
+   * Best-effort PR binding for agents that create PRs via `gh pr create` in
+   * the shell (the GitDialog binds at creation; this covers the shell path).
+   * Writes the session's PR sidecar directly, mirroring the worktree sidecar
+   * pattern; a failure must never shadow the tool result. gh itself is the
+   * attribution authority: the binding is the PR gh resolves for the working
+   * branch, accepted only when it is OPEN, this command's output carries
+   * gh's URL, the pre-run fetch proved the branch's prior state, and the
+   * number differs from the pre-run snapshot — command/output text alone
+   * cannot attribute a printed URL to gh's own execution, and a retry that
+   * passes the execution gate (`gh pr create || gh pr view`) resolves the
+   * branch's EXISTING PR, which the pre-run snapshot declines. The
+   * pre-state proof is per-session: two sessions sharing one checkout can
+   * still race inside the snapshot→bind window, which this gate does not
+   * serialize.
+   *
+   * Scope (by design): only a FOREGROUND run that settled in this call —
+   * an uninterrupted one, or one whose promote was refused because the
+   * child had already exited — reaches this gate. A run promoted to the
+   * background mid-flight and an `is_background: true` run settle through
+   * the background registry, whose output streams to a file and whose
+   * pre-run snapshot was never taken; they are not bound live, and the
+   * transcript is deliberately not a recovery source (no gh-side
+   * attribution). Such a PR binds through `/review <N>` or the worktree
+   * `pr-<N>` convention.
+   */
+  private bindGhPrCreate(
+    command: string,
+    output: string,
+    cwd: string,
+    preRunPrSnapshot: BranchPullRequestSnapshot | undefined,
+    preRunBranch: string | undefined,
+    preRunRepoKeys: AttributionRepoKeys | undefined,
+    ghCreateEnv?: Readonly<Record<string, string | undefined>>,
+  ): void {
+    if (this.config.getShellExecutionSandbox?.()) return;
+    void (async () => {
+      try {
+        if (!commandRunsGhPrCreate(command)) return;
+        // An ERRORED pre-run fetch proved nothing about the branch's prior
+        // PRs — decline instead of failing open, or a branch whose snapshot
+        // flaked would bind its existing PR as this session's creation.
+        if (preRunPrSnapshot?.status === 'error') return;
+        // The launch directory (`directory` param, else target dir), not a
+        // repo the command may have `cd`'d into: gh resolves THIS repo's
+        // branch, so an internal-`cd` create binds only when this branch's
+        // PR URL is what the output carries — backfill recovers the rest.
+        const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
+        if (created.status !== 'pr' || created.state !== 'open') return;
+        // The run resolved the branch's EXISTING PR — nothing was created
+        // (a retry's view segment exits 0 and prints the existing URL).
+        // Binding would stamp this session as creator of a PR it did not
+        // create, at a fresh createdAt that falsifies the badge's
+        // binding-time order.
+        if (
+          preRunPrSnapshot?.status === 'pr' &&
+          created.number === preRunPrSnapshot.number
+        ) {
+          return;
+        }
+        // Repo identity lives in on-disk state an in-command
+        // `git remote set-url origin` / `gh repo set-default` retargets, so
+        // the resolved PR must belong to a repo gh already attributed to
+        // this checkout BEFORE the run (itself, or its fork parent — from
+        // a fork checkout gh resolves the parent for PR operations). An
+        // unresolvable pre-run identity fails closed like the errored
+        // snapshot arm.
+        const createdRepoKey = repoKeyFromWebUrl(created.url);
+        if (
+          createdRepoKey === undefined ||
+          preRunRepoKeys === undefined ||
+          (createdRepoKey !== preRunRepoKeys.resolved &&
+            createdRepoKey !== preRunRepoKeys.parent)
+        ) {
+          return;
+        }
+        // Branch identity: a command that switched branches mid-run
+        // resolves the NEW branch's existing PR post-run (its `|| gh pr
+        // view` segment prints the URL and exits 0); only a PR whose head
+        // branch is the pre-run branch was created by this run. An
+        // uncaptured pre-run branch (detached HEAD, git failure) cannot
+        // prove stability — decline.
+        if (
+          preRunBranch === undefined ||
+          created.headRefName !== preRunBranch
+        ) {
+          return;
+        }
+        if (!output.includes(created.url)) return;
+        const sessionService = this.config.getSessionService();
+        // Re-resolve the session's archive location immediately before the
+        // locked mutation: an archive transition landing during the gh
+        // round-trip above must not strand the binding on a resurrected
+        // active sidecar.
+        let archiveState: 'active' | 'archived' = 'active';
+        try {
+          if (
+            (await sessionService.getSessionLocation(
+              this.config.getSessionId(),
+            )) === 'archived'
+          ) {
+            archiveState = 'archived';
+          }
+        } catch {
+          // Best-effort binding — keep the default active location.
+        }
+        const prPath = sessionService.getPrSessionPathForArchiveState(
+          this.config.getSessionId(),
+          archiveState,
+        );
+        // The same PR already bound stays untouched (position and
+        // createdAt): only a genuinely new binding persists and notifies.
+        // A same-number entry pointing at ANOTHER repo is another PR and
+        // is re-bound here (the created one must win that slot).
+        const createdPr = {
+          number: created.number,
+          url: created.url,
+          state: created.state,
+        };
+        const applied = await upsertSessionPrs(prPath, [
+          { ...createdPr, source: 'create' },
+        ]);
+        if (!applied.added.includes(created.number)) return;
+        // The daemon never sees this write; the notification carries the
+        // catalog mark so live-state clients refetch it (~2s) instead of
+        // waiting for unrelated catalog churn.
+        this.config
+          .getSessionService()
+          .emitSessionPrBound(this.config.getSessionId(), createdPr);
+      } catch {
+        /* best-effort binding */
+      }
+    })();
   }
 
   /**
@@ -3053,6 +3490,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * `executeForeground`. The `promoteArtifacts` parameter carries the
    * pre-allocated buffer/stream slots that absorb the race between
    * service-side promote-time data flush and this finalizer running.
+   *
+   * `preHead` is the HEAD captured synchronously before spawn (null
+   * unless the command carried a commit recognisable as landing in our
+   * cwd, unsandboxed). A promoted command settles after `execute()`
+   * has returned, so the foreground registration block never runs for
+   * it — registration happens here, at settle (#12514).
    */
   private async handlePromotedForeground(
     result: ShellExecutionResult,
@@ -3060,6 +3503,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     commandToExecute: string,
     abortController: AbortController,
     promoteArtifacts: PromoteArtifacts,
+    preHead: string | null,
   ): Promise<ToolResult> {
     // Mirror executeBackground's outputPath layout so /tasks-on-disk and
     // ReadFileTool's auto-allow rules treat foreground-promoted shells
@@ -3091,12 +3535,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (pid !== undefined) {
         if (os.platform() === 'win32') {
           try {
-            const taskkillChild = childProcess.spawn('taskkill', [
-              '/pid',
-              String(pid),
-              '/f',
-              '/t',
-            ]);
+            const taskkillChild = childProcess.spawn(
+              'taskkill',
+              ['/pid', String(pid), '/f', '/t'],
+              // The desktop runtime daemon has no console; without this
+              // flag each console-app child allocates a visible window.
+              { windowsHide: true },
+            );
             taskkillChild.on('error', () => {
               /* swallow — already in error path */
             });
@@ -3241,12 +3686,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (pid !== undefined) {
         if (os.platform() === 'win32') {
           try {
-            const taskkillChild = childProcess.spawn('taskkill', [
-              '/pid',
-              String(pid),
-              '/f',
-              '/t',
-            ]);
+            const taskkillChild = childProcess.spawn(
+              'taskkill',
+              ['/pid', String(pid), '/f', '/t'],
+              // The desktop runtime daemon has no console; without this
+              // flag each console-app child allocates a visible window.
+              { windowsHide: true },
+            );
             // Without an 'error' listener on the spawned ChildProcess,
             // a taskkill spawn failure (binary missing, permission
             // denied, etc.) would emit 'error' with no listener — which
@@ -3389,21 +3835,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const classifySettle = (
       info: ShellPostPromoteSettleInfo,
     ): { status: 'completed' | 'failed'; failMsg: string | null } => {
-      // Decision table: `error` → fail (spawn-side failure); `exitCode
-      // === 0` → complete; non-zero exitCode → fail; signal-killed
-      // (no exitCode, signal set) → fail with descriptive message;
-      // everything-null → fail with generic message.
+      // Decision table: `error` → fail (spawn-side failure); a non-zero
+      // signal means the process was killed (including node-pty's
+      // `exitCode: 0, signal: N` shape), then `exitCode === 0` → complete;
+      // non-zero exitCode → fail; everything-null → fail with a generic
+      // message.
       if (info.error) return { status: 'failed', failMsg: info.error.message };
+      if (isSignalTermination(info.signal)) {
+        return {
+          status: 'failed',
+          failMsg: `Terminated by signal ${info.signal}`,
+        };
+      }
       if (info.exitCode === 0) return { status: 'completed', failMsg: null };
       if (info.exitCode !== null)
         return {
           status: 'failed',
           failMsg: `Exited with code ${info.exitCode}`,
-        };
-      if (info.signal !== null)
-        return {
-          status: 'failed',
-          failMsg: `Terminated by signal ${info.signal}`,
         };
       // PR-2.5 wave-3: this branch is meant to
       // be unreachable — the service always populates one of
@@ -3426,6 +3874,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       };
     };
     const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
+      // `task_stop` aborts the entry before the child necessarily reports
+      // its signal. Preserve the user-intended `cancelled` state instead of
+      // allowing the later signal settle to overwrite it as `failed`.
+      if (entryAc.signal.aborted) {
+        registry.cancel(shellId, info.endTime);
+        return;
+      }
       const cls = classifySettle(info);
       if (cls.status === 'completed') {
         registry.complete(shellId, info.exitCode as number, info.endTime);
@@ -3433,7 +3888,77 @@ export class ShellToolInvocation extends BaseToolInvocation<
         registry.fail(shellId, cls.failMsg as string, info.endTime);
       }
     };
+    // Session-commit registration for the promoted path (#12514 A.3).
+    // `execute()` returns the promote ToolResult without reaching the
+    // foreground registration block, so a commit landed by a promoted
+    // command would never earn the amend exemption. `preHead` arrives
+    // from the caller's pre-spawn capture, gated there on
+    // `attributableInCwd` (and non-sandboxed), so a
+    // null here means the command carried no commit recognisable as
+    // landing in our cwd — `cd /elsewhere && git commit` stays
+    // unregistered exactly as the foreground path leaves it, and
+    // `head.sha !== preHead` can never be trivially true.
+    //
+    // Registration is settle-only by design: the commit can land at any
+    // point in the backgrounded child's life, and the only moment this
+    // path can observe "the child is done" is its settle. So for a child
+    // that is still running the exemption arrives later than the
+    // ToolResult that precedes it (pinned by the deferred-settle row in
+    // `shell.session-commit-tracking.test.ts`), and for a child that
+    // never settles (`npm run dev`, `tail -f`) it never arrives. Closing
+    // that needs a probe independent of the settle, which is a different
+    // mechanism than this PR's; the promote handoff probe alone would
+    // still miss a commit that lands after the user pressed Ctrl+B.
+    let promotedCommitRegistration: Promise<void> | null = null;
+    // Snapshot the registry generation at promote time. `Config.
+    // setApprovalMode` clears the session-commit registry on every real
+    // transition because exemptions must not carry across that boundary
+    // — but this registration fires when the child exits, arbitrarily
+    // later, so without the check a settle landing after such a
+    // transition writes the exemption straight back into the cleared
+    // registry.
+    const registrationGeneration = getSessionCommitGeneration();
+    const registerPromotedCommit = (): void => {
+      if (preHead === null || promotedCommitRegistration !== null) return;
+      if (getSessionCommitGeneration() !== registrationGeneration) {
+        // Fail-closed: the registry this decision was made against no
+        // longer exists, so the exemption it would grant is stale. The
+        // agent's own commit stays amend-blocked until it commits again
+        // inside the current registry generation.
+        debugLogger.warn(
+          `promote: skipping session-commit registration in ${cwd}: the ` +
+            `session-commit registry was cleared (approval-mode transition or ` +
+            `session end) after this command was promoted, so the exemption ` +
+            `must not carry across that boundary.`,
+        );
+        return;
+      }
+      promotedCommitRegistration = this.trackSessionCommit(
+        cwd,
+        preHead,
+        // Lineage, not mere difference. This runs when the backgrounded
+        // child exits — arbitrarily later than the caller's pre-spawn
+        // capture — so a commit anybody else lands in this repository
+        // while the child runs is the newest `commit:` entry by then,
+        // and `head.sha !== preHead` alone would adopt it: the foreign
+        // commit would earn the amend exemption and the promoted one
+        // would lose its own. Requiring that entry to have moved HEAD
+        // *from* `preHead` keeps the registered SHA one this command
+        // created (see `trackSessionCommit`'s `requirePredecessor`).
+        preHead,
+      ).catch((err: unknown) => {
+        // Registration must never break the settle path — a failure
+        // here costs the exemption (fail-closed), nothing more.
+        debugLogger.warn(
+          `promote: session-commit registration failed: ${getErrorMessage(err)}`,
+        );
+      });
+    };
     promoteArtifacts.onSettleWired = (info) => {
+      // The child has exited — if the promoted command landed a commit
+      // in our cwd, this is the moment to register it (the foreground
+      // path's equivalent runs after the foreground result resolves).
+      registerPromotedCommit();
       // Synchronous observation — the child has exited; classify now
       // so the model-facing copy can branch correctly even when the
       // registry transition is deferred behind the stream's flush.
@@ -3498,6 +4023,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       promoteArtifacts.settleQueued = null;
       promoteArtifacts.onSettleWired(queued);
     }
+    // When the settle was already queued (a fast-settling promoted
+    // command), the registration probe kicked off above is in flight —
+    // await it so the exemption is in place by the time the ToolResult
+    // is returned. For a still-running child this is null and costs
+    // nothing; the registration then completes via `onSettleWired`
+    // whenever the child exits.
+    await promotedCommitRegistration;
 
     // Build the model-facing status line based on whether the settle
     // was observed synchronously (i.e. the child has exited). Branch
@@ -3588,9 +4120,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         'Stripped trailing & from background shell command — managed path handles backgrounding',
       );
     }
-    const processedCommand = this.addAttributionToPR(
-      this.addCoAuthorToGitCommit(noTrailingAmp),
-    );
+    const processedCommand = this.config.getShellExecutionSandbox?.()
+      ? noTrailingAmp
+      : this.addAttributionToPR(this.addCoAuthorToGitCommit(noTrailingAmp));
     const cwd = this.params.directory || this.config.getTargetDir();
 
     // Output goes under the project temp dir (which `ReadFileTool`
@@ -3639,32 +4171,47 @@ export class ShellToolInvocation extends BaseToolInvocation<
       abortController: entryAc,
     };
 
-    const { result: resultPromise, pid } = await ShellExecutionService.execute(
-      processedCommand,
-      cwd,
-      (event: ShellOutputEvent) => {
-        if (event.type === 'data' && typeof event.chunk === 'string') {
-          // Strip ANSI escape codes (color, cursor-move, clear-screen) before
-          // writing — agents read the file as plain text, and dev servers /
-          // build tools spam plenty of escape sequences that would render as
-          // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
-          outputStream.write(stripAnsi(event.chunk));
-        }
-        // ANSI array chunks and binary streams are not written to the output
-        // file: agents read the file as plain text and binary spam would be
-        // unhelpful.
-      },
-      entryAc.signal,
-      // Background shells are non-interactive by design — no terminal to
-      // attach a PTY to, no human to type at it. Force the child_process
-      // path so we don't pull in node-pty for fire-and-forget commands.
-      false,
-      shellExecutionConfig ?? {},
-      // Stream stdout/stderr through to the output file as chunks arrive.
-      // Default child_process mode buffers until exit, which would leave
-      // dev-server / watcher output files empty until the process dies.
-      { streamStdout: true },
-    );
+    let executionHandle;
+    try {
+      executionHandle = await executeRuntimeShell(
+        this.config,
+        processedCommand,
+        cwd,
+        (event: ShellOutputEvent) => {
+          if (event.type === 'data' && typeof event.chunk === 'string') {
+            // Strip ANSI escape codes (color, cursor-move, clear-screen) before
+            // writing — agents read the file as plain text, and dev servers /
+            // build tools spam plenty of escape sequences that would render as
+            // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
+            outputStream.write(stripAnsi(event.chunk));
+          }
+          // ANSI array chunks and binary streams are not written to the output
+          // file: agents read the file as plain text and binary spam would be
+          // unhelpful.
+        },
+        entryAc.signal,
+        // Background shells are non-interactive by design — no terminal to
+        // attach a PTY to, no human to type at it. Force the child_process
+        // path so we don't pull in node-pty for fire-and-forget commands.
+        false,
+        shellExecutionConfig ?? {},
+        // Stream stdout/stderr through to the output file as chunks arrive.
+        // Default child_process mode buffers until exit, which would leave
+        // dev-server / watcher output files empty until the process dies.
+        { streamStdout: true },
+      );
+    } catch (error) {
+      outputStream.destroy();
+      try {
+        fs.rmSync(outputPath, { force: true });
+      } catch (cleanupError) {
+        debugLogger.warn(
+          `background shell ${shellId} output cleanup failed: ${getErrorMessage(cleanupError)}`,
+        );
+      }
+      throw error;
+    }
+    const { result: resultPromise, pid } = executionHandle;
 
     if (pid !== undefined) registration.pid = pid;
     const registry = this.config.getBackgroundShellRegistry();
@@ -3715,7 +4262,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           } else if (
             result.error ||
             (result.exitCode !== null && result.exitCode !== 0) ||
-            result.signal !== null
+            isSignalTermination(result.signal)
           ) {
             // Non-zero exit / killed by signal / spawn error all count as failed.
             // Treating them as `completed` would let `/tasks` (and any future
@@ -3723,7 +4270,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // `false` command as a success.
             const reason = result.error
               ? result.error.message
-              : result.signal !== null
+              : isSignalTermination(result.signal)
                 ? `terminated by signal ${result.signal}`
                 : `exited with code ${result.exitCode}`;
             registry.fail(shellId, reason, endTime);
@@ -3795,7 +4342,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const child = childProcess.execFile(
         'git',
         args,
-        { cwd, timeout: 2000 },
+        { cwd, timeout: 2000, windowsHide: true },
         (error, stdout) => {
           if (error) {
             resolve(0);
@@ -3823,7 +4370,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const child = childProcess.execFile(
         'git',
         ['rev-parse', 'HEAD'],
-        { cwd, timeout: 2000 },
+        { cwd, timeout: 2000, windowsHide: true },
         (error, stdout) => {
           if (error) {
             resolve(null);
@@ -3857,6 +4404,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const stdout = childProcess.execFileSync('git', ['rev-parse', 'HEAD'], {
         cwd,
         timeout: 2000,
+        windowsHide: true,
         // Discard stderr noise (e.g. "fatal: not a git repository") —
         // the catch-or-empty-output path already covers failure.
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -3866,6 +4414,158 @@ export class ShellToolInvocation extends BaseToolInvocation<
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Record HEAD in the session registry (`permissions/destructive-commands.ts`)
+   * when a `git commit` put it there, so a later `git commit --amend` of it is
+   * exempt from the Auto-mode destructive-command block.
+   *
+   * The criterion is "the newest HEAD reflog entry is a `commit` verb, and
+   * HEAD moved". Exit code is too strict (`git commit -m x && npm test` can
+   * land the commit and then fail). HEAD movement alone is too loose, and
+   * fail-open: in `git pull && git commit -m x` with nothing staged, the pull
+   * fast-forwards onto somebody else's commit and the commit then exits
+   * non-zero — and because `gitCommitContext` does not treat
+   * `pull`/`checkout`/`merge` as cwd-shifting and the call site has no
+   * exit-code gate, that chain really does reach here. A movement-only test
+   * would register a human's SHA, trading the deterministic Layer-0 block for
+   * the classifier.
+   *
+   * Where the reflog cannot answer at all (`core.logAllRefUpdates` off, reflog
+   * expired, git missing) nothing registers and the amend stays blocked, so
+   * that branch costs a blocked amend and never a lifted one.
+   *
+   * The reflog read does *not* establish that this command's own `git commit`
+   * created HEAD, and no local read can: `preHead` is taken before the spawn
+   * and the reflog after the whole command, so a commit another process lands
+   * in the same repository inside that window is the newest `commit:` entry
+   * and registers instead — degrading the next amend's deterministic Layer-0
+   * block to the L5.3 classifier, and costing the agent its own exemption,
+   * since the foreign entry is the newest one. Binding an entry to this child
+   * needs a signal not derivable from reflog shape, and the cheap candidate is
+   * unsound: a chain-level `GIT_REFLOG_ACTION` stamp rewrites the action of
+   * every reflog-writing git call in the single `/bin/bash -c` child, so a
+   * trailing `checkout` would write a `commit:` verb too. Per-invocation
+   * stamping means changing how the executor spawns. Tracked in #12523.
+   *
+   * No multi-commit guard, unlike {@link attachCommitAttribution}, which has
+   * to *partition* per-file contribution and so bails. In `commit a &&
+   * commit b` HEAD is `b`, created by this command, so registering it is
+   * sound and `a` stays blocked.
+   *
+   * `requirePredecessor` is the promoted path's lineage guard and is
+   * deliberately not applied to the foreground one. There, the window
+   * between the pre-spawn capture and this reflog read is the command's
+   * own duration — the trade-off #12523 tracks and this docblock
+   * discloses. On a Ctrl+B promote the same window is the backgrounded
+   * child's whole (deliberately long) lifetime, so a commit anybody else
+   * lands in this repository meanwhile is not a narrow race but the
+   * expected shape, and difference-from-`preHead` alone would adopt it.
+   * Passing the captured `preHead` here requires the entry that created
+   * HEAD to have moved it *from* that SHA, which only this command's own
+   * commit does. Fail-closed both ways: a foreign commit never earns an
+   * exemption, and a multi-commit promoted chain (`commit a && commit b`,
+   * whose newest entry descends from `a`) loses one it had earned rather
+   * than guessing. The foreground call site passes nothing and keeps the
+   * disclosed window unchanged.
+   */
+  private async trackSessionCommit(
+    cwd: string,
+    preHead: string | null,
+    requirePredecessor?: string,
+  ): Promise<void> {
+    const head = await this.getGitHeadOrigin(cwd);
+    if (
+      head !== null &&
+      requirePredecessor !== undefined &&
+      head.predecessor !== requirePredecessor
+    ) {
+      // Same visibility contract as the `head === null` branch below: the
+      // only other output of this path is a block reason asserting the
+      // commit was not the agent's, so say which side of the lineage
+      // check failed.
+      debugLogger.warn(
+        `Session commit not registered in ${cwd}: the newest HEAD reflog entry descends from ` +
+          `${head.predecessor ?? '(no predecessor)'}, not from the pre-spawn HEAD ` +
+          `${requirePredecessor.slice(0, 12)}, so it was not created by this command.`,
+      );
+      return;
+    }
+    // Neither condition subsumes the other: `createdByCommit` rejects a HEAD
+    // something else relocated, and the `preHead` comparison rejects a commit
+    // that never moved HEAD (nothing staged), which would otherwise
+    // re-register the pre-existing HEAD.
+    if (head !== null && head.createdByCommit && head.sha !== preHead) {
+      registerSessionCommit(head.sha);
+    } else if (head === null) {
+      // Failing closed is the intent; failing closed *invisibly* is not. The
+      // only other output of this path is a block reason asserting the
+      // commit was not the agent's, and nothing else separates "the reflog
+      // could not answer" (reflogs off, expired, probe timed out) from a
+      // genuine attribution failure. Same shape as the attribution refusal
+      // in `attachCommitAttribution`.
+      debugLogger.warn(
+        `Session commit not registered in ${cwd}: the HEAD reflog could not answer, so a later amend stays blocked.`,
+      );
+    }
+  }
+
+  /**
+   * Read HEAD, the reflog action that last moved it, and the SHA that
+   * entry moved it *from*, in one subprocess.
+   *
+   * `--no-show-signature` is required, not cosmetic: with
+   * `log.showSignature=true` git prints the signature verdict ahead of the
+   * formatted output, shifting both fields and making an agent's own signed
+   * commit look uncommitted. Inert when nothing is signed.
+   *
+   * `-2` rather than `-1` so the second entry's SHA is available as the
+   * newest entry's predecessor — the lineage input
+   * {@link trackSessionCommit} requires on the promoted path. It costs one
+   * extra reflog record inside the same 2 s budget.
+   *
+   * Returns `null` when git cannot answer (not a repo, no HEAD, reflog off or
+   * expired, git missing) so every caller fails closed. `predecessor` is
+   * `null` when the reflog holds a single entry (an initial commit, or one
+   * expired down to a single record).
+   */
+  private async getGitHeadOrigin(cwd: string): Promise<{
+    sha: string;
+    createdByCommit: boolean;
+    predecessor: string | null;
+  } | null> {
+    return new Promise((resolve) => {
+      const child = childProcess.execFile(
+        'git',
+        ['log', '-g', '-2', '--no-show-signature', '--format=%H%n%gs', 'HEAD'],
+        { cwd, timeout: 2000, windowsHide: true },
+        (error, stdout) => {
+          if (error) {
+            resolve(null);
+            return;
+          }
+          // One line per field, newest entry first: its SHA, its reflog
+          // subject, then the previous entry's SHA (whose subject is not
+          // read).
+          const [sha, subject, predecessor] = String(stdout).split('\n');
+          if (!sha || !subject) {
+            resolve(null);
+            return;
+          }
+          // Reflog verbs are not localised by git. `\b` admits `commit:`,
+          // `commit (initial|amend|merge):` and excludes every other verb.
+          resolve({
+            sha: sha.trim(),
+            createdByCommit: /^commit\b/.test(subject),
+            predecessor: predecessor?.trim() || null,
+          });
+        },
+      );
+      // Suppress unhandled-error events from the child stream (e.g. ENOENT
+      // when git is missing); the callback still receives the error.
+      child.on('error', () => {});
+    });
   }
 
   /**
@@ -4091,6 +4791,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             .execFileSync('git', ['show', `${postHead}:${rel}`], {
               cwd,
               timeout: 2000,
+              windowsHide: true,
               stdio: ['ignore', 'pipe', 'ignore'],
               maxBuffer: 16 * 1024 * 1024,
             })
@@ -4176,7 +4877,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         const child = childProcess.execFile(
           notesCommand.command,
           notesCommand.args,
-          { cwd, timeout: 5000 },
+          { cwd, timeout: 5000, windowsHide: true },
           (error, stdout, stderr) => {
             const merged = (stdout || '') + (stderr || '');
             if (error) {
@@ -4240,7 +4941,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
       );
       warning =
-        `AI attribution note skipped: ${getErrorMessage(err)}. ` +
+        `AI attribution note skipped: ${getErrorMessage(err).slice(0, 120)}. ` +
         'Co-authored-by trailer is unaffected.';
     } finally {
       // Partial clear: only drop tracking for files that landed in
@@ -4546,8 +5247,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Shell-aware detection — a raw regex would falsely match quoted
     // text such as `echo "git commit"` and hand a corrupted command
-    // (with the trailer mid-string) back to the executor. The stricter
-    // `attributableInCwd` is what we want here: only inject the
+    // (with the trailer mid-string) back to the executor. The
+    // in-cwd check is what we want here: only inject the
     // trailer when we're confident the commit lands in our cwd.
     const segmentRange = findAttributableCommitSegment(command);
     if (!segmentRange) {
@@ -4937,8 +5638,9 @@ function getShellCommandSequencingGuidance({
   }
 }
 
-function getShellToolDescription(): string {
-  const shellConfiguration = getShellConfiguration();
+function getShellToolDescription(
+  shellConfiguration: ShellConfiguration,
+): string {
   const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   const isWindows = os.platform() === 'win32';
   const processGroupNote = isWindows
@@ -4953,7 +5655,7 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO N
 
 **Usage notes**:
 - The command argument is required.
-- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).
+- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes). For longer commands, use \`is_background: true\` and observe the managed task instead of passing a larger timeout.
 - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
 
 - Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
@@ -4991,8 +5693,7 @@ ${processGroupNote}${processStopNote}
 `;
 }
 
-function getCommandDescription(): string {
-  const shellConfiguration = getShellConfiguration();
+function getCommandDescription(shellConfiguration: ShellConfiguration): string {
   const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   switch (shellConfiguration.shell) {
     case 'cmd':
@@ -5015,21 +5716,25 @@ export class ShellTool extends BaseDeclarativeTool<
   static Name: string = ToolNames.SHELL;
 
   override get maxOutputChars(): number {
-    return 30_000;
+    return getShellOutputThreshold(this.config);
   }
 
   constructor(private readonly config: Config) {
+    const shellConfiguration: ShellConfiguration =
+      config.getExecutionEnvironment?.() instanceof SshExecutionEnvironment
+        ? { executable: 'bash', argsPrefix: ['-c'], shell: 'bash' }
+        : getShellConfiguration();
     super(
       ShellTool.Name,
       ToolDisplayNames.SHELL,
-      getShellToolDescription(),
+      getShellToolDescription(shellConfiguration),
       Kind.Execute,
       {
         type: 'object',
         properties: {
           command: {
             type: 'string',
-            description: getCommandDescription(),
+            description: getCommandDescription(shellConfiguration),
           },
           is_background: {
             type: 'boolean',
@@ -5037,7 +5742,9 @@ export class ShellTool extends BaseDeclarativeTool<
               'Optional: Whether to run the command in background. If not specified, defaults to false (foreground execution). Explicitly set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
           },
           timeout: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
+            maximum: 600000,
             description: 'Optional timeout in milliseconds (max 600000)',
           },
           description: {

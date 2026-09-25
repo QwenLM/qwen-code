@@ -4,14 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
-import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  type AcpSessionBridge,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
-const { stderrLines } = vi.hoisted(() => ({ stderrLines: [] as string[] }));
+const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
+  stderrLines: [] as string[],
+  updateSessionOrganization: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: (line: string) => stderrLines.push(line),
+}));
+vi.mock('./session-organization-helpers.js', () => ({
+  createSessionOrganizationService: () => ({ updateSessionOrganization }),
 }));
 
 const {
@@ -21,9 +32,10 @@ const {
   MAX_TRACKED_SPAWNED_SESSIONS,
 } = await import('./create-sub-session.js');
 
-type FakeEvent = { type: string; data: unknown };
+type FakeEvent = { v: 1; type: string; data: unknown };
 
 const chunk = (text: string): FakeEvent => ({
+  v: 1,
   type: 'session_update',
   data: { update: { sessionUpdate: 'agent_message_chunk', content: { text } } },
 });
@@ -31,10 +43,12 @@ const turnComplete = (
   promptId: string,
   stopReason = 'end_turn',
 ): FakeEvent => ({
+  v: 1,
   type: 'turn_complete',
   data: { sessionId: '', stopReason, promptId },
 });
 const turnError = (promptId: string, message: string): FakeEvent => ({
+  v: 1,
   type: 'turn_error',
   data: { sessionId: '', message, promptId },
 });
@@ -46,6 +60,7 @@ function makeFakeBridge(opts?: {
   events?: (promptId: string) => FakeEvent[];
   blockAfterEvents?: boolean;
   sendPromptRejects?: string;
+  modelApplied?: boolean;
   /** Simulate a persisted parent that the idle reaper removed before the
    * sent-mode worker completes. `resumeSession` makes it live again. */
   reapedParentSessionId?: string;
@@ -63,10 +78,12 @@ function makeFakeBridge(opts?: {
    * throw synchronously (e.g. an unknown session id hits an assertion before
    * the first await), which must not clobber the launch error. */
   closeSessionFails?: 'sync' | 'async';
+  closeSessionHangs?: boolean;
   /** Accepted acknowledgements returned by successive completion deliveries. */
   notificationAcks?: boolean[];
   /** Persisted parent lineage for callers restored after a daemon restart. */
   restoredCallerParents?: Readonly<Record<string, string>>;
+  callerSourceTypes?: Readonly<Record<string, string>>;
 }) {
   const spawns: Array<{
     workspaceCwd: string;
@@ -76,7 +93,11 @@ function makeFakeBridge(opts?: {
   }> = [];
   const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
     [];
-  const names: Array<{ sessionId: string; displayName?: string }> = [];
+  const names: Array<{
+    sessionId: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }> = [];
   const closes: string[] = [];
   const relocations: Array<{
     sessionId: string;
@@ -99,6 +120,10 @@ function makeFakeBridge(opts?: {
     };
   }> = [];
   const parentObserverClosures: string[] = [];
+  const subscriptions: Array<{
+    sessionId: string;
+    lastEventId?: number;
+  }> = [];
   let subscribeCalls = 0;
   let capturedPromptId = '';
   let n = 0;
@@ -109,6 +134,7 @@ function makeFakeBridge(opts?: {
     getSessionSummary: (sessionId: string) => ({
       sessionId,
       parentSessionId: opts?.restoredCallerParents?.[sessionId],
+      sourceType: opts?.callerSourceTypes?.[sessionId],
     }),
     spawnOrAttach: async (req: {
       workspaceCwd: string;
@@ -117,13 +143,21 @@ function makeFakeBridge(opts?: {
       parentSessionId?: string;
     }) => {
       spawns.push(req);
-      return { sessionId: `sub-${++n}` };
+      return {
+        sessionId: `sub-${++n}`,
+        ...(req.modelServiceId !== undefined && opts?.modelApplied !== undefined
+          ? { modelApplied: opts.modelApplied }
+          : {}),
+      };
     },
     updateSessionMetadata: (
       sessionId: string,
-      metadata: { displayName?: string },
+      metadata: {
+        displayName?: string;
+        titleSource?: 'manual' | 'auto';
+      },
     ) => {
-      names.push({ sessionId, displayName: metadata.displayName });
+      names.push({ sessionId, ...metadata });
       return metadata;
     },
     getSessionLastEventId: () => 0,
@@ -178,6 +212,9 @@ function makeFakeBridge(opts?: {
       kills.push(sessionId);
       return opts?.killSessionResult ?? true;
     },
+    // Present so a rollback mark cannot fail silently inside its swallowing
+    // catch — the production bridge always implements it.
+    markSessionCatalogChanged: vi.fn(),
     detachClient: async (sessionId: string, clientId?: string) => {
       operations.push(`detach:${sessionId}`);
       detaches.push({ sessionId, ...(clientId ? { clientId } : {}) });
@@ -186,7 +223,7 @@ function makeFakeBridge(opts?: {
       sessionId: string,
       req: { prompt: Array<{ type: string; text?: string }> },
       _signal: unknown,
-      ctx?: { promptId?: string },
+      ctx?: { promptId?: string; onPromptAdmitted?: () => void },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
       prompts.push({
@@ -197,11 +234,13 @@ function makeFakeBridge(opts?: {
       if (opts?.sendPromptRejects) {
         return Promise.reject(new Error(opts.sendPromptRejects));
       }
+      ctx?.onPromptAdmitted?.();
       // Never resolves — the first-turn result comes from the event stream.
       return new Promise(() => {});
     },
     closeSession: (sessionId: string) => {
       closes.push(sessionId);
+      if (opts?.closeSessionHangs) return new Promise<void>(() => {});
       if (opts?.closeSessionFails === 'sync') {
         throw new Error('closeSession exploded');
       }
@@ -228,8 +267,15 @@ function makeFakeBridge(opts?: {
       if (accepted) notifications.push({ sessionId, notification });
       return { sessionId, accepted };
     },
-    async *subscribeEvents(sessionId: string, o?: { signal?: AbortSignal }) {
+    async *subscribeEvents(
+      sessionId: string,
+      o?: { signal?: AbortSignal; lastEventId?: number },
+    ) {
       subscribeCalls++;
+      subscriptions.push({
+        sessionId,
+        ...(o?.lastEventId !== undefined ? { lastEventId: o.lastEventId } : {}),
+      });
       if (sessionId === opts?.reapedParentSessionId) {
         const delivered = notifications.find(
           (item) => item.sessionId === sessionId,
@@ -285,6 +331,7 @@ function makeFakeBridge(opts?: {
     operations,
     notifications,
     parentObserverClosures,
+    subscriptions,
     subscribeCalls: () => subscribeCalls,
   };
 }
@@ -294,6 +341,7 @@ describe('sub-session launcher', () => {
 
   beforeEach(() => {
     stderrLines.length = 0;
+    updateSessionOrganization.mockClear();
   });
 
   it('sent: spawns a thread-scoped session, dispatches, returns the id (background subscribe holds slot)', async () => {
@@ -317,6 +365,7 @@ describe('sub-session launcher', () => {
     ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
     expect(fake.names[0]!.displayName).toContain('my task');
+    expect(fake.names[0]!.titleSource).toBe('auto');
     // 'sent' returns immediately but starts a background subscription to hold
     // the concurrency slot until the sub-session's turn finishes (so the cap
     // stays meaningful). The subscription is fire-and-forget — the launch
@@ -341,6 +390,720 @@ describe('sub-session launcher', () => {
     });
 
     expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
+  });
+
+  it('keeps scheduled-task run titles flat and persists their attribution', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      name: 'Hourly review',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(fake.spawns[0]).toMatchObject({
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    expect(fake.names[0]?.displayName).toBe('Hourly review');
+    expect(fake.names[0]?.titleSource).toBe('auto');
+  });
+
+  it('assigns a scheduled-task run session to its selected group', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(updateSessionOrganization).toHaveBeenCalledWith('sub-1', {
+      groupId: 'group-1',
+      color: null,
+    });
+    expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalled();
+  });
+
+  it('assigns the selected group inside the resolved runtime storage', async () => {
+    const fake = makeFakeBridge();
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
+    let assignedRuntimeBaseDir: string | undefined;
+    updateSessionOrganization.mockImplementationOnce(async () => {
+      assignedRuntimeBaseDir = Storage.getRuntimeBaseDir();
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(updateSessionOrganization).toHaveBeenCalledOnce();
+    expect(assignedRuntimeBaseDir).toBe(runtimeBaseDir);
+  });
+
+  it('still launches when scheduled-task group assignment fails', async () => {
+    const fake = makeFakeBridge();
+    updateSessionOrganization.mockRejectedValueOnce(
+      new Error('group_not_found'),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'run the task',
+        completion: 'sent',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        groupId: 'group-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-1' });
+
+    expect(fake.prompts).toHaveLength(1);
+    expect(stderrLines).toContainEqual(
+      expect.stringMatching(/could not be assigned.*group_not_found/i),
+    );
+  });
+
+  it('rejects a scheduled-task run when prompt admission fails', async () => {
+    const fake = makeFakeBridge({
+      sendPromptRejects: 'child disappeared during init',
+    });
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+    });
+
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          groupId: 'group-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(updateSessionOrganization).not.toHaveBeenCalled();
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('removes an isolated transcript when prompt admission fails', async () => {
+    const fake = makeFakeBridge({
+      sendPromptRejects: 'child disappeared during init',
+    });
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
+    const discardEmptyDirectory = vi.fn();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+      isolatedWorkspace: {
+        materializeDirectory: async (sessionId) =>
+          `${WS}/conversation-${sessionId}`,
+        discardEmptyDirectory,
+      },
+    });
+
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
+
+      expect(fake.kills).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(discardEmptyDirectory).toHaveBeenCalledWith('sub-1');
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('rejects a scheduled-task run when its selected model is not applied', async () => {
+    const fake = makeFakeBridge({ modelApplied: false });
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+    });
+
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          model: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(
+          /model selection failed.*missing-model/i,
+        ),
+      });
+
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(fake.prompts).toEqual([]);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('runs a scheduled-task child when its selected model is applied', async () => {
+    const fake = makeFakeBridge({ modelApplied: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'scheduled child task',
+        completion: 'sent',
+        model: 'model-x',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-1' });
+
+    expect(fake.prompts).toHaveLength(1);
+    expect(fake.closes).toEqual([]);
+  });
+
+  it('keeps a non-scheduled sub-session on the default model when selection fails', async () => {
+    const fake = makeFakeBridge({ modelApplied: false });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'run the task',
+        completion: 'sent',
+        model: 'missing-model',
+        sourceType: 'default',
+        sourceId: 'agent-run-7',
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-1' });
+
+    expect(fake.prompts).toHaveLength(1);
+    expect(fake.closes).toEqual([]);
+  });
+
+  it('bounds rollback when a spawned child does not answer close', async () => {
+    vi.useFakeTimers();
+    const fake = makeFakeBridge({
+      modelApplied: false,
+      closeSessionHangs: true,
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    let settled = false;
+
+    try {
+      const launch = launcher
+        .launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          model: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        })
+        .finally(() => {
+          settled = true;
+        });
+      const rejection = launch.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      // The watchdog strictly outlasts the agent-side close timeout: an equal
+      // bound would let it win the race and skip the transcript cleanup.
+      await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(settled).toBe(true);
+      expect(await rejection).toEqual(
+        expect.objectContaining({
+          message: expect.stringMatching(
+            /model selection failed.*missing-model/i,
+          ),
+        }),
+      );
+      expect(fake.closes).toEqual(['sub-1']);
+      // The watchdog path forces the session down and still removes the
+      // orphaned transcript rather than leaking it.
+      expect(fake.kills).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      removeSession.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('removes an isolated scheduled-task transcript in its runtime', async () => {
+    const fake = makeFakeBridge({ modelApplied: false });
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+      isolatedWorkspace: {
+        materializeDirectory: vi.fn(),
+        discardEmptyDirectory: vi.fn(),
+      },
+    });
+
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          model: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow(/model selection failed.*missing-model/i);
+
+      expect(fake.kills).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('routes a standalone caller through the managed standalone child service', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+    });
+    const createChildWithInitialPrompt = vi.fn(
+      async (
+        request: {
+          sessionId: string;
+          parentSessionId: string;
+          promptId: string;
+          modelServiceId?: string;
+        },
+        prompt: string,
+      ) => ({
+        session: {
+          sessionId: request.sessionId,
+          workspaceCwd: WS,
+          attached: false,
+          sourceType: 'standalone',
+          sourcePersisted: true,
+          parentSessionPersisted: true,
+          modelApplied: false,
+        },
+        projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+        workingDirectory: { state: 'ready' as const },
+        initialPrompt: {
+          promptId: request.promptId,
+          lastEventId: 37,
+          turn: new Promise<never>(() => {}),
+        },
+        prompt,
+      }),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        resume: vi.fn(),
+        continueSession: vi.fn(async (_sessionId, dispatch) =>
+          dispatch({ bridge: fake.bridge } as never, 'caller-standalone'),
+        ),
+      }),
+      boundWorkspace: WS,
+    });
+
+    const result = await launcher.launch({
+      prompt: 'standalone child task',
+      completion: 'sent',
+      model: 'model-x',
+      callerSessionId: 'caller-standalone',
+    });
+
+    expect(result).toMatchObject({
+      sessionId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      parentSessionPersisted: true,
+    });
+    expect(createChildWithInitialPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: result.sessionId,
+        parentSessionId: 'caller-standalone',
+        modelServiceId: 'model-x',
+        promptId: expect.any(String),
+      }),
+      'standalone child task',
+    );
+    expect(fake.spawns).toEqual([]);
+    expect(fake.relocations).toEqual([]);
+    expect(fake.prompts).toEqual([]);
+    expect(fake.subscriptions).toEqual([
+      { sessionId: result.sessionId, lastEventId: 37 },
+    ]);
+  });
+
+  it('preserves standalone scheduled-task model selection failures', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+    });
+    let childSessionId = '';
+    const createChildWithInitialPrompt = vi.fn(
+      async (request: {
+        sessionId: string;
+        parentSessionId: string;
+        promptId: string;
+        modelServiceId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }) => {
+        childSessionId = request.sessionId;
+        throw Object.assign(
+          new Error(
+            'The selected model could not be applied to the standalone session.',
+          ),
+          {
+            name: 'StandaloneSessionServiceError',
+            code: 'model_selection_failed',
+            sessionId: request.sessionId,
+            retryable: true,
+          },
+        );
+      },
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        resume: vi.fn(),
+        continueSession: vi.fn(),
+      }),
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'standalone child task',
+        completion: 'sent',
+        model: 'missing-model',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        callerSessionId: 'caller-standalone',
+      }),
+    ).rejects.toMatchObject({
+      code: 'model_selection_failed',
+      message: expect.stringMatching(/model.*could not be applied/i),
+    });
+
+    expect(childSessionId).not.toBe('');
+    expect(createChildWithInitialPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      }),
+      'standalone child task',
+    );
+    expect(fake.prompts).toEqual([]);
+  });
+
+  it('returns a standalone first turn correlated to the managed prompt', async () => {
+    let managedPromptId = '';
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+      events: () => [chunk('managed result'), turnComplete(managedPromptId)],
+    });
+    const createChildWithInitialPrompt = vi.fn(
+      async (request: {
+        sessionId: string;
+        parentSessionId: string;
+        promptId: string;
+      }) => {
+        managedPromptId = request.promptId;
+        return {
+          session: {
+            sessionId: request.sessionId,
+            workspaceCwd: WS,
+            attached: false,
+            sourceType: 'standalone',
+            sourcePersisted: true,
+            parentSessionPersisted: true,
+          },
+          projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+          workingDirectory: { state: 'ready' as const },
+          initialPrompt: {
+            promptId: request.promptId,
+            lastEventId: 19,
+            turn: Promise.resolve({ stopReason: 'end_turn' as const }),
+          },
+        };
+      },
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        resume: vi.fn(),
+        continueSession: vi.fn(),
+      }),
+      boundWorkspace: WS,
+    });
+
+    const result = await launcher.launch({
+      prompt: 'standalone first turn',
+      completion: 'first-turn',
+      callerSessionId: 'caller-standalone',
+    });
+
+    expect(result).toMatchObject({
+      result: 'managed result',
+      stopReason: 'end_turn',
+      parentSessionPersisted: true,
+    });
+    expect(fake.subscriptions).toEqual([
+      { sessionId: result.sessionId, lastEventId: 19 },
+    ]);
+    expect(fake.spawns).toEqual([]);
+    expect(fake.prompts).toEqual([]);
+  });
+
+  it('leaves standalone child cleanup to the managed service after dispatch failure', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+      blockAfterEvents: true,
+    });
+    const discarded: string[] = [];
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt: async (request: {
+          sessionId: string;
+          parentSessionId: string;
+          promptId: string;
+        }) => ({
+          session: {
+            sessionId: request.sessionId,
+            workspaceCwd: WS,
+            attached: false,
+            sourceType: 'standalone',
+            sourcePersisted: true,
+          },
+          projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+          workingDirectory: { state: 'ready' as const },
+          initialPrompt: {
+            promptId: request.promptId,
+            lastEventId: 0,
+            turn: Promise.reject(new Error('managed dispatch failed')),
+          },
+        }),
+        resume: vi.fn(),
+        continueSession: vi.fn(),
+      }),
+      boundWorkspace: WS,
+      isolatedWorkspace: {
+        materializeDirectory: async (childSessionId) =>
+          `${WS}/conversation-${childSessionId}`,
+        discardEmptyDirectory: async (childSessionId) => {
+          discarded.push(childSessionId);
+        },
+      },
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'standalone failing turn',
+        completion: 'first-turn',
+        callerSessionId: 'caller-standalone',
+      }),
+    ).rejects.toThrow('managed dispatch failed');
+    expect(fake.kills).toEqual([]);
+    expect(fake.closes).toEqual([]);
+    expect(discarded).toEqual([]);
+  });
+
+  it('observes recovered standalone completion with the canonical parent id', async () => {
+    const parentSessionId = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
+    const canonicalParentSessionId = parentSessionId.toLowerCase();
+    const fake = makeFakeBridge({
+      callerSourceTypes: { [parentSessionId]: 'standalone' },
+      reapedParentSessionId: parentSessionId,
+    });
+    let childPromptId = '';
+    (
+      fake.bridge as unknown as {
+        subscribeEvents: AcpSessionBridge['subscribeEvents'];
+      }
+    ).subscribeEvents = async function* () {
+      yield chunk('completed');
+      yield turnComplete(childPromptId);
+    };
+    const observedSessionIds: string[] = [];
+    const ownerBridge = {
+      ...fake.bridge,
+      getSessionLastEventId: (sessionId: string) => {
+        observedSessionIds.push(sessionId);
+        return 0;
+      },
+      getSessionEventEpoch: (sessionId: string) => {
+        observedSessionIds.push(sessionId);
+        return 'owner-epoch';
+      },
+      enqueueBackgroundNotification: async (sessionId: string) => {
+        observedSessionIds.push(sessionId);
+        return { sessionId, accepted: true };
+      },
+      async *subscribeEvents(sessionId: string) {
+        observedSessionIds.push(sessionId);
+        yield Promise.reject(new Error('observer failed'));
+      },
+    } as unknown as AcpSessionBridge;
+    const resume = vi.fn();
+    const continueSession = vi.fn(async (_sessionId, dispatch) =>
+      dispatch({ bridge: ownerBridge } as never, canonicalParentSessionId),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt: async (request) => {
+          childPromptId = request.promptId;
+          return {
+            session: {
+              sessionId: request.sessionId,
+              workspaceCwd: WS,
+              attached: false,
+              sourceType: 'standalone',
+              sourcePersisted: true,
+              parentSessionPersisted: true,
+            },
+            projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+            workingDirectory: { state: 'ready' as const },
+            initialPrompt: {
+              promptId: request.promptId,
+              lastEventId: 0,
+              turn: new Promise<never>(() => {}),
+            },
+          };
+        },
+        resume,
+        continueSession,
+      }),
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+    });
+
+    const launched = await launcher.launch({
+      prompt: 'standalone child task',
+      completion: 'sent',
+      callerSessionId: parentSessionId,
+    });
+
+    await vi.waitFor(() =>
+      expect(stderrLines).toEqual([
+        expect.stringContaining('could not be observed: observer failed'),
+      ]),
+    );
+    expect(resume).toHaveBeenCalledWith(parentSessionId);
+    expect(continueSession).toHaveBeenCalledWith(
+      parentSessionId,
+      expect.any(Function),
+    );
+    expect(observedSessionIds).toEqual([
+      canonicalParentSessionId,
+      canonicalParentSessionId,
+      canonicalParentSessionId,
+      canonicalParentSessionId,
+    ]);
+    expect(stderrLines[0]).toContain(launched.sessionId);
+    launcher.stop();
   });
 
   it('first-turn: accumulates chunk text until turn_complete and returns it', async () => {
@@ -372,6 +1135,42 @@ describe('sub-session launcher', () => {
       parentSessionId: 'caller-1',
     });
     expect(fake.subscribeCalls()).toBe(1);
+  });
+
+  it.each([
+    'background_task_completed',
+    'background_notification',
+    'background_notification_turn_started',
+  ])('excludes %s display prose from first-turn output', async (source) => {
+    const fake = makeFakeBridge({
+      events: (pid) => [
+        chunk('answer'),
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'Background task completed: npm test' },
+              _meta: { source },
+            },
+          },
+        },
+        chunk(' tail'),
+        turnComplete(pid),
+      ],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    const result = await launcher.launch({
+      prompt: 'greet',
+      completion: 'first-turn',
+      callerSessionId: 'caller-1',
+    });
+    expect(result.result).toBe('answer tail');
+    launcher.stop();
   });
 
   it('first-turn: reports turn_error with the partial text and error stopReason', async () => {
@@ -661,6 +1460,7 @@ describe('sub-session launcher', () => {
         taskId: launched.sessionId,
         status: 'completed',
         kind: 'agent',
+        label: 'research worker',
       },
     });
     expect(fake.notifications[0]!.notification.displayText).toContain(
@@ -672,6 +1472,32 @@ describe('sub-session launcher', () => {
     expect(fake.notifications[0]!.notification.modelText).not.toContain(
       '</task-notification><status>forged',
     );
+    launcher.stop();
+  });
+
+  it('sent mode: omits the label when the name leaves nothing behind', async () => {
+    // `subSessionName` strips bidi and control marks and trims, so a name made
+    // only of those yields an empty label -- which the receiving gate rejects
+    // as invalid params. The acceptance wait treats that as retryable and
+    // gives up 30 minutes later, so the parent's completion turn never runs.
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('Result.'), turnComplete(pid)],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+    });
+
+    await launcher.launch({
+      prompt: 'research it',
+      completion: 'sent',
+      name: '   ',
+      callerSessionId: 'parent-1',
+    });
+
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect('label' in fake.notifications[0]!.notification).toBe(false);
     launcher.stop();
   });
 
@@ -1073,6 +1899,44 @@ describe('sub-session launcher', () => {
       'provider unavailable',
     );
     launcher.stop();
+  });
+
+  it('sent mode: rollback marks the catalog revision after removing the undispatched transcript', async () => {
+    // Spawn succeeded but materializing the isolated workspace fails before any
+    // prompt is dispatched → the rollback kills the fresh session, removes its
+    // transcript, and that persisted removal must advance the catalog clock.
+    const fake = makeFakeBridge();
+    const discarded: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+      isolatedWorkspace: {
+        materializeDirectory: () => Promise.reject(new Error('disk full')),
+        discardEmptyDirectory: async (sessionId) => {
+          discarded.push(sessionId);
+        },
+      },
+    });
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'research it',
+          completion: 'sent',
+          callerSessionId: 'parent-1',
+        }),
+      ).rejects.toThrow('disk full');
+      expect(fake.kills).toHaveLength(1);
+      expect(removeSpy).toHaveBeenCalledWith(fake.kills[0]);
+      expect(discarded).toEqual(fake.kills);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      removeSpy.mockRestore();
+      launcher.stop();
+    }
   });
 
   it('first-turn: reports "incomplete" when the stream ends before the turn does', async () => {

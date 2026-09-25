@@ -104,23 +104,17 @@ If you want to inspect the complete reasoning path before deciding, each agent's
 
 ## Configuration
 
-Arena behavior can be customized in [settings.json](../configuration/settings.md):
+Arena settings are nested under `agents.arena` in
+[settings.json](../configuration/settings.md). The schema accepts
+`maxRoundsPerAgent` and `timeoutSeconds`, but the CLI currently drops both
+values when building the configuration used by `/arena`. Setting either field
+therefore does not limit `/arena` runs.
 
-```json
-{
-  "arena": {
-    "worktreeBaseDir": "~/.qwen/arena",
-    "maxRoundsPerAgent": 50,
-    "timeoutSeconds": 600
-  }
-}
-```
-
-| Setting                   | Description                        | Default         |
-| :------------------------ | :--------------------------------- | :-------------- |
-| `arena.worktreeBaseDir`   | Base directory for arena worktrees | `~/.qwen/arena` |
-| `arena.maxRoundsPerAgent` | Maximum reasoning rounds per agent | `50`            |
-| `arena.timeoutSeconds`    | Timeout for each agent in seconds  | `600`           |
+| Setting                          | Description                                                                                          | Default                         |
+| :------------------------------- | :--------------------------------------------------------------------------------------------------- | :------------------------------ |
+| `agents.arena.worktreeBaseDir`   | Custom base directory for Arena worktrees. Use an absolute path; `~` is not expanded.                | The Qwen home `arena` directory |
+| `agents.arena.maxRoundsPerAgent` | Accepted by the schema, but currently not forwarded to `/arena`; setting it has no effect on the run | Unset                           |
+| `agents.arena.timeoutSeconds`    | Accepted by the schema, but currently not forwarded to `/arena`; setting it has no effect on the run | Unset                           |
 
 ## Best practices
 
@@ -168,7 +162,8 @@ For routine changes like renaming a variable or updating a config file, a single
 
 - Verify that each model in `--models` is properly configured with valid API credentials
 - Check that your working directory is a Git repository (worktrees require Git)
-- Ensure you have write access to the worktree base directory (`~/.qwen/arena/` by default)
+- Ensure you have write access to the `arena` directory under the Qwen home
+  directory (the default worktree base directory)
 
 ### Worktree creation fails
 
@@ -178,9 +173,9 @@ For routine changes like renaming a variable or updating a config file, a single
 
 ### Agent takes too long
 
-- Increase the timeout: set `arena.timeoutSeconds` in settings
 - Reduce task complexity — Arena tasks should be focused and well-defined
-- Lower `arena.maxRoundsPerAgent` if agents are spending too many rounds
+- Use fewer agents or models with lower latency
+- Stop the Arena run manually if an agent is taking too long
 
 ### Applying winner fails
 
@@ -200,14 +195,14 @@ Agent Arena is experimental. Current limitations:
 
 ## Comparison with other multi-agent modes
 
-Agent Arena is one of several planned multi-agent modes in Qwen Code. **Agent Team** and **Agent Swarm** are not yet implemented — the table below describes their intended design for reference.
+Agent Arena and the experimental Agent Team runtime serve different multi-agent workflows. Agent Swarm remains a planned mode.
 
-|                   | **Agent Arena**                                        | **Agent Team** (planned)                           | **Agent Swarm** (planned)                                |
+|                   | **Agent Arena**                                        | **Agent Team**                                     | **Agent Swarm** (planned)                                |
 | :---------------- | :----------------------------------------------------- | :------------------------------------------------- | :------------------------------------------------------- |
 | **Goal**          | Competitive: Find the best solution to the _same_ task | Collaborative: Tackle _different_ aspects together | Batch parallel: Dynamically spawn workers for bulk tasks |
 | **Agents**        | Pre-configured models compete independently            | Teammates collaborate with assigned roles          | Workers spawned on-the-fly, destroyed on completion      |
 | **Communication** | No inter-agent communication                           | Direct peer-to-peer messaging                      | One-way: results aggregated by parent                    |
-| **Isolation**     | Full: separate Git worktrees                           | Independent sessions with shared task list         | Lightweight ephemeral context per worker                 |
+| **Isolation**     | Full: separate Git worktrees                           | In-process teammates with a shared task list       | Lightweight ephemeral context per worker                 |
 | **Output**        | One selected solution applied to workspace             | Synthesized results from multiple perspectives     | Aggregated results from parallel processing              |
 | **Best for**      | Benchmarking, choosing between model approaches        | Research, complex collaboration, cross-layer work  | Batch operations, data processing, map-reduce tasks      |
 
@@ -216,4 +211,5 @@ Agent Arena is one of several planned multi-agent modes in Qwen Code. **Agent Te
 Explore related approaches for parallel and delegated work:
 
 - **Lightweight delegation**: [Subagents](./sub-agents.md) handle focused subtasks within your session — better when you don't need model comparison
+- **Collaborative execution**: [Multi-Agent Coordination](./multi-agent-coordination.md) uses Agent Team for shared tasks and teammate messaging
 - **Manual parallel sessions**: Run multiple Qwen Code sessions yourself in separate terminals with [Git worktrees](https://git-scm.com/docs/git-worktree) for full manual control

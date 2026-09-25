@@ -57,7 +57,7 @@ describe('btwCommand', () => {
   let mockContext: CommandContext;
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
-    getGeminiClient: () => ({}),
+    getLlmClient: () => ({}),
     getModel: () => 'test-model',
     getSessionId: () => 'test-session-id',
     getApprovalMode: () => 'default',

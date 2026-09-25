@@ -20,6 +20,9 @@ import {
 
 const sessionData = vi.hoisted(() => new Map<string, unknown>());
 const sessionLists = vi.hoisted(() => new Map<string, unknown>());
+const sessionServiceConstructions = vi.hoisted(
+  () => [] as Array<{ cwd: string; runtimeBaseDir?: string }>,
+);
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -27,7 +30,17 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     SessionService: class {
-      constructor(private readonly cwd: string) {}
+      constructor(
+        private readonly cwd: string,
+        options?: { runtimeBaseDir?: string },
+      ) {
+        sessionServiceConstructions.push({
+          cwd,
+          ...(options?.runtimeBaseDir
+            ? { runtimeBaseDir: options.runtimeBaseDir }
+            : {}),
+        });
+      }
 
       loadSession(sessionId: string) {
         return Promise.resolve(sessionData.get(sessionId));
@@ -75,6 +88,7 @@ function record(
 afterEach(() => {
   sessionData.clear();
   sessionLists.clear();
+  sessionServiceConstructions.length = 0;
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -115,6 +129,7 @@ describe('buildRealtimeStartupContext', () => {
     const runtime = { workspaceCwd: repo } as WorkspaceRuntime;
     const workspaceRegistry = {
       list: () => [runtime],
+      listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
 
     const context = await buildRealtimeStartupContext({
@@ -149,6 +164,7 @@ describe('buildRealtimeStartupContext', () => {
     const runtime = { workspaceCwd: root } as WorkspaceRuntime;
     const workspaceRegistry = {
       list: () => [runtime],
+      listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
 
     await expect(
@@ -173,6 +189,7 @@ describe('buildRealtimeStartupContext', () => {
     const runtime = { workspaceCwd: root } as WorkspaceRuntime;
     const workspaceRegistry = {
       list: () => [runtime],
+      listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
 
     const context = await buildRealtimeStartupContext({
@@ -185,6 +202,48 @@ describe('buildRealtimeStartupContext', () => {
 
     expect(context).toContain('## Machine / Workspace Map');
     expect(context).not.toContain('## Recent Work');
+  });
+
+  it('reads the current and recent catalogs from each runtime base', async () => {
+    const root = temporaryDirectory();
+    const currentCwd = join(root, 'current');
+    const home = join(root, 'home');
+    mkdirSync(currentCwd);
+    mkdirSync(home);
+    writeFileSync(join(currentCwd, 'README.md'), 'available workspace');
+    const primary = {
+      workspaceCwd: join(root, 'primary'),
+      sessionRuntimeBaseDir: join(root, 'primary-runtime'),
+    } as WorkspaceRuntime;
+    const internal = {
+      workspaceCwd: join(root, 'conversations'),
+      sessionRuntimeBaseDir: join(root, 'conversation-runtime'),
+      provenance: 'live-conversation',
+    } as WorkspaceRuntime;
+    const workspaceRegistry = {
+      listAll: () => [primary, internal],
+    } as unknown as WorkspaceRegistry;
+
+    await buildRealtimeStartupContext({
+      runtime: internal,
+      workspaceRegistry,
+      sessionId: 'missing',
+      currentCwd,
+      userRoot: home,
+    });
+
+    expect(sessionServiceConstructions).toEqual(
+      expect.arrayContaining([
+        {
+          cwd: internal.workspaceCwd,
+          runtimeBaseDir: internal.sessionRuntimeBaseDir,
+        },
+        {
+          cwd: primary.workspaceCwd,
+          runtimeBaseDir: primary.sessionRuntimeBaseDir,
+        },
+      ]),
+    );
   });
 
   it('preserves the start and end of an over-budget turn', () => {

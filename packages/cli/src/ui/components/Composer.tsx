@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text, useIsScreenReaderEnabled } from 'ink';
-import { useCallback, useRef, useState } from 'react';
+import { Box, Text, useIsScreenReaderEnabled, type DOMElement } from 'ink';
+import { useCallback, useRef, useState, type RefObject } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
@@ -20,7 +20,11 @@ import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
 
-export const Composer = () => {
+interface ComposerProps {
+  footerRef?: RefObject<DOMElement | null>;
+}
+
+export const Composer = ({ footerRef }: ComposerProps) => {
   const config = useConfig();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
@@ -142,17 +146,22 @@ export const Composer = () => {
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
           clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+          voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
 
       {/* Exclusive area: only one component visible at a time */}
       {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}
-      {uiState.isInputActive &&
+      {/* The footer is the only production consumer of useConfigInitMessage,
+          which returns a message exactly while initialization is pending — so
+          it has to mount on that window too, or startup shows no progress at
+          all. InputPrompt stays gated on isInputActive alone. */}
+      {(uiState.isInputActive || !uiState.isConfigInitialized) &&
         !showSuggestions &&
         (showShortcuts ? (
           <KeyboardShortcuts />
         ) : (
-          !isScreenReaderEnabled && <Footer />
+          !isScreenReaderEnabled && <Footer containerRef={footerRef} />
         ))}
     </Box>
   );

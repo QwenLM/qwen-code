@@ -289,6 +289,7 @@ describe('restoreQQState', () => {
 
   it('restores msgSeqMap from disk', () => {
     fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'msg_abc']],
       msgSeqMap: [['msg_abc', 5]],
     });
     const ch = makeChannel();
@@ -297,6 +298,23 @@ describe('restoreQQState', () => {
     const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
       .msgSeqMap;
     expect(msgSeqMap.get('msg_abc')).toBe(5);
+  });
+
+  it('discards sequence counters without a restored reply context', () => {
+    fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'msg-current']],
+      msgSeqMap: [
+        ['msg-current', 2],
+        ['msg-orphan', 7],
+      ],
+    });
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.get('msg-current')).toBe(2);
+    expect(msgSeqMap.has('msg-orphan')).toBe(false);
   });
 
   it('restores groupActiveMsgEnabled from disk', () => {
@@ -362,6 +380,7 @@ describe('restoreQQState', () => {
 
   it('filters invalid msgSeqMap values (negative or non-number)', () => {
     fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'a']],
       msgSeqMap: [
         ['a', 3],
         ['b', -1],

@@ -8,6 +8,7 @@ import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
+import { promisify } from 'node:util';
 
 export enum PackageManager {
   NPM = 'npm',
@@ -141,6 +142,44 @@ export interface InstallationInfo {
   standaloneDir?: string;
   updateCommand?: string;
   updateMessage?: string;
+}
+
+const execFileAsync = promisify(childProcess.execFile);
+
+// Slow hosts must not hang startup on this lookup.
+const HOMEBREW_INFO_TIMEOUT_MS = 5000;
+
+/**
+ * Best-effort lookup of the newest formula version visible in local Homebrew
+ * metadata. While the homebrew-core formula lags the npm `latest` tag,
+ * `brew upgrade` is a no-op, and an npm-based "update available"
+ * notification would repeat on every startup with no way to clear it
+ * (#9493). Callers use this to decide whether a Homebrew install can
+ * actually be updated before notifying.
+ *
+ * Returns null when the version cannot be determined (brew missing,
+ * timeout, unexpected output); callers keep the legacy notify behavior in
+ * that case rather than silently hiding a real update.
+ */
+export async function getHomebrewLatestVersion(
+  formula = 'qwen-code',
+  run: typeof execFileAsync = execFileAsync,
+): Promise<string | null> {
+  try {
+    const { stdout } = await run(
+      'brew',
+      ['info', '--json=v2', '--formula', formula],
+      { encoding: 'utf8', timeout: HOMEBREW_INFO_TIMEOUT_MS },
+    );
+    const parsed = JSON.parse(String(stdout)) as {
+      formulae?: Array<{ versions?: { stable?: unknown } }>;
+    };
+    const stable = parsed.formulae?.[0]?.versions?.stable;
+    return typeof stable === 'string' && stable.length > 0 ? stable : null;
+  } catch (error) {
+    debugLogger.warn('Failed to query Homebrew formula version:', error);
+    return null;
+  }
 }
 
 export function getInstallationInfo(

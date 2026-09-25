@@ -31,6 +31,7 @@ import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
 import { ArenaStatusDialog } from './arena/ArenaStatusDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
 import { EffortDialog } from './EffortDialog.js';
+import { OutputStyleDialog } from './OutputStyleDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -60,6 +61,7 @@ import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.j
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -357,7 +359,19 @@ export const DialogManager = ({
       <Box flexDirection="column">
         <EffortDialog
           currentEffort={config.getReasoningEffort()}
+          efforts={getReasoningEffortsForConfig(config)}
           onSelect={uiActions.handleEffortSelect}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isOutputStyleDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        <OutputStyleDialog
+          currentStyleName={config.getOutputStyle()?.name}
+          styles={uiState.outputStyleChoices}
+          onSelect={uiActions.handleOutputStyleSelect}
         />
       </Box>
     );
