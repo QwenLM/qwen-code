@@ -60,6 +60,10 @@
       "types": "./dist/sessionAttachments.d.ts",
       "import": "./dist/sessionAttachments.js"
     },
+    "./sessionStartupConfig": {
+      "types": "./dist/session-startup-config.d.ts",
+      "import": "./dist/session-startup-config.js"
+    },
     "./sessionSource": {
       "types": "./dist/session-source.d.ts",
       "import": "./dist/session-source.js"

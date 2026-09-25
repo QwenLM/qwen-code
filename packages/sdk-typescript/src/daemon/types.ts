@@ -1400,6 +1400,7 @@ export function parseDaemonBackgroundTurn(
 
 /** Returned from `POST /session`. */
 export interface DaemonSession {
+  startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /** Immutable runtime ownership root used for daemon routing. */
   workspaceCwd: string;
@@ -1431,10 +1432,16 @@ export interface DaemonSession {
   /** True iff supplied source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
   /**
-   * Present on a create response when the request carried `modelServiceId`.
-   * `false` means the spawn-time model switch failed and the session is
-   * running on the agent default model (also surfaced via the
-   * `model_switch_failed` session event).
+   * Only present on a fresh spawn (`attached: false`) that carried
+   * `modelServiceId` or `startupConfig`. Always true for successful
+   * startupConfig preparation. For legacy model selection, true confirms
+   * the model switch; false means the apply failed (surfaced via
+   * `model_switch_failed`) and the session is running on the agent's
+   * default model. An attach omits the key or, when it coalesced with an
+   * in-flight spawn, reports the spawn owner's outcome — on attach the
+   * `model_switch_failed` event is the caller's signal. Lets create
+   * callers distinguish a confirmed selection from a silent fallback
+   * instead of assuming the requested model is live.
    */
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
@@ -3721,15 +3728,35 @@ export interface SetModelResult {
   [key: string]: unknown;
 }
 
+/** Creation-only selection; does not change shared defaults or later session behavior. */
+export interface SessionStartupConfig {
+  modelServiceId: string;
+  reasoningEffort?: ReasoningSelection;
+}
+
+/** Confirmed state after startup preparation, not a lifetime policy. */
+export interface SessionStartupConfigApplied extends SessionStartupConfig {
+  effectiveReasoning?:
+    | {
+        state: 'enabled';
+        effort?: Exclude<ReasoningSelection, 'default' | 'none'>;
+      }
+    | { state: 'disabled' }
+    | { state: 'provider-default' };
+}
+
 /** Returned from `POST /session/:id/config-option`. */
-export type ReasoningSelection =
-  | 'none'
-  | 'default'
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | 'max';
+export const DAEMON_REASONING_SELECTIONS = [
+  'none',
+  'default',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
+
+export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
