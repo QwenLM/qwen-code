@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -19,6 +20,37 @@ import org.junit.jupiter.api.Test;
 
 class LocalProcessRuntimeProvisionerTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+
+    @Test
+    void reportsADurableKindAndLosesAMissingProcess() throws Exception {
+        HttpRuntimeTransport transport = new HttpRuntimeTransport();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(List.of("node"),
+                        Path.of("").toAbsolutePath(), transport)) {
+            assertEquals(LocalProcessRuntimeProvisioner.KIND,
+                    provisioner.kind());
+            RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a",
+                    "7", "/runtime/workspace", DIGEST, "workspace");
+            RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                    scope, null, provisioner.kind());
+            RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                    "binding-1", 1);
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(LocalProcessRuntimeProvisioner.KIND,
+                    handle.getKind());
+            RuntimeLease missing = new RuntimeLease(
+                    seed.getProvisionalRuntimeId(),
+                    URI.create("http://127.0.0.1:1"), seed.getToken(),
+                    seed.getLeaseId(), seed.getEpoch());
+            RuntimeObservation observation = provisioner
+                    .reconcile(request, seed, handle, missing)
+                    .toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    observation.getOutcome());
+        }
+    }
 
     @Test
     void adoptsAWorkerOnlyAfterAttestationAndRejectsToolRoutes()
@@ -414,6 +446,17 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     private static final class AcceptingTransport implements RuntimeTransport {
+        @Override
+        public java.util.concurrent.CompletionStage<RuntimeAttestation> attest(
+                RuntimeLease lease, RuntimeProvisionRequest request,
+                RuntimeProvisionSeed seed) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    new RuntimeAttestation(lease.getRuntimeInstanceId(),
+                            seed.getGatewayIncarnation(), lease.getLeaseId(),
+                            lease.getEpoch(), request.getScope(),
+                            seed.getProvisionRequestId()));
+        }
+
         @Override
         public java.util.concurrent.CompletionStage<Void> acquire(
                 RuntimeLease lease, RuntimeSession session) {

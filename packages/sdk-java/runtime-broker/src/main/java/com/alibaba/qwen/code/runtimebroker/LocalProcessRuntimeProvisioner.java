@@ -29,6 +29,7 @@ import java.util.regex.Pattern;
  */
 public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
+    static final String KIND = "local-process";
     private static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
     private static final Pattern CAPABILITY_DIGEST =
@@ -60,9 +61,54 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     @Override
+    public String kind() {
+        return KIND;
+    }
+
+    @Override
     public CompletionStage<RuntimeLease> provision(
             RuntimeProvisionRequest request) {
-        return CompletableFuture.supplyAsync(() -> start(request), executor);
+        return CompletableFuture.supplyAsync(() -> start(request, null),
+                executor);
+    }
+
+    @Override
+    public CompletionStage<RuntimeLease> provision(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        if (seed == null) {
+            throw new IllegalArgumentException("seed is required");
+        }
+        return CompletableFuture.supplyAsync(() -> start(request, seed),
+                executor);
+    }
+
+    @Override
+    public CompletionStage<RuntimeResourceHandle> ensureResource(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle knownHandle) {
+        if (knownHandle != null) {
+            if (!KIND.equals(knownHandle.getKind())
+                    || knownHandle.getVersion() != 1) {
+                CompletableFuture<RuntimeResourceHandle> failed =
+                        new CompletableFuture<>();
+                failed.completeExceptionally(new RuntimeBrokerException(409,
+                        "runtime_broker_resource_conflict",
+                        "Managed Runtime resource identity conflicts.",
+                        false));
+                return failed;
+            }
+            return CompletableFuture.completedFuture(knownHandle);
+        }
+        return CompletableFuture.completedFuture(new RuntimeResourceHandle(
+                KIND, 1, Map.of("provider", KIND)));
+    }
+
+    @Override
+    public CompletionStage<RuntimeObservation> reconcile(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, RuntimeLease lastLease) {
+        return CompletableFuture.supplyAsync(
+                () -> observe(request, seed, handle, lastLease), executor);
     }
 
     @Override
@@ -101,18 +147,19 @@ public final class LocalProcessRuntimeProvisioner
         executor.shutdownNow();
     }
 
-    private RuntimeLease start(RuntimeProvisionRequest request) {
+    private RuntimeLease start(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed provided) {
         OwnedProcess ownedProcess = null;
         boolean adopted = false;
         try {
-            String runtimeInstanceId = UUID.randomUUID().toString();
-            String runtimeIncarnation = UUID.randomUUID().toString();
-            String leaseId = UUID.randomUUID().toString();
-            String provisionRequestId = UUID.randomUUID().toString();
-            byte[] tokenBytes = new byte[32];
-            RANDOM.nextBytes(tokenBytes);
-            String token = Base64.getUrlEncoder().withoutPadding()
-                    .encodeToString(tokenBytes);
+            RuntimeProvisionSeed seed = provided != null
+                    ? provided : newSeed();
+            String runtimeInstanceId = seed.getProvisionalRuntimeId();
+            String runtimeIncarnation = seed.getGatewayIncarnation();
+            String leaseId = seed.getLeaseId();
+            String provisionRequestId = seed.getProvisionRequestId();
+            String token = seed.getToken();
+            long epoch = seed.getEpoch();
             RuntimeScope scope = request.getScope();
             if (!CAPABILITY_DIGEST.matcher(scope.getCapabilityDigest())
                     .matches()) {
@@ -122,7 +169,7 @@ public final class LocalProcessRuntimeProvisioner
             }
             JSONObject boot = new JSONObject();
             boot.put("capabilityDigest", scope.getCapabilityDigest());
-            boot.put("epoch", 1);
+            boot.put("epoch", epoch);
             boot.put("isolationClass", scope.getIsolationClass());
             boot.put("leaseId", leaseId);
             boot.put("provisionRequestId", provisionRequestId);
@@ -139,10 +186,7 @@ public final class LocalProcessRuntimeProvisioner
                     .directory(workingDirectory.toFile())
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();
-            ownedProcess = new OwnedProcess(process,
-                    new RuntimeProvisionSeed(provisionRequestId,
-                            runtimeInstanceId, runtimeIncarnation, leaseId,
-                            1, token));
+            ownedProcess = new OwnedProcess(process, seed);
             process.getOutputStream().write(boot.toJSONString()
                     .getBytes(StandardCharsets.UTF_8));
             process.getOutputStream().close();
@@ -157,7 +201,7 @@ public final class LocalProcessRuntimeProvisioner
                     || !runtimeIncarnation.equals(
                             ready.get("runtimeIncarnation"))
                     || !leaseId.equals(ready.get("leaseId"))
-                    || !Long.valueOf(1L).equals(number(ready.get("epoch")))) {
+                    || !Long.valueOf(epoch).equals(number(ready.get("epoch")))) {
                 throw failed("Managed Runtime ready record is invalid.");
             }
             URI endpoint = URI.create(String.valueOf(ready.get("url")));
@@ -166,7 +210,7 @@ public final class LocalProcessRuntimeProvisioner
                 throw failed("Managed Runtime ready record is invalid.");
             }
             RuntimeLease lease = new RuntimeLease(runtimeInstanceId,
-                    endpoint, token, leaseId, 1);
+                    endpoint, token, leaseId, epoch);
             attest(request, ownedProcess.seed, lease);
             owned.put(runtimeInstanceId, ownedProcess);
             adopted = true;
@@ -179,6 +223,52 @@ public final class LocalProcessRuntimeProvisioner
                 ownedProcess.process.destroyForcibly();
             }
         }
+    }
+
+    private RuntimeObservation observe(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+            RuntimeLease lastLease) {
+        if (handle != null && !KIND.equals(handle.getKind())) {
+            return RuntimeObservation.conflict(handle);
+        }
+        if (lastLease == null || seed == null) {
+            return RuntimeObservation.unknown(handle);
+        }
+        OwnedProcess process = owned.get(lastLease.getRuntimeInstanceId());
+        if (process != null && !process.process.isAlive()) {
+            return RuntimeObservation.notFound();
+        }
+        try {
+            attest(request, seed, lastLease);
+        } catch (RuntimeBrokerException failure) {
+            if ("managed_runtime_identity_conflict".equals(failure.getCode())
+                    || "managed_runtime_unauthorized".equals(
+                            failure.getCode())) {
+                return RuntimeObservation.conflict(handle);
+            }
+            if (process == null) {
+                return RuntimeObservation.notFound();
+            }
+            return RuntimeObservation.unknown(handle);
+        }
+        RuntimeResourceHandle readyHandle = handle != null ? handle
+                : new RuntimeResourceHandle(KIND, 1, Map.of("provider", KIND));
+        return RuntimeObservation.ready(readyHandle, lastLease.getEndpoint(),
+                lastLease.getRuntimeInstanceId(), lastLease.getLeaseId(),
+                lastLease.getEpoch());
+    }
+
+    private static RuntimeProvisionSeed newSeed() {
+        String runtimeInstanceId = UUID.randomUUID().toString();
+        String runtimeIncarnation = UUID.randomUUID().toString();
+        String leaseId = UUID.randomUUID().toString();
+        String provisionRequestId = UUID.randomUUID().toString();
+        byte[] tokenBytes = new byte[32];
+        RANDOM.nextBytes(tokenBytes);
+        String token = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(tokenBytes);
+        return new RuntimeProvisionSeed(provisionRequestId, runtimeInstanceId,
+                runtimeIncarnation, leaseId, 1, token);
     }
 
     private void attestOwned(RuntimeProvisionRequest request,
