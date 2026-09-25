@@ -42,13 +42,13 @@ The facts below are from `main` at `ab61e04161`.
 
 ## Negotiation
 
-`managed-context/1` is a capability token, named in the style of `qwen-hosted-harness/1`. A later incompatible change takes a new token.
+`managed-context/1` is a capability token, named in the style of `qwen-hosted-harness/1`; below it is called the protocol token, to keep it apart from the bearer `token`. A later incompatible change takes a new protocol token.
 
-- **Offer.** The Broker offers the protocol by writing boot v2, which carries the token. It writes boot v2 only for a Runtime binding whose Sessions have a Workspace context; every other binding keeps boot v1.
-- **Acceptance.** A worker that implements the protocol answers with ready v2, which repeats the token. It then serves attestation v3 and the installation route, and answers 404 to attestation v2, so one Runtime never presents two identities. The Tool v2 routes keep their shapes, but under boot v2 a tool call runs only for a Session with an installed context, in that context's effective directory. W0c implements this with the per-invocation binding.
+- **Offer.** The Broker offers the protocol by writing boot v2, which carries the protocol token. It writes boot v2 only for a Runtime binding whose Sessions have a Workspace context; every other binding keeps boot v1.
+- **Acceptance.** A worker that implements the protocol answers with ready v2, which repeats the protocol token. It then serves attestation v3 and the installation route, and answers 404 to attestation v2, so one Runtime never presents two identities. The Tool v2 routes keep their shapes, but under boot v2 a tool call runs only for a Session with an installed context, in that context's effective directory. W0c implements this with the per-invocation binding.
 - **Refusal before any side effect.**
   - A worker that implements only boot v1 rejects boot v2 through its closed key set and exits before the ready line.
-  - A ready v1 record, a ready record without the token, or a 404 from a v3 route means the peer is incompatible.
+  - A ready v1 record, a ready record without the protocol token, or a 404 from a v3 route means the peer is incompatible.
 - **No downgrade.** The Broker never provisions a W0 Session with boot v1, and never retries a refused boot v2 as boot v1. A binding without W0 context never receives boot v2.
 
 ## Boot document v2
@@ -70,7 +70,7 @@ The transport is unchanged: one UTF-8 JSON object on standard input, at most 32 
 | `storageId`                                                                | the W0a storage rule: 1 to 256 printable ASCII characters                                |
 | `mountRoot`                                                                | an absolute path of 1 to 4096 UTF-8 bytes, well-formed, with no control character        |
 
-- **Mount root.** `mountRoot` replaces v1's `workspaceCwd`. It is the root at which the Broker's storage resolver mounted this Workspace. An absolute path starts with `/`, with a drive letter and a separator (`C:\` or `C:/`), or with two backslashes (`\\`, a UNC path). The limit counts UTF-8 bytes, as `PATH_MAX` does. The worker treats it as data until the installation handler verifies it.
+- **Mount root.** `mountRoot` replaces v1's `workspaceCwd`. It is the root at which the Broker's storage resolver mounted this Workspace. An absolute path starts with `/`, with a drive letter and a separator (`C:\` or `C:/`), or with two backslashes (`\\`, a UNC path). The limit counts UTF-8 bytes and bounds the value on the wire; whether the path exists is for the installation handler to verify. The worker treats it as data until the installation handler verifies it.
 - **No path hash.** The daemon's path hash, the first 16 hexadecimal characters of SHA-256 over a path, is not carried. Where the worker needs a daemon-compatible local ID, it derives the hash from the verified mount root, so the public `workspaceId` is never a path hash.
 - **No Session context.** A Workspace-isolated Runtime serves many Sessions, and `cwdRelative`, `contextConfigRef` and `contextRevision` must stay out of the placement identity. Each Session installs its context separately, as described below, whatever the isolation class.
 - **Bounded identifiers.** v1 accepts identifiers of any length and refuses, at startup, a boot whose attestation response would exceed 16 KiB. v2 bounds the four Runtime identifiers instead, because attestation responses and receipts repeat them; with every repeated field bounded, those records always fit their limits (see [Sizes](#sizes)). It also bounds the token to the syntax that an `Authorization` header carries, and to 512 characters, the Broker's own limit, well within the header size that the worker's HTTP server accepts.
@@ -81,7 +81,7 @@ The transport is unchanged: one UTF-8 JSON object on standard input, at most 32 
 The worker answers with one line on standard output. The line is a JSON object with exactly these keys: `type: "ready"`, `version: 2`, `managedContext: "managed-context/1"`, `runtimeInstanceId`, `runtimeIncarnation`, `leaseId`, `epoch` and `url`.
 
 - The four identity values repeat the boot document.
-- `url` is `http://127.0.0.1:<port>`, with a port from 1 to 65535 in canonical decimal (no leading zero) and no path, query or user information.
+- `url` is `http://127.0.0.1:<port>`, with a port from 1 to 65535 in canonical decimal (no leading zero) and no path, query, fragment or user information.
 - Unlike v1, the Broker checks the exact key set.
 
 ## Attestation v3
@@ -92,7 +92,7 @@ Attestation v3 keeps the v2 gate and changes only the identity fields.
 - **Headers.** As in v2: the bearer token, `Cache-Control: no-store`, a JSON content type, `X-Qwen-Managed-Lease-Id` and `X-Qwen-Managed-Lease-Epoch`.
 - **Request.** Closed to `protocolVersion`, `managedContext`, `provisionRequestId`, `tenantId`, `workspaceId`, `workspaceGeneration`, `storageId`, `mountRoot`, `capabilityDigest` and `isolationClass`, with the boot v2 rules.
 - **Response.** Closed to the request fields plus `runtimeInstanceId`, `runtimeIncarnation`, `leaseId` and `epoch`.
-- **Checks.** The worker first checks the request against the rules above; a request that breaks one is 400 `managed_runtime_attestation_invalid`. It then compares the eight attested fields, every request field except `protocolVersion` and `managedContext`, with its boot document exactly, as strings, without normalizing paths. Any mismatch is 409 `managed_runtime_identity_conflict`. The attestation cases repeat every boot rule on an attested field. The fixtures also repeat every malformed request object with each attested field it leaves valid changed to another valid value, so a worker that compares any field before checking the shape fails them.
+- **Checks.** The worker first checks the request against the rules above; a request that breaks one is 400 `managed_runtime_attestation_invalid`. It then compares the eight attested fields, every request field except `protocolVersion` and `managedContext`, with its boot document exactly, as strings, without normalizing paths. Any mismatch is 409 `managed_runtime_identity_conflict`. The attestation cases repeat every single-field boot case on an attested field, valid and invalid: an invalid value answers 400, and a valid value that differs from the boot document reaches the comparison and answers 409. The fixtures also repeat every malformed request object with each attested field it leaves valid changed to another valid value, so a worker that compares any field before checking the shape fails them.
 
 ## Context installation
 
@@ -124,7 +124,7 @@ The fixtures pin this order:
 
 - Every malformed request object is repeated after a successful installation, and again with each Workspace field of its binding that it leaves valid changed to another valid value.
 - A binding that breaks a rule carries the digest of its raw fields, so only the rule refuses it.
-- For each of the four Workspace fields, two sequences check that the Workspace part answers before the operation check and before the Session check.
+- For each of the four Workspace fields, three sequences check that the Workspace part answers before the operation check, before the Session check, and before the check of an operation that another Session reuses.
 
 A worker that checks the shape, the binding rules or the digest later, or the Workspace part after the operation or the Session, fails them.
 
@@ -162,7 +162,7 @@ The first four are the codes that attestation v2 and Tool v2 already use. A Brok
 
 `packages/cli/src/serve/contracts/managed-context-v1.schema.json` and `.fixtures.json` hold the whole contract:
 
-- the token, the boot and ready versions, and the two v3 routes;
+- the protocol token, the boot and ready versions, and the two v3 routes;
 - valid and invalid boot documents and ready records;
 - attestation requests and installation requests, each with its expected status and code, replayed against one canonical boot document;
 - installation sequences that exercise idempotency and conflicts;
@@ -170,6 +170,8 @@ The first four are the codes that attestation v2 and Tool v2 already use. A Brok
 - the error table with each code's classification.
 
 The schema fixes each record's shape and the rules it can state readably. JSON Schema cannot state UTF-8 byte or UTF-16 unit limits, a digest over a binding, or a comparison with the boot document, and patterns could state the 2^63−1 bound and the segment rules of a directory's normal form only unreadably. The schema does state a directory's characters and that it starts neither with `/` nor with a drive letter. Fixture cases pin those rules, and the TypeScript test checks that the schema and the module disagree on no other case.
+
+Some cases carry unpaired surrogates as `\uXXXX` escapes, because the rules refuse them. A consumer must read the file with a parser that keeps such escapes, as `JSON.parse`, Jackson and Python's `json` do. Rust's `serde_json` rejects the file by default. `jq` rejects an unpaired high surrogate and replaces an unpaired low one with U+FFFD, so it cannot read the file either, and Go's `encoding/json` silently replaces every unpaired surrogate with U+FFFD.
 
 An implementation independent of both languages computed the expected values and every `contextDigest`, as for W0a.
 
@@ -205,13 +207,14 @@ The worker, the attestation contract, the provisioner, the transport, the fake w
 
 ## Open questions
 
-1. Should a worker that refuses a boot document write a refusal line before it exits? That would let the Broker tell a refusal, which it must never retry, from a crash, which it may retry. A worker that implements only v1 cannot write one, so the Broker still needs a retry bound for boot v2.
+1. Should a worker that refuses a boot document write a refusal line before it exits? That would let the Broker tell a refusal, which it must never retry, from a crash, which it may retry. A worker that implements only v1 cannot write one, so the Broker still needs a retry bound for boot v2. Today the Broker cannot tell the two apart: it discards the worker's standard error, and a v1 worker that refuses boot v2 and one that crashes both end as the same retryable `runtime_provision_failed`.
 2. Should the installation request also carry the configuration installation for `contextConfigRef`, or should that take a later version of the route?
 3. W0a's open question on control characters in `cwdRelative` (every Cc character or only NUL) still applies; the installation handler inherits the W0a rule.
+4. How long does a Runtime keep its installations? The contract keeps every operation and every Session's context for the Runtime's lifetime, and installing the same context under a new `operationId` succeeds, so a long-lived Workspace-isolated Runtime accumulates entries. W0c must set a retention rule, for example releasing a Session's entries when the Session ends, without breaking the idempotent replay the Broker relies on.
 
 ## Follow-up work
 
-| Slice | Scope                                                                                                                                                                                                                                                                                                                                   |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| W0c   | The worker accepts boot v2 and serves attestation v3 and installation; the storage resolver; the provisioner writes boot v2; the v3 transport client; the fake worker for v2; the invocation binding around Tool v2; the activation gate; the Broker's identifier and Session ID checks tightened to these rules before it writes them. |
-| W0e   | Capability advertisement (`workspace_context`) after the whole W0 chain passes.                                                                                                                                                                                                                                                         |
+| Slice | Scope                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W0c   | The worker accepts boot v2 and serves attestation v3 and installation; the storage resolver; the provisioner writes boot v2; the v3 transport client; the fake worker for v2; the invocation binding around Tool v2; the activation gate; the Broker's identifier and Session ID checks tightened to these rules before it writes them; a test that the Broker's JSON writer leaves non-ASCII characters unescaped. |
+| W0e   | Capability advertisement (`workspace_context`) after the whole W0 chain passes.                                                                                                                                                                                                                                                                                                                                     |
