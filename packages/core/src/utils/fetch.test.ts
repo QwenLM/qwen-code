@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  CONNECTION_LEVEL_ERROR_CODES,
   FetchError,
   fetchWithPolicy,
   formatFetchErrorForUser,
@@ -88,10 +89,10 @@ describe('formatFetchErrorForUser', () => {
 });
 
 describe('isConnectionLevelError', () => {
-  // Pins every member of CONNECTION_LEVEL_ERROR_CODES (fetch.ts) so dropping
-  // a code from the set — or losing the ...TLS_ERROR_CODES spread — fails
-  // here. Keep in sync with fetch.ts.
-  it.each([
+  // The exact expected membership of CONNECTION_LEVEL_ERROR_CODES (fetch.ts).
+  // One list drives both the per-code cases below and the membership pin, so
+  // dropping a member reddens a named case and adding one reddens the pin.
+  const EXPECTED_CONNECTION_LEVEL_CODES = [
     'ECONNREFUSED',
     'ECONNRESET',
     'EHOSTUNREACH',
@@ -106,7 +107,19 @@ describe('isConnectionLevelError', () => {
     'DEPTH_ZERO_SELF_SIGNED_CERT',
     'CERT_HAS_EXPIRED',
     'ERR_TLS_CERT_ALTNAME_INVALID',
-  ])(
+  ];
+
+  it('pins the exact membership of CONNECTION_LEVEL_ERROR_CODES', () => {
+    // Widening direction: every member is an https→http downgrade trigger in
+    // tools/web-fetch.ts, so an addition — a mid-transfer code, or a TLS code
+    // added to TLS_ERROR_CODES only to widen the shouldShowTlsHint message —
+    // must be a deliberate change to this list, not a silent one.
+    expect([...CONNECTION_LEVEL_ERROR_CODES].sort()).toEqual(
+      [...EXPECTED_CONNECTION_LEVEL_CODES].sort(),
+    );
+  });
+
+  it.each(EXPECTED_CONNECTION_LEVEL_CODES)(
     'treats %s as connection-level (https upgrade may fall back to http)',
     (code) => {
       expect(
@@ -115,12 +128,20 @@ describe('isConnectionLevelError', () => {
     },
   );
 
-  it.each(['ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT'])(
-    'does not treat %s as connection-level',
-    (code) => {
-      expect(isConnectionLevelError(new FetchError(code, code))).toBe(false);
-    },
-  );
+  // Mid-transfer failures on an already-established, healthy connection: a
+  // fallback here would re-fetch a stalled-but-live https response over
+  // cleartext, doubling the worst-case wait for an ambiguous gain (same
+  // rationale as the ETIMEDOUT exclusion in fetch.ts).
+  it.each([
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_BODY_TIMEOUT',
+    'EPIPE',
+  ])('does not treat %s as connection-level', (code) => {
+    expect(isConnectionLevelError(new FetchError(code, code))).toBe(false);
+  });
 
   it('returns false for non-FetchError values and code-less FetchErrors', () => {
     expect(isConnectionLevelError(new Error('boom'))).toBe(false);

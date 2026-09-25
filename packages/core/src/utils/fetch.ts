@@ -60,7 +60,14 @@ export class FetchError extends Error {
 // where falling back from an opportunistic https upgrade to the originally
 // requested http URL is reasonable (e.g. an intranet FQDN that resolves to
 // a private address and only serves plain http).
-const CONNECTION_LEVEL_ERROR_CODES = new Set([
+//
+// Every member is an https→http downgrade trigger (tools/web-fetch.ts), so
+// fetch.test.ts pins this set's exact membership in both directions. Note the
+// ...TLS_ERROR_CODES spread is a shared-source coupling: TLS_ERROR_CODES also
+// drives the user-facing TLS hint in shouldShowTlsHint, so adding a code there
+// for hint purposes alone would silently widen the downgrade trigger.
+/** @internal Exported for the membership pin in fetch.test.ts only. */
+export const CONNECTION_LEVEL_ERROR_CODES: ReadonlySet<string> = new Set([
   ...TLS_ERROR_CODES,
   'ECONNREFUSED',
   'EPROTO',
