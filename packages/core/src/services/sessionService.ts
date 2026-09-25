@@ -110,6 +110,16 @@ export {
 
 const debugLogger = createDebugLogger('SESSION');
 
+function isManagedFirstRecord(record: ChatRecord): boolean {
+  // New Managed logs write the execution-engine marker before the header.
+  return (
+    record.subtype === 'managed_session_header_v1' ||
+    (record.subtype === 'session_execution_engine' &&
+      (record.systemPayload as { engine?: unknown } | undefined)?.engine ===
+        'managed')
+  );
+}
+
 export class BranchPointInvalidError extends Error {
   constructor(readonly recordId: string) {
     super(`Invalid or inactive branch point: ${recordId}`);
@@ -2696,7 +2706,7 @@ export class SessionService {
 
       const prompt = this.extractFirstPromptFromRecords(records);
       signal?.throwIfAborted();
-      const knownManaged = firstRecord.subtype === 'managed_session_header_v1';
+      const knownManaged = isManagedFirstRecord(firstRecord);
       const titleInfo = this.readSessionTitleInfoFromFile(
         filePath,
         tailBuffer,
@@ -2782,7 +2792,7 @@ export class SessionService {
     ) {
       return undefined;
     }
-    const knownManaged = firstRecord.subtype === 'managed_session_header_v1';
+    const knownManaged = isManagedFirstRecord(firstRecord);
     const titleInfo = this.readSessionTitleInfoFromFile(
       filePath,
       undefined,

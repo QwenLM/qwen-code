@@ -53,7 +53,7 @@ Java 负责公共 Session/Turn 生命周期和租户授权，Harness 负责会�
 
 ### 4.1 会话管理所有权
 
-本地 `SessionService` 可以展示、归档、取消归档和删除已关闭的本地 Managed 会话及其私有资源。daemon 维护在移动或删除 transcript 时持有封存 schema-3 锁上的 claim，完成后保留封存的 writer fence。旧 resume 和录制路径必须在绑定或追加旧引擎记录前拒绝 Managed transcript；旧 rename 和 fork 也必须拒绝。Managed 重命名通过已提交的 `session_metadata` 记录完成。会话列表复用已读取的首条记录，为 legacy transcript 跳过 Managed 元数据探测。
+本地 `SessionService` 可以展示、归档、取消归档和删除已关闭的本地 Managed 会话及其私有资源。daemon 维护在移动或删除 transcript 时持有封存 schema-3 锁上的 claim，完成后保留封存的 writer fence。启动时及会话内的旧 resume 路径和旧录制路径必须在绑定或追加旧引擎记录前拒绝 Managed transcript；旧 rename 和 fork 也必须拒绝。ACP 恢复对该拒绝返回有类型的执行引擎错误，daemon 将其映射为 HTTP 409。Managed 重命名通过已提交的 `session_metadata` 记录完成。会话列表复用已读取的执行引擎记录，为 legacy transcript 跳过 Managed 元数据探测，同时保留 Managed 标题和来源投影。
 
 ### 4.2 公共会话生命周期协议
 

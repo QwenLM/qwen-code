@@ -316,6 +316,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'session_execution_engine'
     | 'omni_recall'
     | 'session_model'
     | 'rewind'

@@ -53,7 +53,7 @@ The common key is `(tenantId, workspaceId, sessionId)`. A writer generation fenc
 
 ### 4.1 Session-management ownership
 
-Local `SessionService` may display, archive, unarchive, and delete a closed local Managed session and its private resources. Daemon maintenance holds a claim against the sealed schema-3 lock while moving or deleting the transcript, then leaves the sealed writer fence intact. Legacy resume and recording must reject a Managed transcript before binding or appending through the old engine; legacy rename and fork must also reject it. Managed renames go through committed `session_metadata` records. Session listings use the already-read first record to skip Managed metadata probes for legacy transcripts.
+Local `SessionService` may display, archive, unarchive, and delete a closed local Managed session and its private resources. Daemon maintenance holds a claim against the sealed schema-3 lock while moving or deleting the transcript, then leaves the sealed writer fence intact. Startup and in-session legacy resume, as well as legacy recording, must reject a Managed transcript before binding or appending through the old engine; legacy rename and fork must also reject it. ACP restore returns a typed execution-engine error for this rejection, which the daemon maps to HTTP 409. Managed renames go through committed `session_metadata` records. Session listings use the already-read execution-engine record to skip Managed metadata probes for legacy transcripts while preserving Managed title and source projection.
 
 ### 4.2 Public Session lifecycle protocol
 

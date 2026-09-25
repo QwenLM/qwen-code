@@ -652,6 +652,18 @@ describe('maintenance on a sealed managed session', () => {
       },
       { class: 'trusted_entry' },
     );
+    await authority.commitDomainRecord(
+      renameCommand('cmd-source-1'),
+      {
+        domain: 'session_source',
+        content: {
+          record: {
+            systemPayload: { sourceType: 'channel', sourceId: 'managed' },
+          },
+        },
+      },
+      { class: 'trusted_entry' },
+    );
     /* Closing seals the lock, which is what leaves a barrier behind. Every
        maintenance path below now meets that sealed lock. */
     await authority.close();
@@ -668,7 +680,23 @@ describe('maintenance on a sealed managed session', () => {
   it('still lists the session and projects its title', async () => {
     const harness = await createSealed();
     const listed = await harness.service.listSessions();
-    expect(listed.items.map((entry) => entry.sessionId)).toContain(sessionId);
+    expect(listed.items).toEqual([
+      expect.objectContaining({
+        sessionId,
+        customTitle: 'Sealed session',
+        titleSource: 'manual',
+        sourceType: 'channel',
+        sourceId: 'managed',
+      }),
+    ]);
+    expect(await harness.service.getSessionListItem(sessionId)).toEqual(
+      expect.objectContaining({
+        customTitle: 'Sealed session',
+        titleSource: 'manual',
+        sourceType: 'channel',
+        sourceId: 'managed',
+      }),
+    );
     expect(harness.service.getSessionTitleInfo(sessionId)).toEqual({
       title: 'Sealed session',
       source: 'manual',
