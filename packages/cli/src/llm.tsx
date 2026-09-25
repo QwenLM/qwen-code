@@ -118,6 +118,10 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import {
+  isInteractiveResumeInvocation,
+  maybeRelinkResumeSession,
+} from './utils/session-relink.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -1004,7 +1008,33 @@ export async function main() {
         process.exit(0);
       }
     }
-    // else: argv.resume is already a valid UUID, pass through to loadCliConfig
+    // A full UUID can identify a session saved under the project's previous
+    // path. Only this explicit form is eligible for cross-project lookup;
+    // picker, title, and --continue behavior remains project-scoped.
+    if (
+      typeof argv.resume === 'string' &&
+      argv.resume !== '' &&
+      cliConfig.isValidSessionId(argv.resume) &&
+      resolvedSessionId === undefined
+    ) {
+      const relink = await maybeRelinkResumeSession({
+        sessionId: argv.resume,
+        cwd: process.cwd(),
+        interactive: isInteractiveResumeInvocation(argv),
+      });
+      if (relink.status === 'blocked') {
+        writeStderrLine(relink.message);
+        process.exit(1);
+      }
+      if (relink.status === 'cancelled') {
+        process.exit(0);
+      }
+      if (relink.status === 'relinked') {
+        writeStderrLine(
+          `Reattached session ${argv.resume} to ${process.cwd()} (previously ${relink.previousCwd}).`,
+        );
+      }
+    }
   }
 
   // We are now past the logic handling potentially launching a child process

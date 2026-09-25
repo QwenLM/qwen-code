@@ -19,6 +19,7 @@ import { getProjectHash } from '../utils/paths.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
@@ -103,6 +104,96 @@ export {
 } from './session-resume-token-counts.js';
 
 const debugLogger = createDebugLogger('SESSION');
+
+const SESSION_RELINK_SCAN_MAX_PROJECTS = 5000;
+
+export type SessionRelinkBlockedReason =
+  | 'active_writer'
+  | 'invalid_transcript'
+  | 'source_directory_exists'
+  | 'source_unavailable'
+  | 'target_conflict'
+  | 'scan_incomplete';
+
+interface SessionRelinkFileIdentity {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+interface SessionRelinkArtifact {
+  sourcePath: string;
+  targetPath: string;
+  sourceData: Buffer;
+  data: Buffer;
+  mode: number;
+  identity: SessionRelinkFileIdentity;
+}
+
+export interface SessionRelinkCandidate {
+  sessionId: string;
+  recordedCwd: string;
+  sourceTranscriptPath: string;
+  sourceChatsDir: string;
+  identity: SessionRelinkFileIdentity;
+}
+
+export type SessionRelinkLookupResult =
+  | { status: 'not_found' }
+  | { status: 'candidate'; candidate: SessionRelinkCandidate }
+  | {
+      status: 'ambiguous';
+      matches: Array<{ recordedCwd?: string; transcriptPath: string }>;
+    }
+  | {
+      status: 'blocked';
+      reason: SessionRelinkBlockedReason;
+      recordedCwd?: string;
+      detail?: string;
+    };
+
+function relinkFileIdentity(stats: fs.Stats): SessionRelinkFileIdentity {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs,
+  };
+}
+
+function sameRelinkFileIdentity(
+  left: SessionRelinkFileIdentity,
+  right: SessionRelinkFileIdentity,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+function remapRelinkPath(
+  value: unknown,
+  oldRoot: string,
+  newRoot: string,
+): unknown {
+  if (typeof value !== 'string') return value;
+  const relative = path.relative(oldRoot, value);
+  if (relative === '') return newRoot;
+  if (
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    return value;
+  }
+  return path.join(newRoot, relative);
+}
 
 export class BranchPointInvalidError extends Error {
   constructor(readonly recordId: string) {
@@ -1019,6 +1110,545 @@ export class SessionService {
    */
   getSessionTranscriptPath(sessionId: string): string {
     return this.getSessionFilePath(sessionId, 'active');
+  }
+
+  /**
+   * Finds an active session with the exact UUID under another project storage
+   * directory. This is intentionally used only by the explicit `--resume
+   * <uuid>` flow: normal listing remains scoped to the current project.
+   */
+  async findRelinkCandidate(
+    sessionId: string,
+  ): Promise<SessionRelinkLookupResult> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return { status: 'not_found' };
+    }
+
+    const localTranscriptPath = this.getSessionFilePath(sessionId, 'active');
+    const localChatsDir = this.getChatsDir();
+    let localTranscriptStats: fs.Stats | undefined;
+    try {
+      localTranscriptStats = await fs.promises.lstat(localTranscriptPath);
+      if (
+        !localTranscriptStats.isFile() ||
+        localTranscriptStats.isSymbolicLink() ||
+        localTranscriptStats.nlink !== 1
+      ) {
+        return { status: 'blocked', reason: 'target_conflict' };
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return {
+          status: 'blocked',
+          reason: 'source_unavailable',
+          detail: String(error),
+        };
+      }
+    }
+    try {
+      await fs.promises.lstat(this.getSessionFilePath(sessionId, 'archived'));
+      return { status: 'blocked', reason: 'target_conflict' };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return {
+          status: 'blocked',
+          reason: 'source_unavailable',
+          detail: String(error),
+        };
+      }
+    }
+
+    const projectsDir = path.dirname(this.storage.getProjectDir());
+    let projectEntries: fs.Dirent[];
+    try {
+      projectEntries = await fs.promises.readdir(projectsDir, {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { status: 'not_found' };
+      }
+      return {
+        status: 'blocked',
+        reason: 'scan_incomplete',
+        detail: String(error),
+      };
+    }
+
+    const projectDirectories = projectEntries.filter((entry) =>
+      entry.isDirectory(),
+    );
+    if (projectDirectories.length > SESSION_RELINK_SCAN_MAX_PROJECTS) {
+      return { status: 'blocked', reason: 'scan_incomplete' };
+    }
+
+    const currentProjectDir = this.storage.getProjectDir();
+    const matches: Array<{
+      transcriptPath: string;
+      chatsDir: string;
+      stats: fs.Stats;
+    }> = localTranscriptStats
+      ? [
+          {
+            transcriptPath: localTranscriptPath,
+            chatsDir: localChatsDir,
+            stats: localTranscriptStats,
+          },
+        ]
+      : [];
+    let scanIncomplete = false;
+    for (const entry of projectDirectories) {
+      const projectDir = path.join(projectsDir, entry.name);
+      if (projectDir === currentProjectDir) continue;
+      const chatsDir = path.join(projectDir, 'chats');
+      const transcriptPath = path.join(chatsDir, `${sessionId}.jsonl`);
+      try {
+        const stats = await fs.promises.lstat(transcriptPath);
+        if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+          scanIncomplete = true;
+          continue;
+        }
+        matches.push({ transcriptPath, chatsDir, stats });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          scanIncomplete = true;
+        }
+      }
+    }
+
+    if (scanIncomplete) {
+      return { status: 'blocked', reason: 'scan_incomplete' };
+    }
+    if (matches.length === 0) return { status: 'not_found' };
+    if (matches.length > 1) {
+      const ambiguousMatches = await Promise.all(
+        matches.map(async ({ transcriptPath }) => ({
+          transcriptPath,
+          recordedCwd: await this.readRelinkRecordedCwd(transcriptPath),
+        })),
+      );
+      return { status: 'ambiguous', matches: ambiguousMatches };
+    }
+
+    const match = matches[0];
+    const transcript = await this.readRelinkTranscript(
+      match.transcriptPath,
+      sessionId,
+    );
+    if (transcript === undefined) {
+      return { status: 'blocked', reason: 'invalid_transcript' };
+    }
+    let currentStats: fs.Stats;
+    try {
+      currentStats = await fs.promises.lstat(match.transcriptPath);
+    } catch (error) {
+      return {
+        status: 'blocked',
+        reason: 'source_unavailable',
+        detail: String(error),
+      };
+    }
+    const identity = relinkFileIdentity(currentStats);
+    if (
+      !currentStats.isFile() ||
+      currentStats.isSymbolicLink() ||
+      currentStats.nlink !== 1 ||
+      !sameRelinkFileIdentity(relinkFileIdentity(match.stats), identity)
+    ) {
+      return { status: 'blocked', reason: 'source_unavailable' };
+    }
+
+    const expectedSourceProjectDir = new Storage(
+      transcript.recordedCwd,
+      this.storage.getRuntimeBaseDir(),
+    ).getProjectDir();
+    if (path.dirname(match.chatsDir) !== expectedSourceProjectDir) {
+      return { status: 'blocked', reason: 'invalid_transcript' };
+    }
+
+    try {
+      await fs.promises.stat(transcript.recordedCwd);
+      return {
+        status: 'blocked',
+        reason: 'source_directory_exists',
+        recordedCwd: transcript.recordedCwd,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return {
+          status: 'blocked',
+          reason: 'source_unavailable',
+          recordedCwd: transcript.recordedCwd,
+          detail: String(error),
+        };
+      }
+    }
+
+    const runtimeStatus = await readRuntimeStatus(
+      path.join(match.chatsDir, `${sessionId}.runtime.json`),
+    );
+    if (
+      runtimeStatus?.sessionId === sessionId &&
+      this.isRelinkRuntimeActive(runtimeStatus.hostname, runtimeStatus.pid)
+    ) {
+      return {
+        status: 'blocked',
+        reason: 'active_writer',
+        recordedCwd: transcript.recordedCwd,
+      };
+    }
+
+    return {
+      status: 'candidate',
+      candidate: {
+        sessionId,
+        recordedCwd: transcript.recordedCwd,
+        sourceTranscriptPath: match.transcriptPath,
+        sourceChatsDir: match.chatsDir,
+        identity,
+      },
+    };
+  }
+
+  /** Move a previously confirmed session into this service's project. */
+  async relinkSession(candidate: SessionRelinkCandidate): Promise<void> {
+    const refreshed = await this.findRelinkCandidate(candidate.sessionId);
+    if (
+      refreshed.status !== 'candidate' ||
+      refreshed.candidate.sourceTranscriptPath !==
+        candidate.sourceTranscriptPath ||
+      !sameRelinkFileIdentity(refreshed.candidate.identity, candidate.identity)
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+
+    const targetChatsDir = this.getChatsDir();
+    const inPlace = candidate.sourceChatsDir === targetChatsDir;
+    fs.mkdirSync(targetChatsDir, { recursive: true });
+    const suffixes = [
+      '.jsonl',
+      '.runtime.json',
+      '.worktree.json',
+      '.pr.json',
+      '.ledger.jsonl',
+    ] as const;
+    const artifacts: SessionRelinkArtifact[] = [];
+
+    if (!inPlace) {
+      for (const suffix of suffixes) {
+        const targetPath = path.join(
+          targetChatsDir,
+          `${candidate.sessionId}${suffix}`,
+        );
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`Session artifact already exists: ${targetPath}`);
+        }
+      }
+    }
+
+    for (const suffix of suffixes) {
+      const sourcePath = path.join(
+        candidate.sourceChatsDir,
+        `${candidate.sessionId}${suffix}`,
+      );
+      const targetPath = path.join(
+        targetChatsDir,
+        `${candidate.sessionId}${suffix}`,
+      );
+      let stats: fs.Stats;
+      try {
+        stats = fs.lstatSync(sourcePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          if (suffix === '.jsonl') throw new SessionTranscriptChangedError();
+          continue;
+        }
+        throw error;
+      }
+      if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+        throw new Error(
+          `Session artifact is not a regular file: ${sourcePath}`,
+        );
+      }
+      const sourceData = fs.readFileSync(sourcePath);
+      let data = sourceData;
+      if (suffix === '.jsonl') {
+        data = Buffer.from(
+          this.rewriteRelinkTranscript(
+            data.toString('utf8'),
+            candidate.sessionId,
+            candidate.recordedCwd,
+          ),
+        );
+      } else if (suffix === '.runtime.json' || suffix === '.worktree.json') {
+        data = this.rewriteRelinkJsonSidecar(
+          data,
+          suffix,
+          candidate.recordedCwd,
+        );
+      }
+      artifacts.push({
+        sourcePath,
+        targetPath,
+        sourceData,
+        data,
+        mode: stats.mode & 0o7777,
+        identity: relinkFileIdentity(stats),
+      });
+    }
+
+    if (inPlace) {
+      const rewritten: SessionRelinkArtifact[] = [];
+      try {
+        for (const artifact of artifacts) {
+          const current = fs.lstatSync(artifact.sourcePath);
+          if (
+            !current.isFile() ||
+            current.isSymbolicLink() ||
+            current.nlink !== 1 ||
+            !sameRelinkFileIdentity(
+              artifact.identity,
+              relinkFileIdentity(current),
+            )
+          ) {
+            throw new SessionTranscriptChangedError();
+          }
+        }
+        for (const artifact of artifacts) {
+          atomicWriteFileSync(artifact.targetPath, artifact.data, {
+            noFollow: true,
+            forceMode: true,
+            mode: artifact.mode,
+          });
+          rewritten.push(artifact);
+        }
+      } catch (error) {
+        for (const artifact of rewritten.reverse()) {
+          try {
+            atomicWriteFileSync(artifact.sourcePath, artifact.sourceData, {
+              noFollow: true,
+              forceMode: true,
+              mode: artifact.mode,
+            });
+          } catch {
+            this.warn(
+              `Failed to restore session artifact ${artifact.sourcePath}`,
+            );
+          }
+        }
+        throw error;
+      }
+      return;
+    }
+
+    const createdTargets: SessionRelinkArtifact[] = [];
+    const removedSources: SessionRelinkArtifact[] = [];
+    const stagedTargets: Array<{
+      artifact: SessionRelinkArtifact;
+      stagingPath: string;
+    }> = [];
+    try {
+      for (const artifact of artifacts) {
+        const stagingPath = `${artifact.targetPath}.relink-${randomUUID()}.tmp`;
+        fs.writeFileSync(stagingPath, artifact.data, {
+          flag: 'wx',
+          mode: artifact.mode,
+          flush: true,
+        });
+        stagedTargets.push({ artifact, stagingPath });
+      }
+      for (const artifact of artifacts) {
+        const current = fs.lstatSync(artifact.sourcePath);
+        if (
+          !current.isFile() ||
+          current.isSymbolicLink() ||
+          current.nlink !== 1 ||
+          !sameRelinkFileIdentity(
+            artifact.identity,
+            relinkFileIdentity(current),
+          )
+        ) {
+          throw new SessionTranscriptChangedError();
+        }
+      }
+      for (const staged of stagedTargets) {
+        // Publishing a hard link is atomic and refuses an existing target.
+        // The staging file lives beside the target, so both names are always
+        // on the same filesystem even when the source project is elsewhere.
+        fs.linkSync(staged.stagingPath, staged.artifact.targetPath);
+        createdTargets.push(staged.artifact);
+        fs.unlinkSync(staged.stagingPath);
+      }
+      for (const artifact of artifacts) {
+        fs.unlinkSync(artifact.sourcePath);
+        removedSources.push(artifact);
+      }
+    } catch (error) {
+      for (const { stagingPath } of stagedTargets) {
+        try {
+          fs.unlinkSync(stagingPath);
+        } catch (cleanupError) {
+          if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') {
+            this.warn(`Failed to remove staging artifact ${stagingPath}`);
+          }
+        }
+      }
+      const targetsToKeep = new Set<string>();
+      for (const artifact of removedSources.reverse()) {
+        try {
+          fs.writeFileSync(artifact.sourcePath, artifact.sourceData, {
+            flag: 'wx',
+            mode: artifact.mode,
+            flush: true,
+          });
+        } catch {
+          targetsToKeep.add(artifact.targetPath);
+          this.warn(
+            `Failed to restore session artifact ${artifact.sourcePath}`,
+          );
+        }
+      }
+      for (const artifact of createdTargets.reverse()) {
+        if (targetsToKeep.has(artifact.targetPath)) continue;
+        try {
+          fs.unlinkSync(artifact.targetPath);
+        } catch {
+          this.warn(`Failed to remove session artifact ${artifact.targetPath}`);
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async readRelinkRecordedCwd(
+    transcriptPath: string,
+  ): Promise<string | undefined> {
+    try {
+      const handle = await fs.promises.open(transcriptPath, 'r');
+      try {
+        const buffer = Buffer.alloc(64 * 1024);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        const firstLine = buffer
+          .subarray(0, bytesRead)
+          .toString('utf8')
+          .split('\n')[0];
+        const record: unknown = JSON.parse(firstLine);
+        if (record && typeof record === 'object' && !Array.isArray(record)) {
+          const cwd = (record as Record<string, unknown>)['cwd'];
+          return typeof cwd === 'string' ? cwd : undefined;
+        }
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      // Best effort only; ambiguity is already sufficient to block migration.
+    }
+    return undefined;
+  }
+
+  private async readRelinkTranscript(
+    transcriptPath: string,
+    sessionId: string,
+  ): Promise<{ recordedCwd: string } | undefined> {
+    try {
+      const contents = await fs.promises.readFile(transcriptPath, 'utf8');
+      const lines = contents.split('\n').filter((line) => line.trim() !== '');
+      if (lines.length === 0) return undefined;
+      let recordedCwd: string | undefined;
+      for (const [index, line] of lines.entries()) {
+        const record: unknown = JSON.parse(line);
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+          return undefined;
+        }
+        const object = record as Record<string, unknown>;
+        if (
+          typeof object['sessionId'] === 'string' &&
+          object['sessionId'] !== sessionId
+        ) {
+          return undefined;
+        }
+        if (index === 0) {
+          if (
+            object['sessionId'] !== sessionId ||
+            typeof object['cwd'] !== 'string' ||
+            object['cwd'].length === 0
+          ) {
+            return undefined;
+          }
+          recordedCwd = object['cwd'];
+        }
+      }
+      return recordedCwd === undefined ? undefined : { recordedCwd };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private rewriteRelinkTranscript(
+    contents: string,
+    sessionId: string,
+    oldRoot: string,
+  ): string {
+    const lines = contents.split('\n').filter((line) => line.trim() !== '');
+    const rewritten = lines.map((line) => {
+      const record: unknown = JSON.parse(line);
+      if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        throw new Error('Invalid session transcript record.');
+      }
+      const object = record as Record<string, unknown>;
+      if (
+        typeof object['sessionId'] === 'string' &&
+        object['sessionId'] !== sessionId
+      ) {
+        throw new Error('Session transcript contains a different session ID.');
+      }
+      if ('cwd' in object) {
+        object['cwd'] = remapRelinkPath(
+          object['cwd'],
+          oldRoot,
+          this.projectRoot,
+        );
+      }
+      return JSON.stringify(object);
+    });
+    return `${rewritten.join('\n')}\n`;
+  }
+
+  private rewriteRelinkJsonSidecar(
+    data: Buffer,
+    suffix: '.runtime.json' | '.worktree.json',
+    oldRoot: string,
+  ): Buffer {
+    try {
+      const parsed: unknown = JSON.parse(data.toString('utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return data;
+      }
+      const object = parsed as Record<string, unknown>;
+      const keys =
+        suffix === '.runtime.json'
+          ? ['work_dir']
+          : ['worktreePath', 'originalCwd', 'workspaceCwd'];
+      for (const key of keys) {
+        if (key in object) {
+          object[key] = remapRelinkPath(object[key], oldRoot, this.projectRoot);
+        }
+      }
+      return Buffer.from(`${JSON.stringify(object, null, 2)}\n`);
+    } catch {
+      return data;
+    }
+  }
+
+  private isRelinkRuntimeActive(hostname: string, pid: number): boolean {
+    if (hostname !== os.hostname()) return true;
+    if (pid <= 0) return true;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
   }
 
   getWorktreeSessionPathForArchiveState(
