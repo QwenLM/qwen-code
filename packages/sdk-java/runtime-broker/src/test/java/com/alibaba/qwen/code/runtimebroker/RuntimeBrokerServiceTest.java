@@ -3113,6 +3113,13 @@ class RuntimeBrokerServiceTest {
         public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
             return delegate.hasActiveByRuntimeSession(runtimeSessionId);
         }
+
+        @Override
+        public boolean hasActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            return delegate.hasActiveByBinding(bindingId,
+                    runtimeGeneration);
+        }
     }
 
     private static final class HookedExecutionRepository
@@ -3221,6 +3228,13 @@ class RuntimeBrokerServiceTest {
         public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
             return delegate.hasActiveByRuntimeSession(runtimeSessionId);
         }
+
+        @Override
+        public boolean hasActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            return delegate.hasActiveByBinding(bindingId,
+                    runtimeGeneration);
+        }
     }
 
     private static final class StaleBindingRepository
@@ -3287,6 +3301,13 @@ class RuntimeBrokerServiceTest {
                 Duration leaseDuration) {
             return delegate.renewOperation(bindingId, owner,
                     operationGeneration, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord releaseOperation(String bindingId,
+                String owner, long operationGeneration) {
+            return delegate.releaseOperation(bindingId, owner,
+                    operationGeneration);
         }
     }
 

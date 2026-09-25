@@ -22,7 +22,9 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 - 将 Broker 暴露为 HTTP 服务或定义公开 Agent resource。
 - 实现本地进程、容器、Kubernetes 或远程 Runtime provisioner。
-- Broker 进程重启后接管或协调 Runtime。
+- Broker 进程重启后接管或协调 legacy binding；具备持久身份的 binding 由
+  Broker 自行接管，见
+  [Runtime 绑定对账](2026-09-24-runtime-binding-reconciliation.zh-CN.md)。
 - 使用 JDBC 持久化 Tool execution 状态。
 - 排空空闲 Runtime binding 或释放物理 Runtime 进程。
 - 实现 Hosted Harness 回调或 Qwen CLI 集成。
@@ -37,9 +39,9 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 ## Binding 生命周期
 
-服务针对准确 placement request 调用 `findOrCreate`，并按 binding 标识合并同一进程中的并发工作。调用 provisioner 前，必须通过 `claimOperation` 取得 `PROVISIONING` 记录。供应期间服务持续续租该 operation claim，并只使用最新 claim 版本写入 `READY`。供应失败且 claim 仍有效时写入 `FAILED`。claim 丢失或过期时绝不发布返回的 lease。
+服务针对准确 placement request 调用 `findOrCreate`，并按 binding 标识合并同一进程中的并发工作。调用 provisioner 前，必须通过 `claimOperation` 取得 `PROVISIONING` 记录。供应期间服务持续续租该 operation claim，并只使用最新 claim 版本写入 `READY`。供应失败且 claim 仍有效时写入 `FAILED`。持久 binding 在其调度器资源已知后绝不写入 `FAILED`：不可重试的身份失败写入 `RECOVERY_BLOCKED`，可重试失败保持 `PROVISIONING`，使重试收敛到已确保的资源，而不是铸造替代资源。claim 丢失或过期时绝不发布返回的 lease。
 
-`READY` 行只是持久化控制面证据，不能证明 endpoint 仍然存活，也不能证明重启后的 Broker 进程拥有凭据和本地资源。服务只在进程内记录由本进程成功供应并证明的 lease。当 repository 返回 `READY` 但进程内不存在匹配 lease 时，服务以 `runtime_reconciliation_required` 失败；绝不会静默复用 endpoint，也不会创建内存替代物。
+`READY` 行只是持久化控制面证据，不能证明 endpoint 仍然存活，也不能证明重启后的 Broker 进程拥有凭据和本地资源。服务只在进程内记录由本进程成功供应并证明的 lease。当 repository 返回 `READY` 但进程内不存在匹配 lease 时，legacy binding 以 `runtime_reconciliation_required` 失败；具备持久身份的 binding 进入 Broker 侧对账：先由 provisioner 观察物理资源，再由 transport 重新证明 Runtime 身份，之后 Session 才可以使用该 lease。两条路径都不会静默复用 endpoint，也不会创建内存替代物；见 [Runtime 绑定对账](2026-09-24-runtime-binding-reconciliation.zh-CN.md)。
 
 ## Runtime Session 生命周期
 
@@ -69,7 +71,7 @@ dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并
 - 格式错误的响应返回不可重试的 `runtime_execution_status_invalid`；transport 或 repository 失败、超过 operation lease 时长仍未返回的查询，以及在 compare-and-set 期间持续变化的记录，都返回可重试的 `runtime_execution_reconcile_failed`；transport 自行分类的错误（例如路由不兼容或身份冲突）保留其 code 与可重试性。所有失败情况下记录都保持 `UNKNOWN`。
 - 同一 execution 的并发调用共享同一个在途查询。关闭服务会让等待中的调用方失败；之后仍到达的 Runtime 应答可能结算该记录，这符合证据规则。查询超时后才到达的应答则被丢弃，下一次轮询会重新查询。
 
-查询以"一个 `reference` 标识一次调用"为前提，这也是 Runtime 标识调用的方式；同时假定 Runtime 会让已结算调用的结果对 `status` 保持可查，保留期属于随 execute 处理器落地的 Runtime 路由契约。即使在同一进程内这一保留也很重要：本进程仍在运行的调用若在其记录变为 `UNKNOWN` 之后才完成，结果不会经由已过期的 claim 写入，要靠之后的查询来结算记录。对 Runtime 报告仍在运行的 `UNKNOWN` execution 发送物理取消、能证明"未开始"的持久回执存储、运维恢复，以及启动或接管时的扫描，都不在本切片范围内。在这些工作落地之前，原 generation 无法作答的 `UNKNOWN` execution 会一直挡住所在 Runtime Session 的 release。busy 检查只按 Runtime Session id 判断，因此在本进程中另一个 Harness 以相同 id 持有的 Session 也无法 release；该 Harness 同时让原 Harness 无法在本进程 acquire 这个 id，只能由另一个 Broker 进程接管。按 Session 身份判断 busy 属于后续工作。在当前基线上它不会阻塞整个 scope：以 `FAILED` 退役的 generation 不再处于 active，下一次放置会供应新的 generation。若后续的恢复状态让已丢失的 generation 保持 active，则需要为这类 execution 单独制定规则。
+查询以"一个 `reference` 标识一次调用"为前提，这也是 Runtime 标识调用的方式；同时假定 Runtime 会让已结算调用的结果对 `status` 保持可查，保留期属于随 execute 处理器落地的 Runtime 路由契约。即使在同一进程内这一保留也很重要：本进程仍在运行的调用若在其记录变为 `UNKNOWN` 之后才完成，结果不会经由已过期的 claim 写入，要靠之后的查询来结算记录。对 Runtime 报告仍在运行的 `UNKNOWN` execution 发送物理取消、能证明"未开始"的持久回执存储、运维恢复，以及启动或接管时的扫描，都不在本切片范围内。在这些工作落地之前，原 generation 无法作答的 `UNKNOWN` execution 会一直挡住所在 Runtime Session 的 release。busy 检查只按 Runtime Session id 判断，因此在本进程中另一个 Harness 以相同 id 持有的 Session 也无法 release；该 Harness 同时让原 Harness 无法在本进程 acquire 这个 id，只能由另一个 Broker 进程接管。按 Session 身份判断 busy 属于后续工作。以 `FAILED` 退役的 generation 不会阻塞整个 scope：它不再处于 active，下一次放置会供应新的 generation。但 `LOST` 的 generation 会，而这个状态现在已经存在——只要还有未结算的 execution 或活跃 Session 引用它，它就保持 active，因此已证明 `LOST` 的 generation 上任何未结算的 execution 都会卡住其 scope：`release` 持续返回可重试的 `runtime_reconciliation_required`，该请求之后每次新的放置都得到 `runtime_broker_runtime_lost`。`reconcileExecution` 也无法清除它——`UNKNOWN` 记录得到不可重试的 `runtime_execution_evidence_unavailable`，而崩溃时停留在 `EXECUTING` 或 `DISPATCHING` 的记录只会被答为 `IN_FLIGHT`，因为没有同 key 重试、取消或接管扫描就不会有任何机制把它转成 `UNKNOWN`。结算或隔离这类 execution 需要单独的规则，且该规则必须覆盖所有未结算状态，而不只是 `UNKNOWN`；见 [Runtime 绑定对账](2026-09-24-runtime-binding-reconciliation.zh-CN.md)。
 
 ## 并发与所有权
 
@@ -81,13 +83,13 @@ dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并
 
 `RuntimeBrokerException` 携带稳定 code、retryable 标记以及供 adapter 使用的状态码。参数校验、身份冲突、格式错误的执行查询 status、原 Runtime generation 已无法作答的 execution，以及不支持查询的 transport 都不可重试；供应、scope 解析、transport 失败、claim 丢失以及缺少 reconciliation 属于可重试的服务不可用情况。
 
-Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding repository 和 Runtime transport，并且 `warm` 返回的 binding record 会把 lease 交给嵌入调用方。JDBC binding repository 会将 token 持久化到 `runtime_token`；因此 binding 行及其备份都属于机密数据，需要收紧访问权限，并采用适当的加密和轮换控制。嵌入 adapter 不得把 lease 或 token 序列化给不可信调用方。服务不记录 token、invocation reference 或 Tool result。嵌入 adapter 仍负责认证调用方，并把调用方映射到传给本服务的 Harness Session 标识。
+Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding repository 和 Runtime transport，并且 `warm` 返回的 binding record 会把 lease 交给嵌入调用方。JDBC binding repository 以加密形式持久化机密：持久 binding 的 provision seed（其中携带 lease token）与 legacy binding 的 lease token 都经必需的 `SecretProtector`（模块内含 `AesGcmSecretProtector`）存为密文，schema 中不再有明文 token 列。密钥必须来自嵌入服务自身的持久 secret 存储，并在重启与多实例之间保持一致；binding 行及其备份仍属机密数据，需要收紧访问权限并采用轮换控制。嵌入 adapter 不得把 lease 或 token 序列化给不可信调用方。服务不记录 token、invocation reference 或 Tool result。嵌入 adapter 仍负责认证调用方，并把调用方映射到传给本服务的 Harness Session 标识。
 
 ## 验证
 
 - Workspace isolation Session 共享一个已供应 binding；session isolation 的不同 Harness Session 获得不同 binding。
 - 同一 Runtime Session 的并发 acquire 在进程内只调用一次 Runtime acquire。
-- 没有进程内证明的持久化 `READY` binding 会 fail closed。
+- 没有进程内证明的持久化 `READY` legacy binding 会 fail closed；持久 binding 改为经过对账后接管。
 - 重复 execution 创建收敛到同一记录和一次 dispatch；同一 idempotency key 对应不同内容时冲突。
 - 取消意图先于 Runtime cancel 调用持久化，并一直保留到物理结果完成结算。
 - 不确定的 execution transport 失败进入 `UNKNOWN`。
@@ -111,4 +113,4 @@ Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding r
 
 ## 后续工作
 
-在启用重启恢复前增加显式进程接管和 reconciliation；增加 JDBC Tool execution 持久化以支持多实例 dispatch 收敛；随后通过私有 HTTP adapter 暴露本服务核心。HTTP `status` 路由与 transport 随 execute 处理器提取一起落地。物理 Runtime drain、Hosted Harness 集成和 Qwen 侧 Broker client 继续作为独立可评审切片。
+Broker 重启后对持久 binding 的接管与对账已实现；剩余切片为可恢复的本地进程供应、支持多实例 dispatch 收敛的 JDBC Tool execution 持久化，以及通过私有 HTTP adapter 暴露本服务核心。HTTP `status` 路由与 transport 随 execute 处理器提取一起落地。物理 Runtime drain、Hosted Harness 集成和 Qwen 侧 Broker client 继续作为独立可评审切片。
