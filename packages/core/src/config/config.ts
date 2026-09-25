@@ -153,6 +153,7 @@ import {
   resetDenialState,
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
+import { clearSessionCommits } from '../permissions/destructive-commands.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -401,6 +402,12 @@ export function parseVisionModelSetting(setting: string | undefined):
 
 function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
+}
+
+function normalizeAdvisorModel(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
 }
 
 // Re-export types
@@ -1436,6 +1443,11 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Explicit model selector for the native Advisor tool. Empty, whitespace,
+   * and "off" disable Advisor and do not fall back to the primary model.
+   */
+  advisorModel?: string;
   /**
    * Built-in WebSearch settings. `enabled: false` disables the tool; when the
    * setting is omitted, the tool may derive a backend from the active provider
@@ -3023,6 +3035,7 @@ export class Config {
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
+  private advisorModel?: string;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -3619,6 +3632,7 @@ export class Config {
         ? params.memoryAgentMaxTurns
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.advisorModel = normalizeAdvisorModel(params.advisorModel);
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -6101,6 +6115,26 @@ export class Config {
     this.fastModel = model || undefined;
   }
 
+  getAdvisorModel(): string | undefined {
+    return this.advisorModel;
+  }
+
+  async setAdvisorModel(model: string | undefined): Promise<boolean> {
+    const normalizedModel = normalizeAdvisorModel(model);
+    if (normalizedModel && this.getDisabledTools().has(ToolNames.ADVISOR)) {
+      return false;
+    }
+
+    this.advisorModel = normalizedModel;
+    if (!this.initialized || !this.toolRegistry) {
+      return true;
+    }
+
+    await this.syncAdvisorToolRegistration(this.toolRegistry);
+    await this.llmClient?.setTools();
+    return true;
+  }
+
   /**
    * Update the vision bridge model at runtime (e.g. `/model --vision <model>`).
    * Pass undefined or an empty string to clear the override and fall back to
@@ -8403,6 +8437,31 @@ export class Config {
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
+      // ...and the session-commit registry behind the AUTO-mode
+      // `git commit --amend` exemption, per its contract ("cleared on session
+      // end or mode switch"): exemptions must not carry across a boundary
+      // where the user re-decides how much the agent may do unattended.
+      // Clearing is fail-closed. Gated on a real transition so a no-op re-set,
+      // which several callers do, cannot drop registrations still in use.
+      // Root Config only, like the workflow-revision stamp above: a derived
+      // overlay's `setApprovalMode` delegates here, and a subagent flipping
+      // its own mode is child-local, not a decision about the root session's
+      // autonomy. Clearing there cost the root a false "not made by the agent
+      // in this session" block on its own commit.
+      //
+      // PLAN is excluded on both legs for the same reason. `enter_plan_mode`
+      // is model-callable from AUTO and `exit_plan_mode` restores it, so the
+      // round trip is two real transitions that end in the posture it started
+      // in — and PLAN cannot execute a commit, so the excursion cannot add an
+      // exemption either. Clearing on it bought nothing and cost the agent a
+      // false block on its own commit, with no escape from inside AUTO.
+      if (
+        !isDerivedConfig(this) &&
+        mode !== ApprovalMode.PLAN &&
+        fromMode !== ApprovalMode.PLAN
+      ) {
+        clearSessionCommits();
+      }
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
@@ -11171,6 +11230,31 @@ export class Config {
     }
   }
 
+  private async syncAdvisorToolRegistration(
+    registry: ToolRegistry,
+    options?: { forSubAgent?: boolean },
+  ): Promise<void> {
+    if (
+      !this.getAdvisorModel() ||
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      options?.forSubAgent
+    ) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
+
+    if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
+
+    registry.unregisterTool(ToolNames.ADVISOR);
+    await this.registerLazyTool(registry, ToolNames.ADVISOR, async () => {
+      const { AdvisorTool } = await import('../tools/advisor.js');
+      return new AdvisorTool(this);
+    });
+    // Consume the factory so disabling Advisor removes its registration completely.
+    await registry.ensureTool(ToolNames.ADVISOR);
+  }
+
   async registerSessionSourceTool(
     registry: ToolRegistry = this.toolRegistry,
   ): Promise<void> {
@@ -11452,6 +11536,7 @@ export class Config {
     await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
+    await this.syncAdvisorToolRegistration(registry, options);
     await registerLazy(ToolNames.TOOL_CALL, async () => {
       const { ToolCallTool } = await import('../tools/tool-call.js');
       return new ToolCallTool(registry);

@@ -41,14 +41,14 @@ describe('web-shell i18n catalog', () => {
     ).toContain('下一次通话');
   });
 
-  // Routes load from user scope only (a repository must not redirect
-  // microphone audio), so the hint must name user settings, in both locales.
-  it('names the user settings scope in the model hint', () => {
-    expect(getTranslator('en')('settings.liveSetup.modelHint')).toContain(
-      'user settings',
-    );
-    expect(getTranslator('zh-CN')('settings.liveSetup.modelHint')).toContain(
-      '用户设置',
-    );
+  // The model hint points at the picker's custom entry by name; keep the two
+  // strings in step in both locales.
+  it('names the custom model entry in the model hint', () => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      expect(t('settings.liveSetup.modelHint')).toContain(
+        t('settings.liveSetup.modelCustom'),
+      );
+    }
   });
 });

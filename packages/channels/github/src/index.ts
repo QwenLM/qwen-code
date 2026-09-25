@@ -49,24 +49,6 @@ export const plugin: ChannelPlugin = {
         ],
       },
       {
-        key: 'senderPolicy',
-        label: 'Sender Policy',
-        kind: 'enum',
-        required: true,
-        description: 'Use "Allowlist" with allowed users on public repos',
-        options: [
-          { value: 'allowlist', label: 'Allowlist' },
-          { value: 'pairing', label: 'Pairing' },
-          { value: 'open', label: 'Open' },
-        ],
-      },
-      {
-        key: 'allowedUsers',
-        label: 'Allowed Users',
-        kind: 'string-list',
-        description: 'GitHub usernames, used by Allowlist and Pairing policies',
-      },
-      {
         key: 'reasonFilter',
         label: 'Reason Filter',
         kind: 'string-list',
