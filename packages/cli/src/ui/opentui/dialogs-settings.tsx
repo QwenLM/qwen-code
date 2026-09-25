@@ -86,6 +86,11 @@ export const SETTINGS_LIST_MAX_ITEMS = 8;
 // same items (its footer is one row; this port's FooterHint carries a margin
 // row) before windowing its list to what is left.
 const SETTINGS_LIST_CHROME_ROWS = 16;
+// The scope step beside it has no search box, arrows, description or restart
+// prompt: its chrome is the frame (4), the tab bar and its spacer (2) and the
+// `> Apply To` title and its spacer (2). The footer hint below the list is
+// what a squeeze sheds first, so it is not charged.
+const SETTINGS_SCOPE_CHROME_ROWS = 8;
 
 /** Parity of configTabLabel in SettingsDialog.tsx. */
 export function settingsTabLabel(tab: SettingsTab): string {
@@ -360,7 +365,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     regionHeight === undefined
       ? SETTINGS_LIST_MAX_ITEMS
       : Math.max(
-          1,
+          0,
           Math.min(
             SETTINGS_LIST_MAX_ITEMS,
             regionHeight -
@@ -486,10 +491,24 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const initialScopeIndex = scopeItems.findIndex(
     (item) => item.value === selectedScope,
   );
+  // Decision 70's rule for the mode dialog's Tab step, applied here: a
+  // region too short for even one scope row must not leave the keys a row
+  // nothing painted — onHighlight alone retargets every later write.
+  const scopeMaxItemsToShow =
+    regionHeight === undefined
+      ? scopeItems.length
+      : Math.max(
+          0,
+          Math.min(
+            scopeItems.length,
+            regionHeight - SETTINGS_SCOPE_CHROME_ROWS,
+          ),
+        );
   const scopeList = useDialogSelect({
     items: scopeItems,
     initialIndex: initialScopeIndex >= 0 ? initialScopeIndex : 0,
     focused: activeTab === 'settings' && mode === 'scope',
+    maxItemsToShow: scopeMaxItemsToShow,
     onSelect: (scope) => {
       setSelectedScope(scope);
       setMode('settings');
@@ -628,6 +647,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       }
       return;
     }
+    // A zero-row budget paints no list row; the row under the cursor is one
+    // nothing paints, so the list keys must not move it or commit it. Tab and
+    // Escape still work — the scope step and the way out are not row-budgeted.
+    if (maxItemsToShow < 1 && name !== 'escape') return;
     if (keyMatchers[Command.SELECTION_UP](original)) {
       if (activeSettingIndexRef.current === 0) {
         setFocusZone('search');
@@ -768,6 +791,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             items={scopeItems}
             activeIndex={scopeList.activeIndex}
             scrollOffset={scopeList.scrollOffset}
+            maxItemsToShow={scopeMaxItemsToShow}
             showNumbers={true}
             focused={true}
             onHover={scopeList.setActiveIndex}
@@ -789,6 +813,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             borderStyle="rounded"
             borderColor={focusZone === 'search' ? C.accent : C.dim}
             paddingX={1}
+            flexDirection="row"
           >
             <text fg={C.dim}>⌕ </text>
             {searchQuery ? (

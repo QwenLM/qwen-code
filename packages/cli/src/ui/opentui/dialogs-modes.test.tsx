@@ -591,9 +591,11 @@ describe('OpenTuiApprovalModeDialog', () => {
 
   it.each([
     // region rows, spacer rows, footer hint, scroll arrows, mode rows
-    // Below five rows the chrome alone fills the region: no list row paints.
+    // At four rows the chrome alone overfills the region: no list row
+    // paints. At five the row the region cannot pay borrows the frame's
+    // blank bottom padding row — ink and the pre-budget code paint it there.
     [4, 0, false, false, 0],
-    [5, 0, false, false, 0],
+    [5, 0, false, false, 1],
     [6, 0, false, false, 1],
     [8, 0, false, true, 1],
     [9, 1, false, true, 1],
@@ -693,6 +695,28 @@ describe('OpenTuiApprovalModeDialog', () => {
 
     expect(harness.setValue).not.toHaveBeenCalled();
     expect(harness.onClose).not.toHaveBeenCalled();
+  });
+
+  it('ignores the Tab step arrows while its region paints no rows, so no scope is adopted invisibly', () => {
+    // The zero-row budget refuses Enter, but the arrows reach the highlight
+    // directly — and on the scope step a highlight move is the adoption, so
+    // one invisible down would retarget every later write. Region four paints
+    // no scope row; the move must not happen.
+    const harness = renderModeDialog({
+      current: ApprovalMode.YOLO,
+      availableTerminalHeight: 4,
+    });
+    press('tab');
+    press('down');
+    harness.rerender(20);
+    press('tab');
+    press('return');
+
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.approvalMode',
+      ApprovalMode.YOLO,
+    );
   });
 
   it('drops the warning box entirely when the region cannot pay a row of it', () => {
@@ -866,21 +890,40 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     },
   );
 
-  it('charges the refusal nothing where the region cannot pay a text row', () => {
+  it('paints the refusal on the one row region six can pay, with its margin shed', () => {
     // Region six leaves one row after the mandatory chrome — not enough for
-    // the refusal's margin plus one text row — so rather than charging a row
-    // that paints nothing, the notice is not rendered and the list keeps the
-    // row.
+    // the refusal's margin plus its text — so the margin sheds and the text
+    // row paints: the base rendered this refusal unconditionally, and a
+    // rejected Enter whose reason paints nothing reads as a dead key.
     const { setValue } = renderUntrusted(6, true);
     press('return');
 
     expect(setValue).not.toHaveBeenCalled();
+    const refusal = screen.getByText(
+      /Cannot enable privileged approval modes in an untrusted folder/,
+    );
+    expect(layoutOf(refusal.parentElement)).toMatchObject({
+      marginTop: 0,
+      height: 1,
+      overflow: 'hidden',
+    });
+    // The list keeps the one row it borrows from the frame's bottom padding.
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
+  });
+
+  it('carries the refusal in the title where the region cannot pay it a row', () => {
+    // Region five leaves nothing after the mandatory chrome, so no notice row
+    // can be charged; the title row is the one row every region paints, and
+    // a rejected Enter still owes its reason there.
+    const { setValue } = renderUntrusted(5);
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
     expect(
-      screen.queryByText(
+      screen.getByText(
         /Cannot enable privileged approval modes in an untrusted folder/,
       ),
-    ).toBeNull();
-    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
+    ).not.toBeNull();
   });
 
   it('clears the refusal when the highlight moves to a mode the gate allows', () => {
@@ -1625,6 +1668,100 @@ describe('OpenTuiSettingsDialog region budget', () => {
     expect(screen.getByText(highlighted.label)).not.toBeNull();
     press('return');
     expect(onSelect).toHaveBeenCalledWith(highlighted.key, SettingScope.User);
+  });
+
+  it('paints no list row the region cannot pay for, and Enter commits nothing', () => {
+    // Region thirteen leaves the list nothing once the chrome is paid: the
+    // first row would land past the region, so no row may paint — and the
+    // hand-rolled key handler must not keep committing the row under the
+    // cursor, which is a write the user was never shown.
+    const items = buildSettingsListItems();
+    const setValue = vi.fn();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+    const onSelect = vi.fn();
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={onSelect}
+        availableTerminalHeight={13}
+      />,
+    );
+    expect(screen.queryByText(items[0]!.label)).toBeNull();
+
+    press('down');
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('budgets the Tab step from the region, so a zero-row window cannot retarget the scope', () => {
+    // The scope step's chrome leaves region seven no row to paint: an
+    // unbudgeted list still highlights Workspace on one invisible down, and
+    // the highlight alone is what every later write persists to.
+    const setValue = vi.fn();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+    const { rerender } = render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={7}
+      />,
+    );
+    press('tab'); // → scope step
+    press('down'); // zero-row window: nothing painted, nothing adopted
+
+    rerender(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={20}
+      />,
+    );
+    press('tab'); // → back to the settings list
+    press('down'); // tools.codeModeOnly — a boolean
+    press('return');
+
+    expect(setValue).toHaveBeenCalledTimes(1);
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.codeModeOnly',
+      true,
+    );
+  });
+
+  it('lays the search box out as the one text row the chrome budget counts', () => {
+    // The budget charges the bordered search box three rows; its two text
+    // children lay out as a column by default, making it four — one row more
+    // than the region was charged, which a resize then lands on a list row.
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={19}
+      />,
+    );
+
+    const search = screen.getByText((t) => t.includes('Search settings'));
+    expect(layoutOf(search.parentElement)).toMatchObject({
+      flexDirection: 'row',
+    });
   });
 
   it('pays for the restart prompt row out of the list window', () => {

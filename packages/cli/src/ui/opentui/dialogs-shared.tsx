@@ -373,8 +373,8 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
         // the highlight move alone already retargets what the next Enter
         // writes. A prefix that could still extend into a painted row keeps
         // its buffer and waits for the completing digit instead: it never
-        // moves the highlight and never arms the flush, because both commit
-        // the highlight.
+        // moves the highlight and never arms the committing flush, because
+        // both commit the highlight.
         const painted = selectionWindow(
           scrollOffset,
           items.length,
@@ -384,7 +384,17 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
           result.activeIndex < painted.start ||
           result.activeIndex >= painted.end
         ) {
-          if (result.selectNow) numberBuffer.current = '';
+          if (result.selectNow) {
+            numberBuffer.current = '';
+          } else {
+            // The kept prefix still expires on the same clock a live entry
+            // flushes on, except this timer only clears: a prefix refused a
+            // minute ago must not complete against the next digit.
+            numberTimer.current = setTimeout(
+              clearNumberBuffer,
+              NUMBER_SELECT_TIMEOUT_MS,
+            );
+          }
           return;
         }
         moveCursor(result.activeIndex);
@@ -412,6 +422,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     // original hook clears its buffer on a non-numeric key.
     clearNumberBuffer();
 
+    // The zero-row budget that refuses Enter has no painted row for the
+    // arrows to reach either: a highlight move fires onHighlight, and on a
+    // highlight-driven step like the scope one that alone retargets what the
+    // next Enter writes.
+    if (maxItemsToShow < 1) return;
     if (keyMatchers[Command.SELECTION_UP](original)) {
       highlightIndex(findNextEnabledIndex(items, cursorRef.current, 'up'));
       return;

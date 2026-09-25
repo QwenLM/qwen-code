@@ -321,11 +321,13 @@ function modeListBudget(
     constrainedHeight -
     chromeWithoutFooter -
     (showFooterHint ? FOOTER_HINT_ROWS : 0);
-  if (listRows < 1) {
-    // The chrome alone fills a region this short: a list row squeezed in
-    // anyway overpaints its neighbours, so the step paints its title only
-    // and the keys have no painted row to commit (the hook refuses Enter
-    // below a one-row window, and the digit guard's window is empty).
+  if (listRows < 0) {
+    // The chrome alone overfills a region this short: a list row squeezed in
+    // anyway overpaints the title, so the step paints its title only and the
+    // keys have no painted row to commit (the hook refuses Enter below a
+    // one-row window, and the digit guard's window is empty). At exactly zero
+    // the row borrows the frame's bottom padding row, which is blank — both
+    // ink and the pre-budget code paint it there.
     return {
       showModeSpacer,
       showFooterHint,
@@ -414,15 +416,15 @@ export function OpenTuiApprovalModeDialog(props: {
             (regionHeight >= MIN_HEIGHT_WITH_MODE_SPACER ? 1 : 0),
         );
   const noticeCap = Math.max(0, rowsAfterChrome - 1);
-  const chargedErrorRows = error
+  // A one-row charge is the text row with its margin shed — the least a
+  // rejected Enter can explain itself with, and a region that cannot pay even
+  // that carries the refusal in the title's subtitle instead (below).
+  const errorRows = error
     ? Math.max(
         Math.min(noticeRows(error, contentWidth), noticeCap),
         Math.min(2, rowsAfterChrome),
       )
     : 0;
-  // A charge under one margin row plus one text row would paint nothing; a
-  // region that short charges nothing instead of paying for an invisible row.
-  const errorRows = chargedErrorRows >= 2 ? chargedErrorRows : 0;
   const warningRows = warningText
     ? Math.min(
         Math.max(0, noticeCap - errorRows),
@@ -539,7 +541,11 @@ export function OpenTuiApprovalModeDialog(props: {
         <box flexDirection="column" flexGrow={1}>
           <DialogTitle
             title={t('Approval Mode')}
-            subtitle={otherScopeModifiedMessage}
+            // Where the region cannot pay the refusal a row of its own, the
+            // title row — the one row every region paints — carries it.
+            subtitle={
+              error && errorRows === 0 ? error : otherScopeModifiedMessage
+            }
             marginBottom={budget.showModeSpacer ? 1 : 0}
             truncateTitle
           />
@@ -555,7 +561,11 @@ export function OpenTuiApprovalModeDialog(props: {
             </box>
           ) : null}
           {error && errorRows > 0 ? (
-            <box marginTop={1} height={errorRows - 1} overflow="hidden">
+            <box
+              marginTop={errorRows > 1 ? 1 : 0}
+              height={errorRows > 1 ? errorRows - 1 : 1}
+              overflow="hidden"
+            >
               <text fg={C.red}>{error}</text>
             </box>
           ) : null}

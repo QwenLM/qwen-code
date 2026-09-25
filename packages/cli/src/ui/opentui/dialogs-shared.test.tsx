@@ -142,6 +142,29 @@ describe('useDialogSelect numeric quick-select', () => {
     expect(onSelect).toHaveBeenCalledWith('item-11');
   });
 
+  it('expires a refused prefix, so it cannot complete against a later digit', () => {
+    // Fifteen rows in a three-row window scrolled to rows 11-13: the leading
+    // 1 addresses row one, which is unpainted, so it is kept only as a
+    // prefix. With no expiry the buffer outlives the keystroke sequence, and
+    // a 1 pressed a minute later completes 11 — committing a row the second
+    // keystroke never addressed.
+    const onSelect = vi.fn();
+    const { result } = renderHook(() =>
+      useDialogSelect({ items, numbers: true, maxItemsToShow: 3, onSelect }),
+    );
+    for (let i = 0; i < 12; i++) press({ name: 'down' });
+    expect(result.current.scrollOffset).toBe(10);
+
+    press({ name: '1', sequence: '1' });
+    act(() => {
+      vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+    });
+    press({ name: '1', sequence: '1' });
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(result.current.activeIndex).toBe(12);
+  });
+
   it('disarms the pending flush when a follow-up digit leaves the window', () => {
     const onSelect = vi.fn();
     renderHook(() =>
@@ -190,6 +213,25 @@ describe('useDialogSelect numeric quick-select', () => {
 describe('useDialogSelect cursor within one key batch', () => {
   beforeEach(() => {
     handlers.length = 0;
+  });
+
+  it('ignores the arrows while the budget paints no rows', () => {
+    // The zero-row budget that refuses Enter has no painted row for the
+    // arrows to reach either: highlightIndex fires onHighlight, and on a
+    // highlight-driven step like the scope one that alone retargets what the
+    // next Enter writes.
+    const onHighlight = vi.fn();
+    const { result } = renderHook(() =>
+      useDialogSelect({
+        items,
+        numbers: false,
+        maxItemsToShow: 0,
+        onHighlight,
+      }),
+    );
+    press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(0);
+    expect(onHighlight).not.toHaveBeenCalled();
   });
 
   it('moves the highlight once per arrow key in a single batch', () => {
