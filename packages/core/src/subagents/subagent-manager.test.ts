@@ -4241,6 +4241,36 @@ bad`);
         ).toContain(ToolNames.SKILL);
       });
 
+      // The `exec` carve-out in toolConfigAllowsSkill only fires when the
+      // call site threads the parent's tool mode through — this parent is a
+      // real CodeModeOnly Config, so dropping the `{ codeModeOnly }` argument
+      // at the createAgentHeadless call site turns this case red while every
+      // case above (whose parent is a direct-mode Config) stays green. An
+      // exec-only list is the shape code mode itself produces, and `skill`
+      // is code-mode-callable, so the agent can load skills through the exec
+      // gateway and must keep its manager.
+      it('keeps the manager for an exec-only agent under CodeModeOnly', async () => {
+        const codeModeParent = makeFakeConfig({ codeModeOnly: true });
+        vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
+          sessionManager,
+        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
+          manager,
+        );
+        vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
+          mockToolRegistry,
+        );
+
+        const context = await launch(
+          { tools: [ToolNames.EXEC] },
+          codeModeParent,
+        );
+        expect(context.getSkillManager()).toBe(sessionManager);
+        expect(context.getToolRegistry().getAllToolNames()).toContain(
+          ToolNames.SKILL,
+        );
+      });
+
       it('withholds the manager when an eager allowlist hides the Skill tool', async () => {
         // `settings.tools.eager` without `skill` leaves it permission-deferred
         // in the session registry, and prepareTools() then drops it from the
