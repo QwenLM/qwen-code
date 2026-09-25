@@ -3,7 +3,9 @@
 Standalone Spring Boot control plane for the Qwen Code Hosted Harness. It has
 no DataWorks dependency and no end-user authentication layer. A trusted
 upstream must send `X-Qwen-Tenant-Id`; the server uses that value on every
-database read and write.
+database read and write. The HTTP server listens on `127.0.0.1` by default;
+set `QWEN_MANAGED_AGENT_SERVER_ADDRESS` when a trusted ingress needs to reach
+it. That ingress must authenticate the tenant before setting the header.
 
 设计说明：[English](../../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
@@ -46,7 +48,7 @@ curl -sS http://127.0.0.1:8080/v1/agents/sessions \
   -d '{"agent_id":"qwen-code","input":[{"type":"text","text":"hello"}]}'
 ```
 
-The returned `sessionId` is an RFC UUID and is the canonical identity used by
+The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
 not maintain a separate public-to-Harness Session mapping.
 
@@ -93,8 +95,9 @@ blocked until it completes.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
-authority and never initializes one. The Java connector probes load before
-create when it cannot prove whether a private authority already exists.
+authority and never initializes one. The Java connector attempts strict
+create for a new binding and loads on conflict or an uncertain creation
+outcome. A known existing binding only loads.
 An in-memory Hosted attachment is bound to one normalized Store endpoint,
 tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.

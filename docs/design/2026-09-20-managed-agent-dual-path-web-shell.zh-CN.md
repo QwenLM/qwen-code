@@ -3,6 +3,8 @@
 [English](./2026-09-20-managed-agent-dual-path-web-shell.md) |
 [简体中文](./2026-09-20-managed-agent-dual-path-web-shell.zh-CN.md)
 
+> PR #12692 范围修正（2026-09-25）：下文的实现与验证记录来自完整集成预览，不是本次拆分的验收证据。当前能力、修复与未完成门禁以[评审修正](2026-09-25-managed-agent-review-corrections.zh-CN.md)为准。
+
 ## 状态
 
 本地开发链路已实现，并于 2026-09-20 完成验证。生产产品通过现有 WebShell provider 属性显式启用。

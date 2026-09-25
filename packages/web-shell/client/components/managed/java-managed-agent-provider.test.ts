@@ -14,7 +14,7 @@ describe('createJavaManagedAgentProvider', () => {
       jsonResponse({
         sessionId: 'session-1',
         title: 'Managed task',
-        status: 'IN_PROGRESS',
+        status: 'ACTIVE',
         createdAt: 10,
         updatedAt: 20,
         activeTurn: {
@@ -55,6 +55,41 @@ describe('createJavaManagedAgentProvider', () => {
       'https://product.example/api/agent/web-shell/v1/sessions/get',
     );
   });
+
+  it.each([
+    ['active', 'running', 'agent_running', false, true],
+    ['active', 'cancelling', 'cancelling', false, false],
+    ['archived', 'completed', 'completed', false, false],
+    ['deleting', 'failed', 'failed', false, false],
+  ] as const)(
+    'maps %s/%s to usable controls',
+    async (status, turnStatus, phase, canSend, canCancel) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
+            sessionId: 'session-1',
+            status,
+            createdAt: 1,
+            updatedAt: 2,
+            activeTurn: {
+              turnId: 'turn-1',
+              status: turnStatus,
+              submittedAt: 1,
+            },
+          }),
+        ),
+      });
+      expect(
+        await provider.getSession('session-1', { clientId: 'client-1' }),
+      ).toEqual(
+        expect.objectContaining({
+          phase,
+          capabilities: { canSend, canCancel },
+        }),
+      );
+    },
+  );
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi

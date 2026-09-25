@@ -261,6 +261,13 @@ class ManagedAgentMySqlIT {
         assertThat(now).isNotNull();
         assertThat(grant.leaseUntil() - now.getTime())
                 .isBetween(700L, 1_000L);
+        Long persistedLeaseMicros = jdbc.queryForObject(
+                "SELECT TIMESTAMPDIFF(MICROSECOND, CURRENT_TIMESTAMP(6),"
+                        + " writer_lease_until) FROM"
+                        + " qwen_managed_session_journal_head WHERE tenant_id"
+                        + " = ? AND session_id = ?",
+                Long.class, tenant, session);
+        assertThat(persistedLeaseMicros).isPositive();
     }
 
     @Test
@@ -292,6 +299,33 @@ class ManagedAgentMySqlIT {
                 ManagedSessionStoreProcessFixtureMain.TENANT,
                 ManagedSessionStoreProcessFixtureMain.SESSION))
                 .isEqualTo(1);
+    }
+
+    @Test
+    @Order(4)
+    void isolatesTenantsThatDifferOnlyByCase() {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        ManagedAgentStore store = new ManagedAgentStore(
+                new JdbcTemplate(dataSource), new ObjectMapper(),
+                Clock.systemUTC(), ignored -> {
+                });
+        Admission lower = store.insertSessionCommand("case-tenant",
+                "CREATE_SESSION", "case-key", "case-digest", "qwen-code",
+                null, List.of(), null);
+        Admission upper = store.insertSessionCommand("CASE-TENANT",
+                "CREATE_SESSION", "case-key", "case-digest", "qwen-code",
+                null, List.of(), null);
+
+        assertThat(upper.sessionId()).isNotEqualTo(lower.sessionId());
+        assertThat(store.findSession("CASE-TENANT", lower.sessionId()))
+                .isEmpty();
+        assertThat(store.findSession("case-tenant", upper.sessionId()))
+                .isEmpty();
+        assertThat(store.listSessions("CASE-TENANT", null, null, 10)
+                .sessions()).extracting(session -> session.sessionId())
+                .containsExactly(upper.sessionId());
     }
 
     private static void cleanupProcessFixture(JdbcTemplate jdbc) {

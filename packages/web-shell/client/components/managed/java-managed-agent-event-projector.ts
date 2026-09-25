@@ -51,7 +51,7 @@ export function projectJavaAgentItem(
       );
   }
   if (item.type === 'tool_call') {
-    const failed = item.status.toLowerCase() === 'failed';
+    const failed = ['failed', 'cancelled'].includes(item.status.toLowerCase());
     const settled = ['completed', 'failed', 'cancelled'].includes(
       item.status.toLowerCase(),
     );
@@ -63,7 +63,12 @@ export function projectJavaAgentItem(
         {
           ...item.attributes,
           itemId: item.itemId,
-          toolName: item.attributes['toolName'] ?? item.attributes['name'],
+          toolCallId:
+            item.attributes['toolCallId'] ?? item.attributes['callId'],
+          toolName:
+            item.attributes['toolName'] ??
+            item.attributes['name'] ??
+            item.attributes['title'],
           failed,
         },
       ),
@@ -140,6 +145,16 @@ function normalizeData(
   data: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const value = data ?? {};
+  if (['tool_requested', 'tool_started', 'tool_completed'].includes(type)) {
+    return {
+      ...value,
+      toolCallId: value['toolCallId'] ?? value['callId'],
+      toolName: value['toolName'] ?? value['name'] ?? value['title'],
+      failed:
+        value['failed'] === true ||
+        ['failed', 'cancelled'].includes(String(value['status']).toLowerCase()),
+    };
+  }
   if (type !== 'accepted') return value;
   const input = Array.isArray(value['input']) ? value['input'] : [];
   return { ...value, prompt: input };

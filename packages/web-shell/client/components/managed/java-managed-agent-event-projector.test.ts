@@ -43,6 +43,30 @@ describe('java managed agent event projector', () => {
     ).toBe('tool_completed');
   });
 
+  it('keeps failed tool status and identity in live events', () => {
+    expect(
+      projectJavaAgentEvent({
+        sequence: 6,
+        eventId: 'evt_6',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        type: 'item.tool_call.updated',
+        createdAt: 6,
+        terminal: false,
+        data: { status: 'failed', callId: 'call-1', name: 'read_file' },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        type: 'tool_completed',
+        data: expect.objectContaining({
+          failed: true,
+          toolCallId: 'call-1',
+          toolName: 'read_file',
+        }),
+      }),
+    );
+  });
+
   it('uses a safe timestamp fallback for invalid legacy values', () => {
     vi.spyOn(Date, 'now').mockReturnValue(42);
     expect(toTimestamp('not-a-date')).toBe(42);

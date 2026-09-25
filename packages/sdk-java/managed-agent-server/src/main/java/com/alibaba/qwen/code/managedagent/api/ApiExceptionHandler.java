@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -26,6 +27,13 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(AsyncRequestNotUsableException.class)
     public void disconnectedClient() {
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Map<String, Object>> missingResource(
+            NoResourceFoundException error) {
+        return response(HttpStatus.NOT_FOUND, "not_found",
+                "The requested endpoint does not exist.");
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class,

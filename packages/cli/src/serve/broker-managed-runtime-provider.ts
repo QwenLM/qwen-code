@@ -69,10 +69,12 @@ interface BrokerEntry {
   readonly request: ManagedRuntimePrepareRequest;
   readonly harnessSessionId: string;
   readonly acquisition: Promise<void>;
+  acquisitionFailed?: boolean;
   readonly executions: Map<string, BrokerExecution>;
   client?: ManagedToolV2Client;
   release?: Promise<boolean>;
   releasing?: boolean;
+  terminal?: boolean;
 }
 
 interface BrokerExecution {
@@ -664,6 +666,10 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         false,
       );
     }
+    if (entry?.acquisitionFailed) {
+      this.entries.delete(request.sessionId);
+      entry = undefined;
+    }
     if (!entry) {
       const immutableRequest = structuredClone(request);
       const acquisition = this.client.acquire(
@@ -681,6 +687,10 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         executions: new Map(),
       };
       this.entries.set(request.sessionId, entry);
+      const acquiredEntry = entry;
+      void acquisition.catch(() => {
+        acquiredEntry.acquisitionFailed = true;
+      });
     }
     await entry.acquisition;
     this.lifetime.signal.throwIfAborted();
@@ -859,6 +869,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       );
     }
     entry.releasing = true;
+    entry.terminal ||= options?.terminal === true;
     if (entry.release) return entry.release;
     const release = (async () => {
       await entry.acquisition.catch(() => {});
@@ -873,7 +884,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       );
       if (released) {
         this.entries.delete(sessionId);
-        if (options?.terminal === true) {
+        if (entry.terminal) {
           this.closedSessions.set(sessionId, entry.request);
         }
       }
@@ -893,8 +904,22 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
   }
 
   private createToolClient(entry: BrokerEntry): ManagedToolV2Client {
-    const control = (operation: Record<string, unknown>) =>
-      this.client.control(
+    const assertEntry = (allowDraining = false) => {
+      this.lifetime.signal.throwIfAborted();
+      if (
+        this.entries.get(entry.request.sessionId) !== entry ||
+        (!allowDraining && entry.releasing)
+      ) {
+        throw new ManagedRuntimeProviderError(
+          'managed_runtime_unavailable',
+          'Managed Runtime Broker Session is being released or is closed.',
+          false,
+        );
+      }
+    };
+    const control = (operation: Record<string, unknown>) => {
+      assertEntry(operation['kind'] === 'history');
+      return this.client.control(
         entry.request.sessionId,
         entry.harnessSessionId,
         operation,
@@ -903,9 +928,12 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
           AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
         ]),
       );
+    };
     const ensureExecution = (
       reference: ManagedToolInvocationReference,
+      allowDraining = false,
     ): BrokerExecution => {
+      assertEntry(allowDraining);
       this.assertReference(entry, reference);
       const referenceDigest = managedToolDigest(reference);
       let execution = entry.executions.get(reference.invocationId);
@@ -917,6 +945,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         );
       }
       if (!execution) {
+        assertEntry();
         execution = {
           referenceDigest,
           reserved: this.client.prepareExecution(
@@ -937,7 +966,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       reference: ManagedToolInvocationReference,
       afterSeq?: number,
     ) => {
-      const execution = ensureExecution(reference);
+      const execution = ensureExecution(reference, true);
       const reserved = await execution.reserved;
       if (reserved.status.state === 'settled' && afterSeq === undefined) {
         return reserved.status;
@@ -970,6 +999,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         );
       }
       execution.started ??= (async () => {
+        assertEntry();
         let status = await this.client.startExecution(
           entry.request.sessionId,
           entry.harnessSessionId,
@@ -1031,7 +1061,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       execute: (reference) => startExecution(reference),
       status: (reference, afterSeq) => readExecution(reference, afterSeq),
       cancel: async (reference) => {
-        const reserved = await ensureExecution(reference).reserved;
+        const reserved = await ensureExecution(reference, true).reserved;
         return this.client.cancelExecution(
           entry.request.sessionId,
           entry.harnessSessionId,

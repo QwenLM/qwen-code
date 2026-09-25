@@ -24,6 +24,7 @@ import {
   type ManagedToolExecutionResult,
   type ManagedToolRuntimeFileHistory,
 } from './managed-tool-runtime.js';
+import { managedToolDigest } from './managed-tool-protocol.js';
 import type {
   ManagedToolCallIdentity,
   ManagedToolInvocationReference,
@@ -330,6 +331,8 @@ describe('ManagedToolRuntime', () => {
       await runtime.prepare({ ...call, callId: 'call-2' }, ReadFileTool.Name, {
         file_path: '/managed-child/b.txt',
       });
+      expect(first.params).toEqual({ file_path: '/managed-child/a.txt' });
+      expect(first.argsDigest).toBe(managedToolDigest(first.params));
       expect(first.description).toBe('a.txt');
       expect(first.defaultPermission).toBe('allow');
       expect(first.sessionId).toBe(sessionId);
@@ -482,6 +485,42 @@ describe('ManagedToolRuntime', () => {
     });
     expect(tool.invocations[0].onConfirm).not.toHaveBeenCalled();
     expect(events).toEqual(['snapshot', 'preflight', 'post']);
+  });
+
+  it('reclaims settled invocation capacity when the next turn begins', async () => {
+    await runtime.beginTurn(identity);
+    for (let index = 0; index < 1024; index++) {
+      const ref = reference(
+        await runtime.prepare(
+          { ...identity, callId: `call-${index}` },
+          tool.name,
+          input,
+        ),
+      );
+      await runtime.preflight(ref);
+      await runtime.execute(ref);
+    }
+    const prior = { ...identity, callId: 'call-0' };
+    const old = reference(await runtime.prepare(prior, tool.name, input));
+    expect(runtime.status(old).state).toBe('settled');
+    await runtime.execute(old);
+    expect(tool.invocations).toHaveLength(1024);
+    expect(tool.invocations[0].execute).toHaveBeenCalledTimes(1);
+    const next = { ...identity, promptId: 'prompt-2' };
+    await runtime.beginTurn(next);
+    expect(() => runtime.status(old)).toThrow('identity does not match');
+    expect(() => runtime.execute(old)).toThrow('identity does not match');
+    await expect(runtime.prepare(prior, tool.name, input)).rejects.toThrow(
+      'turn has not started',
+    );
+    expect(() => runtime.beginTurn(identity)).toThrow('previous tool turn');
+    const ref = reference(await runtime.prepare(next, tool.name, input));
+    await runtime.preflight(ref);
+    expect(await runtime.execute(ref)).toMatchObject({
+      executionStatus: 'success',
+      result: rawResult,
+    });
+    expect(tool.invocations).toHaveLength(1025);
   });
 
   it('runs the preflight hook once across the second confirmation bounce', async () => {

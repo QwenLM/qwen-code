@@ -13,7 +13,7 @@ CREATE TABLE managed_agent_session (
     version BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, session_id),
     UNIQUE (session_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX managed_agent_session_list_idx
     ON managed_agent_session (tenant_id, updated_at, session_id);
@@ -41,7 +41,7 @@ CREATE TABLE managed_agent_turn (
     UNIQUE (prompt_id),
     FOREIGN KEY (tenant_id, session_id)
         REFERENCES managed_agent_session (tenant_id, session_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX managed_agent_turn_dispatch_idx
     ON managed_agent_turn (status, dispatch_lease_until, updated_at);
@@ -55,7 +55,7 @@ CREATE TABLE managed_agent_command (
     turn_id VARCHAR(64),
     created_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, operation, idempotency_key)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE managed_agent_event (
     tenant_id VARCHAR(128) NOT NULL,
@@ -73,7 +73,7 @@ CREATE TABLE managed_agent_event (
     UNIQUE (tenant_id, session_id, source_key),
     FOREIGN KEY (tenant_id, session_id)
         REFERENCES managed_agent_session (tenant_id, session_id)
-);
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX managed_agent_event_turn_idx
     ON managed_agent_event (tenant_id, session_id, turn_id, sequence_id);

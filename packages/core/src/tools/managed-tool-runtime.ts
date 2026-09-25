@@ -45,6 +45,16 @@ import {
 
 import type { ManagedToolFileHistoryClient } from './managed-tool-file-history-protocol.js';
 
+function invocationParams(params: unknown): Record<string, unknown> {
+  // Native tools add optional undefined fields; hash the same JSON sent on the wire.
+  const projected = JSON.parse(JSON.stringify(params)) as Record<
+    string,
+    unknown
+  >;
+  managedToolDigest(projected);
+  return projected;
+}
+
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
 
 export type ManagedToolV2Client = {
@@ -253,6 +263,8 @@ export class ManagedToolRuntime {
     if (this.startedPrompts.has(identity.promptId)) {
       throw new Error('Managed Runtime cannot reopen a previous tool turn.');
     }
+    this.entries.clear();
+    this.calls.clear();
     identity = structuredClone(identity);
     this.snapshotPending = true;
     this.startedPrompts.add(identity.promptId);
@@ -422,7 +434,7 @@ export class ManagedToolRuntime {
     const reference: ManagedToolInvocationReference = {
       ...identity,
       invocationId: randomUUID(),
-      argsDigest: managedToolDigest(invocation.params),
+      argsDigest: managedToolDigest(invocationParams(invocation.params)),
     };
     const toolUseId = generateToolUseId();
     const entry: Entry = {
@@ -434,7 +446,7 @@ export class ManagedToolRuntime {
       toolUseId,
       prepared: {
         ...reference,
-        params: structuredClone(invocation.params) as Record<string, unknown>,
+        params: invocationParams(invocation.params),
         description: invocation.getDescription(),
         locations: invocation.toolLocations(),
         defaultPermission,
@@ -540,7 +552,8 @@ export class ManagedToolRuntime {
     if (entry.execution)
       throw new Error('Managed tool invocation already dispatched.');
     if (
-      managedToolDigest(entry.invocation.params) !== entry.reference.argsDigest
+      managedToolDigest(invocationParams(entry.invocation.params)) !==
+      entry.reference.argsDigest
     ) {
       throw new Error('Managed tool parameters changed after preparation.');
     }

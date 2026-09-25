@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
@@ -96,6 +97,33 @@ class ManagedAgentServerIntegrationTest {
     private PlatformTransactionManager transactionManager;
 
     @Test
+    void allowsRepeatingLifecycleOperationsWithNewCommandKeys() {
+        String tenant = "tenant-repeat-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "create", "digest-create", "qwen-code",
+                null, List.of(), null);
+        for (int cycle = 0; cycle < 2; cycle++) {
+            for (SessionMutationKind kind : List.of(
+                    SessionMutationKind.ARCHIVE,
+                    SessionMutationKind.UNARCHIVE)) {
+                String operation = kind.name() + "_SESSION";
+                String key = operation + cycle;
+                String digest = "same-content-" + operation;
+                store.beginSessionMutation(tenant, operation, key, digest,
+                        session.sessionId(), kind);
+                store.completeSessionMutation(tenant, operation, key,
+                        session.sessionId(), kind, null, null);
+                assertThat(store.beginSessionMutation(tenant, operation,
+                        key, digest, session.sessionId(), kind).replayed())
+                        .isTrue();
+            }
+        }
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "session.archived".equals(event.type()))
+                .hasSize(2);
+    }
+
+    @Test
     void requiresTenantHeader() throws Exception {
         mvc.perform(get("/v1/agents/sessions"))
                 .andExpect(status().isBadRequest())
@@ -111,6 +139,14 @@ class ManagedAgentServerIntegrationTest {
 
         assertThat(applicationContext.getBeansOfType(
                 ManagedSessionStoreController.class)).isEmpty();
+    }
+
+    @Test
+    void missingSessionIdReturnsNotFound() throws Exception {
+        mvc.perform(get("/v1/agents/sessions/")
+                        .header(TenantContextFilter.HEADER, "tenant-empty-id"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("not_found"));
     }
 
     @Test
@@ -792,6 +828,39 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void preservesTextOrderAcrossToolsAndReasoningInSnapshots() {
+        String tenant = "tenant-order-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "order-create", "digest-create",
+                "qwen-code", null, List.of(), null);
+        String turnId = "turn-order";
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "item.output_text.delta", Map.of("text", "before"),
+                false, "before");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "item.tool_call.updated", Map.of("toolCallId", "tool-1"),
+                false, "tool");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "item.output_text.delta", Map.of("text", "after"),
+                false, "after");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "item.reasoning.delta", Map.of("text", "thought"),
+                false, "thought");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "item.output_text.delta", Map.of("text", "final"),
+                false, "final");
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> assertThat(snapshot.items())
+                        .filteredOn(item -> "message".equals(item.type()))
+                        .singleElement().satisfies(item ->
+                                assertThat(item.content())
+                                        .extracting(part -> part.text())
+                                        .containsExactly("before", "after",
+                                                "thought", "final")));
+    }
+
+    @Test
     void ignoresLateEnvironmentResultFromAnOlderTurn() {
         String tenant = "tenant-environment-order-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
@@ -996,6 +1065,10 @@ class ManagedAgentServerIntegrationTest {
                                         Map.of("text", "kept"), false, null,
                                         null, null))));
 
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .isPresent();
+
         store.retractContinuationOutput(tenant, session.sessionId(),
                 turn.turnId(), owner, "boot_old", "epoch_old");
 
@@ -1018,8 +1091,20 @@ class ManagedAgentServerIntegrationTest {
                                             event.sourceKey()))
                             .singleElement()
                             .satisfies(event -> assertThat(event.data())
-                                    .containsEntry("text", ""));
+                                    .containsEntry("text", "kept"));
                 });
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .filteredOn(event -> "stream.reconciled".equals(event.type()))
+                .hasSize(1);
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> assertThat(snapshot.items())
+                        .filteredOn(item -> "message".equals(item.type())
+                                && "assistant".equals(item.role()))
+                        .singleElement().satisfies(item ->
+                                assertThat(item.content()).singleElement()
+                                        .satisfies(part -> assertThat(
+                                                part.text()).isEqualTo("kept"))));
     }
 
     @Test
