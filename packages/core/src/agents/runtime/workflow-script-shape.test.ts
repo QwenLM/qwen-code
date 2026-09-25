@@ -282,3 +282,42 @@ describe('describeWorkflowDeterminismViolations', () => {
     expect(message).not.toContain('line 6');
   });
 });
+
+// #12651 R1-1: maskNonCode must end a `//` comment at any of the four
+// ECMAScript LineTerminators. A CR-only script (no `\n` anywhere) used to
+// be blanked end-to-end, silencing the pre-launch determinism gate (clock
+// calls invisible → run starts and burns tokens before the sandbox guard
+// rejects it) and emptying the agent-row inventory the approval dialog
+// renders.
+describe('scanWorkflowScriptShape — LineTerminator-terminated comments (#12651)', () => {
+  it('still reports a clock call after a CR-only leading comment', () => {
+    const shape = scanWorkflowScriptShape(
+      "// header\rexport const meta = { name: 'x', description: 'd' }\rreturn Date.now();",
+    );
+    expect(shape.determinismViolations.map((v) => v.call)).toContain(
+      'Date.now()',
+    );
+  });
+
+  it('still produces a row for an agent() call after a CR-only leading comment', () => {
+    const shape = scanWorkflowScriptShape(
+      "// header\rexport const meta = { name: 'x', description: 'd' }\rawait agent('do the thing');\rreturn 1;",
+    );
+    expect(shape.agentCalls).toBe(1);
+    expect(shape.rows.length).toBeGreaterThan(0);
+  });
+
+  it('is symmetric with LF on the same script', () => {
+    const cr = scanWorkflowScriptShape(
+      "// h\rexport const meta = { name: 'x', description: 'd' }\rawait agent('go');\rreturn 1;",
+    );
+    const lf = scanWorkflowScriptShape(
+      "// h\nexport const meta = { name: 'x', description: 'd' }\nawait agent('go');\nreturn 1;",
+    );
+    expect(cr.agentCalls).toBe(lf.agentCalls);
+    expect(cr.rows.length).toBe(lf.rows.length);
+    expect(cr.determinismViolations.length).toBe(
+      lf.determinismViolations.length,
+    );
+  });
+});

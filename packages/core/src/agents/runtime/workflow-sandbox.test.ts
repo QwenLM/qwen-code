@@ -3046,6 +3046,29 @@ describe('createWorkflowSandbox primitives', () => {
           expect(meta).toEqual({ name: 'real', description: 'd' });
         },
       );
+
+      // #12651 R1-2: with skipTrivia the meta anchor sits past the leading
+      // comment, so the stripped source must retain the comment verbatim —
+      // the same `slice(0, exportIdx)` term compileWorkflowScript builds
+      // its compilable copy from. Under the old ^-anchored regex that term
+      // was provably '' and the comment disappeared from the compiled
+      // program while all assertions on `meta` stayed green.
+      it('keeps the leading comment in the stripped script (#12651)', () => {
+        const src = `// note\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { stripped, meta } = extractAndStripMeta(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+        expect(stripped.startsWith('// note\n')).toBe(true);
+        expect(stripped.endsWith('\nreturn 1;')).toBe(true);
+      });
+
+      // #12651 R1-3: the brace-walker's `//` skip must also end at any
+      // LineTerminator — a CR-only note inside the meta block used to scan
+      // for \n to end-of-source and hit the unbalanced-brace throw.
+      it('parses a meta block whose body lines and inner comment are CR-separated (#12651)', () => {
+        const src = `export const meta = {\r // note\r name: 'x',\r description: 'd'\r}\rreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
     });
 
     it('compiles a body and hands back its meta', () => {
