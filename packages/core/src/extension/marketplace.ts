@@ -11,7 +11,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import { stat } from 'node:fs/promises';
-import { isSupportedArchiveUrl, parseGitHubRepoForReleases } from './github.js';
+import {
+  isSupportedArchivePath,
+  isSupportedArchiveUrl,
+  parseGitHubRepoForReleases,
+} from './github.js';
 import { isScopedNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
@@ -448,6 +452,22 @@ export async function parseInstallSource(
     };
   } else if (isGitUrl(repo)) {
     // Priority 2: Git URL (http://, https://, git@, sso://)
+    //
+    // Archive downloads are restricted to https:// (see isSupportedArchiveUrl),
+    // but isGitUrl also accepts plain http://. Without this guard an archive
+    // link served over http:// falls through to the git path and later fails
+    // with a confusing "Failed to clone Git repository" error for what is a
+    // plain archive file (see #10741/#10742).
+    if (repo.toLowerCase().startsWith('http://')) {
+      // Match isSupportedArchiveUrl semantics: inspect the URL pathname so
+      // query strings / fragments don't hide the archive extension.
+      const { pathname } = new URL(repo);
+      if (isSupportedArchivePath(pathname)) {
+        throw new Error(
+          `Archive URLs must use https:// (got ${redactUrlCredentials(repo)}). Re-download the archive from an HTTPS URL.`,
+        );
+      }
+    }
     installMetadata = {
       source: repoSource,
       type: 'git',

@@ -46,6 +46,11 @@ vi.mock('./github.js', () => ({
       return false;
     }
   }),
+  isSupportedArchivePath: vi.fn(
+    (source: string) =>
+      source.toLowerCase().endsWith('.zip') ||
+      source.toLowerCase().endsWith('.tar.gz'),
+  ),
   parseGitHubRepoForReleases: vi.fn((url: string) => {
     const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
     if (match) {
@@ -195,6 +200,34 @@ describe('parseInstallSource', () => {
       expect(result.source).toBe('https://example.com/releases/extension.zip');
       expect(result.type).toBe('archive-url');
       expect(result.pluginName).toBe('my-plugin');
+    });
+
+    it('should reject http archive URLs with an actionable error', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('http://example.com/releases/extension.zip'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+
+    it('should reject http archive URLs even when a query string hides the extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('http://example.com/releases/extension.zip?token=1'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+  });
+
+  describe('HTTP URL parsing', () => {
+    it('should still parse plain http git URLs as git installs', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('http://example.com:8080/repo');
+
+      expect(result.source).toBe('http://example.com:8080/repo');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBeUndefined();
     });
   });
 
