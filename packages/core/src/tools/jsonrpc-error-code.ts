@@ -10,7 +10,7 @@
  * Probes in order:
  * 1. a structured numeric `error.code` (McpError / SDK code path);
  * 2. the JSON-RPC error body the legacy-era HTTP transport embeds —
- *    `error.data.text`, then a top-level `text`, then `error.message`.
+ *    `error.data.text`, then `error.message`.
  *
  * The body probe matches `"code": <integer>` anywhere in the string, so
  * member order and nested objects before `code` do not matter, and it
@@ -28,12 +28,10 @@ export function getJsonRpcErrorCode(error: unknown): number | undefined {
   if (typeof direct === 'number' && Number.isInteger(direct)) return direct;
   const bag = error as {
     data?: { text?: unknown };
-    text?: unknown;
     message?: unknown;
   } | null;
   const candidates = [
     bag?.data?.text,
-    bag?.text,
     error instanceof Error ? error.message : undefined,
   ];
   for (const candidate of candidates) {
