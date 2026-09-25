@@ -1,13 +1,13 @@
 ---
 name: desktop-brand-builder
-description: Generate a branded Qwen Code desktop package from the Tauri desktop shell using a minimal brandId and logo. Use when the user wants a custom, white-label, or rebranded desktop client, installer, DMG/EXE/AppImage/deb, or one-click brand build on top of packages/desktop-shell.
+description: Generate a branded Qwen Code desktop package from the Tauri desktop shell using a minimal brandId and logo. Use when the user wants a custom, white-label, or rebranded desktop client, installer, DMG/EXE/AppImage/deb, or one-click brand build on top of packages/desktop.
 ---
 
 # Desktop Brand Builder (Tauri shell)
 
 ## Goal
 
-Create a branded desktop package from `packages/desktop-shell` with the least
+Create a branded desktop package from `packages/desktop` with the least
 user input possible. The user should usually provide only:
 
 ```text
@@ -20,10 +20,11 @@ website: https://acme.ai
 copyright, or updater endpoints unless the user explicitly asks to override
 them.
 
-This skill replaces the Electron-era brand builder that lived in the removed
-`packages/desktop`. The Tauri shell is the only desktop implementation now;
-branding hooks are `src-tauri/tauri.conf.json`, `src-tauri/icons/`, and the
-`bootstrap/` startup UI.
+This skill replaces the Electron-era brand builder that lived in the older,
+since-deleted Electron `packages/desktop` (removed in PR 9085, before this
+Tauri shell took over that path). The Tauri shell is the only desktop
+implementation now; branding hooks are `src-tauri/tauri.conf.json`,
+`src-tauri/icons/`, and the `bootstrap/` startup UI.
 
 ## Input Rules
 
@@ -102,7 +103,7 @@ Create a temporary `brand.json` in the build directory:
 }
 ```
 
-Install dependencies. The brand script itself only needs desktop-shell's
+Install dependencies. The brand script itself only needs the desktop package's
 own `node_modules`, but `npm run build:runtime` shells out to the repo
 root (which uses `cross-env` and other root devDependencies), so the
 root install is also required before packaging:
@@ -111,8 +112,8 @@ root install is also required before packaging:
 # Root dependencies (needed by build:runtime → cross-env, esbuild, etc.)
 npm install
 
-# Desktop-shell dependencies
-cd packages/desktop-shell
+# Desktop package dependencies
+cd packages/desktop
 npm install --workspaces=false
 cd ../..
 ```
@@ -121,8 +122,8 @@ Then run this skill's bundled brand creation script with plain Node (the
 script has no dependencies beyond Node >= 18):
 
 ```bash
-node packages/desktop-shell/.agents/skills/desktop-brand-builder/scripts/brand-create.mjs \
-  --shell-root /absolute/path/to/qwen-code/packages/desktop-shell \
+node packages/desktop/.agents/skills/desktop-brand-builder/scripts/brand-create.mjs \
+  --shell-root /absolute/path/to/qwen-code/packages/desktop \
   --config /absolute/path/to/brand.json
 ```
 
@@ -149,7 +150,7 @@ What the script does:
 Package with the current host target unless the user requested a target:
 
 ```bash
-cd packages/desktop-shell
+cd packages/desktop
 npm run build:runtime --workspaces=false
 npx tauri build            # current platform
 ```
@@ -169,7 +170,7 @@ npx tauri build --target aarch64-apple-darwin   # explicit macOS arm64
 For `target: all`, iterate `build:runtime` → `tauri build` per target; run
 only targets supported by the current machine or CI environment. Do not
 claim cross-platform artifacts were produced unless the files exist.
-Artifacts land under `packages/desktop-shell/src-tauri/target/release/bundle/`
+Artifacts land under `packages/desktop/src-tauri/target/release/bundle/`
 for the host target, or `src-tauri/target/<triple>/release/bundle/` when
 `--target <triple>` is used.
 
@@ -195,7 +196,7 @@ npx @tauri-apps/cli signer generate -w ~/.tauri/my-brand.key
 After packaging:
 
 1. Confirm the expected artifact exists under
-   `packages/desktop-shell/src-tauri/target/release/bundle/`
+   `packages/desktop/src-tauri/target/release/bundle/`
    (or `src-tauri/target/<triple>/release/bundle/` for cross-compile targets)
    (`dmg/`, `nsis/`, `appimage/`, or `deb/`).
 2. Compute `sha256sum` or `shasum -a 256` for each artifact.
@@ -207,7 +208,7 @@ After packaging:
 - Invalid `brandId`: show the regex and ask for a corrected value.
 - Missing `logo`: ask for a valid local path.
 - Missing bundled script: report that
-  `packages/desktop-shell/.agents/skills/desktop-brand-builder/scripts/brand-create.mjs`
+  `packages/desktop/.agents/skills/desktop-brand-builder/scripts/brand-create.mjs`
   is missing, and include the expected command.
 - Already-branded shell-root: the script refuses to run when
   `productName` is no longer the default (`Qwen Code Desktop`). Start from
