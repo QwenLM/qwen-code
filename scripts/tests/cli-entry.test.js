@@ -170,6 +170,87 @@ describe('scripts/cli-entry.js production entry', () => {
     }
   });
 
+  it('hands the post-update relaunch command line to cmd.exe verbatim', async () => {
+    // #12687: the ""…"" idiom only reaches cmd intact when the spawn passes
+    // windowsVerbatimArguments — otherwise Node's MSVCRT escaping rewrites
+    // every embedded quote as \" and cmd /s rule 2 strips the line down to
+    // a literal \"\"path\"\" program name, which is exactly the reporter's
+    // error. The standalone Windows shim stamps an un-normalized
+    // bin\..\bin launcher path, so the fixture carries one.
+    const inheritedShim = process.env.QWEN_CODE_LAUNCHER_PATH;
+    const launcher =
+      'C:\\Users\\test\\AppData\\Local\\qwen-code\\qwen-code\\bin\\..\\bin\\qwen.cmd';
+    process.env.QWEN_CODE_LAUNCHER_PATH = launcher;
+    existsSyncMock.mockImplementation((p) => p === launcher);
+    let spawnCount = 0;
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => {
+      spawnCount += 1;
+      return spawnCount === 1
+        ? { status: 44, signal: null }
+        : { status: 0, signal: null };
+    });
+    try {
+      await import('../cli-entry.js?verbatim-cmd-relaunch');
+      // First spawn is the managed-update child (exit 44), second is the
+      // relaunch through the standalone shim.
+      expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+      expect(spawnSyncMock).toHaveBeenLastCalledWith(
+        'cmd.exe',
+        ['/d', '/s', '/c', `""${launcher}""`],
+        expect.objectContaining({
+          stdio: 'inherit',
+          windowsVerbatimArguments: true,
+        }),
+      );
+    } finally {
+      spawnSyncMock.mockImplementation(spawnImpl);
+      existsSyncMock.mockImplementation(() => false);
+      if (inheritedShim === undefined)
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
+  it('refuses a verbatim cmd relaunch when the launcher has cmd metacharacters', async () => {
+    // windowsVerbatimArguments drops Node's escaping safety net, so a
+    // launcher path containing cmd metacharacters would be re-tokenized
+    // into extra commands. The update itself already landed at that point,
+    // so the entry must skip the relaunch instead of spawning a malformed
+    // command line.
+    const inheritedShim = process.env.QWEN_CODE_LAUNCHER_PATH;
+    const launcher = 'C:\\evil&whoami\\bin\\qwen.cmd';
+    process.env.QWEN_CODE_LAUNCHER_PATH = launcher;
+    existsSyncMock.mockImplementation((p) => p === launcher);
+    let spawnCount = 0;
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => {
+      spawnCount += 1;
+      return spawnCount === 1
+        ? { status: 44, signal: null }
+        : { status: 0, signal: null };
+    });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await import('../cli-entry.js?unsafe-cmd-launcher');
+      // Only the managed-update child ran; no cmd.exe relaunch followed.
+      expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('next run'),
+      );
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      stderrSpy.mockRestore();
+      spawnSyncMock.mockImplementation(spawnImpl);
+      existsSyncMock.mockImplementation(() => false);
+      if (inheritedShim === undefined)
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
   it('leaves the startup version unset when package metadata is unreadable', async () => {
     const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
     delete process.env.QWEN_CODE_STARTUP_VERSION;
