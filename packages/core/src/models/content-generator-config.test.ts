@@ -82,6 +82,7 @@ describe('buildAgentContentGeneratorConfig', () => {
           customHeaders: { Authorization: 'parent-secret' },
         }),
         getModelsConfig: () => models,
+        getRuntimeEnvironment: () => process.env,
       } as unknown as Config;
     }
 
@@ -604,6 +605,7 @@ describe('buildAgentContentGeneratorConfig', () => {
       return {
         getContentGeneratorConfig: () => parent,
         getModelsConfig: () => ({ getResolvedModel }),
+        getRuntimeEnvironment: () => process.env,
       } as unknown as Config;
     }
 

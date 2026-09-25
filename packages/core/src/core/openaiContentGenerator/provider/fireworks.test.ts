@@ -19,6 +19,7 @@ function createCliConfig(): Config {
   return {
     getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     getProxy: vi.fn().mockReturnValue(undefined),
+    getRuntimeEnvironment: () => process.env,
   } as unknown as Config;
 }
 

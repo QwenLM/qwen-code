@@ -758,6 +758,15 @@ describe('serve fast path argument parsing', () => {
         'experimental-managed-runtime-token',
         ['--experimental-managed-runtime-token', 'test-token'],
       ],
+      ['profile', ['--profile', 'hosted-harness']],
+      [
+        'managed-runtime-broker-url',
+        ['--managed-runtime-broker-url', 'http://127.0.0.1:4182'],
+      ],
+      [
+        'managed-runtime-broker-token',
+        ['--managed-runtime-broker-token', 'test-token'],
+      ],
       ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
@@ -768,6 +777,11 @@ describe('serve fast path argument parsing', () => {
       'experimental-managed-runtime-auto-local',
       'experimental-managed-runtime-url',
       'experimental-managed-runtime-token',
+      // The Hosted Harness profile and its Broker credentials are resolved by
+      // the full yargs parser.
+      'profile',
+      'managed-runtime-broker-url',
+      'managed-runtime-broker-token',
 
       'channel',
       'external-tool-guard-endpoint',

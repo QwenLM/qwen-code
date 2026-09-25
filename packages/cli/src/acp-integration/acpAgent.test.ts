@@ -263,9 +263,9 @@ vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
 }));
 
 vi.mock('@qwen-code/acp-bridge/ndJsonStream', async (importOriginal) => ({
-  hasBoundedJsonStructure: (
-    await importOriginal<typeof import('@qwen-code/acp-bridge/ndJsonStream')>()
-  ).hasBoundedJsonStructure,
+  ...(await importOriginal<
+    typeof import('@qwen-code/acp-bridge/ndJsonStream')
+  >()),
   ndJsonStream: vi.fn().mockReturnValue({}),
 }));
 

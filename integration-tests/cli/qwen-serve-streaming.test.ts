@@ -462,6 +462,38 @@ async function turnStatus(
   return (await response.json()) as Record<string, unknown>;
 }
 
+/**
+ * Creates a session the daemon keeps on the legacy engine. New ordinary
+ * sessions default to Managed, whose deferred scope still excludes what the
+ * crash and branch tests below exercise: a per-session `qwen --acp` child and
+ * history branching. A workspace that declares a hook stays legacy when the
+ * session is created, so declare one for an event these tests never raise and
+ * drop the workspace settings again as soon as the session exists.
+ */
+async function createLegacyEngineSession(
+  options: { sessionScope?: 'thread' } = {},
+): ReturnType<DaemonClient['createOrAttachSession']> {
+  const settingsDir = path.join(workspaceDir, '.qwen');
+  const settingsPath = path.join(settingsDir, 'settings.json');
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(
+    settingsPath,
+    JSON.stringify({
+      hooks: {
+        PreCompact: [{ hooks: [{ type: 'command', command: 'true' }] }],
+      },
+    }),
+  );
+  try {
+    return await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      ...options,
+    });
+  } finally {
+    rmSync(settingsPath, { force: true });
+  }
+}
+
 describePOSIX('qwen serve — pollable turn results', () => {
   it('returns only the final parent answer after a tool boundary', async () => {
     const session = await client.createOrAttachSession({
@@ -640,9 +672,7 @@ describePOSIX('qwen serve — turn_error provider detail', () => {
 
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
   it('publishes session_died after the qwen --acp child is SIGKILL-ed', async () => {
-    const session = await client.createOrAttachSession({
-      workspaceCwd: workspaceDir,
-    });
+    const session = await createLegacyEngineSession();
 
     // Find the daemon's direct `--acp` child PID.
     const childPids = execSync(`pgrep -P ${daemon.pid} -f "qwen.*--acp"`, {
@@ -1206,10 +1236,7 @@ describePOSIX('qwen serve — Last-Event-ID resume', () => {
 
 describePOSIX('qwen serve — historical Assistant response branch', () => {
   it('creates, opens, and continues a branch through the real daemon', async () => {
-    const source = await client.createOrAttachSession({
-      workspaceCwd: workspaceDir,
-      sessionScope: 'thread',
-    });
+    const source = await createLegacyEngineSession({ sessionScope: 'thread' });
     const first = await client.prompt(source.sessionId, {
       prompt: [{ type: 'text', text: 'historical branch turn one' }],
     });

@@ -5238,7 +5238,11 @@ describe('multi-workspace session dispatch', () => {
         }),
       ]);
       expect(primaryBridge.summaryCalls).toEqual([]);
+      // The Managed Gateway visibility check looks the session up once on the
+      // addressed workspace's bridge; it never falls back or starts ACP.
       expect(secondaryBridge.summaryCalls).toEqual([
+        sessionId,
+        sessionId,
         sessionId,
         sessionId,
         sessionId,
@@ -5777,10 +5781,12 @@ describe('multi-workspace session dispatch', () => {
 
       expect(primaryBridge.spawnCalls).toEqual([]);
       expect(primaryBridge.restoreCalls).toEqual([]);
-      expect(primaryBridge.summaryCalls).toEqual([]);
+      // The Managed Gateway visibility check looks the session up once on the
+      // addressed workspace's bridge; it never falls back or starts ACP.
+      expect(primaryBridge.summaryCalls).toEqual([sessionId]);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);
-      expect(secondaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.summaryCalls).toEqual([sessionId]);
     });
   });
 
@@ -6057,7 +6063,15 @@ describe('multi-workspace session dispatch', () => {
       expect(primaryBridge.summaryCalls).toEqual([]);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);
-      expect(secondaryBridge.summaryCalls).toEqual([]);
+      // The Managed Gateway visibility check looks the session up once per
+      // export on the addressed workspace's bridge; it never falls back or
+      // starts ACP.
+      expect(secondaryBridge.summaryCalls).toEqual([
+        sessionId,
+        sessionId,
+        sessionId,
+        sessionId,
+      ]);
       expect(secondaryBridge.closeCalls).toEqual([]);
     });
   });
@@ -6667,7 +6681,8 @@ describe('multi-workspace session dispatch', () => {
 
       expect(res.status).toBe(404);
       expect(primaryBridge.summaryCalls).toEqual([]);
-      expect(secondaryBridge.summaryCalls).toEqual([sessionId]);
+      // One lookup for the Managed Gateway visibility check, one for the update.
+      expect(secondaryBridge.summaryCalls).toEqual([sessionId, sessionId]);
       const primarySnapshot =
         await createSessionOrganizationService(PRIMARY_CWD).readSnapshot();
       const secondarySnapshot =

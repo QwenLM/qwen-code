@@ -135,6 +135,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
 
     mockCliConfig = {
       isOmniEnabled: () => true,
+      getRuntimeEnvironment: () => process.env,
       storage: { getQwenDir: () => '/tmp/qwen' },
     } as unknown as Config;
 
@@ -292,6 +293,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   it('does not invalidate when omni is disabled', async () => {
     mockCliConfig = {
       isOmniEnabled: () => false,
+      getRuntimeEnvironment: () => process.env,
       storage: { getQwenDir: () => '/tmp/qwen' },
     } as unknown as Config;
     pipeline = new ContentGenerationPipeline({

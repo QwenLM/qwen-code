@@ -158,14 +158,28 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('runs SDK and Runtime Broker tests from the sibling module on self-hosted runners', () => {
-    const block = step(job('test'), 'Run Java module tests (self-hosted)');
+  it('runs Runtime Broker tests from the sibling module on self-hosted Java 21', () => {
+    const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain(
       'mvn --batch-mode --no-transfer-progress clean test\n' +
-        '          mvn --batch-mode --no-transfer-progress -f ../runtime-broker/pom.xml clean test',
+        '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
+        '            cd ../runtime-broker\n' +
+        '            mvn --batch-mode --no-transfer-progress clean test\n' +
+        '          fi',
     );
+  });
+
+  it('runs the Managed Hosted Runtime E2E on JDK 21 while the daemon E2E stays on 11', () => {
+    const block = job('daemon-e2e');
+    expect(block).toContain(
+      'java-version: |-\n            21\n            11\n',
+    );
+    expect(step(block, 'Run Managed Hosted Runtime E2E')).toContain(
+      "JAVA_HOME: '${{ env.JAVA_HOME_21_X64 }}'",
+    );
+    expect(step(block, 'Run Java daemon E2E')).not.toContain('JAVA_HOME');
   });
 
   it.each(['test', 'daemon-e2e'])(
@@ -179,7 +193,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         block.match(
           /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
         ),
-      ).toHaveLength(name === 'test' ? 7 : 2);
+      ).toHaveLength(name === 'test' ? 6 : 2);
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },

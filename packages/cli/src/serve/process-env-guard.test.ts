@@ -174,6 +174,28 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-gateway-model-runtime.ts',
+    {
+      reason:
+        'The Managed Gateway model runtime defaults its base environment to the daemon process environment ' +
+        'when the caller supplies none, and freezes a copy at construction.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-worker-entry.ts',
+    {
+      reason:
+        'The Managed Runtime worker entry is its own process: it reads its boot contract from the process ' +
+        'environment, and pins the output root and CLI entry it was booted with before starting the embedded daemon.',
+      accesses: {
+        'key:QWEN_CLI_ENTRY': 1,
+        'key:QWEN_RUNTIME_DIR': 1,
+        whole: 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/pem-certificate-blocks.ts',
     {
       reason:
@@ -185,7 +207,10 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/run-qwen-serve.ts',
     {
       reason:
-        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub. ' +
+        'The serve entry point owns daemon bootstrap, feature flags, and child-process defaults. ' +
+        'The Hosted Harness capability digest and the Runtime Broker and Managed Runtime credentials are launch ' +
+        'secrets that option values override; the Broker token is also deleted from process.env once read, so no ' +
+        'child process inherits it. ' +
         'NODE_EXTRA_CA_CERTS is read from the daemon process environment on purpose: it is the trust store Node itself ' +
         'already loaded for this process, so the worker TLS trust-gap check has to consult the same value to know whether ' +
         "an operator has already supplied the issuing CA. Read once into a local: the check now needs the file's " +
@@ -195,12 +220,15 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
+        'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
+        'computed:MANAGED_RUNTIME_BROKER_TOKEN_ENV': 2,
+        'computed:MANAGED_RUNTIME_BROKER_URL_ENV': 1,
+        'computed:MANAGED_RUNTIME_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
         'computed:QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV': 1,
         'computed:RUNTIME_STARTUP_TIMEOUT_ENV': 1,
-        'key:DEV': 1,
         'key:NODE_EXTRA_CA_CERTS': 1,
         'key:NODE_TLS_REJECT_UNAUTHORIZED': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
@@ -306,8 +334,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { whole: 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback, and the paired ' +
+        'execution-engine selector reads the same fallback when no primary effective environment was resolved.',
+      accesses: { whole: 2 },
     },
   ],
   [
