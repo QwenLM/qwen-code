@@ -1416,25 +1416,64 @@ export class AcpDispatcher {
     id: JsonRpcId | undefined,
     sessionIds: readonly string[],
   ): boolean {
-    const activeSessionId = sessionIds.find((sessionId) =>
+    const liveVoiceSessionId = sessionIds.find((sessionId) =>
       this.liveSessionIsolation?.isSessionActive?.(sessionId),
     );
-    if (!activeSessionId) return false;
+    if (liveVoiceSessionId) {
+      if (id !== undefined) {
+        conn.sendConn(
+          error(
+            id,
+            RPC.INVALID_REQUEST,
+            'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+            {
+              errorKind: 'live_session_active',
+              httpStatus: 409,
+              sessionId: liveVoiceSessionId,
+            },
+          ),
+        );
+      }
+      return true;
+    }
+    // A session with a prompt in flight on any runtime (scheduled task,
+    // background agent, interactive turn) is invisible to the Live Voice
+    // check above, but unlinking its transcript mid-turn leaves a head-less
+    // transcript behind (#12091). An attached-but-idle session still deletes
+    // normally.
+    const attachedSessionId = sessionIds.find((sessionId) =>
+      this.isActivelyPromptingSession(sessionId),
+    );
+    if (!attachedSessionId) return false;
     if (id !== undefined) {
       conn.sendConn(
         error(
           id,
           RPC.INVALID_REQUEST,
-          'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+          'An active session cannot be closed, deleted, or archived. Stop the session first.',
           {
             errorKind: 'live_session_active',
             httpStatus: 409,
-            sessionId: activeSessionId,
+            sessionId: attachedSessionId,
           },
         ),
       );
     }
     return true;
+  }
+
+  private isActivelyPromptingSession(sessionId: string): boolean {
+    try {
+      return this.bridge.getSessionSummary(sessionId).hasActivePrompt === true;
+    } catch (err) {
+      if (err instanceof SessionNotFoundError) return false;
+      // A broken probe must not wedge the lifecycle: the close still runs on
+      // the bridge, which is the same failure posture the unguarded path had.
+      debugLogger.warn(
+        `live-session probe failed for ${sessionId}, proceeding unguarded: ${errMsg(err)}`,
+      );
+      return false;
+    }
   }
 
   private serializeSessionErrors(

@@ -10817,6 +10817,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
 
+    it('_qwen/sessions/delete refuses a session with a prompt in flight (#12091)', async () => {
+      bridge.workspaceSessions.push({
+        sessionId: 'sess-1',
+        workspaceCwd: TEST_WORKSPACE,
+        hasActivePrompt: true,
+      } as (typeof bridge.workspaceSessions)[number]);
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      // The pushed summary marks sess-1 mid-turn; an idle summary (the mock's
+      // sess-1 fallback has no active prompt) must not trip the new guard.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 68,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: ['sess-1'] },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        error: {
+          code: -32600,
+          message:
+            'An active session cannot be closed, deleted, or archived. Stop the session first.',
+          data: { errorKind: 'live_session_active', sessionId: 'sess-1' },
+        },
+      });
+    });
+
     it('_qwen/sessions/delete sanitizes stderr close errors', async () => {
       const lineSep = '\u2028';
       const bidiOverride = '\u202e';
