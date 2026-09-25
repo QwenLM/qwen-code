@@ -13,6 +13,7 @@ import {
   INTERIM_MONITOR_MIN_TURN_INTERVAL_MS,
   useLlmStream,
 } from './use-llm-stream.js';
+import type { CommandIdleState } from '../utils/command-idle-state.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
 import type {
   TrackedToolCall,
@@ -387,6 +388,13 @@ describe('useLlmStream', () => {
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
     initialHistory: HistoryItem[] = [],
+    commandIdleStateRef: { current: CommandIdleState } = {
+      current: {
+        streamingState: StreamingState.Idle,
+        localCommandDispatchStartedIdle: false,
+        activeModelStreams: 0,
+      },
+    },
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -469,6 +477,7 @@ describe('useLlmStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          commandIdleStateRef,
         );
       },
       {
@@ -497,6 +506,7 @@ describe('useLlmStream', () => {
         rerender({ ...baseProps, toolCalls }),
       rerenderWithHistory: (history: HistoryItem[]) =>
         rerender({ ...baseProps, history }),
+      commandIdleStateRef,
     };
   };
 
@@ -13314,7 +13324,9 @@ describe('useLlmStream', () => {
       });
       expect(mockSendMessageStream).not.toHaveBeenCalled();
       expect(mockHandleSlashCommand).not.toHaveBeenCalled();
-      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
 
       let releaseStream!: () => void;
       mockSendMessageStream.mockImplementationOnce(() =>
@@ -13338,7 +13350,9 @@ describe('useLlmStream', () => {
       expect(hook.result.current.streamingState).toBe(
         StreamingState.Responding,
       );
-      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
       await act(async () => {
         releaseStream();
         await followUpPromise;
@@ -13401,7 +13415,9 @@ describe('useLlmStream', () => {
         releaseSecondLog();
         await secondSubmission;
       });
-      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
     });
 
     it('does not expose command-idle while a detached continuation streams', async () => {
@@ -13498,7 +13514,9 @@ describe('useLlmStream', () => {
         ).rejects.toThrow('command preparation failed');
       });
 
-      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
     });
 
     it('should call Gemini with prompt content when slash command returns a `submit_prompt` action', async () => {
@@ -18549,7 +18567,9 @@ describe('useLlmStream', () => {
           ),
         );
         expect(result.current.streamingState).toBe(StreamingState.Responding);
-        expect(result.current.localCommandDispatchIsIdle).toBe(false);
+        expect(
+          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(false);
 
         await act(async () => {
           resolveFirstCall();
@@ -18559,7 +18579,9 @@ describe('useLlmStream', () => {
           ]);
         });
         expect(result.current.streamingState).toBe(StreamingState.Responding);
-        expect(result.current.localCommandDispatchIsIdle).toBe(false);
+        expect(
+          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(false);
 
         await act(async () => {
           releaseLog();
@@ -18568,7 +18590,9 @@ describe('useLlmStream', () => {
 
         expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
         expect(result.current.streamingState).toBe(StreamingState.Idle);
-        expect(result.current.localCommandDispatchIsIdle).toBe(false);
+        expect(
+          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(false);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
         await act(async () => {

@@ -181,6 +181,10 @@ import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLlmStream, type CancelSubmitInfo } from './hooks/use-llm-stream.js';
+import {
+  isCommandIdle,
+  type CommandIdleState,
+} from './utils/command-idle-state.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import {
@@ -1466,7 +1470,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const isIdleRef = useRef(true);
   // Slash-command guards need the idle state of the dispatching command,
   // without making app-wide consumers treat that dispatch as idle.
-  const commandIdleStateRef = useRef({
+  const commandIdleStateRef = useRef<CommandIdleState>({
     streamingState: StreamingState.Idle as StreamingState,
     localCommandDispatchStartedIdle: false,
     activeModelStreams: 0,
@@ -1474,12 +1478,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const commandIdleRef = useMemo(
     () => ({
       get current() {
-        const state = commandIdleStateRef.current;
-        return (
-          state.streamingState === StreamingState.Idle ||
-          (state.localCommandDispatchStartedIdle &&
-            state.activeModelStreams === 0)
-        );
+        return isCommandIdle(commandIdleStateRef.current);
       },
     }),
     [],

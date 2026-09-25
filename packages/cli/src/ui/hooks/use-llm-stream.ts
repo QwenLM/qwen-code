@@ -95,6 +95,10 @@ import type {
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
 import {
+  isCommandIdle,
+  type CommandIdleState,
+} from '../utils/command-idle-state.js';
+import {
   isAtCommand,
   isBtwCommand,
   isSlashCommand,
@@ -593,11 +597,7 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
-  commandIdleStateRef?: React.RefObject<{
-    streamingState: StreamingState;
-    localCommandDispatchStartedIdle: boolean;
-    activeModelStreams: number;
-  }>,
+  commandIdleStateRef?: React.RefObject<CommandIdleState>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -880,15 +880,10 @@ export const useLlmStream = (
 
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
-  const localCommandDispatchStartedIdleRef = useRef(false);
   const localCommandDispatchTokenRef = useRef(0);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
-  const internalCommandIdleStateRef = useRef<{
-    streamingState: StreamingState;
-    localCommandDispatchStartedIdle: boolean;
-    activeModelStreams: number;
-  }>({
+  const internalCommandIdleStateRef = useRef<CommandIdleState>({
     streamingState: StreamingState.Idle,
     localCommandDispatchStartedIdle: false,
     activeModelStreams: 0,
@@ -3692,7 +3687,6 @@ export const useLlmStream = (
       if (isLocalSlashCommand) {
         localCommandDispatchToken = ++localCommandDispatchTokenRef.current;
         const startedIdle = streamingState === StreamingState.Idle;
-        localCommandDispatchStartedIdleRef.current = startedIdle;
         liveCommandIdleStateRef.current.localCommandDispatchStartedIdle =
           startedIdle;
       }
@@ -3872,7 +3866,6 @@ export const useLlmStream = (
             isLocalSlashCommand &&
             localCommandDispatchToken === localCommandDispatchTokenRef.current
           ) {
-            localCommandDispatchStartedIdleRef.current = false;
             liveCommandIdleStateRef.current.localCommandDispatchStartedIdle = false;
           }
         }
@@ -6803,10 +6796,7 @@ export const useLlmStream = (
   return {
     streamingState,
     get localCommandDispatchIsIdle() {
-      return (
-        localCommandDispatchStartedIdleRef.current &&
-        activeModelStreamsRef.current === 0
-      );
+      return isCommandIdle(liveCommandIdleStateRef.current);
     },
     submitQuery,
     initError,

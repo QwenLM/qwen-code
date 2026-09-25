@@ -3141,13 +3141,19 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    it.each([
-      [StreamingState.Responding, true],
-      [StreamingState.Responding, false],
-      [StreamingState.Idle, false],
+    it.each<[StreamingState, boolean, number, boolean]>([
+      [StreamingState.Responding, true, 0, true],
+      [StreamingState.Responding, false, 0, false],
+      [StreamingState.Idle, false, 0, true],
+      [StreamingState.Responding, true, 1, false],
     ])(
-      'passes command idle state to slash processing (%s, local dispatch idle: %s)',
-      (streamingState, localCommandDispatchIsIdle) => {
+      'passes command idle state to slash processing (%s, local dispatch idle: %s, active streams: %s)',
+      (
+        streamingState,
+        localCommandDispatchIsIdle,
+        activeModelStreams,
+        expectedCommandIdle,
+      ) => {
         mockedSetUpdateHandler.mockClear();
         mockedUseLlmStream.mockImplementation((...args) => {
           const commandIdleStateRef = args[25] as
@@ -3163,6 +3169,7 @@ describe('AppContainer State Management', () => {
             commandIdleStateRef.current.streamingState = streamingState;
             commandIdleStateRef.current.localCommandDispatchStartedIdle =
               localCommandDispatchIsIdle;
+            commandIdleStateRef.current.activeModelStreams = activeModelStreams;
           }
           return {
             streamingState,
@@ -3187,12 +3194,10 @@ describe('AppContainer State Management', () => {
           />,
         );
 
-        const commandIdleRef = mockedUseSlashCommandProcessor.mock.calls.at(
-          -1,
-        )?.[10] as { current: boolean } | undefined;
-        expect(commandIdleRef?.current).toBe(
-          streamingState === StreamingState.Idle || localCommandDispatchIsIdle,
-        );
+        const commandIdleRef = mockedUseSlashCommandProcessor.mock.calls
+          .map((call) => call[10] as { current: boolean } | undefined)
+          .findLast((ref) => ref !== undefined);
+        expect(commandIdleRef?.current).toBe(expectedCommandIdle);
 
         const appWideIdleRef = mockedSetUpdateHandler.mock.calls.at(-1)?.[2] as
           | { current: boolean }
