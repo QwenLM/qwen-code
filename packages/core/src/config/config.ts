@@ -11246,28 +11246,13 @@ export class Config {
 
     if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
 
-    let enabled = true;
-    try {
-      enabled = this.permissionManager
-        ? await this.permissionManager.isToolEnabled(ToolNames.ADVISOR)
-        : true;
-    } catch (error) {
-      this.debugLogger.warn(
-        `Failed to check permissions for tool "${ToolNames.ADVISOR}", skipping registration:`,
-        error,
-      );
-      return;
-    }
-    if (!enabled) {
-      registry.unregisterTool(ToolNames.ADVISOR);
-      return;
-    }
-
-    const { AdvisorTool } = await import('../tools/advisor.js');
-    if (registry.getTool(ToolNames.ADVISOR) instanceof AdvisorTool) return;
-
     registry.unregisterTool(ToolNames.ADVISOR);
-    registry.registerTool(new AdvisorTool(this));
+    await this.registerLazyTool(registry, ToolNames.ADVISOR, async () => {
+      const { AdvisorTool } = await import('../tools/advisor.js');
+      return new AdvisorTool(this);
+    });
+    // Consume the factory so disabling Advisor removes its registration completely.
+    await registry.ensureTool(ToolNames.ADVISOR);
   }
 
   async registerSessionSourceTool(

@@ -112,6 +112,34 @@ describe('AdvisorTool', () => {
     },
   );
 
+  it('takes the transcript before a deferred Advisor invocation', async () => {
+    const config = makeConfig([
+      { role: 'user', parts: [{ text: 'fix the bug' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'I inspected the package.' },
+          {
+            functionCall: {
+              name: ToolNames.TOOL_CALL,
+              args: { name: 'Advisor', arguments: {} },
+            },
+          },
+          { text: 'after consultation' },
+        ],
+      },
+    ]);
+    const result = await new AdvisorTool(config)
+      .build({})
+      .execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const input = JSON.parse(mockRunForkedAgent.mock.calls[0][0].userMessage);
+    expect(input.transcript).toEqual([
+      { role: 'user', parts: [{ text: 'fix the bug' }] },
+      { role: 'model', parts: [{ text: 'I inspected the package.' }] },
+    ]);
+  });
+
   it('declares an empty, no-permission tool contract', async () => {
     const tool = new AdvisorTool(makeConfig());
 
@@ -270,7 +298,7 @@ describe('AdvisorTool', () => {
   it('recovers an array-wrapped review from the text fallback', async () => {
     mockRunForkedAgent.mockResolvedValueOnce({
       text: JSON.stringify([review]),
-      jsonResult: [review],
+      jsonResult: undefined,
       usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
       model: 'advisor-model',
     });

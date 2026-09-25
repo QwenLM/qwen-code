@@ -615,7 +615,7 @@ export async function runForkedAgent(
           (part) => part.functionCall?.name === 'respond_in_schema',
         )?.functionCall;
         if (schemaCall?.args) {
-          jsonResult = asJsonObject(schemaCall.args);
+          jsonResult ??= asJsonObject(schemaCall.args);
         }
 
         // Defensive: when preserveTools is true the model could produce an

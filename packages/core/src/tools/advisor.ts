@@ -159,7 +159,12 @@ function transcriptBeforeAdvisorCall(history: Content[]): Content[] {
   for (let entryIndex = history.length - 1; entryIndex >= 0; entryIndex -= 1) {
     const entry = history[entryIndex];
     const callIndex = entry?.parts?.findLastIndex(
-      (part) => part.functionCall?.name === ToolNames.ADVISOR,
+      (part) =>
+        part.functionCall?.name === ToolNames.ADVISOR ||
+        (part.functionCall?.name === ToolNames.TOOL_CALL &&
+          typeof part.functionCall.args?.['name'] === 'string' &&
+          part.functionCall.args['name'].trim().toLowerCase() ===
+            ToolNames.ADVISOR),
     );
     if (entry && callIndex !== undefined && callIndex >= 0) {
       const transcript = history.slice(0, entryIndex);
@@ -250,11 +255,8 @@ class AdvisorToolInvocation extends BaseToolInvocation<
           disableModelFallbacks: true,
         }),
       );
-      const structuredResult = Array.isArray(result.jsonResult)
-        ? undefined
-        : result.jsonResult;
       const review = parseReview(
-        structuredResult ?? parseJsonObjectText(result.text),
+        result.jsonResult ?? parseJsonObjectText(result.text),
         result.model,
       );
       return {

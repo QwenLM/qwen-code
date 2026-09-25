@@ -6930,8 +6930,9 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getAdvisorModel()).toBe('advisor-model');
       expect(registry.unregisterTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
-      expect(registry.registerTool).toHaveBeenCalledWith(
-        expect.objectContaining({ name: ToolNames.ADVISOR }),
+      expect(registry.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
       );
       expect(setTools).toHaveBeenCalledTimes(1);
 
@@ -6952,14 +6953,14 @@ describe('Server Config (config.ts)', () => {
       await config.initialize();
       const registry = config.getToolRegistry();
       vi.mocked(registry.unregisterTool).mockClear();
-      vi.mocked(registry.registerTool).mockClear();
+      vi.mocked(registry.registerFactory).mockClear();
 
       const applied = await config.setAdvisorModel('advisor-model');
 
       expect(applied).toBe(false);
       expect(config.getAdvisorModel()).toBeUndefined();
       expect(registry.unregisterTool).not.toHaveBeenCalled();
-      expect(registry.registerTool).not.toHaveBeenCalled();
+      expect(registry.registerFactory).not.toHaveBeenCalled();
     });
 
     it('does not register Advisor in safe mode', async () => {
@@ -6971,8 +6972,32 @@ describe('Server Config (config.ts)', () => {
 
       await config.initialize();
 
-      expect(ToolRegistry.prototype.registerTool).not.toHaveBeenCalledWith(
-        expect.objectContaining({ name: ToolNames.ADVISOR }),
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it('defers Advisor when tools.eager omits it', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        eagerTools: [],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      expect(registry.registerPermissionDeferredFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.ensureTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      await config.setAdvisorModel('off');
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
       );
     });
 

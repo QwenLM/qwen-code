@@ -434,7 +434,7 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.model).toBe('test-model');
   });
 
-  it('forces structured output through respond_in_schema', async () => {
+  it('keeps the first structured response when the provider emits another schema call', async () => {
     saveCacheSafeParams(
       {
         tools: [{ functionDeclarations: [{ name: 'edit' }] }],
@@ -471,6 +471,23 @@ describe('runForkedAgent (cache path)', () => {
                 promptTokenCount: 5,
                 candidatesTokenCount: 3,
               },
+            },
+          };
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      {
+                        functionCall: { name: 'respond_in_schema', args: {} },
+                      },
+                    ],
+                  },
+                },
+              ],
             },
           };
         }
