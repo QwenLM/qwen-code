@@ -593,6 +593,11 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  commandIdleStateRef?: React.RefObject<{
+    streamingState: StreamingState;
+    localCommandDispatchStartedIdle: boolean;
+    activeModelStreams: number;
+  }>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -875,10 +880,21 @@ export const useLlmStream = (
 
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
-  const [localCommandDispatchStartedIdle, setLocalCommandDispatchStartedIdle] =
-    useState(false);
+  const localCommandDispatchStartedIdleRef = useRef(false);
+  const localCommandDispatchTokenRef = useRef(0);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
+  const internalCommandIdleStateRef = useRef<{
+    streamingState: StreamingState;
+    localCommandDispatchStartedIdle: boolean;
+    activeModelStreams: number;
+  }>({
+    streamingState: StreamingState.Idle,
+    localCommandDispatchStartedIdle: false,
+    activeModelStreams: 0,
+  });
+  const liveCommandIdleStateRef =
+    commandIdleStateRef ?? internalCommandIdleStateRef;
   // A continuation may be admitted while an earlier submission is finalizing.
   const submissionActivitiesByGenerationRef = useRef(new Map<number, number>());
   const settleSubmissionStateIfIdle = useCallback(() => {
@@ -1323,6 +1339,7 @@ export const useLlmStream = (
     }
     return StreamingState.Idle;
   }, [isResponding, toolCalls]);
+  liveCommandIdleStateRef.current.streamingState = streamingState;
 
   useEffect(() => {
     if (
@@ -3671,10 +3688,13 @@ export const useLlmStream = (
         submitType === SendMessageType.UserQuery &&
         typeof query === 'string' &&
         isSlashCommand(query.trim());
+      let localCommandDispatchToken: number | undefined;
       if (isLocalSlashCommand) {
-        setLocalCommandDispatchStartedIdle(
-          streamingState === StreamingState.Idle,
-        );
+        localCommandDispatchToken = ++localCommandDispatchTokenRef.current;
+        const startedIdle = streamingState === StreamingState.Idle;
+        localCommandDispatchStartedIdleRef.current = startedIdle;
+        liveCommandIdleStateRef.current.localCommandDispatchStartedIdle =
+          startedIdle;
       }
 
       // A thrown stream can leave partial assistant runs in the dynamic
@@ -3848,8 +3868,12 @@ export const useLlmStream = (
           metadata?.onAdmissionFailed?.();
           throw error;
         } finally {
-          if (isLocalSlashCommand) {
-            setLocalCommandDispatchStartedIdle(false);
+          if (
+            isLocalSlashCommand &&
+            localCommandDispatchToken === localCommandDispatchTokenRef.current
+          ) {
+            localCommandDispatchStartedIdleRef.current = false;
+            liveCommandIdleStateRef.current.localCommandDispatchStartedIdle = false;
           }
         }
         const { queryToSend, shouldProceed, scheduledToolCallId } =
@@ -4017,6 +4041,8 @@ export const useLlmStream = (
         }
 
         activeModelStreamsRef.current += 1;
+        liveCommandIdleStateRef.current.activeModelStreams =
+          activeModelStreamsRef.current;
         setIsResponding(true);
         setInitError(null);
         // Entering "requesting" phase — no content yet for this API call.
@@ -4311,6 +4337,8 @@ export const useLlmStream = (
             0,
             activeModelStreamsRef.current - 1,
           );
+          liveCommandIdleStateRef.current.activeModelStreams =
+            activeModelStreamsRef.current;
           const shouldDrainCompletedToolBatches =
             activeModelStreamsRef.current === 0;
           if (goalBinding) {
@@ -4410,6 +4438,7 @@ export const useLlmStream = (
       releaseUndeliveredGoalTurn,
       retainSubmissionActivity,
       setSubmissionInFlight,
+      liveCommandIdleStateRef,
     ],
   );
 
@@ -6773,8 +6802,12 @@ export const useLlmStream = (
 
   return {
     streamingState,
-    localCommandDispatchIsIdle:
-      localCommandDispatchStartedIdle && activeModelStreamsRef.current === 0,
+    get localCommandDispatchIsIdle() {
+      return (
+        localCommandDispatchStartedIdleRef.current &&
+        activeModelStreamsRef.current === 0
+      );
+    },
     submitQuery,
     initError,
     pendingHistoryItems,

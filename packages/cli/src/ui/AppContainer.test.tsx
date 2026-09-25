@@ -139,6 +139,7 @@ import {
 } from './utils/commandUtils.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './utils/findings-coalescing.js';
 import { ICON } from './constants.js';
+import { setUpdateHandler } from './handleAutoUpdate.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
 import type { Content } from '@google/genai';
@@ -388,6 +389,7 @@ describe('AppContainer State Management', () => {
   const mockedUseModelCommand = useModelCommand as Mock;
   const mockedUseSlashCommandProcessor = useSlashCommandProcessor as Mock;
   const mockedUseLlmStream = useLlmStream as Mock;
+  const mockedSetUpdateHandler = setUpdateHandler as Mock;
   const mockedUseVim = useVim as Mock;
   const mockedUseFolderTrust = useFolderTrust as Mock;
   const mockedUseIdeTrustListener = useIdeTrustListener as Mock;
@@ -3116,7 +3118,7 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      const goalQueueRef = mockedUseLlmStream.mock.lastCall?.at(-1) as
+      const goalQueueRef = mockedUseLlmStream.mock.lastCall?.at(-2) as
         | {
             current: {
               submissionInFlightRef: { current: boolean };
@@ -3131,23 +3133,49 @@ describe('AppContainer State Management', () => {
       });
 
       expect(mockSubmitQuery).not.toHaveBeenCalled();
-      expect(mockQueueMessage).toHaveBeenCalledWith('/help', false, '/help');
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '/help',
+        false,
+        '/help',
+        false,
+      );
     });
 
-    it.each([true, false])(
-      'passes command-only idle state to slash processing (%s)',
-      (localCommandDispatchIsIdle) => {
-        mockedUseLlmStream.mockReturnValue({
-          streamingState: StreamingState.Responding,
-          localCommandDispatchIsIdle,
-          submitQuery: vi.fn(),
-          initError: null,
-          pendingHistoryItems: [],
-          thought: null,
-          cancelOngoingRequest: vi.fn(),
-          retryLastPrompt: vi.fn(),
-          streamingResponseLengthRef: { current: 0 },
-          isReceivingContent: false,
+    it.each([
+      [StreamingState.Responding, true],
+      [StreamingState.Responding, false],
+      [StreamingState.Idle, false],
+    ])(
+      'passes command idle state to slash processing (%s, local dispatch idle: %s)',
+      (streamingState, localCommandDispatchIsIdle) => {
+        mockedSetUpdateHandler.mockClear();
+        mockedUseLlmStream.mockImplementation((...args) => {
+          const commandIdleStateRef = args[25] as
+            | {
+                current: {
+                  streamingState: StreamingState;
+                  localCommandDispatchStartedIdle: boolean;
+                  activeModelStreams: number;
+                };
+              }
+            | undefined;
+          if (commandIdleStateRef) {
+            commandIdleStateRef.current.streamingState = streamingState;
+            commandIdleStateRef.current.localCommandDispatchStartedIdle =
+              localCommandDispatchIsIdle;
+          }
+          return {
+            streamingState,
+            localCommandDispatchIsIdle,
+            submitQuery: vi.fn(),
+            initError: null,
+            pendingHistoryItems: [],
+            thought: null,
+            cancelOngoingRequest: vi.fn(),
+            retryLastPrompt: vi.fn(),
+            streamingResponseLengthRef: { current: 0 },
+            isReceivingContent: false,
+          };
         });
 
         render(
@@ -3162,7 +3190,16 @@ describe('AppContainer State Management', () => {
         const commandIdleRef = mockedUseSlashCommandProcessor.mock.calls.at(
           -1,
         )?.[10] as { current: boolean } | undefined;
-        expect(commandIdleRef?.current).toBe(localCommandDispatchIsIdle);
+        expect(commandIdleRef?.current).toBe(
+          streamingState === StreamingState.Idle || localCommandDispatchIsIdle,
+        );
+
+        const appWideIdleRef = mockedSetUpdateHandler.mock.calls.at(-1)?.[2] as
+          | { current: boolean }
+          | undefined;
+        expect(appWideIdleRef?.current).toBe(
+          streamingState === StreamingState.Idle,
+        );
       },
     );
 

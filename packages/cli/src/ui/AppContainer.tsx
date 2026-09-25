@@ -1466,7 +1466,24 @@ export const AppContainer = (props: AppContainerProps) => {
   const isIdleRef = useRef(true);
   // Slash-command guards need the idle state of the dispatching command,
   // without making app-wide consumers treat that dispatch as idle.
-  const commandIdleRef = useRef(true);
+  const commandIdleStateRef = useRef({
+    streamingState: StreamingState.Idle as StreamingState,
+    localCommandDispatchStartedIdle: false,
+    activeModelStreams: 0,
+  });
+  const commandIdleRef = useMemo(
+    () => ({
+      get current() {
+        const state = commandIdleStateRef.current;
+        return (
+          state.streamingState === StreamingState.Idle ||
+          (state.localCommandDispatchStartedIdle &&
+            state.activeModelStreams === 0)
+        );
+      },
+    }),
+    [],
+  );
   // Live content-area height, kept in a ref so useLlmStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -2447,7 +2464,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     streamingState,
-    localCommandDispatchIsIdle,
     submitQuery,
     initError,
     pendingHistoryItems: pendingLlmHistoryItems,
@@ -2488,16 +2504,14 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    commandIdleStateRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
 
-  // Now that streamingState is available, keep isIdleRef in sync and
-  // flush any deferred update notifications when the model finishes responding.
+  // Keep the app-wide idle ref narrow for deferred update notifications. The
+  // command-facing ref reads the shared live state synchronously instead.
   isIdleRef.current = streamingState === StreamingState.Idle;
-  commandIdleRef.current =
-    streamingState === StreamingState.Idle ||
-    localCommandDispatchIsIdle === true;
 
   useEffect(() => {
     if (streamingState === StreamingState.Idle) {

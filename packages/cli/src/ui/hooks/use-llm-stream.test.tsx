@@ -13346,6 +13346,64 @@ describe('useLlmStream', () => {
       expect(hook.result.current.streamingState).toBe(StreamingState.Idle);
     });
 
+    it('does not let an older cancelled slash dispatch clear a newer dispatch', async () => {
+      let releaseFirstLog!: () => void;
+      let releaseSecondLog!: () => void;
+      mockLogMessage
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseFirstLog = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseSecondLog = resolve;
+            }),
+        );
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+      const onCancelSubmit = vi.fn();
+      const hook = renderTestHook([], undefined, undefined, onCancelSubmit, {
+        logMessage: mockLogMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+
+      let firstSubmission!: Promise<void>;
+      let secondSubmission!: Promise<void>;
+      await act(async () => {
+        firstSubmission = hook.result.current.submitQuery('/cmd-a');
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(1));
+
+      act(() => {
+        hook.result.current.cancelOngoingRequest();
+      });
+      expect(onCancelSubmit).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(hook.result.current.streamingState).toBe(StreamingState.Idle),
+      );
+
+      await act(async () => {
+        secondSubmission = hook.result.current.submitQuery('/cmd-b');
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(2));
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+
+      await act(async () => {
+        releaseFirstLog();
+        await firstSubmission;
+      });
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+
+      await act(async () => {
+        releaseSecondLog();
+        await secondSubmission;
+      });
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+    });
+
     it('does not expose command-idle while a detached continuation streams', async () => {
       let releaseLog!: () => void;
       let releaseToolStream!: () => void;
@@ -13407,11 +13465,6 @@ describe('useLlmStream', () => {
           await Promise.resolve();
         });
         await waitFor(() => expect(releaseToolStream).toBeDefined());
-        await act(async () => {
-          hook.rerenderWithHistory([
-            { id: 1, type: MessageType.INFO, text: 'force ref projection' },
-          ]);
-        });
 
         expect(hook.result.current.streamingState).toBe(
           StreamingState.Responding,
