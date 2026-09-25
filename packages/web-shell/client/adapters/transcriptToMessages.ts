@@ -1920,9 +1920,6 @@ function daemonToolPreviewToArgs(
           ? { parentDelegationId: preview.parentDelegationId }
           : {}),
       };
-    case 'mcp_invocation':
-      // An absent summary is the daemon's confirmed no-argument signal.
-      return preview.argsSummary === undefined ? {} : undefined;
     default:
       return undefined;
   }

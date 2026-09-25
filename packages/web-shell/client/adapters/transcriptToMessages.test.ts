@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createDaemonToolPreview,
   createDaemonTranscriptState,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
@@ -3118,17 +3119,26 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('keeps confirmed-empty MCP args in safe projection', () => {
+  it.each([
+    { name: 'missing input', input: undefined },
+    { name: 'null input', input: null },
+    { name: 'name argument', input: { name: 'health' } },
+    { name: 'toolName argument', input: { toolName: 'health' } },
+  ])('does not infer empty MCP args from a preview: $name', ({ input }) => {
+    const toolName = 'mcp__sample__ping';
+    const title = 'ping (sample MCP Server): {}';
+    const preview = createDaemonToolPreview(input, { toolName, title });
+    expect(preview).toEqual({
+      kind: 'mcp_invocation',
+      serverId: 'sample',
+      toolName: 'ping',
+    });
     const messages = transcriptBlocksToDaemonMessages(
       [
         toolBlock('mcp-safe', 'mcp-call', 'completed', 1, {
-          toolName: 'mcp__sample__ping',
-          title: 'ping (sample MCP Server): {}',
-          preview: {
-            kind: 'mcp_invocation',
-            serverId: 'sample',
-            toolName: 'ping',
-          },
+          toolName,
+          title,
+          preview,
           rawInput: undefined,
         }),
       ],
@@ -3138,8 +3148,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
 
     expect(tool).toBeDefined();
-    expect(tool?.args).toEqual({});
-    expect(getToolDescription(tool!)).toBe('');
+    expect(tool?.args).toBeUndefined();
+    expect(getToolDescription(tool!)).toBe(title);
   });
 
   it.each(['cancelled', 'canceled'])(
