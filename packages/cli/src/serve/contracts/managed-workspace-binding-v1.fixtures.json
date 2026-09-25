@@ -1,0 +1,1107 @@
+{
+  "contractVersion": 1,
+  "digest": {
+    "algorithm": "sha256",
+    "prefix": "sha256:",
+    "domainTag": "qwen-managed-context-binding-v1",
+    "fieldOrder": [
+      "tenantId",
+      "workspaceId",
+      "workspaceGeneration",
+      "storageId",
+      "cwdRelative",
+      "contextConfigRef",
+      "contextRevision"
+    ]
+  },
+  "paths": [
+    {
+      "id": "root-dot",
+      "input": ".",
+      "expected": {
+        "cwdRelative": "."
+      }
+    },
+    {
+      "id": "root-dot-slash",
+      "input": "./",
+      "expected": {
+        "cwdRelative": "."
+      }
+    },
+    {
+      "id": "root-dot-slash-dot",
+      "input": "./.",
+      "expected": {
+        "cwdRelative": "."
+      }
+    },
+    {
+      "id": "root-repeated-separators",
+      "input": ".//./",
+      "expected": {
+        "cwdRelative": "."
+      }
+    },
+    {
+      "id": "plain-child",
+      "input": "services",
+      "expected": {
+        "cwdRelative": "services"
+      }
+    },
+    {
+      "id": "nested-child",
+      "input": "services/api",
+      "expected": {
+        "cwdRelative": "services/api"
+      }
+    },
+    {
+      "id": "trailing-slash",
+      "input": "services/api/",
+      "expected": {
+        "cwdRelative": "services/api"
+      }
+    },
+    {
+      "id": "repeated-separators",
+      "input": "services//api",
+      "expected": {
+        "cwdRelative": "services/api"
+      }
+    },
+    {
+      "id": "dot-segments",
+      "input": "./services/./api/.",
+      "expected": {
+        "cwdRelative": "services/api"
+      }
+    },
+    {
+      "id": "spaces-kept",
+      "input": " a /b ",
+      "expected": {
+        "cwdRelative": " a /b "
+      }
+    },
+    {
+      "id": "space-only-segment",
+      "input": "a/   /b",
+      "expected": {
+        "cwdRelative": "a/   /b"
+      }
+    },
+    {
+      "id": "case-kept",
+      "input": "Services/API",
+      "expected": {
+        "cwdRelative": "Services/API"
+      }
+    },
+    {
+      "id": "non-ascii",
+      "input": "项目/服务 一",
+      "expected": {
+        "cwdRelative": "项目/服务 一"
+      }
+    },
+    {
+      "id": "nfd-not-normalized",
+      "input": "café",
+      "expected": {
+        "cwdRelative": "café"
+      }
+    },
+    {
+      "id": "astral-characters",
+      "input": "𝄞/🎵",
+      "expected": {
+        "cwdRelative": "𝄞/🎵"
+      }
+    },
+    {
+      "id": "triple-dot-segment",
+      "input": ".../a",
+      "expected": {
+        "cwdRelative": ".../a"
+      }
+    },
+    {
+      "id": "dot-dot-prefixed-names",
+      "input": "..a/b..",
+      "expected": {
+        "cwdRelative": "..a/b.."
+      }
+    },
+    {
+      "id": "dot-dot-space-segment",
+      "input": ".. /a",
+      "expected": {
+        "cwdRelative": ".. /a"
+      }
+    },
+    {
+      "id": "tilde-is-literal",
+      "input": "~/x",
+      "expected": {
+        "cwdRelative": "~/x"
+      }
+    },
+    {
+      "id": "percent-not-decoded",
+      "input": "%2e%2e/a",
+      "expected": {
+        "cwdRelative": "%2e%2e/a"
+      }
+    },
+    {
+      "id": "colon-after-two-letters",
+      "input": "ab:c",
+      "expected": {
+        "cwdRelative": "ab:c"
+      }
+    },
+    {
+      "id": "max-length-ascii",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "cwdRelative": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "id": "max-length-astral",
+      "input": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞",
+      "expected": {
+        "cwdRelative": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞"
+      }
+    },
+    {
+      "id": "empty",
+      "input": "",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "absolute",
+      "input": "/srv/a",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "absolute-root",
+      "input": "/",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "double-slash-absolute",
+      "input": "//a",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-upper",
+      "input": "C:x",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-lower-slash",
+      "input": "c:/x",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-only",
+      "input": "Z:",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-after-dot-segment",
+      "input": "./C:x",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-after-empty-segments",
+      "input": ".//c:/x",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-only-after-dot-segment",
+      "input": "./Z:",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-like-name-in-later-segment",
+      "input": "a/C:x",
+      "expected": {
+        "cwdRelative": "a/C:x"
+      }
+    },
+    {
+      "id": "backslash",
+      "input": "a\\b",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "backslash-only",
+      "input": "\\",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "parent",
+      "input": "..",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "parent-leading",
+      "input": "../a",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "parent-inner",
+      "input": "a/../b",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "parent-trailing",
+      "input": "a/..",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "parent-after-dot",
+      "input": "./..",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "nul",
+      "input": "a\u0000b",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "newline",
+      "input": "a\nb",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "escape-sequence",
+      "input": "a\u001b[31mb",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "del",
+      "input": "a\u007fb",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "c1-csi",
+      "input": "a\u009bb",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "last-c0-control",
+      "input": "a\u001fb",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "first-c1-control",
+      "input": "a\u0080b",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "last-c1-control",
+      "input": "a\u009fb",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "no-break-space-kept",
+      "input": "a b",
+      "expected": {
+        "cwdRelative": "a b"
+      }
+    },
+    {
+      "id": "lone-high-surrogate",
+      "input": "a\ud800",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "lone-low-surrogate",
+      "input": "\udc00a",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "high-surrogate-before-ascii",
+      "input": "\ud800a",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "two-high-surrogates",
+      "input": "\ud800\ud800a",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "digit-before-colon",
+      "input": "1:x",
+      "expected": {
+        "cwdRelative": "1:x"
+      }
+    },
+    {
+      "id": "dot-before-drive-like-name",
+      "input": ".C:x",
+      "expected": {
+        "cwdRelative": ".C:x"
+      }
+    },
+    {
+      "id": "non-ascii-letter-before-colon",
+      "input": "é:x",
+      "expected": {
+        "cwdRelative": "é:x"
+      }
+    },
+    {
+      "id": "kelvin-sign-before-colon",
+      "input": "K:x",
+      "expected": {
+        "cwdRelative": "K:x"
+      }
+    },
+    {
+      "id": "long-s-before-colon",
+      "input": "ſ:x",
+      "expected": {
+        "cwdRelative": "ſ:x"
+      }
+    },
+    {
+      "id": "leading-colon",
+      "input": ":x",
+      "expected": {
+        "cwdRelative": ":x"
+      }
+    },
+    {
+      "id": "drive-first-upper-letter",
+      "input": "A:x",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-first-lower-letter",
+      "input": "a:x",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "drive-last-lower-letter",
+      "input": "z:x",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "at-sign-before-colon",
+      "input": "@:x",
+      "expected": {
+        "cwdRelative": "@:x"
+      }
+    },
+    {
+      "id": "left-bracket-before-colon",
+      "input": "[:x",
+      "expected": {
+        "cwdRelative": "[:x"
+      }
+    },
+    {
+      "id": "backtick-before-colon",
+      "input": "`:x",
+      "expected": {
+        "cwdRelative": "`:x"
+      }
+    },
+    {
+      "id": "left-brace-before-colon",
+      "input": "{:x",
+      "expected": {
+        "cwdRelative": "{:x"
+      }
+    },
+    {
+      "id": "too-long-ascii",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "too-long-astral",
+      "input": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    },
+    {
+      "id": "too-long-before-normalization",
+      "input": "./././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././",
+      "expected": {
+        "error": "invalid_cwd"
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "id": "root",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000001370000001773746f726167653a2f2f7076632f70726f6a6563742d61000000012e00000013636f6e6669673a62756e646c652d33407231320000000131",
+        "contextDigest": "sha256:53806bd3c066c6594c331e02a3a88df2ff50f334a793fa579837fb99a5b3d1dd"
+      }
+    },
+    {
+      "id": "subdirectory",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": "services/api",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000001370000001773746f726167653a2f2f7076632f70726f6a6563742d610000000c73657276696365732f61706900000013636f6e6669673a62756e646c652d33407231320000000131",
+        "contextDigest": "sha256:60edeb0b26dfb61fa32e3a50c344403d4d7ece051f26b931ec0798684057caea"
+      }
+    },
+    {
+      "id": "next-revision",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "2"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000001370000001773746f726167653a2f2f7076632f70726f6a6563742d61000000012e00000013636f6e6669673a62756e646c652d33407231320000000132",
+        "contextDigest": "sha256:3ca59f0cc17a4d2482b091659ff161f48f594c635f720a0c8eed6edf16364e42"
+      }
+    },
+    {
+      "id": "non-ascii-cwd",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": "项目/服务 一",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000001370000001773746f726167653a2f2f7076632f70726f6a6563742d6100000011e9a1b9e79bae2fe69c8de58aa120e4b88000000013636f6e6669673a62756e646c652d33407231320000000131",
+        "contextDigest": "sha256:c0d48b6ac064d85e94c24f417db08d763e1c22c94fbd48d30b43c4f3a17aea8c"
+      }
+    },
+    {
+      "id": "nfc-cwd",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": "café",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000001370000001773746f726167653a2f2f7076632f70726f6a6563742d6100000005636166c3a900000013636f6e6669673a62756e646c652d33407231320000000131",
+        "contextDigest": "sha256:a4066febca7e929af5681030f1a0d4a4b4b6ba3e20937e70e43d87e0e437cf1c"
+      }
+    },
+    {
+      "id": "nfd-cwd",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": "café",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000001370000001773746f726167653a2f2f7076632f70726f6a6563742d610000000663616665cc8100000013636f6e6669673a62756e646c652d33407231320000000131",
+        "contextDigest": "sha256:b9c74ac329181219b5a4d151b6f4c7b163af0ce41021931885ae4f199f09fd9e"
+      }
+    },
+    {
+      "id": "space-only-segment-cwd",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": "a/   /b",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000001370000001773746f726167653a2f2f7076632f70726f6a6563742d6100000007612f2020202f6200000013636f6e6669673a62756e646c652d33407231320000000131",
+        "contextDigest": "sha256:6ee8af7a8e0056c3af6aefc435164fbafce166cfb912b8ee6f6eb1d5938ab410"
+      }
+    },
+    {
+      "id": "shortest-values",
+      "binding": {
+        "tenantId": "t",
+        "workspaceId": "w",
+        "workspaceGeneration": "1",
+        "storageId": "!",
+        "cwdRelative": ".",
+        "contextConfigRef": "~",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000174000000017700000001310000000121000000012e000000017e0000000131",
+        "contextDigest": "sha256:5935d6ecb37b594068330a22377f2a3e75b2195f6245481d4ac55c14babef129"
+      }
+    },
+    {
+      "id": "every-identifier-character-class",
+      "binding": {
+        "tenantId": "Tenant.9:a-b_C",
+        "workspaceId": "A_z.0:9-Z",
+        "workspaceGeneration": "7",
+        "storageId": "!~#$%&'()*+,-./0:;<=>?@A[]^_`a{|}",
+        "cwdRelative": ".",
+        "contextConfigRef": "~!\"#config@Z",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000e54656e616e742e393a612d625f4300000009415f7a2e303a392d5a000000013700000021217e232425262728292a2b2c2d2e2f303a3b3c3d3e3f40415b5d5e5f60617b7c7d000000012e0000000c7e212223636f6e666967405a0000000131",
+        "contextDigest": "sha256:ff8f7132670c154b3d67663ae8e77d7e7f86585e772cbf9cee7fe1b090092e6e"
+      }
+    },
+    {
+      "id": "above-2-pow-53",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "9007199254740993",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "9223372036854775807"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d76310000000874656e616e742d610000000c77735f70726f6a6563745f6100000010393030373139393235343734303939330000001773746f726167653a2f2f7076632f70726f6a6563742d61000000012e00000013636f6e6669673a62756e646c652d33407231320000001339323233333732303336383534373735383037",
+        "contextDigest": "sha256:762fd7b80d892920abdfad106197027936976627340005d48c6cc0525e287687"
+      }
+    },
+    {
+      "id": "every-length-at-its-limit",
+      "binding": {
+        "tenantId": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "workspaceId": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
+        "workspaceGeneration": "7",
+        "storageId": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+        "cwdRelative": ".",
+        "contextConfigRef": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "encodedHex": "0000001f7177656e2d6d616e616765642d636f6e746578742d62696e64696e672d763100000080747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747400000080777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777700000001370000010073737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373000000012e0000020063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363630000000131",
+        "contextDigest": "sha256:ffa294595e90b9efbac2fbc692b7126a4a8bf65e9b1f4b4ecef78053642406c4"
+      }
+    },
+    {
+      "id": "non-normalized-cwd",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": "./services",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "invalid-cwd",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": "../x",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "zero-generation",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "0",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "leading-zero-generation",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "07",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "generation-above-int64",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "9223372036854775808",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "negative-revision",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "-1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "zero-revision",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "0"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "leading-zero-revision",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "01"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "workspace-id-with-slash",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws/a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "empty-tenant",
+      "binding": {
+        "tenantId": "",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "tenant-too-long",
+      "binding": {
+        "tenantId": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "storage-id-with-space",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "storage-id-too-long",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "config-ref-non-ascii",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:é",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "empty-config-ref",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "empty-workspace-id",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "empty-storage-id",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "storage-id-with-del",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage\u007f",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "config-ref-with-del",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config\u007f",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "config-ref-with-space",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config a",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "revision-above-int64",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "9223372036854775808"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "plus-sign-revision",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "+1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "space-before-revision",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": " 1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "space-after-generation",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7 ",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "arabic-indic-digit-generation",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "٧",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "fullwidth-digit-revision",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "１"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "config-ref-too-long",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "ws_project_a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    },
+    {
+      "id": "workspace-id-too-long",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/project-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "config:bundle-3@r12",
+        "contextRevision": "1"
+      },
+      "expected": {
+        "error": "invalid_binding"
+      }
+    }
+  ]
+}

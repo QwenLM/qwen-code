@@ -1,0 +1,317 @@
+# Managed Workspace Binding Contract (W0a)
+
+[English](2026-09-25-managed-workspace-binding-contract.md) | [简体中文](2026-09-25-managed-workspace-binding-contract.zh-CN.md)
+
+Status: implemented at the module boundary; nothing is wired yet. Updated: 2026-09-25. This is the first W0 slice of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). The module placement and the timing of the boot envelope remain open for review in [this comment](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126).
+
+## Problem
+
+A hosted Managed Session must run its tools in a Workspace that an administrator registered and that the actor is allowed to use. Tools start from a relative directory chosen when the Session is created. That choice must survive retries, restarts and changes to the tenant default. Java admission, the Runtime Broker and the Runtime worker must also agree on it byte for byte.
+
+Today no layer defines the choice. The Broker receives whatever `RuntimeScope` its caller resolves. Nothing validates a relative directory, checks the actor's access, applies a tenant default, or produces an identity that the worker can verify. If each layer later validates on its own terms, two failures become possible. A path that one layer normalizes and another rejects can put tools in the wrong directory. A default that is re-resolved on retry can move a Session to another Workspace.
+
+## Current state
+
+The facts below are from `main` at `3413e8cc57`.
+
+- **Broker scope.** `RuntimeScope` carries `tenantId`, `workspaceId`, `workspaceGeneration` (a string), `canonicalCwd`, `capabilityDigest` and `isolationClass`. `HarnessSessionResolver` resolves one scope per Harness Session, and the Broker does not authenticate these values. `LocalProcessRuntimeProvisioner` copies `workspaceId`, `workspaceGeneration` and the canonical cwd into the worker's boot document.
+- **Worker contract.** The boot document is closed-key `version: 1`. The v2 attestation request repeats the tenant and Workspace fields: `workspaceId` is opaque, `workspaceGeneration` is a non-empty string (numbers are rejected), and `workspaceCwd` is only checked for being non-empty.
+- **Daemon registry.** The daemon's TypeScript `WorkspaceRegistry` routes local multi-workspace traffic. Its `workspaceId` is the first 16 hex characters of SHA-256 over the canonical cwd, and its generation is an in-memory counter. It has five states and no tenant. It is not the hosted Registry, and W0a does not change it.
+- **Session records.** The managed session records from #12302 live in TypeScript core. They key a Session by `{tenantId, workspaceId, sessionId}` and carry no cwd or binding fields.
+- **Missing pieces.** Upstream has no Java control plane, no `managed_agent_session` table and no Managed Agent public OpenAPI. Nothing defines a Workspace selection, a relative cwd, a context revision or a ContextBinding.
+- **Digests.** Java and TypeScript share no digest canonicalization. The Broker's JDBC repositories already derive keys as SHA-256 over length-prefixed UTF-8 fields (`JdbcRepositorySupport.digest`). TypeScript core has a private canonical-JSON digest for session records.
+
+## Goals
+
+- One lexical rule for the relative working directory (`cwdRelative`), based on the `WorkspaceRelativePath` rule of the reference contract. Language-neutral fixtures pin it, so Java and TypeScript reject and normalize the same inputs.
+- A Workspace Registry record and a read contract, backed first by deployment configuration.
+- Actor-scoped access with three levels. It drives list visibility, the `can_create_session` hint and creation admission.
+- A pure resolver that turns an actor and an optional selection into either a resolved Workspace or exactly one typed error. It covers the tenant default for an omitted selection.
+- A `ContextBinding` value whose `contextDigest` Java and TypeScript compute identically, pinned by shared fixtures.
+- A normalized form of the caller's selection, including an omission marker, that W0b can fold into its request digest.
+
+## Non-goals
+
+- Persisting Session bindings, creation receipts or operations. That is W0b.
+- Resolving storage to a mount; wiring the Broker, Harness or worker; opening an activation gate. That is W0c.
+- The versioned boot envelope `managed-context/1` and any attestation version bump. See [Boot envelope](#boot-envelope).
+- Public or BFF DTOs, routes, cursors and capability advertisement. `workspace_context` stays false. That is Stage D and W0d.
+- Agent, Bundle and configuration compatibility checks at admission. That is W0b.
+- Filesystem checks: existence, realpath, symlinks and mount identity. Those belong to the Runtime in W0c.
+- JDBC tables for the Registry. The configuration-backed Registry needs none, and the Runtime Broker schema stays unchanged.
+- Changes to the daemon `WorkspaceRegistry` or to daemon routes.
+
+## Module placement
+
+Option A is implemented, and the choice remains open for review in #12380. Either way the code stays framework-neutral: no Spring, no CLI internals, no scheduler, and no fallback to in-memory state behind a failing durable source.
+
+| Option          | Location                                                                                                                 | For                                                                                                                                                                                                                        | Against                                                                                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A (recommended) | A new module `packages/sdk-java/managed-workspace` (artifact `qwen-managed-workspace`, Java 21, no runtime dependencies) | The Registry, access and resolution are control-plane admission, not Broker state. The module does not overlap the open Broker PRs (#12627, #12630, #12637). The Broker depends on its small `ContextBinding` type in W0c. | The SDK Java workflow runs modules explicitly. The self-hosted and hosted Java 21 steps, the Checkstyle step and `scripts/tests/sdk-java-workflow.test.js` each need the new module. |
+| B               | A package inside `runtime-broker`                                                                                        | No CI change. `ContextBinding` sits next to its first consumer.                                                                                                                                                            | The module's README and QWEN.md limit it to Broker state and exclude public Agent resources. Its README is also being edited by #12627.                                              |
+
+In both options, the shared fixtures and the TypeScript twin of the rule and the digest live under `packages/cli/src/serve`, next to the existing Runtime contracts.
+
+## Vocabulary
+
+Several words below already have other meanings in this repository.
+
+| Term                 | Meaning here                                                                                                                                         | Not to be confused with                                                                              |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Workspace ID         | Opaque and assigned by an administrator. It matches `[A-Za-z0-9._:-]{1,128}`, is unique within a tenant and is compared byte for byte.               | The daemon's path-hash `workspaceId`.                                                                |
+| workspace generation | The Registry's replacement counter: a positive 64-bit integer that only grows for a Workspace ID. On the wire and in digests it is a decimal string. | A Runtime binding generation, the daemon's `generationId`, or the `workspace_generation` capability. |
+| storage ID           | The logical identity of the Workspace's durable files.                                                                                               | A mount path.                                                                                        |
+| ContextBinding       | The Session's committed Workspace context.                                                                                                           | A Runtime binding, which places a Runtime.                                                           |
+| contextRevision      | The version of the Session's context. It is 1 at creation, and W2 raises it.                                                                         | The workspace generation, a configuration revision, or an activation epoch.                          |
+
+## Workspace Registry
+
+### Record
+
+A Registry record has these fields. The record is immutable.
+
+| Field                 | Rule                                                             |
+| --------------------- | ---------------------------------------------------------------- |
+| `tenantId`            | `[A-Za-z0-9._:-]{1,128}`                                         |
+| `workspaceId`         | `[A-Za-z0-9._:-]{1,128}`                                         |
+| `workspaceGeneration` | An integer from 1 to 2^63−1                                      |
+| `storageId`           | 1 to 256 printable ASCII characters (0x21 to 0x7E)               |
+| `displayName`         | 1 to 512 code points, well-formed Unicode, no control characters |
+| `state`               | `active`, `draining` or `removed`                                |
+| `policyRef`           | 1 to 512 printable ASCII characters                              |
+| `configRef`           | 1 to 512 printable ASCII characters                              |
+
+The identifier pattern is the tenant pattern of the Java SDK's `ManagedSessionStoreConnection`, applied here to Workspace IDs as well. It is also a subset of the stable-ID rule for the TypeScript managed session key, so a hosted Workspace ID is valid in both places. ASCII identifiers also mean no Unicode normalization is ever needed before a digest.
+
+### States
+
+| State      | Listed | Selectable for a new Session | Can be the default |
+| ---------- | ------ | ---------------------------- | ------------------ |
+| `active`   | yes    | yes                          | yes                |
+| `draining` | yes    | no (`workspace_unavailable`) | no                 |
+| `removed`  | yes    | no (`workspace_unavailable`) | no                 |
+
+Existing Sessions keep their binding in every state. What a draining or removed Workspace means for them belongs to W0e and W1.
+
+### Configuration source
+
+The read interface offers three operations:
+
+- Find one record by tenant and Workspace ID.
+- Page through a tenant's records in byte order of the Workspace ID, which matches the `ascii_bin` collation of the reference schema. A page shorter than the limit means that no records follow, and every implementation accepts limits from 1 to 1000.
+- Return the tenant's configured default Workspace ID.
+
+The first implementation is an immutable snapshot built from deployment configuration. Construction rejects the snapshot when:
+
+- A `(tenantId, workspaceId)` pair appears twice.
+- A tenant default names a Workspace that is not in that tenant.
+- Any field breaks its rule.
+
+There is no public registration API, and no Workspace ID is derived from a path.
+
+The embedding service applies a change by replacing the snapshot. A successor check rejects a replacement that would do any of the following:
+
+- Drop a Workspace. A Workspace is retired by moving it to `removed`, so Sessions pinned to it can still be explained later.
+- Lower a Workspace's generation.
+- Change its `storageId` without raising its generation.
+
+A later JDBC Registry, backed by the reference `managed_agent_workspace` table, can implement the same interface.
+
+## Actor access
+
+The embedding service authenticates the actor and passes in a tenant ID and an actor ID. W0a never reads either from a request body. A policy returns one of three access levels for an actor and a record:
+
+- `NONE`
+- `READ`
+- `CREATE`, which implies `READ`
+
+Lookups are always scoped to the actor's tenant. A Workspace in another tenant cannot be told apart from a missing one, whatever the policy says. The policy is evaluated on every call and is never baked into a page or a result. W0a ships one explicit-grant policy for tests and single-tenant deployments; there is no allow-all default.
+
+Listing returns the records the actor can read, each with `canCreateSession`. That field is a permission hint only; the state is reported separately and the caller combines the two. Records come in Workspace ID order, with `hasMore` and a `defaultWorkspace`. The default is computed independently of the page and is present only when the tenant default exists, is `active`, and the actor has `CREATE`. Paging is by the last Workspace ID seen. The catalog reads the Registry in batches of 1000 whatever the page size, so records the actor cannot read cost few round trips. Opaque cursors bound to tenant, actor and query belong to the API layer.
+
+## Working-directory rule
+
+`cwdRelative` is a string. The API layer turns an omitted field into `.` and rejects `null`. Every violation below is `invalid_cwd`.
+
+1. The value must be well-formed Unicode, with no unpaired surrogate.
+2. Its length must be 1 to 1024 code points, the way JSON Schema counts. The empty string is invalid; it is not `.`.
+3. It must contain no control character: Unicode category Cc, which covers C0 (including NUL), DEL and C1. The reference contract names only NUL; see [Open questions](#open-questions).
+4. It must contain no backslash.
+5. It must not start with `/`.
+6. Its normal form, described below, must not start with a drive prefix: an ASCII letter followed by `:`. Checking the normal form also rejects spellings such as `./C:x`.
+7. After splitting on `/`, no segment may be exactly `..`.
+
+Normalization then drops empty segments (from repeated or trailing `/`) and `.` segments, and joins the rest with `/`. If nothing is left, the result is `.`. Nothing else changes: spaces, case and non-ASCII characters are kept, there is no Unicode normalization, and nothing is percent-decoded. ContextBinding carries the normalized value, and W0b digests it.
+
+| Input                | Result         |
+| -------------------- | -------------- |
+| `.` or `./` or `./.` | `.`            |
+| `services//api/`     | `services/api` |
+| `./services/./api`   | `services/api` |
+| `a/ b /c`            | `a/ b /c`      |
+| empty string         | `invalid_cwd`  |
+| `..` or `a/../b`     | `invalid_cwd`  |
+| `/srv/a`             | `invalid_cwd`  |
+| `C:x` or `./C:x`     | `invalid_cwd`  |
+| `a\b`                | `invalid_cwd`  |
+
+The rule is lexical only. It does not model Windows name aliasing such as trailing dots or 8.3 names. Before any tool runs, the Runtime must still verify existence, realpath containment, symlinks and mount identity, and it rechecks them at tool boundaries (W0c). The working directory is where tools start; it is not a security boundary.
+
+## Selection resolution
+
+A selection is either omitted, or explicit with a Workspace ID and a `cwdRelative` (`.` when the caller left it out). The API layer rejects `null` and `{}` before resolution.
+
+Resolution runs these checks in order and stops at the first failure. The Java API runs step 1 when the explicit selection is built, so an invalid directory fails before any lookup.
+
+| Step                                        | Explicit selection                                           | Omitted selection                                 |
+| ------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------- |
+| 1. Normalize `cwdRelative`                  | `invalid_cwd`                                                | — (always `.`)                                    |
+| 2. Choose the target                        | its Workspace ID                                             | the tenant default; if none, `workspace_required` |
+| 3. Look up the target in the actor's tenant | missing: `workspace_not_found`                               | missing: `workspace_required`                     |
+| 4. Check access                             | `NONE`: `workspace_not_found`; `READ`: `workspace_forbidden` | not `CREATE`: `workspace_required`                |
+| 5. Check the state                          | not `active`: `workspace_unavailable`                        | not `active`: `workspace_required`                |
+
+On success the result carries:
+
+- the tenant ID, Workspace ID, workspace generation and storage ID;
+- the record's `configRef` and `policyRef`;
+- the normalized `cwdRelative`;
+- whether the tenant default was used.
+
+The syntax check comes first because it needs no lookup and reveals nothing. An omitted selection never yields 404, 403 or 409: an unusable default counts as no default. An explicit selection never falls back to the default.
+
+The resolver is stateless. W0b calls it only on first admission and persists the result atomically with the creation receipt. A retry must find the original receipt first and must not call the resolver again, because a changed default would otherwise rebind the retry. For the request digest, the selection exposes a fixed omission marker, or the Workspace ID with the normalized `cwdRelative`. W0b folds these into its digest with the encoding described below.
+
+## ContextBinding and digest
+
+A ContextBinding has seven required fields, checked with the same rules as the Registry record:
+
+- `tenantId`: `[A-Za-z0-9._:-]{1,128}`
+- `workspaceId`: `[A-Za-z0-9._:-]{1,128}`
+- `workspaceGeneration`: from 1 to 2^63−1
+- `storageId`: 1 to 256 printable ASCII characters
+- `cwdRelative`: already in normal form
+- `contextConfigRef`: 1 to 512 printable ASCII characters
+- `contextRevision`: from 1 to 2^63−1
+
+`contextConfigRef` names the frozen configuration descriptor that W0b records at admission from the Registry's `configRef` and `policyRef`. W0a checks only its format and otherwise treats it as opaque. Nothing supplies `contextDigest`; it is always derived. A decoder that reads the two integers from text must accept only the ASCII form `[1-9][0-9]*` with a value of at most 2^63−1, as the TypeScript implementation does. `Long.parseLong` alone is not enough: it also accepts a sign, leading zeros and non-ASCII digits.
+
+`contextDigest` is `sha256:` followed by the lowercase hex SHA-256 of a byte sequence. The sequence concatenates the items below in order. Each item is a 4-byte big-endian length followed by that many UTF-8 bytes.
+
+1. the domain tag `qwen-managed-context-binding-v1`
+2. `tenantId`
+3. `workspaceId`
+4. `workspaceGeneration`, as a decimal string with no sign and no leading zeros
+5. `storageId`
+6. `cwdRelative`
+7. `contextConfigRef`
+8. `contextRevision`, as a decimal string with no sign and no leading zeros
+
+Reasons for this encoding:
+
+- Length prefixes keep field boundaries unambiguous for any Unicode directory name.
+- There is no JSON escaping or number formatting for fastjson2 and `JSON.stringify` to disagree on.
+- The Broker's repository keys already use the same construction, and it takes a few lines in TypeScript.
+- Generations and revisions are decimal strings, so a JavaScript consumer never routes a 64-bit value through `Number`.
+- The `sha256:` prefix matches `capabilityDigest` in the private Runtime protocol. Session-record `DurableRef` digests are bare hex; a later journal reference must convert explicitly.
+
+The digest covers the Session's context only. The Runtime binding ID and generation, and the Harness owner generation, are bound at execution by the invocation wrapper in W0c. `displayName` does not affect execution. `policyRef` reaches execution through `contextConfigRef`.
+
+Both languages consume shared fixtures in `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`, validated against a schema file next to them. The file has two case lists:
+
+- **Paths:** an input, and either the normalized result or `invalid_cwd`.
+- **Bindings:** the fields, and either the hex of the encoded bytes with `contextDigest`, or a rejection.
+
+The cases cover both sides of each rule's boundaries, including non-ASCII names, a segment of spaces only and a generation above 2^53. The expected values were computed by an implementation independent of both languages.
+
+## Boot envelope
+
+The boot envelope is a separate slice (W0a-2), pending the answer in #12380. This slice fixes what the envelope will carry: the ContextBinding fields, their normalization and the digest. W0a-2 must then do the following:
+
+- Negotiate `managed-context/1`.
+- Add a new boot-document version that carries the ContextBinding and the inputs for the mount root and effective cwd. The daemon-style path hash survives only as a compatibility alias.
+- Add a new attestation identity version, so that W0c reuses the existing gate instead of inventing a separate Workspace attestation.
+- Change these together: the TypeScript key lists, the schema, the fixtures, the Java field-set assertions and the fake worker `fake-attestation-worker.mjs`. The fake worker does not enforce the closed key set today, so Java tests would not catch a mismatch.
+
+That slice, or W0c, must also decide which fields enter the Runtime placement scope. A Workspace-isolated Runtime is shared by Sessions whose `cwdRelative` differ. So `cwdRelative` and `contextRevision` must stay out of the placement identity in `RuntimeScope`; adding them would change the Broker's request and scope keys and stop Runtime reuse. They bind per Session and per invocation instead.
+
+## Errors
+
+| Code                    | HTTP | When                                                                                           |
+| ----------------------- | ---- | ---------------------------------------------------------------------------------------------- |
+| `workspace_required`    | 400  | The selection is omitted and there is no usable tenant default.                                |
+| `invalid_cwd`           | 400  | `cwdRelative` breaks the working-directory rule.                                               |
+| `workspace_not_found`   | 404  | The explicit Workspace is missing, belongs to another tenant, or is not readable by the actor. |
+| `workspace_forbidden`   | 403  | The actor can read the explicit Workspace but lacks `CREATE`.                                  |
+| `workspace_unavailable` | 409  | The explicit Workspace is `draining` or `removed`.                                             |
+
+None of these succeeds on an unchanged retry. W0a raises them as one exception type that carries the code and the HTTP status, like `RuntimeBrokerException`. The API layer maps them to its error envelope. `unsupported_feature`, `workspace_generation_conflict` and `context_revision_conflict` belong to later slices.
+
+## Security and tenancy
+
+- The tenant and actor come only from the embedding service's authentication.
+- The error codes do not distinguish another tenant's Workspace, an unreadable Workspace and a missing one.
+- Workspace generations, storage IDs and configuration references come only from the Registry. A caller supplies at most a Workspace ID and a relative directory. No absolute path, mount, storage ID or generation is accepted from a caller, and none appears in an error or a list entry.
+- Resolution never falls back. An explicit selection gets no default, and an omitted selection never gets a launch cwd or the daemon's primary Workspace.
+- Access is evaluated on every call. No result carries authorization that outlives the call.
+- The working-directory rule is lexical. The Runtime still enforces containment, realpath and symlink safety at installation and at tool boundaries.
+
+## Files affected
+
+Option A is implemented as follows.
+
+- `packages/sdk-java/managed-workspace/` (new):
+  - The Registry record and state, the Registry interface and the configuration snapshot with its successor check.
+  - The actor, the access levels and policy, and the explicit-grant policy.
+  - The catalog that lists and resolves.
+  - The selection and resolved Workspace, the working-directory rule, `ContextBinding` and the exception type.
+  - Tests, including the fixture consumer. Also a README and a QWEN.md.
+- `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` and `.schema.json` (new).
+- `packages/cli/src/serve/managed-workspace-binding.ts` and its test (new). This is the TypeScript twin of the working-directory rule and the digest. It is not wired into the worker yet.
+- `.github/workflows/sdk-java.yml` and `scripts/tests/sdk-java-workflow.test.js`: run the new module in the Java 21 jobs.
+- This design document, in both languages.
+
+`runtime-broker`, the daemon `WorkspaceRegistry`, the worker boot document and the attestation contract do not change.
+
+## Validation plan
+
+- **Java unit tests:**
+  - Record and snapshot validation, and the successor check.
+  - The explicit-grant policy.
+  - Listing: filtering, order, paging, and a default outside the current page.
+  - Every resolution row, for both explicit and omitted selections.
+  - The working-directory rule, and ContextBinding validation and digest.
+- **Fixture consumers:** Java and TypeScript both run every path and binding case. TypeScript validates the fixture file against its schema with strict Ajv.
+- **Mutation check:** revert each guard and confirm that a test fails.
+- **Commands:** `mvn test` and `mvn checkstyle:check` on JDK 21; `npm run build && npm run typecheck`; focused Vitest runs.
+- **CI:** the new module runs in the Java 21 jobs on Linux, macOS and Windows.
+
+## Acceptance criteria
+
+- Java and TypeScript produce identical normalized paths and `contextDigest` values for every fixture. This includes non-ASCII names, a segment of spaces only and a generation above 2^53.
+- An omitted selection resolves only to an active tenant default in which the actor can create Sessions. Every other omitted case is `workspace_required`.
+- An explicit selection never falls back to the default.
+- Another tenant's Workspace and an unreadable Workspace produce the same `workspace_not_found`.
+- No caller-supplied absolute path, storage ID or generation can reach a resolved Workspace or a ContextBinding.
+- A replacement snapshot cannot drop a Workspace, lower its generation, or change its storage ID without a new generation.
+- The Java module does not depend on Spring, CLI internals, `runtime-broker` or a scheduler.
+- The documentation does not claim persistence, wiring or capability advertisement.
+
+## Open questions
+
+1. Module placement, option A or B. This is asked in #12380.
+2. Whether the boot envelope waits for the worker handler slice (F1-b), or its shape is agreed now. This is asked in #12380.
+3. Should `cwdRelative` reject every control character (C0, DEL and C1), as implemented, or only NUL, as the reference contract says? A newline or an escape sequence in a directory name reaches logs, UI and shell prompts.
+4. Should `removed` Workspaces appear in listings at all, or only in Session views?
+
+## Follow-up work
+
+| Slice | Scope                                                                                                                                                               |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W0a-2 | The versioned boot envelope and attestation identity.                                                                                                               |
+| W0b   | Atomic Session binding with the creation receipt, original-key recovery, and explicitly unbound old Sessions.                                                       |
+| W0c   | Session-based Broker resolution through `HarnessSessionResolver`, the storage-to-mount resolver, worker installation and attestation, and the Workspace turn lease. |
+| W0d   | WebShell selection, the relative-directory field, and the default and empty states.                                                                                 |
+| W0e   | Recovery and rollout.                                                                                                                                               |
+
+Stage D generates the public and BFF DTOs from the reviewed OpenAPI. A JDBC Registry follows when a control plane persists Workspaces.

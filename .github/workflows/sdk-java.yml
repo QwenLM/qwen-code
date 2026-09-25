@@ -109,6 +109,7 @@ jobs:
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/sdk-java/runtime-broker/pom.xml
+            packages/sdk-java/managed-workspace/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       # The runtime-broker process tests spawn the Node fixture worker.
@@ -147,6 +148,8 @@ jobs:
           if [ "${MATRIX_JAVA}" = "21" ]; then
             cd ../runtime-broker
             mvn --batch-mode --no-transfer-progress clean test
+            cd ../managed-workspace
+            mvn --batch-mode --no-transfer-progress clean test
           fi
 
       - name: 'Run Java SDK tests (hosted)'
@@ -163,6 +166,13 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress clean test'
 
+      - name: 'Run Managed Workspace tests'
+        if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' }}"
+        working-directory: 'packages/sdk-java/managed-workspace'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'mvn --batch-mode --no-transfer-progress clean test'
+
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
@@ -173,6 +183,13 @@ jobs:
       - name: 'Run Runtime Broker state Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
         working-directory: 'packages/sdk-java/runtime-broker'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
+
+      - name: 'Run Managed Workspace Checkstyle'
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
+        working-directory: 'packages/sdk-java/managed-workspace'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
