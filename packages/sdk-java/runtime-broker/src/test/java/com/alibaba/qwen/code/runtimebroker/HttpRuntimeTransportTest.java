@@ -120,6 +120,20 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void acceptsIntegralDecimalsInTheAttestationResponse() throws Exception {
+        ObjectNode body = successBody();
+        long epoch = body.required("epoch").longValue();
+        body.put("protocolVersion", new BigDecimal("2.0"));
+        body.put("epoch", BigDecimal.valueOf(epoch).setScale(1));
+        reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+        RuntimeAttestation proof = attest().toCompletableFuture()
+                .get(2, TimeUnit.SECONDS);
+
+        assertEquals(epoch, proof.getEpoch());
+    }
+
+    @Test
     void classifiesEverySharedFixtureOutcome() throws Exception {
         for (JsonNode fixture : suite.required("cases")) {
             JsonNode expected = fixture.required("expected");
@@ -556,6 +570,12 @@ class HttpRuntimeTransportTest {
         ObjectNode roundedProtocol = successBody();
         roundedProtocol.put("protocolVersion",
                 new BigDecimal("1.9999999999999999"));
+        ObjectNode roundedUpProtocol = successBody();
+        roundedUpProtocol.put("protocolVersion",
+                new BigDecimal("2.0000000000000001"));
+        ObjectNode roundedUpEpoch = successBody();
+        roundedUpEpoch.put("epoch",
+                new BigDecimal("4.0000000000000001"));
         Map<String, Reply> replies = new LinkedHashMap<>();
         replies.put("cache", new Reply(200, valid, "private",
                 "application/json"));
@@ -570,8 +590,12 @@ class HttpRuntimeTransportTest {
                 json(200, JSON.writeValueAsBytes(fractionalProtocol)));
         replies.put("rounded version",
                 json(200, JSON.writeValueAsBytes(roundedProtocol)));
+        replies.put("rounded-up version",
+                json(200, JSON.writeValueAsBytes(roundedUpProtocol)));
         replies.put("epoch",
                 json(200, JSON.writeValueAsBytes(fractionalEpoch)));
+        replies.put("rounded-up epoch",
+                json(200, JSON.writeValueAsBytes(roundedUpEpoch)));
         for (Map.Entry<String, Reply> planned : replies.entrySet()) {
             reply.set(planned.getValue());
 

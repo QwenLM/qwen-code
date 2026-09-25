@@ -556,10 +556,8 @@ public final class HttpRuntimeTransport {
 
     private static void requireProtocol(Map<String, Object> response,
             String operation) {
-        Object raw = response.get("protocolVersion");
-        if (!(raw instanceof Number number)
-                || new BigDecimal(number.toString())
-                        .compareTo(BigDecimal.valueOf(2)) != 0) {
+        if (!Long.valueOf(2).equals(
+                exactLong(response.get("protocolVersion")))) {
             throw protocol("Managed Runtime " + operation
                     + " response is invalid.");
         }
@@ -567,15 +565,22 @@ public final class HttpRuntimeTransport {
 
     private static long requiredPositiveLong(Map<String, Object> response,
             String field) {
-        Object value = response.get(field);
-        if (!(value instanceof Number number)) {
-            throw protocol("Managed Runtime attestation response is invalid.");
-        }
-        long parsed = number.longValue();
-        if (number.doubleValue() != parsed || parsed <= 0) {
+        Long parsed = exactLong(response.get(field));
+        if (parsed == null || parsed <= 0) {
             throw protocol("Managed Runtime attestation response is invalid.");
         }
         return parsed;
+    }
+
+    private static Long exactLong(Object value) {
+        if (!(value instanceof Number number)) {
+            return null;
+        }
+        try {
+            return new BigDecimal(number.toString()).longValueExact();
+        } catch (ArithmeticException | NumberFormatException exception) {
+            return null;
+        }
     }
 
     private static boolean jsonContentType(String value) {
