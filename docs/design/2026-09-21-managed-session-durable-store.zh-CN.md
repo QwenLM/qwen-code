@@ -2,6 +2,8 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
+> PR #12692 范围修正（2026-09-25）：下文的实现与验证记录来自完整集成预览，不是本次拆分的验收证据。当前能力、修复与未完成门禁以[评审修正](2026-09-25-managed-agent-review-corrections.zh-CN.md)为准。
+
 状态：当前 feature 分支工作树已实现 D0、D1a 和 D1b，包括 TypeScript/Java 共享 golden contract，以及基于真实 MySQL 的独立 JVM 崩溃/接管证明。面向新建 Hosted Session 和 inline 资源的 D2a 路由、Hosted 冷加载链路、第一阶段公共 Session 生命周期，以及 settled Session 与单 execution 在途 Turn 的确定性 owner failover 证明也已实现。settled 证明会强杀真实 Java 与 Hosted Harness 进程、删除旧 Harness 磁盘、启动替代 owner，并在第二轮恢复第一轮上下文后成功完成 Turn。在途证明则在 durable `PREPARED` Broker 身份和私有 `await_runtime` checkpoint 已提交、但物理执行尚未开始时强杀两个 owner。替代 Harness 不分配新 Runtime，而是重建同一个 execution 与 Runtime Session 身份，只启动一次物理执行，把 `SETTLED` 回执持久化为 `results_ready`，并在替代 Harness generation 与 Java event epoch 下完成 checkpoint-bound continuation。删除旧 Harness 磁盘后，该证明观察到一条 Broker 记录、一次物理副作用、一次初始模型请求、一次 continuation 模型请求、一个公共终态事件，且没有重放原 Prompt。Java 会在调用 continuation 前先持久安装替代 event epoch 与 attachment cursor，再在响应后推进 cursor。`UNKNOWN` 观测会由当前 fenced writer 持久写成 `BLOCKED_EXECUTION`，Java 会终止已准入的公共 Turn，而不会重新提交。当前实现还会在任何物理派发前原子准入一批按顺序排列、允许并发的 Runtime execution，为每个 execution 单独结算 outcome reference，并且只在整批全部 settled 后继续。处于取消态的替代 owner 会被动检查原 execution，按其 durable identity 逐项取消；遇到 `UNKNOWN` 时阻塞，并且不会启动替代 Runtime 或模型 continuation，只发布一个 cancelled 终态。多 execution 与恢复态取消路径已有 TypeScript 和 Java 协议/coordinator 覆盖，但其确定性多进程故障注入仍待完成。OSS 资源、物理删除/保留策略、continuation 准入后的 Harness 再次崩溃与事件重建、Workspace 对账、Kubernetes 调度恢复及其余 D3 生产门禁仍待完成。日期：2026-09-24。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
 
 ## 1. 决策

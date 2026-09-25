@@ -137,6 +137,7 @@ function toSessionSummary(
     !['completed', 'failed', 'cancelled', 'recovery_blocked'].includes(
       turnStatus,
     );
+  const sessionActive = session.status.toLowerCase() === 'active';
   const errorCode =
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
   return {
@@ -151,7 +152,10 @@ function toSessionSummary(
     phase,
     runtimeReady: runtimeState === 'ready',
     runtimeState,
-    capabilities: { canSend: !active, canCancel: active },
+    capabilities: {
+      canSend: sessionActive && !active,
+      canCancel: sessionActive && active && turnStatus !== 'cancelling',
+    },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };
 }
@@ -174,7 +178,12 @@ function toPhase(
     return 'failed';
   }
   if (turnStatus === 'cancelled') return 'cancelled';
-  if (turnStatus === 'in_progress' || turnStatus === 'requires_action') {
+  if (turnStatus === 'cancelling') return 'cancelling';
+  if (
+    turnStatus === 'running' ||
+    turnStatus === 'in_progress' ||
+    turnStatus === 'requires_action'
+  ) {
     return 'agent_running';
   }
   if (turnStatus === 'accepted' || turnStatus === 'queued') {

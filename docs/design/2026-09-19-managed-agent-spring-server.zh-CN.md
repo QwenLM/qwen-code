@@ -2,6 +2,8 @@
 
 [English](2026-09-19-managed-agent-spring-server.md) | [简体中文](2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+> PR #12692 范围修正（2026-09-25）：下文的实现与验证记录来自完整集成预览，不是本次拆分的验收证据。当前能力、修复与未完成门禁以[评审修正](2026-09-25-managed-agent-review-corrections.zh-CN.md)为准。
+
 状态：Phase 1 已实现；生产门禁仍未关闭
 日期：2026-09-19
 

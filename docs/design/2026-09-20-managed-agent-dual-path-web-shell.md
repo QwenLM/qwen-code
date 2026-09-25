@@ -3,6 +3,8 @@
 [English](./2026-09-20-managed-agent-dual-path-web-shell.md) |
 [简体中文](./2026-09-20-managed-agent-dual-path-web-shell.zh-CN.md)
 
+> PR #12692 scope correction (2026-09-25): implementation and verification records below refer to the full integration preview, not acceptance evidence for this split. See [review corrections](2026-09-25-managed-agent-review-corrections.md) for current capabilities, fixes, and remaining gates.
+
 ## Status
 
 Implemented and locally verified on 2026-09-20. Production products opt in

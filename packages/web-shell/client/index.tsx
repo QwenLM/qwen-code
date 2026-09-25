@@ -38,7 +38,6 @@ export {
   type ManagedAgentWebShellProps,
 } from './ManagedAgentWebShell';
 export {
-  createDaemonManagedAgentProvider,
   type ManagedAgentCommandOptions,
   type ManagedAgentProvider,
   type ManagedAgentRequestOptions,

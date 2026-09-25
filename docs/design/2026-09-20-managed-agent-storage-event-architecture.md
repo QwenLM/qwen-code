@@ -2,6 +2,8 @@
 
 [English](2026-09-20-managed-agent-storage-event-architecture.md) | [简体中文](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)
 
+> PR #12692 scope correction (2026-09-25): implementation and verification records below refer to the full integration preview, not acceptance evidence for this split. See [review corrections](2026-09-25-managed-agent-review-corrections.md) for current capabilities, fixes, and remaining gates.
+
 Status: proposed architecture, with P0 and the SQL-backed P1 materialization slice implemented on this branch. Date: 2026-09-20. This design uses the integration snapshot below; it does not claim production validation of the complete architecture.
 
 Supplement status: disaster recovery and compliance deletion in Sections 9.1–9.4 are proposed and unvalidated. This change updates documentation only, with no code/schema/deployment changes or product tests. The supplement uses the fixed [code_agent@1478e7b](https://github.com/doudouOUC/code_agent/tree/1478e7b632eb237bc3f40ea574ce90782e1cf4c3/qwen-code/feature/managed-agents) design, draft integration reference `bad721f22fcd8cfad9ec22e98f69fec75b20b6f0`, and inspected local baseline `f5088d2e`; it neither replaces the older design wholesale nor treats those snapshots as one implementation. Item 5, quotas/billing, is excluded. Tenant trust and strong-isolation selection remain deferred, with no implied production multi-tenant security guarantee.

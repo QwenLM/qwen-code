@@ -25,7 +25,7 @@ class QwenHostedHarnessConnectorTest {
             "11111111-1111-4111-8111-111111111111";
 
     @Test
-    void probesColdLoadBeforeCreatingASessionWithoutABinding() {
+    void loadsAnExistingSessionWithoutCreatingIt() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =
                 mock(HostedHarnessCapabilities.class);
@@ -38,7 +38,7 @@ class QwenHostedHarnessConnectorTest {
         QwenHostedHarnessConnector connector = connector(client);
 
         HarnessConnector.Attachment attachment = connector.createOrLoad(
-                "tenant-a", SESSION_ID, false);
+                "tenant-a", SESSION_ID, true);
 
         assertThat(attachment.bootId()).isEqualTo(BOOT_ID);
         verify(client).loadSession(any(LoadHarnessSession.class));
@@ -46,19 +46,19 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
-    void createsOnlyAfterColdLoadReturnsNotFound() {
+    void loadsAnExistingAuthorityAfterCreateConflicts() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =
                 mock(HostedHarnessCapabilities.class);
         HarnessSessionRef session = mock(HarnessSessionRef.class);
-        DaemonHttpException notFound = mock(DaemonHttpException.class);
-        when(notFound.getStatusCode()).thenReturn(404);
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(client.capabilities()).thenReturn(capabilities);
         when(client.loadSession(any(LoadHarnessSession.class)))
-                .thenThrow(notFound);
-        when(client.createSession(any(CreateHarnessSession.class)))
                 .thenReturn(session);
+        when(client.createSession(any(CreateHarnessSession.class)))
+                .thenThrow(conflict);
         when(session.getHarnessBootId()).thenReturn(BOOT_ID);
         QwenHostedHarnessConnector connector = connector(client);
 

@@ -56,6 +56,31 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
+    void rejectsUnsupportedDispatchFenceRoutesBeforeAnySideEffects()
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            for (String route : java.util.List.of("executions:prepare",
+                    "executions/execution-1:start")) {
+                HttpURLConnection connection = (HttpURLConnection) broker
+                        .getBaseUri().resolve("/internal/runtime-broker/v1/"
+                                + route).toURL().openConnection();
+                connection.setRequestMethod("POST");
+                connection.setRequestProperty("Authorization",
+                        "Bearer broker-token");
+                connection.setDoOutput(true);
+                connection.getOutputStream().write("{}".getBytes());
+                assertThat(connection.getResponseCode()).isEqualTo(501);
+                assertThat(new String(connection.getErrorStream()
+                        .readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
+                        .contains("runtime_dispatch_fence_unsupported");
+                connection.disconnect();
+            }
+            org.mockito.Mockito.verifyNoInteractions(store);
+        }
+    }
+
+    @Test
     void derivesWorkspaceIdWhenItIsNotConfigured() throws Exception {
         ManagedAgentProperties properties = properties();
         properties.getRuntimeBroker().setProvisioner("local-process");

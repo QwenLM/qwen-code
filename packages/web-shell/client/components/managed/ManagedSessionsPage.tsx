@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
 import { Button } from '../ui/button';
@@ -12,10 +11,9 @@ import {
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
-import {
-  createDaemonManagedAgentProvider,
-  type ManagedAgentProvider,
-  type ManagedAgentSessionSummary,
+import type {
+  ManagedAgentProvider,
+  ManagedAgentSessionSummary,
 } from './managed-agent-provider';
 
 interface PendingPrompt {
@@ -82,6 +80,7 @@ export function ManagedSessionsPage({
   workspaceCwd?: string;
   managedAgentProvider?: ManagedAgentProvider;
 }) {
+  const { t } = useI18n();
   if (managedAgentProvider) {
     return (
       <ManagedSessionsContent
@@ -94,41 +93,7 @@ export function ManagedSessionsPage({
       />
     );
   }
-  return (
-    <DaemonManagedSessionsPage
-      sessionId={sessionId}
-      onSelectSession={onSelectSession}
-      workspaceCwd={workspaceCwd}
-    />
-  );
-}
-
-function DaemonManagedSessionsPage({
-  sessionId,
-  onSelectSession,
-  workspaceCwd,
-}: {
-  sessionId?: string;
-  onSelectSession: (sessionId: string | undefined) => void;
-  workspaceCwd?: string;
-}) {
-  const { client, baseUrl, capabilities } = useWorkspace();
-  const provider = useMemo(
-    () => createDaemonManagedAgentProvider(client, baseUrl),
-    [client, baseUrl],
-  );
-  return (
-    <ManagedSessionsContent
-      sessionId={sessionId}
-      onSelectSession={onSelectSession}
-      workspaceCwd={workspaceCwd}
-      provider={provider}
-      enabled={capabilities?.features?.includes('managed_sessions') === true}
-      cancellationEnabled={
-        capabilities?.features?.includes('managed_session_cancel') === true
-      }
-    />
-  );
+  return <p role="status">{t('managed.unavailable')}</p>;
 }
 
 function ManagedSessionsContent({

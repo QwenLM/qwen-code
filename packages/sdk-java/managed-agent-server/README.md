@@ -8,6 +8,17 @@ database read and write.
 设计说明：[English](../../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+## Integration status
+
+This split is not yet a complete Hosted Harness / Runtime deployment. The
+embedded HTTP transport returns 501 for acquire/control/release. Prepare/start
+also return 501 because the merged Broker has no durable dispatch fence.
+Harness-level drain does not tear down workers. The copied real-process E2E
+script requires TypeScript integrations absent from this PR. See the
+[review corrections](../../../docs/design/2026-09-25-managed-agent-review-corrections.md)
+for the remaining merge gates; earlier preview timing and recovery results
+below are not evidence for this split.
+
 ## Prerequisites
 
 - Java 21
@@ -83,7 +94,7 @@ curl -sS -X DELETE \
 
 Archive and delete reject an active Turn. Rename waits for the Harness to
 durably commit `session_metadata`; archive closes the Harness attachment and
-drains the Runtime binding; delete closes it only when the Session was active
+requests Runtime drain (currently only an in-process retirement flag); delete closes it only when the Session was active
 and always drains the binding; unarchive clears the Runtime retirement fence
 and loads the Harness lazily on the next Turn. A failed external action leaves
 a `PENDING` command that the same idempotency key can safely resume. The
@@ -93,8 +104,8 @@ blocked until it completes.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
-authority and never initializes one. The Java connector probes load before
-create when it cannot prove whether a private authority already exists.
+authority and never initializes one. The Java connector attempts strict create for a new binding and loads on
+conflict or uncertain creation outcome. A known existing binding only loads.
 An in-memory Hosted attachment is bound to one normalized Store endpoint,
 tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.

@@ -271,7 +271,7 @@ public class ManagedAgentStore implements AgentStateStore {
         appendEvent(tenantId, sessionId, null,
                 mutationEvent(kind, "requested"),
                 Map.of("sessionId", sessionId), false,
-                mutationSource(operation, requestDigest, "requested"), now);
+                mutationSource(operation, idempotencyKey, "requested"), now);
         return new SessionMutationCommand(sessionId, "PENDING",
                 session.status(), false);
     }
@@ -337,7 +337,7 @@ public class ManagedAgentStore implements AgentStateStore {
         appendEvent(tenantId, sessionId, null,
                 mutationEvent(kind, "completed"), data,
                 kind == SessionMutationKind.DELETE,
-                mutationSource(operation, command.requestDigest(),
+                mutationSource(operation, idempotencyKey,
                         "completed"), now);
         return requireSessionForUpdate(tenantId, sessionId);
     }
@@ -562,7 +562,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit) {
-        requireSession(tenantId, sessionId);
+        requireSessionForUpdate(tenantId, sessionId);
         Long covered = jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " managed_agent_consumer_progress WHERE tenant_id"
                         + " = ? AND session_id = ? AND consumer_name = ?"
@@ -849,6 +849,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retractContinuationOutput(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId,
             String eventEpoch) {
+        requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
@@ -861,18 +862,26 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalArgumentException(
                     "continuation owner is missing");
         }
+        String sourcePrefix = harnessBootId + ":" + eventEpoch + ":";
+        String reconciliationKey = "reconcile:" + sourcePrefix + turnId;
+        if (hasSourceEvent(tenantId, sessionId, reconciliationKey)) {
+            return;
+        }
+        jdbc.queryForObject("SELECT covered_sequence FROM"
+                        + " managed_agent_consumer_progress WHERE tenant_id"
+                        + " = ? AND session_id = ? AND consumer_name = ?"
+                        + " FOR UPDATE",
+                Long.class, tenantId, sessionId, MESSAGE_PROJECTION);
         List<EventRecord> deltas = jdbc.query("SELECT * FROM"
                         + " managed_agent_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND event_type"
                         + " IN ('item.output_text.delta',"
-                        + " 'item.reasoning.delta') ORDER BY sequence_id"
-                        + " ASC",
+                        + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
                 eventMapper, tenantId, sessionId, turnId);
-        List<String> clearedParts = new ArrayList<>();
         for (EventRecord event : deltas) {
-            String partId = continuationPartId(turnId, event);
-            if (!clearedParts.contains(partId)) {
-                clearedParts.add(partId);
+            if (event.sourceKey() == null
+                    || !event.sourceKey().startsWith(sourcePrefix)) {
+                continue;
             }
             Map<String, Object> data = new LinkedHashMap<>(event.data());
             data.put("text", "");
@@ -881,24 +890,21 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " AND sequence_id = ?",
                     writeJson(data), tenantId, sessionId, event.sequence());
         }
-        for (String partId : clearedParts) {
-            jdbc.update("UPDATE managed_agent_item_part SET part_text = '',"
-                            + " updated_at = ?, revision = revision + 1"
-                            + " WHERE tenant_id = ? AND session_id = ?"
-                            + " AND part_id = ?",
-                    now, tenantId, sessionId, partId);
-        }
-    }
-
-    private static String continuationPartId(String turnId,
-            EventRecord event) {
-        String partId = string(event.data().get("contentPartId"));
-        if (partId != null) {
-            return partId;
-        }
-        String partType = "item.reasoning.delta".equals(event.type())
-                ? "reasoning" : "output_text";
-        return "part_" + turnId + "_" + partType;
+        // Rebuild shared text parts from retained events, including any
+        // output belonging to other Harness generations.
+        jdbc.update("DELETE FROM managed_agent_item_part WHERE tenant_id = ?"
+                        + " AND session_id = ?", tenantId, sessionId);
+        jdbc.update("DELETE FROM managed_agent_item WHERE tenant_id = ?"
+                        + " AND session_id = ?", tenantId, sessionId);
+        jdbc.update("DELETE FROM managed_agent_snapshot WHERE tenant_id = ?"
+                        + " AND session_id = ?", tenantId, sessionId);
+        jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                        + " covered_sequence = 0, updated_at = ? WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " consumer_name = ?",
+                now, tenantId, sessionId, MESSAGE_PROJECTION);
+        appendEvent(tenantId, sessionId, turnId, "stream.reconciled", Map.of(),
+                false, reconciliationKey, now);
     }
 
     @Transactional
@@ -1153,10 +1159,17 @@ public class ManagedAgentStore implements AgentStateStore {
         if (itemId == null) {
             itemId = "item_" + event.turnId() + "_assistant";
         }
-        String partId = string(event.data().get("contentPartId"));
-        if (partId == null) {
-            partId = "part_" + event.turnId() + "_" + partType;
-        }
+        List<String> preceding = jdbc.query("SELECT part_id FROM"
+                        + " managed_agent_item_part WHERE tenant_id = ?"
+                        + " AND session_id = ? AND item_id = ? AND"
+                        + " part_type = ? AND last_sequence = ?",
+                (result, row) -> result.getString("part_id"),
+                event.tenantId(), event.sessionId(), itemId, partType,
+                event.sequence() - 1);
+        String partId = preceding.isEmpty()
+                ? "part_" + event.turnId() + "_" + partType + "_"
+                        + event.sequence()
+                : preceding.get(0);
         upsertItem(event, itemId, "message", "assistant", "in_progress",
                 Map.of());
         appendPart(event, itemId, partId, partType, text);
@@ -1479,8 +1492,8 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private static String mutationSource(String operation,
-            String requestDigest, String phase) {
-        return "control:" + operation + ":" + requestDigest + ":" + phase;
+            String idempotencyKey, String phase) {
+        return "control:" + operation + ":" + idempotencyKey + ":" + phase;
     }
 
     private static void requireSessionStatus(String actual,

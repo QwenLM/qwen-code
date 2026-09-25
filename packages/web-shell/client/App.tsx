@@ -9091,7 +9091,7 @@ export function App({
   >(() =>
     initialConnectionsSettingsCategory
       ? 'settings'
-      : managedSelectionFromUrl().open
+      : managedAgentProvider && managedSelectionFromUrl().open
         ? 'managed'
         : null,
   );
@@ -19525,10 +19525,7 @@ export function App({
                     openPanel('channels');
                   }}
                   onOpenManagedSessions={
-                    managedAgentProvider ||
-                    workspace.capabilities?.features?.includes(
-                      'managed_sessions',
-                    )
+                    managedAgentProvider
                       ? () => {
                           closeMobileDrawer();
                           openPanel('managed');

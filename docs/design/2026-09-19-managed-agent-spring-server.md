@@ -2,6 +2,8 @@
 
 [English](2026-09-19-managed-agent-spring-server.md) | [简体中文](2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+> PR #12692 scope correction (2026-09-25): implementation and verification records below refer to the full integration preview, not acceptance evidence for this split. See [review corrections](2026-09-25-managed-agent-review-corrections.md) for current capabilities, fixes, and remaining gates.
+
 Status: Phase 1 implemented; production gates remain open
 Date: 2026-09-19
 

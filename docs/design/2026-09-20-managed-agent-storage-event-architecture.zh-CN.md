@@ -2,6 +2,8 @@
 
 [English](2026-09-20-managed-agent-storage-event-architecture.md) | [简体中文](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)
 
+> PR #12692 范围修正（2026-09-25）：下文的实现与验证记录来自完整集成预览，不是本次拆分的验收证据。当前能力、修复与未完成门禁以[评审修正](2026-09-25-managed-agent-review-corrections.zh-CN.md)为准。
+
 状态：总体架构仍为提议；本分支已实现 P0 和基于 SQL 的 P1 物化切片。日期：2026-09-20。本文按下面的集成代码快照设计，不表示完整架构已经通过生产验收。
 
 补充状态：§9.1～9.4 的灾备与合规删除是待实现、未验收设计。本轮只修改文档，不修改代码/schema/部署或运行产品测试。补充设计源固定为 [code_agent@1478e7b](https://github.com/doudouOUC/code_agent/tree/1478e7b632eb237bc3f40ea574ce90782e1cf4c3/qwen-code/feature/managed-agents)，draft 集成参考为 `bad721f22fcd8cfad9ec22e98f69fec75b20b6f0`，本地核对基线为 `f5088d2e`；不整体覆盖旧设计，也不把这些快照视作同一实现。第5项配额/计费排除；租户信任与强隔离选型暂缓，不默认已具备生产多租户安全。

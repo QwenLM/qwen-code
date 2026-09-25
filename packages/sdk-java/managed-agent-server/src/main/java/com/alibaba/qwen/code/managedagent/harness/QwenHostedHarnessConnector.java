@@ -80,7 +80,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 ? load(tenantId, sessionId, true)
                 : attachments.computeIfAbsent(key, ignored -> loadExisting
                         ? load(tenantId, sessionId, false)
-                        : loadOrCreate(tenantId, sessionId));
+                        : create(tenantId, sessionId));
         attachments.put(key, attached);
         return new Attachment(attached.getHarnessBootId(),
                 attached.getRuntimeRecovery(),
@@ -216,18 +216,6 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         ManagedSessionStoreConnection store = managedSessionStore(tenantId);
         return client().loadSession(new LoadHarnessSession(sessionId, store,
                 passiveManagedRuntimeRecovery));
-    }
-
-    private HarnessSessionRef loadOrCreate(String tenantId,
-            String sessionId) {
-        try {
-            return load(tenantId, sessionId, false);
-        } catch (DaemonHttpException error) {
-            if (error.getStatusCode() != 404) {
-                throw error;
-            }
-            return create(tenantId, sessionId);
-        }
     }
 
     private ManagedSessionStoreConnection managedSessionStore(
