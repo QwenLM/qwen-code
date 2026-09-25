@@ -771,7 +771,8 @@ export class MCPOAuthProvider {
             authorizationUrl: discoveredConfig.authorizationUrl,
             tokenUrl: discoveredConfig.tokenUrl,
             scopes: discoveredConfig.scopes || config.scopes || [],
-            registrationUrl: discoveredConfig.registrationUrl,
+            registrationUrl:
+              discoveredConfig.registrationUrl ?? config.registrationUrl,
             // Preserve existing client credentials
             clientId: config.clientId,
             clientSecret: config.clientSecret,
