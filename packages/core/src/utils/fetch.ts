@@ -75,6 +75,10 @@ const CONNECTION_LEVEL_ERROR_CODES = new Set([
   // a healthy https server, and a fallback there would double a worst-case
   // 60s wait for an ambiguous gain.
   'UND_ERR_CONNECT_TIMEOUT',
+  // Port 443 unreachable at the network layer (ICMP host/net unreachable) —
+  // the routing-level sibling of ECONNREFUSED, same fallback rationale.
+  'EHOSTUNREACH',
+  'ENETUNREACH',
 ]);
 
 export function isConnectionLevelError(error: unknown): boolean {

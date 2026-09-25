@@ -9,6 +9,7 @@ import {
   FetchError,
   fetchWithPolicy,
   formatFetchErrorForUser,
+  isConnectionLevelError,
   isPermittedRedirect,
   isPrivateHost,
 } from './fetch.js';
@@ -83,6 +84,29 @@ describe('formatFetchErrorForUser', () => {
 
   it('does not include troubleshooting for non-fetch errors', () => {
     expect(formatFetchErrorForUser(new Error('boom'))).toBe('boom');
+  });
+});
+
+describe('isConnectionLevelError', () => {
+  it.each(['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH'])(
+    'treats %s as connection-level (https upgrade may fall back to http)',
+    (code) => {
+      expect(
+        isConnectionLevelError(new FetchError(`connect ${code}`, code)),
+      ).toBe(true);
+    },
+  );
+
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT'])(
+    'does not treat %s as connection-level',
+    (code) => {
+      expect(isConnectionLevelError(new FetchError(code, code))).toBe(false);
+    },
+  );
+
+  it('returns false for non-FetchError values and code-less FetchErrors', () => {
+    expect(isConnectionLevelError(new Error('boom'))).toBe(false);
+    expect(isConnectionLevelError(new FetchError('no code'))).toBe(false);
   });
 });
 
