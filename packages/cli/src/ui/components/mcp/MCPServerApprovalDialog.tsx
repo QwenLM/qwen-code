@@ -79,7 +79,7 @@ export const MCPServerApprovalDialog: React.FC<
             {`Untrusted MCP server in ${source}`}
           </Text>
           <Text color={theme.text.primary}>
-            {`This workspace declares an MCP server. Approving lets Qwen Code start it and run its tools. Approval is bound to this exact configuration — if ${source} changes, you will be asked again.`}
+            {`This workspace declares an MCP server. Approving lets Qwen Code start it and run its tools. Approval is bound to this exact configuration — if ${source} changes, or an environment variable it substitutes changes value, you will be asked again.`}
           </Text>
         </Box>
 

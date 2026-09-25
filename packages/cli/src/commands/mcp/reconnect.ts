@@ -18,7 +18,10 @@ import {
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { getPendingGatedMcpServers } from '../../config/mcpApprovals.js';
-import { assembleMcpServers } from '../../config/mcpServers.js';
+import {
+  assembleMcpServers,
+  mcpExpansionOptions,
+} from '../../config/mcpServers.js';
 import { getCurrentLanguage } from '../../i18n/index.js';
 
 async function getMcpServersFromConfig(
@@ -40,6 +43,8 @@ async function getMcpServersFromConfig(
   const mcpServers: Record<string, MCPServerConfig> = assembleMcpServers(
     settings.merged.mcpServers,
     process.cwd(),
+    undefined,
+    mcpExpansionOptions(settings.merged, process.cwd()),
   );
   for (const extension of extensions) {
     if (extension.isActive) {
