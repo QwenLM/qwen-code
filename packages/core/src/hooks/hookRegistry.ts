@@ -134,9 +134,9 @@ export class HookRegistry {
       for (const [key, enabled] of enabledSnapshot) {
         if (!enabled && !restoredKeys.has(key)) {
           debugLogger.warn(
-            `A previously disabled hook was not found after reload ` +
-              `(key=${key}). Its state has been reset because its name was ` +
-              'changed or removed. Re-disable it by name if still needed.',
+            `A previously disabled hook (key=${key}) did not match any entry ` +
+              'after reload; its enabled state was not carried over. If the ' +
+              'hook still exists, re-disable it by name.',
           );
         }
       }
@@ -235,9 +235,9 @@ export class HookRegistry {
       );
     } else {
       debugLogger.warn(
-        `No individually disable-able hooks found matching "${hookName}". ` +
-          'Hooks without a "name" field cannot be disabled individually; ' +
-          'add a "name" to the hook definition to enable per-hook toggling.',
+        `No hooks found matching "${hookName}" to ${enabled ? 'enable' : 'disable'}. ` +
+          'Only hooks with a "name" field can be toggled individually; add a ' +
+          '"name" to the hook definition if it is unnamed.',
       );
     }
   }

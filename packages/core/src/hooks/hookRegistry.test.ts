@@ -10,6 +10,19 @@ import { HookRegistry } from './hookRegistry.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookConfig } from './types.js';
 
+const { debugWarn } = vi.hoisted(() => ({
+  debugWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    warn: debugWarn,
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
+}));
+
 describe('HookRegistry', () => {
   let mockConfig: HookRegistryConfig;
   let mockFeedbackEmitter: FeedbackEmitter;
@@ -1216,6 +1229,9 @@ describe('HookRegistry', () => {
   });
 
   describe('reloadConfiguredHooks — stable enabled-state keying', () => {
+    beforeEach(() => {
+      debugWarn.mockClear();
+    });
     it('preserves disabled state of a named command hook when its command is edited on disk', async () => {
       const userHooks = {
         [HookEventName.PreToolUse]: [
@@ -1266,6 +1282,7 @@ describe('HookRegistry', () => {
       expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
         0,
       );
+      expect(debugWarn).not.toHaveBeenCalled();
     });
 
     it('preserves disabled state of a named HTTP hook when its URL is edited on disk', async () => {
@@ -1314,6 +1331,7 @@ describe('HookRegistry', () => {
         'http://new.example.com/hook',
       );
       expect(after[0].enabled).toBe(false);
+      expect(debugWarn).not.toHaveBeenCalled();
     });
 
     it('preserves disabled state of a named prompt hook when its prompt text is edited on disk', async () => {
@@ -1362,6 +1380,7 @@ describe('HookRegistry', () => {
         'Evaluate this tool call for safety (new)',
       );
       expect(after[0].enabled).toBe(false);
+      expect(debugWarn).not.toHaveBeenCalled();
     });
 
     it('refuses to disable an unnamed command hook individually', async () => {
@@ -1438,6 +1457,11 @@ describe('HookRegistry', () => {
       expect(after[0].enabled).toBe(true);
       expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
         1,
+      );
+      // The reload warning should fire exactly once for the orphaned key
+      expect(debugWarn).toHaveBeenCalledTimes(1);
+      expect(debugWarn.mock.calls[0][0]).toContain(
+        'did not match any entry after reload',
       );
     });
   });
