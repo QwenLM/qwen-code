@@ -3315,7 +3315,7 @@ describe('persistent workspace registrations', () => {
       .send({ isPinned: true });
 
     expect(res.status).toBe(404);
-    expect(res.body.code).toBe('registration_not_found');
+    expect(res.body.code).toBe('workspace_registration_not_found');
     expect(setPinned).toHaveBeenCalledWith('not-stored', true);
   });
 

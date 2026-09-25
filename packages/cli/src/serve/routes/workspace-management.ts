@@ -21,6 +21,7 @@ import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
 import type {
+  WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
@@ -1933,7 +1934,7 @@ export function registerWorkspaceManagementRoutes(
         sendSealed(res);
         return;
       }
-      const registrationId = String(req.params['id']);
+      const requestedId = String(req.params['id']);
       operationStarted();
       try {
         const body = await safeBody(req);
@@ -1945,15 +1946,21 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
-        const changed = await workspaceRegistrationStore.setPinned(
-          registrationId,
-          isPinned,
-        );
-        if (!changed) {
+
+        // Find the registry entry that owns this registration ID.
+        const entries = workspaceRegistry.listAllEntries();
+        let targetEntry: WorkspaceEntry | undefined;
+        for (const entry of entries) {
+          if (entry.registrationIds.includes(requestedId)) {
+            targetEntry = entry;
+            break;
+          }
+        }
+        if (!targetEntry) {
+          // Also check the store directly for non-registry workspaces.
           const snapshot = await workspaceRegistrationStore.read();
           const exists = snapshot.workspaces.some(
-            (workspace) =>
-              workspaceRegistrationId(workspace) === registrationId,
+            (workspace) => workspaceRegistrationId(workspace) === requestedId,
           );
           if (!exists) {
             res.status(404).json({
@@ -1962,11 +1969,47 @@ export function registerWorkspaceManagementRoutes(
             });
             return;
           }
+          // Entry exists in store but not in registry — fall through to setPinned with requestedId.
+          const changed = await workspaceRegistrationStore.setPinned(
+            requestedId,
+            isPinned,
+          );
+          if (!changed) {
+            res.status(404).json({
+              error: 'Workspace registration not found',
+              code: 'workspace_registration_not_found',
+            });
+            return;
+          }
+          const updatedSnapshot = await workspaceRegistrationStore.read();
+          const pinnedAt = updatedSnapshot.pinnedAts?.[requestedId];
+          res.json({
+            id: requestedId,
+            isPinned: pinnedAt !== undefined,
+            ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+          });
+          return;
         }
+
+        // Update pin state for ALL registration IDs of this entry.
+        for (const regId of targetEntry.registrationIds) {
+          await workspaceRegistrationStore.setPinned(regId, isPinned);
+        }
+
+        // Read back the pinnedAt for the requested ID (may be an alias).
         const snapshot = await workspaceRegistrationStore.read();
-        const pinnedAt = snapshot.pinnedAts?.[registrationId];
+        // Prefer the requestedId's pinnedAt; if it's an alias, find any matching entry.
+        let pinnedAt = snapshot.pinnedAts?.[requestedId];
+        if (pinnedAt === undefined) {
+          for (const regId of targetEntry.registrationIds) {
+            if (snapshot.pinnedAts?.[regId] !== undefined) {
+              pinnedAt = snapshot.pinnedAts[regId];
+              break;
+            }
+          }
+        }
         res.json({
-          id: registrationId,
+          id: requestedId,
           isPinned: pinnedAt !== undefined,
           ...(pinnedAt !== undefined ? { pinnedAt } : {}),
         });
@@ -1975,9 +2018,24 @@ export function registerWorkspaceManagementRoutes(
           // The store already committed the change; treat as success.
           writeStderrLine(`qwen serve: ${err.message}`);
           const snapshot = await workspaceRegistrationStore.read();
-          const pinnedAt = snapshot.pinnedAts?.[registrationId];
+          let pinnedAt = snapshot.pinnedAts?.[requestedId];
+          if (pinnedAt === undefined) {
+            // Fallback: scan all entries for this requestedId.
+            const entries = workspaceRegistry.listAllEntries();
+            for (const entry of entries) {
+              if (entry.registrationIds.includes(requestedId)) {
+                for (const regId of entry.registrationIds) {
+                  if (snapshot.pinnedAts?.[regId] !== undefined) {
+                    pinnedAt = snapshot.pinnedAts[regId];
+                    break;
+                  }
+                }
+                break;
+              }
+            }
+          }
           res.json({
-            id: registrationId,
+            id: requestedId,
             isPinned: pinnedAt !== undefined,
             ...(pinnedAt !== undefined ? { pinnedAt } : {}),
           });

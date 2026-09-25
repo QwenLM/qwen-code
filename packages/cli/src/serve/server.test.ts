@@ -5577,6 +5577,7 @@ describe('createServeApp', () => {
           primary: true,
           trusted: true,
           workflowsEnabled: false,
+          isPinned: false,
         },
       ]);
 
@@ -5738,6 +5739,7 @@ describe('createServeApp', () => {
         trusted: true,
         workflowsEnabled: false,
         kind: 'live',
+        isPinned: false,
       });
       expect(response.body.features).not.toContain('multi_workspace_sessions');
       expect(response.body.limits).toHaveProperty('maxSessionsPerWorkspace');
