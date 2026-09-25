@@ -138,6 +138,7 @@ import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
+import { isResourceExhaustion } from '../skills/skill-load.js';
 import {
   authoredSkillName,
   skillRestrictionNames,
@@ -3867,14 +3868,14 @@ export class Config {
       !this.isSafeMode() &&
       !this.getBareMode()
     ) {
-      await this.extensionManager.refreshCache();
+      await this.refreshExtensionsAtStartup();
     } else if (
       !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       explicitExtensionNames.length > 0
     ) {
-      await this.extensionManager.refreshCache({
+      await this.refreshExtensionsAtStartup({
         names: explicitExtensionNames,
       });
     }
@@ -4211,7 +4212,10 @@ export class Config {
     recordStartupEvent('config_initialize_hooks_end');
     options?.signal?.throwIfAborted();
 
-    this.subagentManager = new SubagentManager(this);
+    this.subagentManager = new SubagentManager(this, {
+      getPendingExtensionRefusals: () =>
+        this.extensionManager.getPendingScanRefusals().values(),
+    });
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
       if (
@@ -4312,7 +4316,7 @@ export class Config {
       !this.getBareMode() &&
       !this.isSafeMode()
     ) {
-      await this.extensionManager.refreshCache();
+      await this.refreshExtensionsAtStartup();
     }
     recordStartupEvent('config_initialize_extensions_final_end');
     options?.signal?.throwIfAborted();
@@ -9768,6 +9772,35 @@ export class Config {
 
   getListExtensions(): boolean {
     return this.listExtensions;
+  }
+
+  /**
+   * Startup refresh: the extension loaders fail a refresh closed on
+   * resource exhaustion. At startup there is no previous cache to keep and
+   * no later refresh to retry, so retry once and otherwise continue without
+   * the extension set instead of aborting initialization — a single
+   * transient EMFILE must not kill or hang the CLI.
+   */
+  private async refreshExtensionsAtStartup(options?: {
+    names?: string[];
+  }): Promise<void> {
+    try {
+      await this.extensionManager.refreshCache(options);
+      return;
+    } catch (error) {
+      if (!isResourceExhaustion(error)) throw error;
+      this.debugLogger.warn(
+        `Extension load hit resource exhaustion; retrying once: ${getErrorMessage(error)}`,
+      );
+    }
+    try {
+      await this.extensionManager.refreshCache(options);
+    } catch (error) {
+      if (!isResourceExhaustion(error)) throw error;
+      this.debugLogger.warn(
+        `Extension load still exhausted; continuing without it: ${getErrorMessage(error)}`,
+      );
+    }
   }
 
   getExtensionManager(): ExtensionManager {

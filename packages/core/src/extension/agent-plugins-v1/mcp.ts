@@ -87,6 +87,9 @@ export async function loadAgentPluginMcpServers(
         writable: true,
       });
     } catch (error) {
+      // Resource exhaustion fails the load closed — skipping only this
+      // server would commit the plugin with a truncated server set (R9-1).
+      if (isResourceExhaustion(error)) throw error;
       debugLogger.warn(
         `Skipping Agent Plugins MCP server "${name}": ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -110,6 +113,9 @@ export async function loadAgentPluginMcpServers(
         }
       }
     } catch (error) {
+      // Resource exhaustion fails the load closed — deleting the stdio
+      // servers would commit the plugin with a truncated server set (R9-1).
+      if (isResourceExhaustion(error)) throw error;
       debugLogger.warn(
         `Failed to create Agent Plugins data directory; disabling stdio MCP servers: ${error instanceof Error ? error.message : String(error)}`,
       );

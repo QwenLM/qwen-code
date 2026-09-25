@@ -644,6 +644,22 @@ export class ExtensionManager {
   /** See `sourceFingerprint`. `undefined` until the first refresh commits. */
   private lastSourceFingerprint: string | undefined;
   private inFlightSourceRevalidation: Promise<boolean> | undefined;
+  /**
+   * Executor refusals recorded by refresh attempts that REJECTED before
+   * committing. mergeScanRefusalsIntoCache also carries them on cache
+   * entries, but a failed-scan tombstone fails closed with `isActive:
+   * false` (R8-1) and the dispatch-side refusal reader filters to active
+   * extensions — so without this side channel those refusals never reach a
+   * by-name dispatch and the refused name falls through to a same-named
+   * builtin (R10-2). Keyed by extension name, then agent name as recorded.
+   * A committed full refresh supersedes and clears them; a name-filtered
+   * commit proves nothing about the other entries and leaves them pending
+   * (see refreshCacheWithSnapshot).
+   */
+  private readonly pendingScanRefusals = new Map<
+    string,
+    Map<string, SubagentError>
+  >();
 
   private withNetworkPolicy(
     installMetadata: ExtensionInstallMetadata | undefined,
@@ -1579,6 +1595,15 @@ export class ExtensionManager {
     });
     this.extensionCache = nextCache;
     this.applyStoreActivation(snapshot);
+    // A full committed refresh supersedes every pending refusal record:
+    // the committed entries carry their own fresh refusal records. A
+    // name-filtered commit proves nothing about the other entries, so it
+    // leaves them pending — a stale record fails closed (a refused name
+    // keeps refusing) until the next full refresh rather than re-opening
+    // the builtin fall-through.
+    if (dirFingerprintBeforeLoad !== undefined) {
+      this.pendingScanRefusals.clear();
+    }
     // Only a full refresh establishes a baseline. A name-filtered refresh leaves
     // the cache partial, so claiming the whole directory is up to date would let
     // `refreshCacheIfSourcesChanged` report "unchanged" over a partial set.
@@ -1588,6 +1613,49 @@ export class ExtensionManager {
       );
     }
     return snapshot;
+  }
+
+  /**
+   * Activation verdict for a failed-scan tombstone, from the same authority
+   * the committed path uses (the store snapshot, see applyStoreActivation).
+   * The lookup walks the workspace realpath, which rethrows every non-ENOENT
+   * errno: degrading the one tombstone to `isActive: false` keeps a
+   * transient failure there from aborting the merge loop and discarding
+   * every other entry's recorded refusals (R9-2), and matches the R8-1
+   * rule that a tombstone without an activation authority fails closed.
+   */
+  private tombstoneActivation(
+    name: string,
+    storeSnapshot: ExtensionStoreSnapshot,
+  ): boolean {
+    try {
+      return (
+        this.getExtensionActivationForNameFromSnapshot(
+          name,
+          storeSnapshot,
+          this.workspaceDir,
+        ).effective === 'enabled'
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to derive activation for failed-scan tombstone "${name}"; failing closed: ${getErrorMessage(error)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Executor refusals recorded by refresh attempts that rejected before
+   * committing (see the field comment). SubagentManager unions these into
+   * its extension-level refusal map so a by-name dispatch of a refused name
+   * still refuses while its extension is absent or failed-closed inactive
+   * in the cache (R8-1).
+   */
+  getPendingScanRefusals(): ReadonlyMap<
+    string,
+    ReadonlyMap<string, SubagentError>
+  > {
+    return this.pendingScanRefusals;
   }
 
   /**
@@ -1610,6 +1678,7 @@ export class ExtensionManager {
   ): void {
     const cache = new Map(this.extensionCache ?? []);
     for (const [name, { extension, refusals }] of scanRefusals) {
+      this.pendingScanRefusals.set(name, new Map(refusals));
       const cached = cache.get(name);
       if (cached !== undefined) {
         cache.set(name, {
@@ -1637,11 +1706,7 @@ export class ExtensionManager {
           // The committed path's activation authority is the store snapshot
           // (applyStoreActivation), so derive from it the same way.
           isActive: storeSnapshot
-            ? this.getExtensionActivationForNameFromSnapshot(
-                extension.name,
-                storeSnapshot,
-                this.workspaceDir,
-              ).effective === 'enabled'
+            ? this.tombstoneActivation(extension.name, storeSnapshot)
             : false,
           path: extension.path,
           format: extension.format,
@@ -3580,6 +3645,7 @@ export class ExtensionManager {
     });
     onCommitted?.(snapshot.generation);
     this.extensionCache?.delete(identity.name);
+    this.pendingScanRefusals.delete(identity.name);
     if (isUpdate) return snapshot;
     const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
     if (deleteGitCredential) {

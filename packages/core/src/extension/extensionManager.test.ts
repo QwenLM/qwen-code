@@ -40,6 +40,8 @@ import type {
 } from '../index.js';
 import { ExtensionStore } from './extension-store.js';
 import { SubagentError } from '../subagents/types.js';
+import { SubagentManager } from '../subagents/subagent-manager.js';
+import type { Config } from '../config/config.js';
 import { ExtensionPreferencesStore } from './extensionPreferences.js';
 import {
   AGENT_PLUGIN_MCP_SCHEMA,
@@ -5011,6 +5013,181 @@ describe('extension tests', () => {
           disarm();
         }
         expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([]);
+      });
+
+      it('keeps the refusal tombstone when the activation lookup itself throws', async () => {
+        // The tombstone branch derives isActive from the store snapshot;
+        // getActivation canonicalizes the workspace path and rethrows every
+        // non-ENOENT errno. Unguarded, that throw abandoned the whole merge
+        // — discarding every entry's refusals — and escaped the
+        // readConsistent callback, replacing the scan's own rejection
+        // (R9-2). The one entry must degrade to isActive: false instead,
+        // and the refresh must still surface the errno that killed the
+        // scan. (Faulting store.getActivation directly, not realpathSync:
+        // the head load's isEnabled realpaths the same workspace path and
+        // must stay intact for the refusal to be recorded at all.)
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'aaa-refusal',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+
+        // Record the extension's policy in the store, so the tombstone
+        // branch's activation lookup reaches getActivation (the name
+        // fallback returns early without it).
+        const enabler = createExtensionManager();
+        await enabler.refreshCache();
+        await enabler.disableExtension('aaa-refusal', SettingScope.User);
+
+        // A dangling symlink at the extensions root rejects the next
+        // refresh after aaa-refusal's scan recorded its refusal.
+        fs.symlinkSync(
+          path.join(userExtensionsDir, 'missing-target'),
+          path.join(userExtensionsDir, 'zzz-dangling'),
+        );
+
+        const store = new ExtensionStore({ extensionsDir: userExtensionsDir });
+        const activationSpy = vi
+          .spyOn(store, 'getActivation')
+          .mockImplementation(() => {
+            throw Object.assign(new Error('ENOTDIR: not a directory'), {
+              code: 'ENOTDIR',
+            });
+          });
+        try {
+          const manager = createExtensionManager({ extensionStore: store });
+          await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
+
+          const tombstone = manager
+            .getLoadedExtensions()
+            .find((extension) => extension.name === 'aaa-refusal');
+          expect(activationSpy).toHaveBeenCalled();
+          expect(
+            tombstone?.agentExecutorRefusals?.get('explore'),
+          ).toBeInstanceOf(SubagentError);
+          expect(tombstone?.isActive).toBe(false);
+          expect(
+            manager.getPendingScanRefusals().get('aaa-refusal')?.get('explore'),
+          ).toBeInstanceOf(SubagentError);
+        } finally {
+          activationSpy.mockRestore();
+        }
+      });
+
+      it('gates dispatch with a failed-scan refusal whose tombstone failed closed inactive', async () => {
+        // The dispatch-side refusal map is built from ACTIVE extensions
+        // (config.getActiveExtensions), so the failed-scan tombstone above
+        // — isActive: false when no activation authority survives — cannot
+        // carry its refusals there. They must reach the SubagentManager
+        // through the manager-held pending channel instead (R8-1), or a
+        // by-name dispatch of the refused name silently resolves the
+        // same-named builtin (R10-2).
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'aaa-refusal',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+
+        const enabler = createExtensionManager();
+        await enabler.refreshCache();
+        await enabler.disableExtension('aaa-refusal', SettingScope.User);
+
+        // A dangling symlink at the extensions root rejects the next
+        // refresh after aaa-refusal's scan recorded its refusal.
+        const dangling = path.join(userExtensionsDir, 'zzz-dangling');
+        fs.symlinkSync(
+          path.join(userExtensionsDir, 'missing-target'),
+          dangling,
+        );
+
+        const manager = createExtensionManager();
+        // The store's state.json read fails once the scan is running — the
+        // two recovery reads withLock runs before the scan are let through.
+        fsProbe.failReadFileSyncFor = 'extension-enablement.json';
+        fsProbe.failReadFileFor = 'state.json';
+        fsProbe.failReadFileSkip = 2;
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
+        } finally {
+          fsProbe.failReadFileSyncFor = undefined;
+          fsProbe.failReadFileFor = undefined;
+          fsProbe.failReadFileSkip = 0;
+        }
+
+        const tombstone = manager
+          .getLoadedExtensions()
+          .find((extension) => extension.name === 'aaa-refusal');
+        expect(tombstone?.isActive).toBe(false);
+        const refusal = manager
+          .getPendingScanRefusals()
+          .get('aaa-refusal')
+          ?.get('explore');
+        expect(refusal).toBeInstanceOf(SubagentError);
+
+        const subagents = new SubagentManager(
+          {
+            getProjectRoot: () => tempWorkspaceDir,
+            getActiveExtensions: () =>
+              manager.getLoadedExtensions().filter((e) => e.isActive),
+            getAgentsSettings: () => ({}),
+            getSdkMode: () => false,
+            isSafeMode: () => false,
+          } as unknown as Config,
+          {
+            getPendingExtensionRefusals: () =>
+              manager.getPendingScanRefusals().values(),
+          },
+        );
+        await expect(subagents.loadSubagent('explore')).rejects.toBe(refusal);
+
+        // The next committed full refresh supersedes the pending records.
+        fs.unlinkSync(dangling);
+        await manager.refreshCache();
+        expect(manager.getPendingScanRefusals().size).toBe(0);
+      });
+
+      it('drops the pending refusals of an uninstalled extension', async () => {
+        // A pending refusal outlives the failed refresh that recorded it so
+        // dispatch keeps refusing the name, but uninstalling the extension
+        // removes its agents for good — the record must not keep a
+        // same-named builtin blocked past the uninstall.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'aaa-refusal',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+        // Seed the store policy so the uninstall has a matching record.
+        const enabler = createExtensionManager();
+        await enabler.refreshCache();
+
+        fs.symlinkSync(
+          path.join(userExtensionsDir, 'missing-target'),
+          path.join(userExtensionsDir, 'zzz-dangling'),
+        );
+
+        const manager = createExtensionManager();
+        await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
+        expect(
+          manager.getPendingScanRefusals().get('aaa-refusal')?.get('explore'),
+        ).toBeInstanceOf(SubagentError);
+
+        await manager.uninstallExtension('aaa-refusal', false);
+        expect(manager.getPendingScanRefusals().has('aaa-refusal')).toBe(false);
       });
     });
   });

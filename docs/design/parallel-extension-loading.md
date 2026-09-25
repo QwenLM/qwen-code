@@ -63,6 +63,12 @@ cache and fingerprint baseline stay in place, and the next
 `refreshCacheIfSourcesChanged` retries — instead of committing a truncated
 (or empty) extension set stamped as up to date.
 
+At startup there is no previous cache to keep and no later refresh to
+retry, so `Config.initialize` routes its extension refreshes through a
+helper that retries resource exhaustion once and otherwise continues
+without the extension set rather than aborting initialization; post-startup
+refreshes keep the fail-closed semantics above.
+
 One scoped exception: executor refusals recorded by a scan are preserved
 even when the scan dies. A file that declares an `executor`/`executionBackend`
 but fails validation is recorded in `extension.agentExecutorRefusals` so a
@@ -77,7 +83,12 @@ refusals — so the refusal gates dispatch either way. The merge runs in
 so a concurrent uninstall or refresh cannot commit between the failed
 scan and the merge and be overwritten by it. The tombstone's `isActive`
 derives from the store snapshot like the committed path's does, failing
-closed when even that read is exhausted.
+closed when even that read is exhausted. A fail-closed tombstone is
+inactive, though, and the dispatch-side refusal map reads only active
+extensions — so the merge additionally records each attempt's refusals in
+a manager-held pending map that `SubagentManager` unions into its
+extension-level refusal map regardless of activation, and a committed full
+refresh supersedes and clears those pending records.
 
 ### Outside the descriptor budget
 

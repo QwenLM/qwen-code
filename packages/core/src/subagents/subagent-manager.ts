@@ -156,9 +156,31 @@ export class SubagentManager {
   >();
   private readonly changeListeners: Set<() => void> = new Set();
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    options: {
+      /**
+       * Extension executor refusals recorded by refresh attempts that
+       * rejected before committing. The committed refusal records ride on
+       * active extensions (`agentExecutorRefusals`), but a failed-scan
+       * tombstone fails closed inactive (R8-1), so its refusals only reach
+       * dispatch through this channel. The daemon's CRUD-scoped manager and
+       * other Config-stub constructions omit it and see committed records
+       * only.
+       */
+      getPendingExtensionRefusals?: () => Iterable<
+        ReadonlyMap<string, SubagentError>
+      >;
+    } = {},
+  ) {
     this.validator = new SubagentValidator();
+    this.getPendingExtensionRefusals =
+      options.getPendingExtensionRefusals ?? (() => []);
   }
+
+  private readonly getPendingExtensionRefusals: () => Iterable<
+    ReadonlyMap<string, SubagentError>
+  >;
 
   addChangeListener(listener: () => void): () => void {
     this.changeListeners.add(listener);
@@ -1797,6 +1819,16 @@ export class SubagentManager {
       const merged = new Map<string, SubagentError>();
       for (const extension of extensions) {
         for (const [name, error] of extension.agentExecutorRefusals ?? []) {
+          merged.set(name, error);
+        }
+      }
+      // Refusals a REJECTED refresh recorded never committed onto the
+      // active set above; they stay pending at the extension manager until
+      // the next committed refresh and gate dispatch from here regardless
+      // of the failed-closed activation verdict (R8-1). Same scan scoping
+      // as the committed records: only names a scan actually refused.
+      for (const refusals of this.getPendingExtensionRefusals()) {
+        for (const [name, error] of refusals) {
           merged.set(name, error);
         }
       }

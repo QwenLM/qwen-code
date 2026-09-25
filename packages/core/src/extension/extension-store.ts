@@ -413,10 +413,21 @@ export class ExtensionStore {
       try {
         artifacts = await readArtifacts();
       } catch (error) {
-        await onArtifactsRejected?.(
-          async () =>
-            (await this.readSnapshotUnlocked()) ?? this.emptySnapshot(),
-        );
+        // The callback folds the failed attempt's records into shared state;
+        // it must never replace the primary rejection. A throw from it (its
+        // own snapshot read, or anything its callees rethrow) is logged and
+        // the original error still surfaces (R9-2).
+        try {
+          await onArtifactsRejected?.(
+            async () =>
+              (await this.readSnapshotUnlocked()) ?? this.emptySnapshot(),
+          );
+        } catch (callbackError) {
+          debugLogger.warn(
+            'extension store rejection callback failed; surfacing the primary error:',
+            callbackError,
+          );
+        }
         throw error;
       }
       const { value, extensions } = artifacts;

@@ -1084,6 +1084,52 @@ describe('ExtensionStore', () => {
     await expect(mutation).resolves.toMatchObject({ generation: 1 });
   });
 
+  it('readConsistent surfaces the primary rejection when the rejection callback itself fails', async () => {
+    // The callback folds the failed attempt's records into shared state; a
+    // throw from it must be logged and the original rejection still
+    // surface — otherwise the refresh reports an errno that never killed
+    // the scan (R9-2).
+    const store = makeStore();
+    const primary = Object.assign(new Error('scan died'), {
+      code: 'EMFILE',
+    });
+    const callbackFailure = Object.assign(new Error('callback died'), {
+      code: 'ENOTDIR',
+    });
+    let callbackRan = false;
+    await expect(
+      store.readConsistent(
+        async () => {
+          throw primary;
+        },
+        async () => {
+          callbackRan = true;
+          throw callbackFailure;
+        },
+      ),
+    ).rejects.toBe(primary);
+    expect(callbackRan).toBe(true);
+  });
+
+  it('readConsistent still runs the rejection callback before releasing the lock', async () => {
+    const store = makeStore();
+    await store.ensureInitialized([{ id: 'd4'.repeat(32), name: 'demo' }]);
+    let callbackSawSnapshot = false;
+    await expect(
+      store.readConsistent(
+        async () => {
+          throw new Error('scan died');
+        },
+        async (readSnapshot) => {
+          const snapshot = await readSnapshot();
+          callbackSawSnapshot =
+            snapshot.extensions['d4'.repeat(32)] !== undefined;
+        },
+      ),
+    ).rejects.toThrow('scan died');
+    expect(callbackSawSnapshot).toBe(true);
+  });
+
   it.runIf(process.platform !== 'win32')(
     'uses one workspace key for symlink and real paths',
     async () => {

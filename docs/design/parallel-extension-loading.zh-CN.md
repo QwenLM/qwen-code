@@ -56,6 +56,11 @@ install-metadata sidecar 读取、`loadExtensionWorkflows`（含其候选路径�
 `refreshCacheIfSourcesChanged` 会重试——而不是把一个被截断（或为空）的
 扩展集提交并盖上"已是最新"的戳。
 
+启动时没有既有缓存可保留、也没有下一次 refresh 可重试，因此
+`Config.initialize` 让启动阶段的扩展 refresh 经过一个辅助方法：遇到资源
+耗尽先重试一次，仍失败则不带扩展集继续启动，而不是中止初始化；启动之后
+的 refresh 仍保持上述 fail-closed 语义。
+
 一个有界例外：扫描已记录的 executor refusal 即使扫描失败也会被保留。
 声明了 `executor`/`executionBackend` 但校验失败的文件会记录在
 `extension.agentExecutorRefusals` 中，使按名分派拒绝而不是回退到同名
@@ -68,7 +73,11 @@ install-metadata sidecar 读取、`loadExtensionWorkflows`（含其候选路径�
 `readConsistent` 的拒绝回调中、仍持有 store 锁时执行，因此并发的卸载或
 refresh 无法在扫描失败与合并之间抢先提交而被陈旧记录覆盖。tombstone 的
 `isActive` 与已提交路径一样从 store 快照推导，当连该读取也因耗尽失败时
-按关闭处理（fail closed）。
+按关闭处理（fail closed）。但按关闭处理的 tombstone 处于非激活状态，而
+分派侧的 refusal map 只读取激活扩展——因此合并还会把本次尝试记录的
+refusal 写入扩展管理器持有的 pending map，由 `SubagentManager` 不论激活
+状态都并入其 extension 级 refusal map；下一次完整 refresh 提交后这些
+pending 记录即被取代并清空。
 
 ### 描述符预算之外
 
