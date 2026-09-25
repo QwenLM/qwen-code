@@ -24,8 +24,57 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getResolvedProxyUrlForRuntimeFetch,
+  loadUndici,
+} from '../utils/runtimeFetchOptions.js';
 
 const debugLogger = createDebugLogger('SUPERFAST');
+
+/** Hostnames that refer to this machine. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+/** True when the endpoint points at this machine (loopback). */
+function isLoopbackEndpoint(endpoint: string): boolean {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    return LOOPBACK_HOSTS.has(host) || host.endsWith('.localhost');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when some proxy is in play for this process: an explicit
+ * `--proxy`/settings proxy recorded at config time, or a proxy environment
+ * variable. When this is true and the endpoint is loopback, the process-wide
+ * proxy dispatcher would otherwise tunnel the local decision request through the
+ * proxy, which cannot reach this machine.
+ */
+function proxyInPlay(): boolean {
+  if (getResolvedProxyUrlForRuntimeFetch()) return true;
+  return Boolean(
+    process.env['HTTPS_PROXY'] ||
+      process.env['https_proxy'] ||
+      process.env['HTTP_PROXY'] ||
+      process.env['http_proxy'],
+  );
+}
+
+// A single direct (non-proxying) undici Agent, created lazily and reused for
+// every loopback decision call so the connection pool is shared. undici stays
+// behind the dynamic import (issue #7264).
+let directDispatcher: unknown | undefined;
+async function getDirectDispatcher(): Promise<unknown> {
+  if (directDispatcher) return directDispatcher;
+  const { Agent } = await loadUndici();
+  directDispatcher = new Agent({
+    headersTimeout: 0,
+    bodyTimeout: 0,
+    keepAliveTimeout: 60_000,
+  });
+  return directDispatcher;
+}
 
 /** Wire-level question kinds supported by the Jev-compatible protocol. */
 export type QuestionSpec =
@@ -114,7 +163,7 @@ export async function querySystemOne(
       ? AbortSignal.any([signal, timeoutSignal])
       : timeoutSignal;
 
-    const res = await fetch(settings.endpoint, {
+    const init: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -123,7 +172,22 @@ export async function querySystemOne(
         questions,
       }),
       signal: combined,
-    });
+    };
+
+    // The decision backend is a local server. When a proxy is configured but
+    // NO_PROXY does not cover the loopback host, the process-wide proxy
+    // dispatcher would tunnel this request through the proxy, which cannot reach
+    // this machine, so the gate would never work. Pin a direct, non-proxying
+    // dispatcher (and undici's own fetch, so the dispatcher and fetch share one
+    // undici version) for loopback endpoints when a proxy is in play.
+    let fetchFn: typeof fetch = fetch;
+    if (isLoopbackEndpoint(settings.endpoint) && proxyInPlay()) {
+      const undici = await loadUndici();
+      fetchFn = undici.fetch as unknown as typeof fetch;
+      init.dispatcher = await getDirectDispatcher();
+    }
+
+    const res = await fetchFn(settings.endpoint, init);
 
     if (!res.ok) {
       debugLogger.debug(
