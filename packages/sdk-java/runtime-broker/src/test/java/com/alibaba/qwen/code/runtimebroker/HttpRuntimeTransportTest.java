@@ -361,6 +361,26 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void preservesNullValuesInToolInput() throws Exception {
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("optional", null);
+        input.put("nested", java.util.Collections.singletonMap("value", null));
+        input.put("items", Arrays.asList(null,
+                java.util.Collections.singletonMap("value", null)));
+        Map<String, Object> reference = toolReference();
+        reference.put("input", input);
+        reply.set(json(200, JSON.writeValueAsBytes(findIn(toolSuite("execute"),
+                "success").required("expected").required("body"))));
+
+        transport.execute(toolLease(server.getAddress().getPort()),
+                toolSession(), reference).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS);
+
+        assertEquals(JSON.valueToTree(input), JSON.readTree(captured.get())
+                .required("input"));
+    }
+
+    @Test
     void statusAnswersUnknownFromTheSharedFixture() throws Exception {
         JsonNode statusSuite = toolSuite("status");
         JsonNode unknown = findIn(statusSuite, "unknown-is-ok");
@@ -540,6 +560,7 @@ class HttpRuntimeTransportTest {
         replies.put("cache", new Reply(200, valid, "private",
                 "application/json"));
         replies.put("type", new Reply(200, valid, "no-store", "text/plain"));
+        replies.put("separators", new Reply(200, valid, "no-store", ";;"));
         replies.put("charset", new Reply(200, valid, "no-store",
                 "application/json; charset=utf-16"));
         replies.put("field", json(200, JSON.writeValueAsBytes(unknownField)));
@@ -580,18 +601,25 @@ class HttpRuntimeTransportTest {
 
     @Test
     void rejectsAToolResponseWithoutNoStoreJson() throws IOException {
-        byte[] body = JSON.writeValueAsBytes(findIn(toolSuite("status"),
-                "unknown-is-ok").required("expected").required("body"));
+        byte[] body = JSON.writeValueAsBytes(findIn(toolSuite("execute"),
+                "success").required("expected").required("body"));
         for (Reply invalid : List.of(
                 new Reply(200, body, "", "application/json"),
                 new Reply(200, body, "max-age=60", "application/json"),
                 new Reply(200, body, "no-store", ""),
+                new Reply(200, body, "no-store", ";"),
+                new Reply(200, body, "no-store", ";;"),
+                new Reply(200, body, "no-store", "; ;"),
                 new Reply(200, body, "no-store", "text/html"),
                 new Reply(200, body, "no-store",
                         "application/json; charset=utf-16"))) {
             reply.set(invalid);
-            for (String operation : List.of("status", "cancel")) {
-                assertEquals(400, awaitToolFailure(operation).getStatusCode());
+            for (String operation : List.of("execute", "status", "cancel")) {
+                RuntimeBrokerException failure = awaitToolFailure(operation);
+                assertEquals(400, failure.getStatusCode());
+                assertEquals("managed_runtime_attestation_invalid",
+                        failure.getCode());
+                assertFalse(failure.isRetryable());
             }
         }
     }

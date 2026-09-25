@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
+import com.alibaba.fastjson2.JSONWriter;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -250,7 +251,7 @@ public final class HttpRuntimeTransport {
 
     private static byte[] encodeToolRequest(Map<String, Object> body,
             int limit) {
-        byte[] encoded = JsonCodec.encode(body);
+        byte[] encoded = JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);
         if (encoded.length > limit) {
             throw new IllegalArgumentException(
                     "Managed Runtime tool request exceeds "
@@ -579,7 +580,8 @@ public final class HttpRuntimeTransport {
 
     private static boolean jsonContentType(String value) {
         String[] parts = value.split(";");
-        if (!"application/json".equalsIgnoreCase(parts[0].trim())) {
+        if (parts.length == 0
+                || !"application/json".equalsIgnoreCase(parts[0].trim())) {
             return false;
         }
         for (int index = 1; index < parts.length; index++) {
