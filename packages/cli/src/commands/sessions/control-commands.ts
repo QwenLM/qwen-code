@@ -170,10 +170,15 @@ function rawAnswerTail(argv: {
   const session = raw[at + commands.length];
   if (typeof session !== 'string') return undefined;
   const tail = raw.slice(at + commands.length + 1);
-  // `--` marks the verbatim tail the positional's describe promises; the
-  // separator itself is not part of the answer.
-  const separator = tail.indexOf('--');
-  if (separator !== -1) tail.splice(separator, 1);
+  // Only a separator that leads the tail was entered as one, and only that
+  // one is not part of the answer. Every other `--` here is answer text:
+  // `insertAnswerTextSeparator` writes its separator into the copy handed to
+  // yargs (`config.ts` reassigns its own local), never into `process.argv`,
+  // so this tail can only contain a `--` the user typed. Scanning for the
+  // first one anywhere deleted a literal separator the answer meant —
+  // `answer <id> run npm test -- --watch` delivered "run npm test --watch",
+  // and npm then read `--watch` as its own flag instead of a test filter.
+  if (tail[0] === '--') tail.shift();
   return { session, text: tail.join(' ') };
 }
 

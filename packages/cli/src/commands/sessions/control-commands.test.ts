@@ -347,6 +347,41 @@ describe('answer command parsing with the root options registered', () => {
     expect(answer).toHaveBeenCalledWith(SESSION, '--debug');
   });
 
+  it('keeps a later -- in the answer instead of deleting it', async () => {
+    // The raw tail is read off `process.argv`, which never receives the
+    // separator `insertAnswerTextSeparator` inserts into the yargs copy, so
+    // a `--` sitting inside the tail can only be one the user typed.
+    // Stripping the first one found anywhere delivered "run npm test
+    // --watch" here, and npm read `--watch` as its own flag.
+    const answer = mockDelivered();
+    await parse([
+      'sessions',
+      'answer',
+      SESSION,
+      'run',
+      'npm',
+      'test',
+      '--',
+      '--watch',
+    ]);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'run npm test -- --watch');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('gives one intent one answer whichever end the separator was typed at', async () => {
+    // The leading form was already stripped correctly, so the position of
+    // the user's own `--` used to decide the answer: "do x -- y" typed
+    // without a leading separator delivered "do x y".
+    const unled = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'do', 'x', '--', 'y']);
+    expect(unled).toHaveBeenCalledWith(SESSION, 'do x -- y');
+
+    const led = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, '--', 'do', 'x', '--', 'y']);
+    expect(led).toHaveBeenCalledWith(SESSION, 'do x -- y');
+  });
+
   it('keeps an unknown option when root options are registered', async () => {
     const answer = mockDelivered();
     await parse(['sessions', 'answer', SESSION, '--frobnicate', 'keep']);
