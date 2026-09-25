@@ -16335,8 +16335,10 @@ exit 1
           REPAIR_VERIFIED_HEAD: '',
           FIRST_AUDIT_VERDICT: '',
           REPAIR_AUDIT_VERDICT: '',
-          FIRST_CONCLUSION: '',
-          REPAIR_CONCLUSION: '',
+          FIRST_PREEXISTING: '',
+          REPAIR_PREEXISTING: '',
+          FIRST_STEP_OUTCOME: '',
+          REPAIR_STEP_OUTCOME: '',
           FIRST_KISS_AUDIT: '',
           REPAIR_KISS_AUDIT: '',
           ...env,
@@ -16351,14 +16353,14 @@ exit 1
       run({
         FIRST_OUTCOME: 'fixed',
         FIRST_VERIFIED_HEAD: 'first-sha',
-        FIRST_CONCLUSION: 'success',
+        FIRST_STEP_OUTCOME: 'success',
       }),
     ).toMatchObject({
       status: 0,
       written: expect.stringContaining('verified_head=first-sha'),
     });
     expect(
-      run({ FIRST_OUTCOME: 'noop', FIRST_CONCLUSION: 'success' }),
+      run({ FIRST_OUTCOME: 'noop', FIRST_STEP_OUTCOME: 'success' }),
     ).toMatchObject({
       status: 0,
       written: expect.stringContaining('outcome=noop'),
@@ -16394,8 +16396,8 @@ exit 1
         REPAIR_OUTCOME: 'fixed',
         REPAIR_COMMITTED: 'true',
         REPAIR_VERIFIED_HEAD: 'repair-sha',
-        FIRST_CONCLUSION: 'failure',
-        REPAIR_CONCLUSION: 'success',
+        FIRST_STEP_OUTCOME: 'failure',
+        REPAIR_STEP_OUTCOME: 'success',
       }),
     ).toMatchObject({
       status: 0,
@@ -16407,7 +16409,7 @@ exit 1
       FIRST_VERIFIED_HEAD: 'stale-first-sha',
       REPAIR_ATTEMPTED: 'true',
       REPAIR_OUTCOME: 'fixed',
-      REPAIR_CONCLUSION: 'success',
+      REPAIR_STEP_OUTCOME: 'success',
     });
     expect(repairedWithoutVerifiedHead).toMatchObject({
       status: 0,
@@ -16473,55 +16475,74 @@ exit 1
       run({
         FIRST_OUTCOME: 'fixed',
         FIRST_AUDIT_VERDICT: 'sound',
-        FIRST_CONCLUSION: 'success',
+        FIRST_STEP_OUTCOME: 'success',
       }),
     ).toMatchObject({
       status: 0,
       written: expect.stringContaining('audit_verdict=sound'),
     });
-    // Conclusion gate: fixed/noop are the ONLY outcomes that release the
-    // PAT push, and a gate that reached them exited 0 — step conclusion
-    // success. A silent gate death (killed mid-check) concludes failure,
-    // yet its step-output file stays discoverable under $RUNNER_TEMP and
-    // appendable; the forged claim must be discarded, never pushed
-    // (probe-verified entrance on the pre-gate finalize body).
+    // A failed step with continue-on-error concludes success, so the raw step
+    // outcome must seal any claim that would release the push.
     expect(workflow).toContain(
-      "FIRST_CONCLUSION: '${{ steps.verify.conclusion }}'",
+      "FIRST_STEP_OUTCOME: '${{ steps.verify.outcome }}'",
     );
     expect(workflow).toContain(
-      "REPAIR_CONCLUSION: '${{ steps.verify_repair.conclusion }}'",
+      "REPAIR_STEP_OUTCOME: '${{ steps.verify_repair.outcome }}'",
     );
     const forgedFixed = run({
       FIRST_OUTCOME: 'fixed',
       FIRST_COMMITTED: 'true',
       FIRST_VERIFIED_HEAD: 'forged-sha',
       FIRST_AUDIT_VERDICT: 'sound',
-      FIRST_CONCLUSION: 'failure',
+      FIRST_PREEXISTING: 'true',
+      FIRST_CONCLUSION: 'success',
+      FIRST_STEP_OUTCOME: 'failure',
     });
     expect(forgedFixed.status).toBe(1);
     expect(forgedFixed.written).not.toContain('outcome=fixed');
+    expect(forgedFixed.written).not.toContain('committed=');
     expect(forgedFixed.written).not.toContain('verified_head=');
     expect(forgedFixed.written).not.toContain('audit_verdict=');
+    expect(forgedFixed.written).not.toContain('preexisting=');
     // noop releases the push-bound report + thread resolution too.
     expect(
-      run({ FIRST_OUTCOME: 'noop', FIRST_CONCLUSION: 'failure' }),
-    ).toMatchObject({ status: 1 });
-    // A killed repair pass is gated identically.
-    expect(
       run({
-        FIRST_OUTCOME: 'failed',
-        REPAIR_ATTEMPTED: 'true',
-        REPAIR_OUTCOME: 'fixed',
-        REPAIR_CONCLUSION: 'failure',
+        FIRST_OUTCOME: 'noop',
+        FIRST_CONCLUSION: 'success',
+        FIRST_STEP_OUTCOME: 'failure',
       }),
     ).toMatchObject({ status: 1 });
-    // A legitimate rejection (outcome=failed on a failing conclusion)
+    // A killed repair pass is gated identically.
+    const forgedRepair = run({
+      FIRST_OUTCOME: 'failed',
+      REPAIR_ATTEMPTED: 'true',
+      REPAIR_OUTCOME: 'fixed',
+      REPAIR_VERIFIED_HEAD: 'forged-repair-sha',
+      REPAIR_AUDIT_VERDICT: 'sound',
+      REPAIR_CONCLUSION: 'success',
+      REPAIR_STEP_OUTCOME: 'failure',
+    });
+    expect(forgedRepair.status).toBe(1);
+    expect(forgedRepair.written).not.toContain('outcome=fixed');
+    expect(forgedRepair.written).not.toContain('verified_head=');
+    expect(forgedRepair.written).not.toContain('audit_verdict=');
+    // A legitimate rejection (outcome=failed on a failing step)
     // still surfaces — the gate binds only the push-releasing outcomes.
     expect(
-      run({ FIRST_OUTCOME: 'failed', FIRST_CONCLUSION: 'failure' }),
+      run({ FIRST_OUTCOME: 'failed', FIRST_STEP_OUTCOME: 'failure' }),
     ).toMatchObject({
       status: 1,
       written: expect.stringContaining('outcome=failed'),
+    });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        FIRST_PREEXISTING: 'true',
+        FIRST_STEP_OUTCOME: 'failure',
+      }),
+    ).toMatchObject({
+      status: 1,
+      written: expect.stringContaining('preexisting=true'),
     });
     // kiss_audit rides the same selection chain — the gates' defended
     // output, forwarded with the selected pass.
@@ -16531,7 +16552,7 @@ exit 1
     expect(
       run({
         FIRST_OUTCOME: 'fixed',
-        FIRST_CONCLUSION: 'success',
+        FIRST_STEP_OUTCOME: 'success',
         FIRST_KISS_AUDIT: 'true',
       }),
     ).toMatchObject({
@@ -16543,7 +16564,7 @@ exit 1
         FIRST_OUTCOME: 'failed',
         REPAIR_ATTEMPTED: 'true',
         REPAIR_OUTCOME: 'fixed',
-        REPAIR_CONCLUSION: 'success',
+        REPAIR_STEP_OUTCOME: 'success',
         FIRST_KISS_AUDIT: 'false',
         REPAIR_KISS_AUDIT: 'true',
       }),

@@ -229,7 +229,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [126. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…](#af-126)
 - [127. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…](#af-127)
 - [128. review-address · Finalize verification — The verdict travels WITH the attempt whose outcome is selected: a repair pass…](#af-128)
-- [129. review-address · Finalize verification — Conclusion gate: fixed/noop are the ONLY outcomes that release the PAT push. A…](#af-129)
+- [129. review-address · Finalize verification — Only a successful verification step can release the PAT push](#af-129)
 - [130. review-address · Finalize verification — handoff and the two brake-violation rejections are deliberate, PUBLISHED…](#af-130)
 - [131. review-address · Push and report — Growth-audit trail (+ re-arm on sound): audit rounds record the verdict under…](#af-131)
 - [132. review-address · Push and report — The mirror of the resolve above: a finding the agent did NOT resolve keeps its…](#af-132)
@@ -3389,20 +3389,19 @@ validated verdict as the record.
 
 <a id="af-129"></a>
 
-### 129. review-address · Finalize verification — Conclusion gate: fixed/noop are the ONLY outcomes that release the PAT push. A…
+### 129. review-address · Finalize verification — Only a successful verification step can release the PAT push
 
 In `review-address` · `Finalize verification`.
 
 ```text
-Conclusion gate: fixed/noop are the ONLY outcomes that release
-the PAT push. A silent gate death (the step killed mid-check)
-concludes failure, yet its step-output file stays discoverable
-under $RUNNER_TEMP and appendable — a forged outcome=fixed +
-verified_head must not flow to the push condition. Accept
-fixed/noop only from a pass whose step concluded success;
-anything else reads as a crashed gate (empty outcome → the
-report's retry path), never as a verdict, and the audit bit
-riding the tainted outputs is discarded with it.
+Fixed/noop are the only outcomes that release the PAT push.
+Both verification steps use continue-on-error, which changes a
+failed step's conclusion to success. The gate must check the raw
+step outcome instead. A step killed mid-check leaves its output
+file discoverable and appendable under $RUNNER_TEMP, but a forged
+outcome=fixed plus verified_head cannot reach the push condition
+when the step outcome is failure. Discard the related outputs with
+the claim so the report does not treat them as a verified result.
 ```
 
 <a id="af-130"></a>
