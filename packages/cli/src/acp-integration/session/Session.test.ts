@@ -11092,6 +11092,70 @@ describe('Session', () => {
       },
     );
 
+    it.each(['read the selection', ''])(
+      'records accepted embedded resources on their owning prompt (%j)',
+      async (text) => {
+        const embeddedResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        };
+        const expectedResource = structuredClone(embeddedResource);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              ...(text ? [{ type: 'text' as const, text }] : []),
+              embeddedResource,
+            ],
+          },
+          { version: 1, sessionId: 'test-session-id', promptId: 'embedded-1' },
+          undefined,
+          'model-only instruction',
+        );
+        embeddedResource.resource.text = 'changed after submission';
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          text,
+          undefined,
+          {
+            displayText: text,
+            hookContext: '',
+            embeddedResources: [expectedResource],
+          },
+          'embedded-1',
+        );
+      },
+    );
+
+    it('rejects text resources that exceed the per-prompt replay budget before recording', async () => {
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'context://example/oversized',
+                text: 'x'.repeat(256 * 1024),
+              },
+            },
+          ],
+        }),
+      ).rejects.toThrow(
+        'Embedded text resources exceed the 256 KiB replay limit',
+      );
+      expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('records daemon attachment references for transcript replay', async () => {
       const imageReference = {
         type: 'image' as const,
@@ -11140,6 +11204,133 @@ describe('Session', () => {
       );
     });
 
+    it('does not apply the inline replay limit to a large daemon-native text attachment', async () => {
+      const attachmentReference = {
+        type: 'resource' as const,
+        attachmentId: 'large-notes.txt',
+        mimeType: 'text/plain',
+        size: 256 * 1024,
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///large-notes.txt',
+              mimeType: 'text/plain',
+              text: 'x'.repeat(256 * 1024),
+            },
+          },
+        ],
+        _meta: {
+          'qwen.daemon.attachmentReferences': [attachmentReference],
+          'qwen.daemon.attachmentResourceIndexes': [0],
+        },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        {
+          displayText: '',
+          hookContext: '',
+          attachmentReferences: [attachmentReference],
+        },
+        undefined,
+      );
+    });
+
+    it('retains a direct resource sharing a URI with a daemon-native attachment', async () => {
+      const attachmentReference = {
+        type: 'resource' as const,
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 6,
+      };
+      const directResource = {
+        type: 'resource' as const,
+        resource: {
+          uri: 'attachment:///notes.txt',
+          mimeType: 'text/plain',
+          text: 'different direct content',
+        },
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///notes.txt',
+              mimeType: 'text/plain',
+              text: 'native',
+            },
+          },
+          directResource,
+        ],
+        _meta: {
+          'qwen.daemon.attachmentReferences': [attachmentReference],
+          'qwen.daemon.attachmentResourceIndexes': [0],
+        },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        {
+          displayText: '',
+          hookContext: '',
+          attachmentReferences: [attachmentReference],
+          embeddedResources: [directResource],
+        },
+        undefined,
+      );
+    });
+
+    it('keeps ambiguous same-URI resources when legacy daemon metadata has no positions', async () => {
+      const directResource = {
+        type: 'resource' as const,
+        resource: { uri: 'attachment:///notes.txt', text: 'direct' },
+      };
+      const nativeResource = {
+        type: 'resource' as const,
+        resource: { uri: 'attachment:///notes.txt', text: 'native' },
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [directResource, nativeResource],
+        _meta: {
+          'qwen.daemon.attachmentReferences': [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 6,
+            },
+          ],
+        },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        expect.objectContaining({
+          embeddedResources: [directResource, nativeResource],
+        }),
+        undefined,
+      );
+    });
+
     it('records 256 attachment references from one prompt', async () => {
       const attachmentReferences = Array.from({ length: 256 }, (_, index) => ({
         type: 'image' as const,
@@ -11165,6 +11356,38 @@ describe('Session', () => {
         expect.objectContaining({ attachmentReferences }),
         undefined,
       );
+    });
+
+    it('does not apply the inline resource limit to more than 256 native references', async () => {
+      const attachmentReferences = Array.from({ length: 257 }, (_, index) => ({
+        type: 'resource' as const,
+        attachmentId: `notes-${index}.txt`,
+        mimeType: 'text/plain',
+        size: 1024,
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: attachmentReferences.map((reference) => ({
+          type: 'resource' as const,
+          resource: {
+            uri: `attachment:///${reference.attachmentId}`,
+            mimeType: 'text/plain',
+            text: 'x'.repeat(1024),
+          },
+        })),
+        _meta: {
+          'qwen.daemon.attachmentReferences': attachmentReferences,
+          'qwen.daemon.attachmentResourceIndexes': Array.from(
+            { length: 257 },
+            (_, index) => index,
+          ),
+        },
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalled();
     });
 
     it('records empty file attachment references', async () => {

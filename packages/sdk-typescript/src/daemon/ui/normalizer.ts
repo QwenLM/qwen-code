@@ -890,6 +890,31 @@ function normalizeSessionUpdate(
           },
         ];
       }
+      if (
+        isRecord(content) &&
+        content['type'] === 'resource' &&
+        isRecord(content['resource']) &&
+        typeof content['resource']['uri'] === 'string' &&
+        content['resource']['uri'].length > 0 &&
+        typeof content['resource']['text'] === 'string'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'user.resource.delta',
+            resource: {
+              ...content,
+              type: 'resource',
+              resource: {
+                ...content['resource'],
+                uri: content['resource']['uri'],
+                text: content['resource']['text'],
+              },
+            },
+            ...(meta ? { meta } : {}),
+          },
+        ];
+      }
       const part = extractContentPart(content);
       if (part) {
         if (part.kind === 'image') {

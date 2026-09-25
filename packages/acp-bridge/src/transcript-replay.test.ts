@@ -1195,6 +1195,82 @@ describe('createTranscriptReplayMachine', () => {
       },
     );
 
+    it.each(['read the selection', ''])(
+      'replays embedded resources as typed user chunks on their owning prompt (%j)',
+      (text) => {
+        const embeddedResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        };
+        const secondResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/second',
+            mimeType: 'text/plain',
+            text: 'second selection',
+          },
+        };
+        const projected = updates(
+          createTranscriptReplayMachine(),
+          record('user-embedded', 'user', {
+            daemonPromptId: 'embedded-1',
+            message: {
+              role: 'user',
+              parts: [{ text: 'expanded model input' }],
+            },
+            systemPayload: {
+              displayText: text,
+              hookContext: '',
+              embeddedResources: [embeddedResource, secondResource],
+            },
+          }),
+        );
+
+        expect(
+          projected.map((update) =>
+            'content' in update ? update.content : update,
+          ),
+        ).toEqual([
+          ...(text ? [{ type: 'text', text }] : []),
+          embeddedResource,
+          secondResource,
+        ]);
+        for (const update of projected) {
+          expect(update._meta).toMatchObject({
+            promptId: 'embedded-1',
+            qwenTranscript: { sourceRecordIds: ['user-embedded'] },
+          });
+        }
+      },
+    );
+
+    it('ignores malformed and blob embedded resource records', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-invalid-embedded', 'user', {
+          message: { role: 'user', parts: [] },
+          systemPayload: {
+            displayText: '',
+            hookContext: '',
+            embeddedResources: [
+              null,
+              { type: 'resource', resource: { uri: 'context://missing-text' } },
+              { type: 'resource', resource: { uri: '', text: 'empty URI' } },
+              {
+                type: 'resource',
+                resource: { uri: 'context://blob', blob: 'AQID' },
+              },
+            ],
+          },
+        }),
+      );
+      expect(projected).toEqual([]);
+    });
+
     it('ignores invalid resource references and does not infer them from fileData', () => {
       const projected = updates(
         createTranscriptReplayMachine(),
