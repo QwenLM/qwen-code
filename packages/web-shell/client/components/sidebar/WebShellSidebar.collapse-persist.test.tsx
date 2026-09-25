@@ -9,7 +9,7 @@ import sidebarStyles from './WebShellSidebar.module.css';
 import {
   getCompletedUnreadStorageKey,
   readCompletedUnreadIds,
-  writeCompletedUnreadIds,
+  updateCompletedUnreadIds,
 } from './completedUnreadSessions';
 import {
   clickSidebarElement as click,
@@ -41,6 +41,9 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
     return {
       connection: {
         status: 'connected',
+        error: undefined as string | undefined,
+        loadingTranscript: undefined as boolean | undefined,
+        catchingUp: undefined as boolean | undefined,
         sessionId: null as string | null,
         workspaceCwd: '/tmp/project',
         capabilities: undefined as
@@ -253,6 +256,10 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   connection.sessionId = null;
+  connection.status = 'connected';
+  connection.error = undefined;
+  connection.loadingTranscript = undefined;
+  connection.catchingUp = undefined;
   workspace.baseUrl = 'http://daemon-a.test';
   connection.workspaceCwd = '/tmp/project';
   connection.capabilities = organizationCapabilities;
@@ -281,6 +288,15 @@ beforeEach(() => {
   useSessionCatalogQueries.mockReset();
   useSessionCatalogQueries.mockReturnValue([]);
   loadSession.mockReset();
+  workspace.client.workspaceByCwd.mockReset();
+  workspace.client.workspaceByCwd.mockImplementation(() => ({
+    listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+    listSessionGroups: vi
+      .fn()
+      .mockResolvedValue({ groups: [], colorOptions: [] }),
+  }));
+  archived.deleteSession.mockReset();
+  archived.deleteSession.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -465,10 +481,457 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toBeNull();
   });
 
+  it('preserves unread completion when opening the session fails', async () => {
+    const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identity = '/tmp/project\0failed-open';
+    updateCompletedUnreadIds(key, { add: new Set([identity]) });
+    active.sessions = [makeSession('failed-open')];
+    active.data = active.sessions;
+    loadSession.mockRejectedValueOnce(new Error('Session unavailable'));
+    renderSidebar();
+    await flushSidebar();
+
+    const row = container
+      .querySelector('[data-web-shell-session-completed-unread]')!
+      .closest<HTMLElement>('[role="button"]')!;
+    act(() => click(row));
+    await flushSidebar();
+
+    expect(loadSession).toHaveBeenCalledWith('failed-open', '/tmp/project');
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+  });
+
+  it.each([
+    { state: 'connecting', status: 'connecting' },
+    {
+      state: 'loading transcript',
+      status: 'connected',
+      loadingTranscript: true,
+    },
+    { state: 'catching up', status: 'connected', catchingUp: true },
+    { state: 'failed', status: 'connected', error: 'Replay failed' },
+  ])(
+    'preserves unread while the SDK target is $state and its load fails',
+    async (pending) => {
+      const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+      const identity = '/tmp/project\0pending-failure';
+      updateCompletedUnreadIds(key, { add: [identity] });
+      active.sessions = [makeSession('pending-failure')];
+      active.data = active.sessions;
+      let rejectLoad!: (error: Error) => void;
+      loadSession.mockImplementationOnce(() => {
+        connection.status = pending.status;
+        connection.error = pending.error;
+        connection.loadingTranscript = pending.loadingTranscript;
+        connection.catchingUp = pending.catchingUp;
+        connection.sessionId = 'pending-failure';
+        return new Promise<void>((_resolve, reject) => {
+          rejectLoad = reject;
+        });
+      });
+      renderSidebar();
+      await flushSidebar();
+      const row = container
+        .querySelector('[data-web-shell-session-completed-unread]')!
+        .closest<HTMLElement>('[role="button"]')!;
+      act(() => click(row));
+      renderSidebar();
+      await flushSidebar();
+      expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+
+      await act(async () => {
+        rejectLoad(new Error('Replay failed'));
+      });
+      await flushSidebar();
+      expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+      expect(
+        container.querySelector('[data-web-shell-session-completed-unread]'),
+      ).not.toBeNull();
+      if (pending.state === 'connecting') {
+        act(() => click(row));
+        await flushSidebar();
+        expect(loadSession).toHaveBeenCalledTimes(2);
+        expect(readCompletedUnreadIds(key)).toEqual(new Set());
+        return;
+      }
+      act(() => root.unmount());
+      root = createRoot(container);
+      connection.sessionId = null;
+      connection.status = 'connected';
+      connection.error = undefined;
+      connection.loadingTranscript = undefined;
+      connection.catchingUp = undefined;
+      renderSidebar();
+      await flushSidebar();
+      expect(
+        container.querySelector('[data-web-shell-session-completed-unread]'),
+      ).not.toBeNull();
+    },
+  );
+
+  it('waits for active work to stop before marking a completed prompt unread', async () => {
+    const session = makeSession('held-work', {
+      hasActivePrompt: true,
+      activeWorkState: 'active',
+    });
+    active.sessions = [session];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
+    ).not.toBeNull();
+    expect(
+      readCompletedUnreadIds(getCompletedUnreadStorageKey(workspace.baseUrl)),
+    ).toEqual(new Set());
+
+    active.sessions = [
+      { ...session, hasActivePrompt: false, activeWorkState: 'idle' },
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+  });
+
+  it('preserves another tab completion while the local running snapshot is stale', async () => {
+    const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identity = '/tmp/project\0remote-completion';
+    active.sessions = [
+      makeSession('remote-completion', { hasActivePrompt: true }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    active.sessions = [...active.sessions];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    const itemKey = `${key}\0${identity}`;
+    act(() => {
+      window.localStorage.setItem(itemKey, '1');
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: itemKey,
+          newValue: '1',
+          storageArea: window.localStorage,
+        }),
+      );
+    });
+    await flushSidebar();
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+    expect(
+      container.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+
+    active.sessions = [...active.sessions];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+
+    active.sessions = [makeSession('remote-completion')];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+  });
+
+  it('retains unread completion when the current catalog page no longer includes it', async () => {
+    const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identity = '/tmp/project\0outside-page';
+    updateCompletedUnreadIds(key, { add: new Set([identity]) });
+    const session = makeSession('outside-page');
+    active.sessions = [session];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    active.sessions = [];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+    active.sessions = [session];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+  });
+
+  it('retains unread completion through archive and unarchive', async () => {
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: ['session_organization', 'session_archive'],
+    };
+    workspace.capabilities = connection.capabilities;
+    const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identity = '/tmp/project\0archived-unread';
+    updateCompletedUnreadIds(key, { add: new Set([identity]) });
+    const session = makeSession('archived-unread');
+    active.sessions = [session];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    active.sessions = [];
+    active.data = active.sessions;
+    archived.sessions = [{ ...session, isArchived: true }];
+    archived.data = archived.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+    active.sessions = [session];
+    active.data = active.sessions;
+    archived.sessions = [];
+    archived.data = archived.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps active-work status above a restored unread marker in a secondary workspace', async () => {
+    const capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
+    const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+    updateCompletedUnreadIds(key, {
+      add: new Set(['/tmp/other\0secondary-work']),
+    });
+    const session = makeSession('secondary-work', {
+      workspaceCwd: '/tmp/other',
+      activeWorkState: 'active',
+    });
+    useSessionCatalogQueries.mockImplementation((_client, queries) =>
+      queries.map((query: { options: { group?: string } }) => ({
+        page: { sessions: query.options.group === 'all' ? [session] : [] },
+        loading: false,
+      })),
+    );
+    renderSidebar(true);
+    await flushSidebar();
+
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="completed"]',
+      ),
+    ).toBeNull();
+    expect(readCompletedUnreadIds(key)).toEqual(new Set());
+  });
+
+  it('shows running status for a restored unread secondary row while expanded', async () => {
+    const capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
+    updateCompletedUnreadIds(getCompletedUnreadStorageKey(workspace.baseUrl), {
+      add: new Set(['/tmp/other\0secondary-running']),
+    });
+    const client = {
+      listWorkspaceSessions: vi.fn().mockResolvedValue([
+        makeSession('secondary-running', {
+          displayName: 'Secondary running',
+          workspaceCwd: '/tmp/other',
+          hasActivePrompt: true,
+        }),
+      ]),
+      listSessionGroups: vi
+        .fn()
+        .mockResolvedValue({ groups: [], colorOptions: [] }),
+    };
+    workspace.client.workspaceByCwd.mockReturnValue(client);
+    renderSidebar();
+    await flushSidebar();
+    const header = Array.from(
+      container.querySelectorAll<HTMLElement>('[aria-expanded]'),
+    ).find((element) => element.textContent?.includes('other'));
+    expect(header).toBeDefined();
+    if (header!.getAttribute('aria-expanded') === 'false') {
+      act(() => click(header!));
+      await flushSidebar();
+    }
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Secondary running'));
+    expect(row).toBeDefined();
+    expect(
+      row!.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(
+      row!.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+  });
+
+  it('hides completion in archived row details without clearing the unread record', async () => {
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: ['session_organization', 'session_archive'],
+    };
+    workspace.capabilities = connection.capabilities;
+    const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identity = '/tmp/project\0archived-unread';
+    updateCompletedUnreadIds(key, { add: new Set([identity]) });
+    active.sessions = [];
+    active.data = active.sessions;
+    archived.sessions = [
+      makeSession('archived-unread', {
+        displayName: 'Archived unread',
+        isArchived: true,
+      }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar();
+    await flushSidebar();
+    const header = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Archived'));
+    expect(header).toBeDefined();
+    act(() => click(header!));
+    await flushSidebar();
+    const row = container.querySelector<HTMLElement>('[class*="archivedRow"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      row!.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+      await new Promise((resolve) => window.setTimeout(resolve, 320));
+    });
+    const details = document.querySelector('[role="dialog"]');
+    expect(details).not.toBeNull();
+    expect(details!.textContent).toContain('Idle');
+    expect(details!.textContent).not.toContain('Finished');
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+  });
+
+  it.each(['success', 'failure', 'not removed'] as const)(
+    'clears an archived unread record only after confirmed deletion: %s',
+    async (result) => {
+      connection.capabilities = {
+        ...organizationCapabilities,
+        features: ['session_organization', 'session_archive'],
+      };
+      workspace.capabilities = connection.capabilities;
+      const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+      const identity = '/tmp/project\0delete-unread';
+      updateCompletedUnreadIds(key, { add: new Set([identity]) });
+      active.sessions = [];
+      active.data = active.sessions;
+      archived.sessions = [makeSession('delete-unread', { isArchived: true })];
+      archived.data = archived.sessions;
+      if (result === 'success')
+        archived.deleteSession.mockResolvedValueOnce(true);
+      else if (result === 'not removed')
+        archived.deleteSession.mockResolvedValueOnce(false);
+      else
+        archived.deleteSession.mockRejectedValueOnce(
+          new Error('Delete failed'),
+        );
+      renderSidebar();
+      await flushSidebar();
+      const header = Array.from(
+        container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.includes('Archived'));
+      act(() => click(header!));
+      await flushSidebar();
+      const moreActions = container.querySelector<HTMLElement>(
+        '[class*="archivedRow"] button[aria-label="More actions"]',
+      );
+      expect(moreActions).not.toBeNull();
+      act(() => click(moreActions!, true));
+      await flushSidebar();
+      const deleteItem = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.trim() === 'Delete');
+      expect(deleteItem).toBeDefined();
+      act(() => click(deleteItem!));
+      await flushSidebar();
+      const dialog = document.querySelector('[role="dialog"]');
+      const confirm = Array.from(
+        dialog!.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.trim() === 'Delete');
+      expect(confirm).toBeDefined();
+      act(() => click(confirm!));
+      await flushSidebar();
+
+      expect(archived.deleteSession).toHaveBeenCalledWith('delete-unread');
+      expect(readCompletedUnreadIds(key)).toEqual(
+        new Set(result === 'success' ? [] : [identity]),
+      );
+    },
+  );
+
+  it('does not let an old daemon load clear a new daemon unread marker', async () => {
+    const firstKey = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const secondKey = getCompletedUnreadStorageKey('http://daemon-b.test');
+    const identity = '/tmp/project\0delayed-open';
+    updateCompletedUnreadIds(firstKey, { add: new Set([identity]) });
+    updateCompletedUnreadIds(secondKey, { add: new Set([identity]) });
+    active.sessions = [makeSession('delayed-open')];
+    active.data = active.sessions;
+    let resolveLoad!: () => void;
+    loadSession.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveLoad = resolve;
+      }),
+    );
+    renderSidebar();
+    await flushSidebar();
+    const row = container
+      .querySelector('[data-web-shell-session-completed-unread]')!
+      .closest<HTMLElement>('[role="button"]')!;
+    act(() => click(row));
+    await flushSidebar();
+    workspace.baseUrl = 'http://daemon-b.test';
+    renderSidebar();
+    await flushSidebar();
+    await act(async () => {
+      resolveLoad();
+    });
+    await flushSidebar();
+
+    expect(readCompletedUnreadIds(secondKey)).toEqual(new Set([identity]));
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+  });
+
   it('keeps restored markers isolated when switching daemons without remounting', async () => {
     const storageKey = getCompletedUnreadStorageKey(workspace.baseUrl);
     const identity = '/tmp/project\0same-session';
-    writeCompletedUnreadIds(storageKey, new Set([identity]));
+    updateCompletedUnreadIds(storageKey, { add: new Set([identity]) });
     active.sessions = [makeSession('same-session')];
     active.data = active.sessions;
     renderSidebar();
@@ -501,6 +964,10 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     active.data = active.sessions;
     renderSidebar();
     await flushSidebar();
+    active.sessions = [...active.sessions];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
 
     workspace.baseUrl = 'http://daemon-b.test';
     active.sessions = [makeSession('same-session', { hasActivePrompt: false })];
@@ -515,12 +982,103 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toEqual(new Set());
   });
 
+  it('preserves secondary unread records when a collapsed catalog page narrows', async () => {
+    const capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
+    const key = getCompletedUnreadStorageKey(workspace.baseUrl);
+    const identity = '/tmp/other\0secondary-unread';
+    updateCompletedUnreadIds(key, { add: [identity] });
+    let sessions = [
+      makeSession('secondary-unread', { workspaceCwd: '/tmp/other' }),
+    ];
+    useSessionCatalogQueries.mockImplementation((_client, queries) =>
+      queries.map((query: { options: { group?: string } }) => ({
+        page: { sessions: query.options.group === 'all' ? sessions : [] },
+        loading: false,
+      })),
+    );
+    renderSidebar(true);
+    await flushSidebar();
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="completed"]',
+      ),
+    ).not.toBeNull();
+    sessions = [];
+    renderSidebar(true);
+    await flushSidebar();
+    expect(readCompletedUnreadIds(key)).toEqual(new Set([identity]));
+
+    sessions = [
+      makeSession('secondary-unread', { workspaceCwd: '/tmp/other' }),
+    ];
+    renderSidebar(true);
+    await flushSidebar();
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="completed"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('does not carry a settled secondary running snapshot into another daemon', async () => {
+    const capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
+    let running = true;
+    useSessionCatalogQueries.mockImplementation((_client, queries) =>
+      queries.map((query: { options: { group?: string } }) => ({
+        page: {
+          sessions:
+            query.options.group === 'all'
+              ? [
+                  makeSession('same-session', {
+                    workspaceCwd: '/tmp/other',
+                    hasActivePrompt: running,
+                  }),
+                ]
+              : [],
+        },
+        loading: false,
+      })),
+    );
+    renderSidebar(true);
+    await flushSidebar();
+    renderSidebar(true);
+    await flushSidebar();
+    workspace.baseUrl = 'http://daemon-b.test';
+    running = false;
+    renderSidebar(true);
+    await flushSidebar();
+
+    expect(
+      readCompletedUnreadIds(getCompletedUnreadStorageKey(workspace.baseUrl)),
+    ).toEqual(new Set());
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="completed"]',
+      ),
+    ).toBeNull();
+  });
+
   it('clears restored running and currently open markers on the first snapshot', async () => {
     const storageKey = getCompletedUnreadStorageKey(workspace.baseUrl);
-    writeCompletedUnreadIds(
-      storageKey,
-      new Set(['/tmp/project\0running', '/tmp/project\0opened']),
-    );
+    updateCompletedUnreadIds(storageKey, {
+      add: new Set(['/tmp/project\0running', '/tmp/project\0opened']),
+    });
     connection.sessionId = 'opened';
     active.sessions = [
       makeSession('running', { hasActivePrompt: true }),
@@ -553,7 +1111,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       '/tmp/other\0other-unread',
       '/tmp/project\0channel-unread',
     ]);
-    writeCompletedUnreadIds(storageKey, identities);
+    updateCompletedUnreadIds(storageKey, { add: identities });
     connection.capabilities = {
       ...organizationCapabilities,
       features: ['session_organization', 'session_source_metadata'],

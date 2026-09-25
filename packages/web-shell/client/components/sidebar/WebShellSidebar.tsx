@@ -125,11 +125,9 @@ import {
   replaceOwnedCollapsedSessionSectionIds,
 } from './collapsedSessionSections';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
-import {
-  getCompletedUnreadStorageKey,
-  readCompletedUnreadIds,
-  writeCompletedUnreadIds,
-} from './completedUnreadSessions';
+import { getCompletedUnreadStorageKey } from './completedUnreadSessions';
+import { useCompletedUnreadSessions } from './useCompletedUnreadSessions';
+import { reconcileCompletedUnreadSessions } from './reconcileCompletedUnreadSessions';
 import {
   collectScheduledTaskSession,
   getScheduledTaskSessionGroup,
@@ -1498,19 +1496,8 @@ export function WebShellSidebar({
   const completedUnreadStorageKey = getCompletedUnreadStorageKey(
     workspace.baseUrl,
   );
-  const [unreadStorageKey, setUnreadStorageKey] = useState(
-    completedUnreadStorageKey,
-  );
-  const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
-    () => readCompletedUnreadIds(completedUnreadStorageKey),
-  );
-  if (unreadStorageKey !== completedUnreadStorageKey) {
-    setUnreadStorageKey(completedUnreadStorageKey);
-    setCompletedUnreadIds(readCompletedUnreadIds(completedUnreadStorageKey));
-  }
-  useEffect(() => {
-    writeCompletedUnreadIds(completedUnreadStorageKey, completedUnreadIds);
-  }, [completedUnreadStorageKey, completedUnreadIds]);
+  const [completedUnreadIds, updateCompletedUnreadIds] =
+    useCompletedUnreadSessions(completedUnreadStorageKey);
   const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
@@ -1547,6 +1534,7 @@ export function WebShellSidebar({
     Record<SidebarSessionSource, Map<string, boolean> | null>
   >({ default: null, channel: null });
   const lastTrackedSessionSourceRef = useRef(sessionSource);
+  // Reset before both reconcilers so a daemon switch has no prior baseline.
   useEffect(() => {
     previousRunningBySourceRef.current = { default: null, channel: null };
     previousSecondaryRunningBySourceRef.current = {
@@ -1597,6 +1585,22 @@ export function WebShellSidebar({
         connection.workspaceCwd || primaryWorkspaceCwd,
       )
     : null;
+  // Session switching publishes the target ID before its load succeeds.
+  const openedSessionIdentity =
+    connection.status === 'connected' &&
+    !connection.error &&
+    !connection.loadingTranscript &&
+    !connection.catchingUp
+      ? currentSessionIdentity
+      : null;
+  useEffect(() => {
+    if (
+      openedSessionIdentity &&
+      completedUnreadIds.has(openedSessionIdentity)
+    ) {
+      updateCompletedUnreadIds({ remove: [openedSessionIdentity] });
+    }
+  }, [completedUnreadIds, openedSessionIdentity, updateCompletedUnreadIds]);
   const liveStateGroupCatalogs = useWorkspaceSessionLiveState(
     workspace.client,
     {
@@ -2413,14 +2417,23 @@ export function WebShellSidebar({
       return 'question' as const;
     }
     if (
-      statusSessions.some((session) =>
-        completedUnreadIds.has(getIdentityForSession(session)),
+      statusSessions.some(
+        (session) =>
+          getIdentityForSession(session) !== openedSessionIdentity &&
+          !session.hasActivePrompt &&
+          session.activeWorkState !== 'active' &&
+          completedUnreadIds.has(getIdentityForSession(session)),
       )
     ) {
       return 'completed' as const;
     }
     return undefined;
-  }, [completedUnreadIds, getIdentityForSession, statusSessions]);
+  }, [
+    completedUnreadIds,
+    getIdentityForSession,
+    openedSessionIdentity,
+    statusSessions,
+  ]);
   const collapsedSessionStatusLabel = collapsedSessionStatus
     ? t(
         collapsedSessionStatus === 'approval'
@@ -2484,48 +2497,26 @@ export function WebShellSidebar({
         )
         .map((session) => [
           getIdentityForSession(session),
-          Boolean(session.hasActivePrompt),
+          Boolean(
+            session.hasActivePrompt || session.activeWorkState === 'active',
+          ),
         ]),
     );
     const previousRunningBySessionId =
       previousRunningBySourceRef.current[sessionSource];
     previousRunningBySourceRef.current[sessionSource] = runningBySessionId;
 
-    setCompletedUnreadIds((current) => {
-      const next = new Set(current);
-      let changed = false;
-
-      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId ??
-        []) {
-        const isRunning = runningBySessionId.get(sessionIdentity);
-        if (
-          wasRunning &&
-          isRunning === false &&
-          sessionIdentity !== currentSessionIdentity &&
-          !next.has(sessionIdentity)
-        ) {
-          next.add(sessionIdentity);
-          changed = true;
-        }
-      }
-
-      for (const sessionIdentity of next) {
-        if (
-          sessionIdentity === currentSessionIdentity ||
-          runningBySessionId.get(sessionIdentity) === true ||
-          (previousRunningBySessionId?.has(sessionIdentity) &&
-            !runningBySessionId.has(sessionIdentity))
-        ) {
-          next.delete(sessionIdentity);
-          changed = true;
-        }
-      }
-
-      return changed ? next : current;
-    });
+    updateCompletedUnreadIds(
+      reconcileCompletedUnreadSessions(
+        previousRunningBySessionId,
+        runningBySessionId,
+        openedSessionIdentity,
+      ),
+    );
   }, [
     completedUnreadStorageKey,
-    currentSessionIdentity,
+    updateCompletedUnreadIds,
+    openedSessionIdentity,
     error,
     getIdentityForSession,
     loading,
@@ -2551,7 +2542,9 @@ export function WebShellSidebar({
         )
         .map((session) => [
           getIdentityForSession(session),
-          Boolean(session.hasActivePrompt),
+          Boolean(
+            session.hasActivePrompt || session.activeWorkState === 'active',
+          ),
         ]),
     );
     const previousRunningBySessionId =
@@ -2559,39 +2552,18 @@ export function WebShellSidebar({
     previousSecondaryRunningBySourceRef.current[sessionSource] =
       runningBySessionId;
 
-    setCompletedUnreadIds((current) => {
-      const next = new Set(current);
-      let changed = false;
-      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId ??
-        []) {
-        const isRunning = runningBySessionId.get(sessionIdentity);
-        if (
-          wasRunning &&
-          isRunning === false &&
-          sessionIdentity !== currentSessionIdentity &&
-          !next.has(sessionIdentity)
-        ) {
-          next.add(sessionIdentity);
-          changed = true;
-        }
-      }
-      for (const sessionIdentity of next) {
-        if (
-          sessionIdentity === currentSessionIdentity ||
-          runningBySessionId.get(sessionIdentity) === true ||
-          (previousRunningBySessionId?.has(sessionIdentity) &&
-            !runningBySessionId.has(sessionIdentity))
-        ) {
-          next.delete(sessionIdentity);
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
+    updateCompletedUnreadIds(
+      reconcileCompletedUnreadSessions(
+        previousRunningBySessionId,
+        runningBySessionId,
+        openedSessionIdentity,
+      ),
+    );
   }, [
     collapsed,
     completedUnreadStorageKey,
-    currentSessionIdentity,
+    updateCompletedUnreadIds,
+    openedSessionIdentity,
     getIdentityForSession,
     secondaryActiveQueries.length,
     secondaryActiveSessions,
@@ -2818,21 +2790,16 @@ export function WebShellSidebar({
         sessionId,
         workspaceCwd || primaryWorkspaceCwd,
       );
-      if (sessionIdentity === currentSessionIdentity) {
+      if (sessionIdentity === openedSessionIdentity) {
         onSelectCurrentSession?.();
         return;
       }
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
-      setCompletedUnreadIds((current) => {
-        if (!current.has(sessionIdentity)) return current;
-        const next = new Set(current);
-        next.delete(sessionIdentity);
-        return next;
-      });
       setSessionBusy(sessionId, true, workspaceCwd);
       void (async () => {
         try {
           await onLoadSession(sessionId, workspaceCwd);
+          updateCompletedUnreadIds({ remove: [sessionIdentity] });
         } catch (err) {
           if (!isAbortError(err)) {
             onError(err, t('sidebar.switchFailed'));
@@ -2843,9 +2810,10 @@ export function WebShellSidebar({
       })();
     },
     [
-      currentSessionIdentity,
+      openedSessionIdentity,
       onError,
       onLoadSession,
+      updateCompletedUnreadIds,
       onSelectCurrentSession,
       primaryWorkspaceCwd,
       setSessionBusy,
@@ -3143,6 +3111,7 @@ export function WebShellSidebar({
               (entry) => entry.sessionId === id,
             );
             if (itemError) throw new Error(itemError.error);
+            return result.removed.includes(id) || result.notFound.includes(id);
           }
         : scope.kind === 'primary'
           ? isArchived
@@ -3154,7 +3123,9 @@ export function WebShellSidebar({
     if (busySessionIdsRef.current.has(sessionIdentity)) return;
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
-      .then(() => {
+      .then((removed) => {
+        if (!removed) return;
+        updateCompletedUnreadIds({ remove: [sessionIdentity] });
         onSessionsDeleted?.([sessionId]);
         bumpWorkspaceReload();
       })
@@ -3176,6 +3147,7 @@ export function WebShellSidebar({
     getIdentityForSession,
     onError,
     onSessionsDeleted,
+    updateCompletedUnreadIds,
     primaryWorkspaceCwd,
     resolveSessionWorkspaceScope,
     sessionCatalogController,
@@ -4273,7 +4245,11 @@ export function WebShellSidebar({
       const exporting =
         standalone?.busy || exportingSessionIds.has(sessionIdentity);
       const completedUnread =
-        !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
+        !isArchived &&
+        sessionIdentity !== openedSessionIdentity &&
+        !session.hasActivePrompt &&
+        session.activeWorkState !== 'active' &&
+        completedUnreadIds.has(sessionIdentity);
       // Pinned group members also render in the Pinned section; callers
       // suppress the rename form on the duplicate row so only one input can
       // mount — a rival input's autofocus would blur this one and its blur
@@ -4930,6 +4906,7 @@ export function WebShellSidebar({
       handleTogglePin,
       handleUnarchive,
       isCurrentSession,
+      openedSessionIdentity,
       openGroupMenuFromAnchor,
       saveRename,
       searchQuery,

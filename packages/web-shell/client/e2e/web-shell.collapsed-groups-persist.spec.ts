@@ -104,8 +104,8 @@ test('keeps an observed completion unread across page reload until opened @smoke
 
   await section.getByText('API review', { exact: true }).click();
   await expect(section.getByText('API review', { exact: true })).toBeVisible();
-  await expect(marker).toHaveCount(0);
   await completeReplay(page, daemon, background.sessionId);
+  await expect(marker).toHaveCount(0);
   await page.reload();
   await expect(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
@@ -114,6 +114,90 @@ test('keeps an observed completion unread across page reload until opened @smoke
   await expect(section.getByText('API review', { exact: true })).toBeVisible();
   await expect(marker).toHaveCount(0);
 });
+
+for (const openedInOtherTab of [false, true]) {
+  test(`cross-tab writes ${openedInOtherTab ? 'do not restore a read completion' : 'preserve unrelated completions'} @smoke`, async ({
+    page,
+    context,
+  }, testInfo) => {
+    const first = createOrganizedScenario();
+    const second = createOrganizedScenario();
+    const firstCompletion = first.sessions[1];
+    const secondCompletion = second.sessions[2];
+    firstCompletion.hasActivePrompt = true;
+    second.sessions[1].hasActivePrompt = openedInOtherTab;
+    secondCompletion.hasActivePrompt = true;
+
+    const firstDaemon = await installScenario(page, first, testInfo);
+    const otherPage = await context.newPage();
+    const secondDaemon = await installScenario(otherPage, second, testInfo);
+    await gotoSession(page, first, firstDaemon);
+    await gotoSession(otherPage, second, secondDaemon);
+
+    const firstRow = page.getByRole('button').filter({
+      has: page.getByText('API review', { exact: true }),
+    });
+    const otherRow = otherPage.getByRole('button').filter({
+      has: otherPage.getByText('Release notes', { exact: true }),
+    });
+    await expect(
+      firstRow.locator('[data-web-shell-session-running]'),
+    ).toBeVisible();
+    await expect(
+      otherRow.locator('[data-web-shell-session-running]'),
+    ).toBeVisible();
+
+    firstCompletion.hasActivePrompt = false;
+    await expect(
+      firstRow.locator('[data-web-shell-session-completed-unread]'),
+    ).toBeVisible();
+
+    if (openedInOtherTab) {
+      second.sessions[1].hasActivePrompt = false;
+      await expect(
+        otherPage
+          .locator('section[aria-label="Backend"]')
+          .locator('[data-web-shell-session-completed-unread]'),
+      ).toBeVisible();
+      await firstRow.click();
+      await completeReplay(page, firstDaemon, firstCompletion.sessionId);
+      await page
+        .getByRole('button')
+        .filter({ has: page.getByText('E2E Harness Session', { exact: true }) })
+        .click();
+      await completeReplay(page, firstDaemon, first.sessionId);
+      await expect(
+        firstRow.locator('[data-web-shell-session-completed-unread]'),
+      ).toHaveCount(0);
+    }
+
+    secondCompletion.hasActivePrompt = false;
+    await expect(
+      otherRow.locator('[data-web-shell-session-completed-unread]'),
+    ).toBeVisible();
+    await page.reload();
+    await expect(
+      page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+    ).toBeVisible();
+    await completeReplay(
+      page,
+      firstDaemon,
+      first.sessionId,
+      first.events.length,
+    );
+    await page.screenshot({
+      path: testInfo.outputPath('after-other-tab-update.png'),
+    });
+    await expect(
+      firstRow.locator('[data-web-shell-session-completed-unread]'),
+    ).toHaveCount(openedInOtherTab ? 0 : 1);
+    await expect(
+      page
+        .locator('section[aria-label="Ungrouped"]')
+        .locator('[data-web-shell-session-completed-unread]'),
+    ).toBeVisible();
+  });
+}
 
 test('keeps long session details inside a constrained WebShell @smoke', async ({
   page,
