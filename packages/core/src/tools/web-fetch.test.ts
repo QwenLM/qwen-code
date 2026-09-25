@@ -1390,6 +1390,37 @@ describe('WebFetchTool', () => {
       );
     });
 
+    it('should fall back to http when port 443 is network-unreachable', async () => {
+      // Firewall discards the https port with ICMP host unreachable instead
+      // of refusing/resetting it (issue #12699): without EHOSTUNREACH in the
+      // fallback whitelist the original http URL is never retried.
+      const fetchSpy = vi
+        .spyOn(fetchUtils, 'fetchWithPolicy')
+        .mockRejectedValueOnce(
+          new fetchUtils.FetchError('connect EHOSTUNREACH', 'EHOSTUNREACH'),
+        )
+        .mockResolvedValueOnce(
+          okResponse({ finalUrl: 'http://mba.example.edu.cn/2025/' }),
+        );
+      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'http://mba.example.edu.cn/2025/', prompt: 'read' })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        1,
+        'https://mba.example.edu.cn/2025/',
+        expect.anything(),
+      );
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        2,
+        'http://mba.example.edu.cn/2025/',
+        expect.anything(),
+      );
+    });
+
     it('should not fall back to http when the caller asked for https', async () => {
       vi.spyOn(fetchUtils, 'fetchWithPolicy').mockRejectedValue(
         new fetchUtils.FetchError('connect ECONNREFUSED', 'ECONNREFUSED'),

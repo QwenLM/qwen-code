@@ -70,6 +70,12 @@ const CONNECTION_LEVEL_ERROR_CODES = new Set([
   // only ever fires for URLs the caller requested as http.
   'ECONNRESET',
   'UND_ERR_SOCKET',
+  // Port 443 dropped at the network layer (ICMP host/net unreachable) rather
+  // than actively refused — typical for plain-http-only hosts sitting behind
+  // a firewall that discards the https port. Same safety argument as above:
+  // the fallback only ever fires for URLs the caller requested as http.
+  'EHOSTUNREACH',
+  'ENETUNREACH',
   // Filtered port 443 (silent drop): undici's own bounded connect timeout.
   // Deliberately NOT the full-budget ETIMEDOUT — that can fire mid-body on
   // a healthy https server, and a fallback there would double a worst-case
