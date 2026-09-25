@@ -95,9 +95,10 @@ function candidateFieldsOf(candidate: Record<string, unknown>): string[] {
 }
 
 /**
- * What an UNCERTIFIED candidate — one whose capture ran under a runtime that
- * published no identity — may carry into the cache: the names of the subject
- * the ledger is about, and nothing that anchors. An allowlist on purpose,
+ * What an UNCERTIFIED candidate — one that carries no `lastModelId`,
+ * because its capture ran under a runtime that published no identity or
+ * recorded no anchor at all (`ledgerOnly`) — may carry into the cache: the
+ * names of the subject the ledger is about, and nothing that anchors. An allowlist on purpose,
  * where the certified merge is a deny list: there a forgotten field is anchor
  * state lost (a full round), here it would be anchor state written with no
  * certifier, which a reader that does not re-check the identity would honour.
@@ -151,8 +152,11 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // or file round has no posted marker to carry it, so refusing here lost
   // round N's open Criticals and round N+1 re-filed them under fresh ids.
   // Such a candidate promotes the LEDGER only (`SUBJECT_FIELDS`): no
-  // certifier, no anchor. Empty or non-string stays a refusal, because no
-  // capture writes it — it is a malformed or hand-edited candidate.
+  // certifier, no anchor. The same one rule covers a local capture that
+  // could not anchor its round at all (#12657) — it writes no identity, and
+  // names why in `ledgerOnly`, which only the success line reads. Empty or
+  // non-string stays a refusal, because no capture writes it — it is a
+  // malformed or hand-edited candidate.
   const certified = Object.hasOwn(candidate, 'lastModelId');
   const candidateModel = candidate['lastModelId'];
   if (
@@ -326,9 +330,11 @@ function runCacheCommit(args: CacheCommitArgs): void {
     `Committed review cache to ${inertText(args.out)}` +
       (certified
         ? ''
-        : ' — the findings ledger only: the capture recorded no model ' +
-          'identity, so no anchor was written and the next round reviews ' +
-          'in full'),
+        : ' — the findings ledger only: ' +
+          (typeof candidate['ledgerOnly'] === 'string'
+            ? inertText(candidate['ledgerOnly'], 160)
+            : 'the capture recorded no model identity') +
+          ', so no anchor was written and the next round reviews in full'),
   );
 }
 

@@ -156,6 +156,7 @@ const external = [
   'node-pty',
   '@lydell/node-pty-darwin-arm64',
   '@lydell/node-pty-darwin-x64',
+  '@lydell/node-pty-linux-arm64',
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
@@ -251,6 +252,7 @@ const mainBuild = esbuild.build({
   metafile: true,
   write: true,
   keepNames: true,
+  minifyWhitespace: true,
 });
 
 // fzf index worker — runs in its own worker_threads worker that

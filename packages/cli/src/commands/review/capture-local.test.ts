@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { seedParseArgs } from './lib/test-utils.js';
+import { isLedgerOnlyCandidate, seedParseArgs } from './lib/test-utils.js';
 import {
   COMPOSE_FLOOR_ENV,
   DEADLINE_ENV,
@@ -107,9 +107,9 @@ function capture(over: Record<string, unknown> = {}) {
 let savedIdentity: string | undefined;
 
 beforeEach(() => {
-  // Every real round runs under a published identity, and the candidate is
-  // withheld without one (an anchor certified by nobody is refused at
-  // promotion) — so the fixtures publish one, and the test about the
+  // Every real round runs under a published identity, and the candidate
+  // anchors nothing without one (it carries the findings ledger alone) — so
+  // the fixtures publish one, and the test about the
   // empty case blanks it itself.
   savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
   process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
@@ -403,7 +403,7 @@ describe('capture-local (command boundary)', () => {
     expect(plan.effort).toBeUndefined();
   });
 
-  it('withholds the cache candidate when the visibility bits cannot be enumerated', () => {
+  it('writes no anchor when the visibility bits cannot be enumerated', () => {
     // The candidate records the identity of the tree this round reviewed;
     // an oracle the capture cannot run leaves that identity uncertified, so
     // the write fails closed exactly like the decided stops do.
@@ -411,12 +411,22 @@ describe('capture-local (command boundary)', () => {
     visibilityMock.mockReturnValue(null);
     run('plan.json');
     expect(
-      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
-    ).toBe(false);
+      isLedgerOnlyCandidate(
+        join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(true);
     expect(errs.join('')).toContain('could not be enumerated');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      )['ledgerOnly'],
+    ).toBe('the tracked-file visibility bits could not be enumerated');
   });
 
-  it('withholds the cache candidate while tracked paths carry a visibility bit', () => {
+  it('writes no anchor while tracked paths carry a visibility bit', () => {
     // `hash-object` reads through a set --assume-unchanged/--skip-worktree
     // bit while `git diff` cannot see the edit it hides — the candidate
     // would record the identity of bytes this round never reviewed.
@@ -424,9 +434,19 @@ describe('capture-local (command boundary)', () => {
     visibilityMock.mockReturnValue(['src/pay.ts']);
     run('plan.json');
     expect(
-      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
-    ).toBe(false);
-    expect(errs.join('')).toContain('the cache candidate is withheld');
+      isLedgerOnlyCandidate(
+        join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(true);
+    expect(errs.join('')).toContain('findings ledger only, no anchor');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      )['ledgerOnly'],
+    ).toBe('tracked-file visibility bits hide bytes from the diff');
   });
 
   it('escapes the classes JSON.stringify passes raw, not just C0', () => {
