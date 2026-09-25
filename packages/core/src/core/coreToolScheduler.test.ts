@@ -47,6 +47,7 @@ import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { isAlreadyTruncated } from '../tools/truncation.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
@@ -13470,7 +13471,12 @@ describe('CoreToolScheduler telemetry spans', () => {
         terminalWidth: 90,
         terminalHeight: 30,
       }),
-      storage: { getProjectTempDir: () => '/tmp' },
+      storage: {
+        getProjectTempDir: () => '/tmp',
+        getToolResultsDir: () => '/tmp/tool-results',
+      },
+      getToolResultBytesWritten: () => 0,
+      trackToolResultBytes: vi.fn(),
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -14115,6 +14121,176 @@ describe('CoreToolScheduler telemetry spans', () => {
     )?.[0] as { input: { duration_ms?: unknown } } | undefined;
     expect(postToolUse?.input.duration_ms).toEqual(expect.any(Number));
     expect(postToolUse?.input.duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  // #11770: a PostToolUseFailure hook's additionalContext used to be
+  // appended to `errorMessage` BEFORE the identity check below, so the gate
+  // re-armed and the producer's own sizing was undone — the trailing exit
+  // code was lost again for anyone with such a hook configured.
+  async function runBudgetedFailure(options: {
+    outputBudgetApplied?: boolean;
+    hookContext?: string;
+  }) {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: FAILURE_BODY,
+      returnDisplay: 'x',
+      ...(options.outputBudgetApplied === undefined
+        ? {}
+        : { outputBudgetApplied: options.outputBudgetApplied }),
+      error: {
+        message: FAILURE_BODY,
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PreToolUse'
+            ? { decision: 'allow' }
+            : request.eventName === 'PostToolUseFailure' && options.hookContext
+              ? {
+                  hookSpecificOutput: {
+                    additionalContext: options.hookContext,
+                  },
+                }
+              : {},
+      })),
+    };
+    const { completedCalls } = await runSingleTool({
+      execute,
+      toolName: 'budgetedFailureTool',
+      tools: [
+        new MockTool({
+          name: 'budgetedFailureTool',
+          execute,
+          maxOutputChars: 30_000,
+        }),
+      ],
+      messageBus,
+      disableHooks: false,
+    });
+    const call = completedCalls[0] as CompletedToolCall;
+    return (call.response.error?.message ?? '') as string;
+  }
+
+  const FAILURE_BODY = `${'b'.repeat(28_990)}exit 7`;
+  const HOOK_CONTEXT = 'hook says: check the mount';
+
+  it('keeps a producer-sized error body when a failure hook adds context', async () => {
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext: HOOK_CONTEXT,
+    });
+
+    // The producer's tail is what the gate used to eat.
+    expect(message).toBe(`${FAILURE_BODY}\n\n${HOOK_CONTEXT}`);
+  });
+
+  it('keeps it without a hook too, so the case above is the hook path', async () => {
+    const message = await runBudgetedFailure({ outputBudgetApplied: true });
+
+    expect(message).toBe(FAILURE_BODY);
+  });
+
+  it('still bounds an error body the producer never sized', async () => {
+    // The control in the other direction: deferring the hook context must
+    // not turn the gate off for producers that build `error.message`
+    // separately.
+    vi.mocked(fsWriteFile).mockClear();
+    const message = await runBudgetedFailure({ hookContext: HOOK_CONTEXT });
+
+    const suffix = `\n\n${HOOK_CONTEXT}`;
+    expect(message.endsWith(suffix)).toBe(true);
+    const body = message.slice(0, -suffix.length);
+    expect(isAlreadyTruncated(body)).toBe(true);
+    expect(body).not.toContain('exit 7');
+    expect(body).not.toContain(HOOK_CONTEXT);
+    // The gate persisted the producer's body alone: the context is appended
+    // after it, not folded into what it bounded.
+    const persisted = vi
+      .mocked(fsWriteFile)
+      .mock.calls.map(([, content]) => content);
+    expect(persisted).toEqual([FAILURE_BODY]);
+  });
+
+  it('caps oversized failure-hook context without touching the body', async () => {
+    // `error.message` reaches telemetry and the session record, which the
+    // batch budget does not bound.
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext: 'h'.repeat(200_000),
+    });
+
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    expect(message).toBe(
+      `${FAILURE_BODY}\n\n${'h'.repeat(kept)}\n... [truncated, ${200_000 - kept} more characters]`,
+    );
+  });
+
+  it('never cuts failure-hook context between the halves of a surrogate pair', async () => {
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD - 1;
+    const hookContext = `${'h'.repeat(kept)}\u{1F600}${'t'.repeat(100)}`;
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext,
+    });
+
+    expect(message).toBe(
+      `${FAILURE_BODY}\n\n${'h'.repeat(kept)}\n... [truncated, ${hookContext.length - kept} more characters]`,
+    );
+  });
+
+  it('keeps a surrogate pair whole when it ends exactly at the cut', async () => {
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD - 2;
+    const hookContext = `${'h'.repeat(kept)}\u{1F600}${'t'.repeat(100)}`;
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext,
+    });
+
+    expect(message).toBe(
+      `${FAILURE_BODY}\n\n${'h'.repeat(kept)}\u{1F600}\n... [truncated, 100 more characters]`,
+    );
+  });
+
+  it('adds no truncation marker to failure-hook context exactly at the cap', async () => {
+    const hookContext = 'h'.repeat(DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD);
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext,
+    });
+
+    expect(message).toBe(`${FAILURE_BODY}\n\n${hookContext}`);
+  });
+
+  it('caps failure-hook context when the tool throws', async () => {
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUseFailure'
+            ? { hookSpecificOutput: { additionalContext: 'h'.repeat(200_000) } }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('real boom')),
+    });
+
+    const call = completedCalls[0] as CompletedToolCall;
+    const kept = DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    expect(call.status).toBe('error');
+    expect(call.response.error?.message).toBe(
+      `real boom\n\n${'h'.repeat(kept)}\n... [truncated, ${200_000 - kept} more characters]`,
+    );
   });
 
   it.each([ToolErrorType.EXECUTION_FAILED, ToolErrorType.EXECUTION_TIMEOUT])(

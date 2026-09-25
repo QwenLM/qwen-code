@@ -57,7 +57,9 @@ the text.
    detail at the producer's declared budget — together with the aggregate batch
    budget and the no-I/O cap at the send boundary. The combined pass over
    appended metadata runs on the success path only, so failure-hook context
-   appended to a timeout detail is bounded only by those two.
+   appended to a timeout detail is bounded only by those two. On the ordinary
+   failure path, and when the tool throws, that context is capped on its own
+   at the tool-output threshold, with a truncation marker.
 6. A failure message is only exempt while it _is_ the marked body.
 
 ## Design
@@ -88,16 +90,25 @@ The generic gate stands down for a marked body:
   untouched.
 - Ordinary failure path — the gate is skipped only while `error.message` is
   still byte-for-byte the marked `llmContent`. Producers that build
-  `error.message` separately, such as spawn and setup failures, and any
-  failure-hook context appended beforehand both change the string, so those
-  retain the gate.
+  `error.message` separately, such as spawn and setup failures, change the
+  string, so those retain the gate. Failure-hook context is appended only after
+  the gate, so it cannot re-arm it.
 
 Nothing else about the ordering changes. On the success path, hook context and
 skill or rule reminders are still appended after the body is bounded, and the
-combined pass still bounds the assembled string against the doubled budget. The
-timeout branch runs no combined pass after appending failure-hook context, so
-that context is bounded only by the aggregate batch budget and the
-send-boundary cap. Aggregate batch finalization still runs afterwards.
+combined pass still bounds the assembled string against the doubled budget.
+Both failure branches append failure-hook context after the body is bounded.
+The ordinary branch caps that context at the tool-output threshold, cut on a
+code-point boundary with a truncation marker, instead of running
+a combined pass: re-bounding the assembled string would truncate the producer's
+body again, and its `error.message` also reaches telemetry and the session
+record, which the batch budget does not bound. A tool that throws gets the same
+cap on the context appended to its exception message, for the same reason. The
+timeout branch keeps
+`error.message` to the operational summary and appends the context to the
+response part only, with no combined pass, so there the context is bounded only
+by the aggregate batch budget and the send-boundary cap. Aggregate batch
+finalization still runs afterwards.
 
 ### Metadata appended outside the budget
 

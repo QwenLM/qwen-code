@@ -265,6 +265,26 @@ function runInRequestGoalContext<T>(
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
+
+/**
+ * Caps failure-hook context appended to a tool's error message. Cut the way
+ * `httpHookRunner` cuts oversized hook output, with a marker naming what was
+ * dropped, and never between the halves of a surrogate pair.
+ */
+function capFailureHookContext(context: string, limit: number): string {
+  if (context.length <= limit) {
+    return context;
+  }
+  let end = limit;
+  const last = context.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  debugLogger.debug(
+    `Failure hook context truncated from ${context.length} to ${end} characters`,
+  );
+  return `${context.slice(0, end)}\n... [truncated, ${context.length - end} more characters]`;
+}
 // Tools whose output must bypass the persistence gate. read_file pages itself,
 // and read_mcp_resource caps text in formatMcpResourceContents. enter_plan_mode
 // returns lifecycle policy that must remain inline. This gate runs before
@@ -6486,14 +6506,16 @@ export class CoreToolScheduler {
             this.postToolUseFailureEndMeta,
           );
 
-          // Append additional context from hook if provided
+          // Defer the hook's context on BOTH failure paths. Appending it to
+          // `errorMessage` here changed the string the gate below compares
+          // against `toolResult.llmContent`, so `errorBodyAlreadyBounded` went
+          // false and a producer that had already sized its own body got
+          // re-truncated — losing the trailing exit code again for anyone with
+          // a PostToolUseFailure hook configured (#11770). The timeout branch
+          // already deferred; the success path states the same ordering as
+          // "append the deferred metadata now that the body is bounded".
           if (failureHookResult.additionalContext) {
-            if (isTimeout) {
-              failureHookAdditionalContext =
-                failureHookResult.additionalContext;
-            } else {
-              errorMessage += `\n\n${failureHookResult.additionalContext}`;
-            }
+            failureHookAdditionalContext = failureHookResult.additionalContext;
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
@@ -6636,11 +6658,14 @@ export class CoreToolScheduler {
           this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
         // Only skip when the message still IS the body the producer sized.
         // Producers that build `error.message` separately (spawn/setup
-        // failures) and any failure-hook context appended above both change the
-        // string, so those keep the gate.
+        // failures) change the string, so those keep the gate. Compared against
+        // the producer's own message rather than the running `errorMessage`:
+        // the two are equal here now that hook context is deferred, and naming
+        // the immutable one keeps a later append from silently re-arming the
+        // gate the way the hook append used to (#11770).
         const errorBodyAlreadyBounded =
           toolResult.outputBudgetApplied === true &&
-          errorMessage === toolResult.llmContent;
+          operationalErrorMessage === toolResult.llmContent;
         if (
           canonicalName !== ToolNames.EXEC &&
           errorMessage.length > errorGateThreshold &&
@@ -6660,6 +6685,18 @@ export class CoreToolScheduler {
               ...(persistResult.outputFile ? [persistResult.outputFile] : []),
             ]),
           );
+        }
+
+        // The body is bounded; now the deferred hook context. It is capped on its
+        // own, at the tool-output threshold the success path allows appended
+        // metadata: re-bounding the assembled string would truncate the
+        // producer's body again, and `error.message` also reaches telemetry and
+        // the session record, which the batch budget does not bound.
+        if (failureHookAdditionalContext) {
+          errorMessage += `\n\n${capFailureHookContext(
+            failureHookAdditionalContext,
+            this.config.getTruncateToolOutputThreshold(),
+          )}`;
         }
 
         const error = new Error(errorMessage);
@@ -6879,9 +6916,14 @@ export class CoreToolScheduler {
             this.postToolUseFailureEndMeta,
           );
 
-          // Append additional context from hook if provided
+          // Append additional context from hook if provided, capped as on
+          // the returned-error path: this message reaches telemetry and the
+          // session record too.
           if (failureHookResult.additionalContext) {
-            exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
+            exceptionErrorMessage += `\n\n${capFailureHookContext(
+              failureHookResult.additionalContext,
+              this.config.getTruncateToolOutputThreshold(),
+            )}`;
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
