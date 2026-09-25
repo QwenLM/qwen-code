@@ -168,6 +168,51 @@ describe('managed session shared field rules', () => {
     ).toThrow(/exceeds 512 UTF-8 bytes/);
   });
 
+  it('rejects C1 control characters', () => {
+    expect(() =>
+      parseManagedSessionEvent(inputEvent({ eventId: 'a\u0085b' })),
+    ).toThrow(/control characters/);
+  });
+
+  it('requires stable identifiers to be valid UTF-8 in NFC form', () => {
+    expect(() =>
+      parseManagedSessionEvent(inputEvent({ eventId: '\ud800' })),
+    ).toThrow(/valid UTF-8 text/);
+    expect(() =>
+      parseManagedSessionEvent(inputEvent({ eventId: 'cafe\u0301' })),
+    ).toThrow(/NFC normalization/);
+    expect(
+      parseManagedSessionEvent(inputEvent({ eventId: '你好😀' })).eventId,
+    ).toBe('你好😀');
+  });
+
+  it('rejects a timestamp outside the ECMAScript UTC range', () => {
+    expect(() =>
+      parseManagedSessionEvent(
+        inputEvent({ occurredAt: MANAGED_SESSION_LIMITS.maxTimeMs + 1 }),
+      ),
+    ).toThrow(/maximum UTC Unix millisecond value/);
+  });
+
+  it('keeps untrusted field names out of error-message control sequences', () => {
+    const unsafeKey = 'bad\u001b[31m\nfield';
+    try {
+      parseManagedSessionEvent(
+        inputEvent({
+          payload: {
+            ...(inputEvent()['payload'] as object),
+            [unsafeKey]: true,
+          },
+        }),
+      );
+      throw new Error('expected validation to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ManagedSessionRecordError);
+      // eslint-disable-next-line no-control-regex
+      expect((error as Error).message).not.toMatch(/[\u001b\n]/);
+    }
+  });
+
   it('counts identifier length in UTF-8 bytes, not code units', () => {
     const justOver = '\u00e9'.repeat(MANAGED_SESSION_LIMITS.maxIdBytes / 2 + 1);
     expect(justOver.length).toBeLessThan(MANAGED_SESSION_LIMITS.maxIdBytes);

@@ -7,6 +7,7 @@
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
@@ -16,12 +17,15 @@ export const MANAGED_SESSION_HEADER_SUBTYPE = 'managed_session_header_v1';
 export const MANAGED_SESSION_EVENT_SUBTYPE = 'managed_session_event_v1';
 export const MANAGED_SESSION_COMMIT_SUBTYPE = 'managed_session_commit_v1';
 
+const MAX_ERROR_VALUE_LENGTH = 4096;
+
 export const MANAGED_SESSION_LIMITS = {
   maxIdBytes: 512,
   // Not frozen by the storage spec: a bound for free-form enum-adjacent fields
   // such as `source` or `stopReason`, borrowed from its error-message cap.
   maxTextBytes: 4096,
   maxJsonDepth: 64,
+  maxTimeMs: 8_640_000_000_000_000,
   maxEventBytes: 1024 * 1024,
   maxCommitMarkerBytes: 64 * 1024,
   maxTransactionEvents: 256,
@@ -240,6 +244,11 @@ function object(
   return value as Record<string, ManagedSessionJsonValue>;
 }
 
+/** Record keys and values are untrusted; never echo them into an error raw. */
+function safeErrorValue(value: string): string {
+  return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
+}
+
 function assertNoUnknownKeys(
   input: Record<string, ManagedSessionJsonValue>,
   allowed: readonly string[],
@@ -247,7 +256,7 @@ function assertNoUnknownKeys(
 ): void {
   for (const key of Object.keys(input)) {
     if (!allowed.includes(key)) {
-      fail(`${label} has the unknown field "${key}".`);
+      fail(`${label} has the unknown field "${safeErrorValue(key)}".`);
     }
   }
 }
@@ -264,7 +273,7 @@ function boundedString(
     fail(`${label} exceeds ${maxBytes} UTF-8 bytes.`);
   }
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) {
     fail(`${label} must not contain control characters.`);
   }
   return value;
@@ -274,7 +283,14 @@ export function assertManagedSessionStableId(
   value: ManagedSessionJsonValue | undefined,
   label: string,
 ): string {
-  return boundedString(value, label, MANAGED_SESSION_LIMITS.maxIdBytes);
+  const id = boundedString(value, label, MANAGED_SESSION_LIMITS.maxIdBytes);
+  if (Buffer.from(id, 'utf8').toString('utf8') !== id) {
+    fail(`${label} must be valid UTF-8 text.`);
+  }
+  if (id.normalize('NFC') !== id) {
+    fail(`${label} must use NFC normalization.`);
+  }
+  return id;
 }
 
 export function assertManagedSessionSequence(
@@ -296,6 +312,9 @@ export function assertManagedSessionTime(
 ): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
     fail(`${label} must be UTC Unix milliseconds as a safe integer.`);
+  }
+  if (value > MANAGED_SESSION_LIMITS.maxTimeMs) {
+    fail(`${label} exceeds the maximum UTC Unix millisecond value.`);
   }
   return value;
 }

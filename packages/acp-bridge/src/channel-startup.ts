@@ -6,11 +6,12 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PRIVATE_ACP_CAPABILITY_ENV } from '@qwen-code/qwen-code-core';
-import type {
-  AcpChannel,
-  AcpChannelExitInfo,
-  ChannelFactory,
-  ChannelFactoryStartupContext,
+import {
+  AcpChannelTeardownError,
+  type AcpChannel,
+  type AcpChannelExitInfo,
+  type ChannelFactory,
+  type ChannelFactoryStartupContext,
 } from './channel.js';
 import type { HarnessChannel, ChannelLifecycle } from './channel-lifecycle.js';
 import type {
@@ -192,13 +193,24 @@ export function createChannelStartup({
           ),
         ]);
       } catch (teardownError) {
-        throw new AggregateError(
-          [error, teardownError],
-          'ACP channel construction and teardown failed',
+        throw new AcpChannelTeardownError(
+          new AggregateError(
+            [error, teardownError],
+            'ACP channel construction and teardown failed',
+          ),
         );
       }
       throw error;
     }
+    // A startup failure after the child exists must confirm its teardown;
+    // an unconfirmed one may leave a live resource behind, so it surfaces as
+    // AcpChannelTeardownError instead of being swallowed.
+    const stopChannel = (context: string) =>
+      terminateChannel(channel, initTimeoutMs, context).catch(
+        (error: unknown) => {
+          throw new AcpChannelTeardownError(error);
+        },
+      );
 
     const { connection } = info;
     const markTransportFailed = (error: unknown) => {
@@ -326,16 +338,12 @@ export function createChannelStartup({
       // `aliveChannels` with `isDying === true` is mid-teardown."
       info.isDying = true;
       startupAbort.abort(err);
-      await terminateChannel(
-        channel,
-        initTimeoutMs,
-        'channel initialization failure',
-      ).catch(() => undefined);
+      await stopChannel('channel initialization failure');
       throw err;
     }
 
     if (info.isDying) {
-      await channel.kill().catch(() => {});
+      await stopChannel('dying during initialize');
       throw new BridgeChannelClosedError('during initialize');
     }
 
@@ -346,9 +354,7 @@ export function createChannelStartup({
     if (isShuttingDown()) {
       info.isDying = true;
       startupAbort.abort(new Error('AcpSessionBridge is shutting down'));
-      await terminateChannel(channel, initTimeoutMs, 'late shutdown').catch(
-        () => undefined,
-      );
+      await stopChannel('late shutdown');
       throw new Error('AcpSessionBridge is shutting down');
     }
     if (!channelLifecycle.has(info)) {
@@ -357,11 +363,7 @@ export function createChannelStartup({
         'during channel initialization',
       );
       startupAbort.abort(error);
-      await terminateChannel(
-        channel,
-        initTimeoutMs,
-        'exited during initialization',
-      ).catch(() => undefined);
+      await stopChannel('exited during initialization');
       throw error;
     }
 
@@ -383,11 +385,7 @@ export function createChannelStartup({
         `Runtime epoch source must increase monotonically (local=${runtimeEpoch}, current=${previousRuntimeEpoch}, next=${nextRuntimeEpoch}).`,
       );
       startupAbort.abort(epochError);
-      await terminateChannel(
-        channel,
-        initTimeoutMs,
-        'invalid runtime epoch',
-      ).catch(() => undefined);
+      await stopChannel('invalid runtime epoch');
       throw epochError;
     }
     runtimeEpoch = nextRuntimeEpoch;

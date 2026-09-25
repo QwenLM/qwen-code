@@ -1364,6 +1364,18 @@ export function createServeApp(
         workspaceId: hashDaemonWorkspace(boundWorkspace),
         requireManagedForOrdinary: opts.profile === 'hosted-harness',
         legacyFactory: createSpawnChannelFactory({
+          processRegistry: deps.managedChildProcesses?.registry,
+          childHeapPolicy: deps.managedChildProcesses?.policy,
+          ...(deps.managedChildProcesses
+            ? {
+                reclaimIdleChild: async (signal?: AbortSignal) => {
+                  await reclaimIdleAcp?.(
+                    hashDaemonWorkspace(boundWorkspace),
+                    signal,
+                  );
+                },
+              }
+            : {}),
           ...(acpChildArgs ? { extraArgs: acpChildArgs } : {}),
         }),
         resolveToolRuntimeProvider: () => managedToolRuntimeProviderRef.current,

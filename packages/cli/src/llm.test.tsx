@@ -466,6 +466,8 @@ describe('llm.tsx main function', () => {
             QWEN_CODE_PRIVATE_MANAGED_TOOL_RUNTIME: owned ? 'owned-v2' : '',
             QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
               EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+            QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+              '{"dotEnv":[],"settingsEnv":[]}',
           });
         },
       );
@@ -504,6 +506,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as unknown as LoadedSettings;
@@ -544,6 +547,8 @@ describe('llm.tsx main function', () => {
             QWEN_CODE_PRIVATE_MANAGED_TOOL_RUNTIME: owned ? 'owned-v2' : '',
             QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
               EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+            QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+              '{"dotEnv":[],"settingsEnv":[]}',
           },
           onUpdateRelaunch: expect.any(Function),
         }),
@@ -879,6 +884,8 @@ describe('llm.tsx main function', () => {
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_MANAGED_TOOL_RUNTIME: '',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -1250,6 +1257,7 @@ describe('llm.tsx main function', () => {
           setValue: vi.fn(),
           forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
           migrationWarnings: [],
+          getSystemHooks: () => undefined,
           getUserHooks: () => undefined,
           getProjectHooks: () => undefined,
         } as unknown as LoadedSettings;

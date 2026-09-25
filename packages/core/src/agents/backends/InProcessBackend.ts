@@ -108,6 +108,13 @@ export class InProcessBackend implements Backend {
   }
 
   spawnAgent(config: AgentSpawnConfig): Promise<void> {
+    if (this.runtimeContext.getAgentExecutionBackend?.() === 'container') {
+      return Promise.reject(
+        new Error(
+          'Container execution is required; team and Arena agents are unsupported.',
+        ),
+      );
+    }
     if (this.cleanedUp || this.spawningAgents.has(config.agentId)) {
       return Promise.reject(
         new Error(`Agent "${config.agentId}" cannot be started.`),

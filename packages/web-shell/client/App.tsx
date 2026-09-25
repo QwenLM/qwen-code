@@ -9135,6 +9135,7 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory) &&
       !(activePanel === 'managed' && externalManagedAgentAvailable)
     ) {
       setActivePanel(null);

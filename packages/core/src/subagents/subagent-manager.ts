@@ -942,6 +942,18 @@ export class SubagentManager {
       managedScope?: ManagedChildExecutionScope;
     },
   ): Promise<{ subagent: SubagentExecutor; dispose: () => Promise<void> }> {
+    if (
+      runtimeContext.getShellExecutionSandbox?.() &&
+      (config.executor !== undefined ||
+        Object.keys(config.mcpServers ?? {}).length > 0 ||
+        Object.keys(config.hooks ?? {}).length > 0)
+    ) {
+      throw new SubagentError(
+        'Tool execution sandbox does not support agent executors, MCP servers or hooks.',
+        SubagentErrorCode.INVALID_CONFIG,
+        config.name,
+      );
+    }
     const originalRuntimeContext = runtimeContext;
     const managedScope =
       options?.managedScope ?? createManagedChildExecutionScope(runtimeContext);
@@ -1176,6 +1188,7 @@ export class SubagentManager {
           runtimeContext,
           modelConfig.model,
           options?.runtimeAuthOverrides,
+          modelConfig.reasoningEffort,
         ),
       );
 

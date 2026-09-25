@@ -3535,6 +3535,10 @@ export class CoreToolScheduler {
             'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
             call_id: reqInfo.callId,
             tool_name: canonicalName,
+            ...(reqInfo.parentCallId
+              ? { 'tool.parent_call_id': reqInfo.parentCallId }
+              : {}),
+            ...(reqInfo.source ? { 'tool.source': reqInfo.source } : {}),
           },
           toolCall.tool.description,
           reqInfo.prompt_id,
@@ -3554,6 +3558,22 @@ export class CoreToolScheduler {
         // L3→L4→L5 Permission Flow
         // =================================================================
 
+        // Fixed-policy orchestrator calls skip the interactive permission
+        // flow entirely: no PermissionManager ask/deny evaluation, no
+        // confirmation dialog, no plan/auto classification. The remaining
+        // guards still hold — PM tool-enablement ran at schedule time,
+        // origin/descriptor pairing was enforced before buildInvocation,
+        // and PreToolUse hooks fire (a hook deny fails the call closed)
+        // at execution time.
+        if (reqInfo.executionOrigin?.kind === 'fixed_policy') {
+          this.setToolCallOutcome(
+            reqInfo.callId,
+            ToolConfirmationOutcome.ProceedAlways,
+          );
+          this.setStatusInternal(reqInfo.callId, 'scheduled');
+          continue;
+        }
+
         // ---- L3→L4: Shared permission flow ----
         let toolParams = invocation.params as Record<string, unknown>;
         const flowResult = await runInRequestGoalContext(reqInfo, () =>
@@ -3562,6 +3582,7 @@ export class CoreToolScheduler {
             invocation,
             canonicalName,
             toolParams,
+            signal,
           ),
         );
         if (
@@ -3909,16 +3930,15 @@ export class CoreToolScheduler {
               // operators see recovery fallbacks in the debug log. A
               // pmForcedAsk fallback isn't an audit-worthy event.
               if (
-                isDenialFallbackReason(outcome.reason) ||
-                outcome.reason === 'classifier_unavailable'
+                outcome.message &&
+                (isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable')
               ) {
                 this.autoModeFallbackCallIds.add(reqInfo.callId);
-                if (outcome.message) {
-                  autoModeFallback = {
-                    reason: outcome.reason,
-                    message: outcome.message,
-                  };
-                }
+                autoModeFallback = {
+                  reason: outcome.reason,
+                  message: outcome.message,
+                };
                 debugLogger.warn(
                   `Auto mode fallback to manual approval (${outcome.reason}): ` +
                     formatDenialStateLog(denialState),

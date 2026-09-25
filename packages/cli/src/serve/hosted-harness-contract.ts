@@ -37,14 +37,14 @@ export function createHostedHarnessContract(
   if (!UUID_PATTERN.test(bootId)) {
     throw new Error('Hosted Harness bootId must be an RFC UUID v1-v5.');
   }
-  return {
-    protocolVersions: {
+  return Object.freeze({
+    protocolVersions: Object.freeze({
       current: HOSTED_HARNESS_PROTOCOL_VERSION,
-      supported: [HOSTED_HARNESS_PROTOCOL_VERSION],
-    },
+      supported: Object.freeze([HOSTED_HARNESS_PROTOCOL_VERSION] as const),
+    }),
     bootId: bootId.toLowerCase(),
     capabilityDigest,
-  };
+  });
 }
 
 export function hostedHarnessContractMiddleware(

@@ -443,12 +443,12 @@ export interface ServeOptions {
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
 export interface HostedHarnessCapabilities {
-  protocolVersions: {
-    current: 1;
-    supported: [1];
+  readonly protocolVersions: {
+    readonly current: 1;
+    readonly supported: readonly [1];
   };
-  bootId: string;
-  capabilityDigest: string;
+  readonly bootId: string;
+  readonly capabilityDigest: string;
 }
 
 export interface CapabilitiesEnvelope {

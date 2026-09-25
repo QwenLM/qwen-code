@@ -5152,6 +5152,9 @@ describe('SessionService', () => {
       mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
       vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
       vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation(
+        actualJsonl.parseLineTolerant,
+      );
       transcriptSnapshotSpy.mockRestore();
 
       // Restore any fs spies installed by the outer beforeEach.

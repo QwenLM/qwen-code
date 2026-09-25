@@ -3093,15 +3093,16 @@ export async function createAcpAgentHost(
   let initialized = false;
   const drainPool = () => agentInstance?.shutdownMcpPool(8_000);
 
-  let sessionEndFired = false;
   let sessionEndPromise: Promise<void> | undefined;
 
+  // A second caller (a signal landing mid-shutdown) joins the in-flight
+  // SessionEnd hooks instead of returning before they finish.
   const fireSessionEndOnce = async (
     reason: SessionEndReason,
     managedConfigs?: Config[],
   ) => {
-    if (!initialized || sessionEndFired) return;
-    sessionEndFired = true;
+    if (!initialized) return;
+    if (sessionEndPromise) return sessionEndPromise;
 
     sessionEndPromise = (async () => {
       const configs = new Set<Config>(managedConfigs ?? [config]);

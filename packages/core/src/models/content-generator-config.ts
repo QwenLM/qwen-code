@@ -364,17 +364,20 @@ function applyResolvedModelConfig(
     targetConfig.apiKey =
       authOverrides.apiKey ??
       environment[resolvedModel.envKey] ??
-      (sameProvider ? parentConfig.apiKey : undefined);
+      (inheritCredentials ? parentConfig.apiKey : undefined);
     targetConfig.apiKeyEnvKey = resolvedModel.envKey;
   } else {
-    targetConfig.apiKey = resolveCredentialField(
-      authOverrides.apiKey,
-      sameProvider ? parentConfig.apiKey : undefined,
-      authOverrides.authType,
-      'apiKey',
-      environment,
-    );
-    targetConfig.apiKeyEnvKey = sameProvider
+    targetConfig.apiKey =
+      authOverrides.registryBaseUrl !== undefined && !inheritCredentials
+        ? authOverrides.apiKey
+        : resolveCredentialField(
+            authOverrides.apiKey,
+            sameProvider ? parentConfig.apiKey : undefined,
+            authOverrides.authType,
+            'apiKey',
+            environment,
+          );
+    targetConfig.apiKeyEnvKey = inheritCredentials
       ? parentConfig.apiKeyEnvKey
       : undefined;
   }

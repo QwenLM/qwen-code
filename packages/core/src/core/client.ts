@@ -3162,6 +3162,11 @@ export class LlmClient {
       await this.config.assertCanStartTurn();
     }
     await this.config.ensureManagedHarnessRunnable?.();
+    if (
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery
+    )
+      this.config.applyReasoningOverrides?.();
     const signal = options?.goalSignal
       ? AbortSignal.any([callerSignal, options.goalSignal])
       : callerSignal;

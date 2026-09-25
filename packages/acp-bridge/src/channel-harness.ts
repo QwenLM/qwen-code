@@ -15,7 +15,7 @@ import {
   type ChangeSessionCwdRequest,
   type AcpSessionBridge,
 } from './bridgeTypes.js';
-import type { AcpChannelExitInfo } from './channel.js';
+import { AcpChannelTeardownError, type AcpChannelExitInfo } from './channel.js';
 import {
   createChannelLifecycle,
   type HarnessChannel,
@@ -73,6 +73,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   let runtimeOperationReservations = 0;
   const pendingKeepAliveDeadlines = new Map<symbol, number>();
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  // A startup whose resource teardown could not be confirmed permanently
+  // quarantines this harness: a retry could run beside a live orphan.
+  let teardownFailure: AcpChannelTeardownError | undefined;
 
   function liveHarnessChannel(): HarnessChannel | undefined {
     const channel = channelLifecycle.current;
@@ -277,6 +280,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     if (isShuttingDown()) {
       throw new Error('AcpSessionBridge is shutting down');
     }
+    if (teardownFailure) throw teardownFailure;
     // Skip a channel that's marked dying — its underlying transport is
     // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
     // would either hang or land the caller with a sessionId that
@@ -286,7 +290,12 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       return channelLifecycle.current;
     if (channelLifecycle.starting) return await channelLifecycle.starting;
 
-    const promise = channelLifecycle.startSpawn(channelStartup.start);
+    const promise = channelLifecycle.startSpawn(() =>
+      channelStartup.start().catch((error: unknown) => {
+        if (error instanceof AcpChannelTeardownError) teardownFailure = error;
+        throw error;
+      }),
+    );
     try {
       return await promise;
     } finally {
@@ -370,6 +379,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     },
     get pendingKeepAliveCount() {
       return pendingKeepAliveDeadlines.size;
+    },
+    get teardownFailure() {
+      return teardownFailure;
     },
     createConnection: createHarnessConnection,
     withWorktreeInitialization(
