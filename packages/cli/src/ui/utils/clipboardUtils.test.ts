@@ -167,7 +167,15 @@ function createMockChild(
 }
 
 /**
- * Create a mock child process that fails to spawn: emits error, never closes.
+ * Create a mock child process that fails to spawn.
+ *
+ * Emits `close` after `error`, because that is what Node does: a child that
+ * fails to spawn still reports `close` with the negated errno (measured on
+ * Node v22/v24: `error:ENOENT` then `close:code=-2,sig=null`). A fixture that
+ * stopped at `error` would hide every defect that lives in the second event,
+ * which is where the double-settle was. The nested `process.nextTick` keeps
+ * `close` the later event it is in production while still draining before the
+ * awaiting test resumes (Node empties the nextTick queue before microtasks).
  */
 function createSpawnErrorChild() {
   const stdout = new EventEmitter() as EventEmitter & {
@@ -188,6 +196,9 @@ function createSpawnErrorChild() {
 
   process.nextTick(() => {
     child.emit('error', new Error('spawn ENOENT'));
+    process.nextTick(() => {
+      child.emit('close', -2, null);
+    });
   });
 
   return child;
@@ -195,6 +206,11 @@ function createSpawnErrorChild() {
 
 /**
  * Create a mock child process that never completes, driving the timeout path.
+ *
+ * `kill` answers with `close(null, 'SIGTERM')`, which is what a real
+ * `child.kill()` produces and what the production timeout path therefore
+ * always sees after it has already notified. An inert `vi.fn()` left that
+ * second `close` unemitted, so the timeout path's double-settle was invisible.
  */
 function createHangingChild() {
   const stdout = new EventEmitter() as EventEmitter & {
@@ -210,7 +226,11 @@ function createHangingChild() {
   };
   child.stdout = stdout;
   child.stderr = stderr;
-  child.kill = vi.fn();
+  child.kill = vi.fn(() => {
+    process.nextTick(() => {
+      child.emit('close', null, 'SIGTERM');
+    });
+  });
   child.killed = false;
 
   return child;
@@ -469,7 +489,13 @@ describe('clipboardUtils', () => {
 
       const onUnavailable = vi.fn();
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      // The fixture emits `error` then `close(-2)`, as Node does. Without the
+      // settle latch the close handler re-enters its non-zero branch: a second
+      // notify, and an exit code recorded for a process that never started.
       expect(onUnavailable).toHaveBeenCalledOnce();
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('exited with code'),
+      );
     });
 
     it('notifies when the wl-paste query times out', async () => {
@@ -514,6 +540,9 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('exited with code'),
+      );
     });
 
     it('notifies when the xclip query times out on X11', async () => {
@@ -558,13 +587,17 @@ describe('clipboardUtils', () => {
     // Linux clipboard tools use one and the same exit code for "the display
     // server is dead" and for "nothing is on the clipboard", so the exit code
     // alone cannot separate them — only stderr can. Verified against upstream
-    // sources: xclip xcprint.c `errconvsel()` prints "xclip: Error: There is
-    // no owner for the <selection> selection" then `exit(EXIT_FAILURE)` when
-    // `XGetSelectionOwner()` is None; wl-paste's `bail()` macro
-    // (src/util/misc.h) is `fprintf(stderr, ...) + exit(1)` and is called with
-    // "Nothing is copied" (wl-clipboard >= 2) or "No selection" (1.x) when
-    // there is no offer. Pressing the image-paste binding with an empty
-    // clipboard is routine, so it must not claim the native module is broken.
+    // sources: released xclip 0.13 has no `errconvsel()`; a `-t TARGETS -o`
+    // query on a selection nobody owns hits the `XCLIB_XCOUT_BAD_TARGET`
+    // branch with no fallback left and prints "Error: target TARGETS not
+    // available" before `return EXIT_FAILURE` (xclip.c:468). Unreleased xclip
+    // master instead routes it through `errconvsel()` (xcprint.c:136), which
+    // prints "xclip: Error: There is no owner for the <selection> selection".
+    // wl-paste's `bail()` macro (src/util/misc.h) is `fprintf(stderr, ...) +
+    // exit(1)` and is called with "Nothing is copied" (wl-clipboard >= 2) or
+    // "No selection" (1.x) when there is no offer. Pressing the image-paste
+    // binding with an empty clipboard is routine, so it must not claim the
+    // native module is broken.
 
     it('stays quiet when wl-paste exits non-zero because nothing is copied', async () => {
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
@@ -588,7 +621,27 @@ describe('clipboardUtils', () => {
       expect(onUnavailable).not.toHaveBeenCalled();
     });
 
+    it('stays quiet when released xclip 0.13 reports the target is unavailable', async () => {
+      // The wording a shipped xclip actually produces for an unowned
+      // selection. 0.13 is what Debian/Ubuntu/Fedora package, and it has no
+      // `errconvsel()`, so the master-only wording below matches nothing here:
+      // without this marker the routine empty-clipboard case falls through to
+      // onUnavailable and spends the session's one-shot notify latch on a
+      // false alarm, silencing the genuine failure this PR exists to report.
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(
+        createMockChild('', 1, 'Error: target TARGETS not available\n'),
+      );
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
     it('stays quiet when xclip exits non-zero because nothing owns the selection', async () => {
+      // Unreleased xclip git master wording, kept so the marker set covers
+      // both the shipped and the in-development spelling.
       setupX11Env();
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
       mockSpawn.mockReturnValue(
@@ -663,20 +716,34 @@ describe('clipboardUtils', () => {
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
       mockSpawn.mockReturnValue(createHangingChild());
 
-      await expect(clipboardHasImage(vi.fn())).resolves.toBe(false);
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         expect.stringMatching(/^xclip timed out after \d+ms$/),
       );
+      // The kill() the timeout path issues produces `close(null, 'SIGTERM')`,
+      // which the fixture now emits. The timeout line must be the *only*
+      // diagnosis recorded: `exited with code null` states an exit code the
+      // query never had, and the notify must not fire a second time.
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('exited with code'),
+      );
+      expect(onUnavailable).toHaveBeenCalledOnce();
     }, 10000);
 
     it('records the timeout when the wl-paste query never answers', async () => {
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
       mockSpawn.mockReturnValue(createHangingChild());
 
-      await expect(clipboardHasImage(vi.fn())).resolves.toBe(false);
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         expect.stringMatching(/^wl-paste --list-types timed out after \d+ms$/),
       );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('exited with code'),
+      );
+      expect(onUnavailable).toHaveBeenCalledOnce();
     }, 10000);
   });
 

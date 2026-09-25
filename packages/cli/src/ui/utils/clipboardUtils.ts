@@ -246,15 +246,22 @@ async function saveFromCommand(
  * same non-zero exit code they use for a real query failure, so an exit code
  * alone cannot separate "clipboard unreachable" from "clipboard legitimately
  * empty". Their stderr wording can. Verified against upstream sources:
- * - xclip: `xclip: Error: There is no owner for the CLIPBOARD selection`
- *   (xcprint.c `errconvsel()`, reached when `XGetSelectionOwner()` is `None`,
- *   then `exit(EXIT_FAILURE)`).
+ * - xclip 0.13, the release Debian/Ubuntu/Fedora ship: `-t TARGETS -o` on a
+ *   selection nobody owns takes the `XCLIB_XCOUT_BAD_TARGET` branch that has
+ *   no fallback left, prints `Error: target TARGETS not available` and returns
+ *   `EXIT_FAILURE` (xclip.c:468).
+ * - xclip git master, unreleased: the same case is routed through
+ *   `errconvsel()` (xcprint.c:136, called from xclip.c:778) and prints
+ *   `xclip: Error: There is no owner for the CLIPBOARD selection`. Released
+ *   0.13 has no `errconvsel()` at all, so this wording on its own classifies
+ *   nothing on a shipped xclip — both markers are needed.
  * - wl-paste (wl-clipboard >= 2): `Nothing is copied` — `bail()` in
  *   src/util/misc.h is `fprintf(stderr, ...) + exit(1)`, called from
  *   `selection_callback()` when the offer is NULL.
  * - wl-paste (wl-clipboard 1.x): `No selection` — same `bail()` path.
  */
 const EMPTY_CLIPBOARD_STDERR_MARKERS = [
+  'target TARGETS not available',
   'no owner for the',
   'Nothing is copied',
   'No selection',
@@ -304,8 +311,18 @@ async function checkClipboardForImage(
       });
       let stdout = '';
       let stderr = '';
+      // Node delivers `close` after a spawn `error` (carrying the negated
+      // errno) and after a timeout `kill()` (with `code === null`). Without a
+      // settle latch the close handler re-enters its non-zero branch for a
+      // query that has already been reported, so the debug log this function
+      // added for diagnosis records an exit code the process never had and
+      // `onUnavailable` fires twice for one failure. Same guard, same reason,
+      // as `resolved` in saveFromCommand above.
+      let settled = false;
 
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         try {
           child.kill();
         } catch {
@@ -324,6 +341,8 @@ async function checkClipboardForImage(
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        if (settled) return;
+        settled = true;
         if (code !== 0) {
           // Unconditional, like saveFromCommand's: a tool that exits non-zero
           // without writing to stderr (xclip does) still has to leave the exit
@@ -356,8 +375,14 @@ async function checkClipboardForImage(
             .some((line) => line === 'image/png' || line === 'image/bmp'),
         );
       });
-      child.on('error', () => {
+      child.on('error', (err) => {
         clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        // With the latch suppressing the close handler's fabricated exit code,
+        // this is a spawn failure's only trace — same line saveFromCommand
+        // logs for the same event.
+        debugLogger.debug(`Failed to spawn ${command}:`, err);
         onUnavailable?.();
         resolve(false);
       });
@@ -462,8 +487,16 @@ async function getWlPasteImageTypes(
     }
     let stdout = '';
     let stderr = '';
+    // Same latch as checkClipboardForImage: `close` follows both a spawn
+    // `error` and a timeout `kill()`, and re-entering the close handler for an
+    // already-reported query would log an exit code the process never had,
+    // notify twice, and — on the timeout/error paths — risk reaching the
+    // `cachedWlPasteImageTypes = types` line that must stay success-only.
+    let settled = false;
 
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       try {
         child.kill();
       } catch {
@@ -485,6 +518,8 @@ async function getWlPasteImageTypes(
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       if (code !== 0) {
         // Do NOT cache failed result
         // Unconditional, like saveFromCommand's: an empty stderr still has to
@@ -509,9 +544,15 @@ async function getWlPasteImageTypes(
       cachedWlPasteImageTypes = types;
       resolve(types);
     });
-    child.on('error', () => {
+    child.on('error', (err) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       // Do NOT cache failed result (error)
+      // Logged for the same reason as checkClipboardForImage's error handler:
+      // the latch removes the close handler's fabricated exit code, so the
+      // errno has to be recorded here or the failure leaves no trace.
+      debugLogger.debug('Failed to spawn wl-paste --list-types:', err);
       onUnavailable?.();
       resolve([]);
     });
