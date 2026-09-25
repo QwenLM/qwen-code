@@ -689,6 +689,12 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
+  /**
+   * Extra trusted roots beyond `effectiveCwd` (multi-root workspace),
+   * forwarded to the daemon tool guard on every shell check. Empty for a
+   * single-root session.
+   */
+  additionalRoots: readonly string[];
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
@@ -1753,6 +1759,9 @@ export class BridgeClient implements Client {
       toolName,
       arguments: args,
       effectiveCwd: entry.effectiveCwd,
+      // Daemon-owned trusted roots for a multi-root session; the guard
+      // widens its containment area to these alongside effectiveCwd.
+      additionalRoots: entry.additionalRoots,
       // Forwarded verbatim and explicitly untrusted: the host policy decides
       // whether it can establish this scope from state it owns.
       ...(typeof invocationCwd === 'string' && invocationCwd.length > 0

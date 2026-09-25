@@ -130,6 +130,15 @@ export interface ExternalToolGuardPrepareRequest {
    * owns before using it as a containment basis.
    */
   readonly invocationCwd?: string;
+  /**
+   * Extra trusted roots beyond `effectiveCwd`, for a multi-root session
+   * (e.g. a VS Code multi-root workspace whose projects live in separate
+   * folders). Daemon-owned and trusted, like `effectiveCwd`: the guard
+   * widens its containment area to this set, so a mutating Git command in
+   * any opened folder is allowed while anything outside every opened folder
+   * stays denied. Absent or empty keeps the single-root behavior.
+   */
+  readonly additionalRoots?: readonly string[];
 }
 
 export type ExternalToolGuardPrepareResult =
@@ -426,6 +435,16 @@ export interface BridgeOptions {
    * MUST canonicalize before passing.
    */
   boundWorkspace: string;
+  /**
+   * Extra trusted roots beyond `boundWorkspace` for a multi-root session
+   * (e.g. a VS Code multi-root workspace whose projects live in separate
+   * folders). Forwarded to the daemon tool guard on every shell check so a
+   * mutating Git command in any opened folder is allowed while anything
+   * outside every opened folder stays denied. Sessions created on this
+   * bridge inherit the list; isolated single-workspace bridges leave it
+   * unset and keep the single-root behavior.
+   */
+  additionalRoots?: readonly string[];
   /**
    * Per-handle env overrides forwarded to `defaultSpawnChannelFactory`
    * at spawn time. Concurrent embedded daemons in the same process

@@ -662,6 +662,13 @@ interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
+  /**
+   * Extra trusted roots beyond this session's cwd, inherited from the
+   * bridge's `additionalRoots` (multi-root workspace). Forwarded to the
+   * daemon tool guard so a mutating Git command in any opened folder is
+   * allowed. Empty for a single-root session.
+   */
+  additionalRoots: readonly string[];
   createdAt: string;
   displayName?: string;
   /** Id of the session that spawned this one (via `create_sub_session`).
@@ -6304,6 +6311,7 @@ export function createSessionControlPlane(
       sessionId,
       workspaceCwd,
       effectiveCwd: workspaceCwd,
+      additionalRoots: opts.additionalRoots ?? [],
       createdAt: new Date().toISOString(),
       ...(options.parentSessionId
         ? { parentSessionId: options.parentSessionId }

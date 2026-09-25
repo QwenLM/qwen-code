@@ -1900,8 +1900,43 @@ async function resolveDiscoveredRepository(
 
 interface GuardEvaluationContext {
   readonly canonicalEffectiveCwd: string;
+  // Extra trusted roots beyond the effective cwd, already canonicalized at
+  // the entry point. Empty for a single-root session, where every check
+  // reduces to the effective cwd alone.
+  readonly additionalRoots: readonly string[];
   readonly ambientRelocations: readonly GitEnvRelocation[];
   readonly ambientUnresolved: boolean;
+}
+
+// The full trusted area: the effective cwd plus any additional roots.
+function trustedRoots(context: GuardEvaluationContext): readonly string[] {
+  return context.additionalRoots.length === 0
+    ? [context.canonicalEffectiveCwd]
+    : [context.canonicalEffectiveCwd, ...context.additionalRoots];
+}
+
+function isWithinAnyRoot(target: string, roots: readonly string[]): boolean {
+  return roots.some((root) => isWithinRoot(target, root));
+}
+
+// The innermost root that contains `target` (the most specific match), or
+// undefined when no root does. Used as the walk-up stop boundary so a
+// project inside a second root is bounded by that root rather than by a
+// sibling the target does not live under.
+function containingRoot(
+  target: string,
+  roots: readonly string[],
+): string | undefined {
+  let innermost: string | undefined;
+  for (const root of roots) {
+    if (
+      isWithinRoot(target, root) &&
+      (innermost === undefined || root.length > innermost.length)
+    ) {
+      innermost = root;
+    }
+  }
+  return innermost;
 }
 
 async function evaluateGitInvocation(
@@ -2023,7 +2058,7 @@ async function evaluateGitInvocation(
       }
     }
     repositoryTarget = await realpathNearestExistingAsync(repositoryTarget);
-    if (!isWithinRoot(repositoryTarget, context.canonicalEffectiveCwd)) {
+    if (!isWithinAnyRoot(repositoryTarget, trustedRoots(context))) {
       return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, repositoryTarget);
     }
   }
@@ -2044,18 +2079,23 @@ async function denyOutsideDiscoveredRepository(
   context: GuardEvaluationContext,
 ): Promise<GuardDenial | undefined> {
   const canonicalStart = await realpathNearestExistingAsync(startDirectory);
+  // Walk up only to the root that actually contains the start directory. In
+  // a multi-root session the effective cwd may be a sibling the start does
+  // not live under; bounding by that sibling would walk past the start's own
+  // project root toward the filesystem root and deny legitimate git.
+  const boundary = containingRoot(canonicalStart, trustedRoots(context));
+  if (boundary === undefined) {
+    return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, canonicalStart);
+  }
   let discovered: string | undefined;
   try {
-    discovered = await resolveDiscoveredRepository(
-      canonicalStart,
-      context.canonicalEffectiveCwd,
-    );
+    discovered = await resolveDiscoveredRepository(canonicalStart, boundary);
   } catch {
     return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, canonicalStart);
   }
   if (discovered === undefined) return undefined;
   const canonicalDiscovered = await realpathNearestExistingAsync(discovered);
-  if (!isWithinRoot(canonicalDiscovered, context.canonicalEffectiveCwd)) {
+  if (!isWithinAnyRoot(canonicalDiscovered, trustedRoots(context))) {
     return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, canonicalDiscovered);
   }
   return undefined;
@@ -2212,7 +2252,7 @@ async function evaluateUnrecognizedRun(
     return { allowed: false, reason: UNRECOGNIZED_PROGRAM_DENIAL };
   }
   const canonicalBasis = await realpathNearestExistingAsync(basisCwd);
-  if (!isWithinRoot(canonicalBasis, context.canonicalEffectiveCwd)) {
+  if (!isWithinAnyRoot(canonicalBasis, trustedRoots(context))) {
     return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, canonicalBasis);
   }
   // Same discovery rule as a recognized git run: being in an in-boundary
@@ -2412,6 +2452,7 @@ async function evaluateCommandWithCwd(
     exported.relocations.length > 0 || exported.unresolved
       ? {
           canonicalEffectiveCwd: context.canonicalEffectiveCwd,
+          additionalRoots: context.additionalRoots,
           ambientRelocations: [
             ...context.ambientRelocations,
             ...exported.relocations,
@@ -2481,6 +2522,7 @@ async function evaluateCommandWithCwd(
       prefix.relocations.length > 0 || prefix.unresolved
         ? {
             canonicalEffectiveCwd: base.canonicalEffectiveCwd,
+            additionalRoots: base.additionalRoots,
             ambientRelocations: [
               ...base.ambientRelocations,
               ...prefix.relocations,
@@ -2841,6 +2883,7 @@ async function evaluateCommandWithCwd(
           const inherited = activeContext();
           const ambient: GuardEvaluationContext = {
             canonicalEffectiveCwd: inherited.canonicalEffectiveCwd,
+            additionalRoots: inherited.additionalRoots,
             ambientRelocations: [
               ...inherited.ambientRelocations,
               ...analysis.state.relocations,
@@ -2997,9 +3040,9 @@ async function evaluateCommandWithCwd(
           // program word is undecidable rather than harmless.
           if (
             trackedCwd === undefined ||
-            !isWithinRoot(
+            !isWithinAnyRoot(
               await realpathNearestExistingAsync(trackedCwd),
-              inherited.canonicalEffectiveCwd,
+              trustedRoots(inherited),
             )
           ) {
             return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
@@ -3321,15 +3364,34 @@ async function evaluateBuiltInGuard(
     }
   }
 
+  // Extra trusted roots for a multi-root session, canonicalized against the
+  // session's own directory (they are absolute opened-folder paths in
+  // practice; resolving here keeps a relative input well-defined). They stay
+  // trusted even when the effective cwd is narrowed to a sub-agent worktree:
+  // they are the folders the user opened for this session.
+  const additionalRoots: string[] = [];
+  for (const raw of request.additionalRoots ?? []) {
+    if (typeof raw !== 'string' || raw.length === 0) continue;
+    const canonical = await realpathNearestExistingAsync(
+      path.resolve(sessionCwd, raw),
+    );
+    if (!additionalRoots.includes(canonical)) additionalRoots.push(canonical);
+  }
+
   // A model-supplied `directory` becomes the containment basis, so it must
-  // itself stay inside the effective working directory before it is trusted.
+  // itself stay inside the trusted area before it is trusted.
   let startDirectory = canonicalEffectiveCwd;
   const startDirectoryValue = request.arguments['directory'];
   if (typeof startDirectoryValue === 'string') {
     startDirectory = await realpathNearestExistingAsync(
       path.resolve(canonicalEffectiveCwd, startDirectoryValue),
     );
-    if (!isWithinRoot(startDirectory, canonicalEffectiveCwd)) {
+    if (
+      !isWithinAnyRoot(startDirectory, [
+        canonicalEffectiveCwd,
+        ...additionalRoots,
+      ])
+    ) {
       return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, startDirectory);
     }
   }
@@ -3340,6 +3402,7 @@ async function evaluateBuiltInGuard(
     startDirectory,
     {
       canonicalEffectiveCwd,
+      additionalRoots,
       ambientRelocations: [],
       ambientUnresolved: false,
     },
