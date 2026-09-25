@@ -85,8 +85,17 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether an agent running with `toolConfig` is declared the Skill tool: the
- * same declaration-level filters `AgentCore.prepareTools()` applies.
+ * Whether an agent running with `toolConfig` is declared the Skill tool.
+ *
+ * This MIRRORS the declaration-level filters `AgentCore.prepareTools()`
+ * applies — it does not re-run them, and parity is not automatic:
+ * `prepareTools()` additionally consults the context-aware
+ * `isToolExcludedForCurrentContext` and the `settings.tools.eager` allowlist.
+ * The first answers for the currently running agent while this predicate is
+ * also called from the parent's frame, so it checks the raw
+ * `EXCLUDED_TOOLS_FOR_SUBAGENTS` set instead; the second cannot be read from
+ * a `ToolConfig` at all, so it arrives as `options.skillEagerHidden` (below).
+ * A filter added to `prepareTools()` propagates here only by hand.
  *
  * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
  * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
