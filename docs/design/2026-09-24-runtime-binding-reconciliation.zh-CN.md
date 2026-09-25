@@ -88,5 +88,5 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 - 可恢复的本地进程 provision（ready record 接管），使真实本地 Runtime 能跨越 Broker 重启。
 - Drain 生命周期与已接管绑定的健康刷新。
-- 结算所在代次已被证明 `LOST` 的 `UNKNOWN` 执行。`reconcileExecution` 已在 #12655 落地，只回答仍能给出证据的代次，因此这种情况需要单独的规则。
+- 结算已被证明 `LOST` 的那一代上所有未结算的执行——`EXECUTING` 与 `DISPATCHING` 同样算在内，而不只是 `UNKNOWN`，因为崩溃遗留的 `EXECUTING` 行不会自行变成 `UNKNOWN`。`reconcileExecution` 已在 #12655 落地，只回答仍能给出证据的代次，因此这种情况需要单独的规则。
 - Kubernetes provision，以及 schema 版本化之后的迁移。
