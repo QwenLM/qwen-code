@@ -81,5 +81,10 @@ The TypeScript implementation in
 `packages/cli/src/serve/managed-workspace-binding.ts` produces the same
 normalized directories and digests; both run the shared fixtures in
 `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`.
+The fixtures of the `managed-context/1` envelope,
+`packages/cli/src/serve/contracts/managed-context-v1.fixtures.json`, carry
+context digests computed with the same encoding, and
+`ManagedContextEnvelopeConformanceTest` recomputes them; see
+[Managed Context Envelope](../../../docs/design/2026-09-25-managed-context-envelope.md).
 The package uses only the JDK and no other Broker class, and nothing wires
 it into the Broker service yet.

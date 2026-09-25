@@ -145,6 +145,21 @@ export function computeManagedContextDigest(
     .digest('hex')}`;
 }
 
+/** Whether a value follows the W0a identifier rule, as tenant IDs do. */
+export function isManagedIdentifier(value: unknown): value is string {
+  return matches(IDENTIFIER_PATTERN, value);
+}
+
+/** Whether a value is a storage ID under the W0a rule. */
+export function isWorkspaceStorageId(value: unknown): value is string {
+  return matches(STORAGE_ID_PATTERN, value);
+}
+
+/** Whether a value is canonical decimal text from 1 to 2^63-1. */
+export function isCanonicalDecimalText(value: unknown): value is string {
+  return isCanonicalDecimal(value);
+}
+
 function matches(pattern: RegExp, value: unknown): boolean {
   return typeof value === 'string' && pattern.test(value);
 }
